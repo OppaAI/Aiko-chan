@@ -1,8 +1,8 @@
 """
-core/memory.py
+core/memorize.py
 
 Aiko's persistent memory via mem0 + Qdrant.
-Abstracts all mem0 calls so brain.py stays clean.
+Abstracts all mem0 calls so think.py stays clean.
 Swap this file out if mem0 doesn't make the cut for Grace.
 """
 
@@ -20,7 +20,7 @@ MEM0_CONFIG = {
             "host": os.getenv("QDRANT_HOST", "localhost"),
             "port": int(os.getenv("QDRANT_PORT", 6333)),
             "collection_name": "aiko_memory",
-            "embedding_model_dims": 768,  # nomic-embed-text-v2-moe output dims
+            "embedding_model_dims": 768,
         },
     },
     "llm": {
@@ -35,27 +35,27 @@ MEM0_CONFIG = {
         "config": {
             "model": os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text-v2-moe"),
             "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-            "embedding_dims": 768,  # explicitly tell mem0 the output size
+            "embedding_dims": 768,
         },
     },
 }
 
-# fixed user id — single-user companion
 AIKO_USER_ID = "OppaAI"
 
 
-# ── memory manager ────────────────────────────────────────────────────────────
+# ── memorize ──────────────────────────────────────────────────────────────────
 
-class AikoMemory:
+class AikoMemorize:
     """
     Thin wrapper around mem0 Memory.
     Handles all Qdrant-backed persistence for Aiko-chan.
     """
 
     def __init__(self) -> None:
-        print("[memory] Connecting to Qdrant and initialising mem0...")
+        """Initialise mem0 Memory and connect to Qdrant."""
+        print("[memorize] Connecting to Qdrant and initialising mem0...")
         self._mem = Memory.from_config(MEM0_CONFIG)
-        print("[memory] Ready.")
+        print("[memorize] Ready.")
 
     def add(self, messages: list[dict], user_id: str = AIKO_USER_ID) -> None:
         """
@@ -75,7 +75,6 @@ class AikoMemory:
         Returns a list of mem0 memory objects.
         """
         results = self._mem.search(query, filters={"user_id": user_id}, limit=limit)
-        # mem0 returns {"results": [...]} in newer versions
         if isinstance(results, dict):
             return results.get("results", [])
         return results or []
@@ -103,4 +102,4 @@ class AikoMemory:
     def clear(self, user_id: str = AIKO_USER_ID) -> None:
         """Wipe all memories for a user. Use carefully."""
         self._mem.delete_all(user_id=user_id)
-        print(f"[memory] Cleared all memories for user '{user_id}'.")
+        print(f"[memorize] Cleared all memories for user '{user_id}'.")

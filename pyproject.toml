@@ -6,7 +6,6 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "click>=8.4.1",
-    "dotenv>=0.9.9",
     "fastembed>=0.8.0",
     "mem0ai[nlp]>=0.1.0",
     "ollama>=0.3.0",

@@ -25,7 +25,7 @@ MEM0_CONFIG = {
     "llm": {
         "provider": "ollama",
         "config": {
-            "model": os.getenv("OLLAMA_MODEL", "llama3.2"),
+            "model": os.getenv("OLLAMA_MODEL", "gemma4:e2b"),
             "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         },
     },
@@ -39,7 +39,7 @@ MEM0_CONFIG = {
 }
 
 # fixed user id — single-user companion
-AIKO_USER_ID = "oppa"
+AIKO_USER_ID = "OppaAI"
 
 
 # ── memory manager ────────────────────────────────────────────────────────────

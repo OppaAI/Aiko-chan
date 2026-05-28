@@ -114,7 +114,7 @@ uv run python cli.py --clear-mem
 
 ## Project Structure
 
-```
+```text
 aiko/
 ├── core/
 │   ├── brain.py        # Ollama chat loop, search intercept, async memory

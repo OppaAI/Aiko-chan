@@ -13,8 +13,8 @@ import sys
 
 load_dotenv()
 
-from core.memory import AikoMemory
-from core.brain  import AikoBrain
+from core.memorize import AikoMemorize
+from core.think    import AikoThink
 
 
 # ── banner ────────────────────────────────────────────────────────────────────
@@ -59,8 +59,8 @@ def run_cli(debug: bool = False) -> None:
     print(BANNER)
     print("[system] Initialising Aiko-chan...\n")
 
-    memory = AikoMemory()
-    brain  = AikoBrain(memory)
+    memorize = AikoMemorize()
+    think    = AikoThink(memorize)
 
     print("\nAiko-chan is ready. Type /help for commands.\n")
 
@@ -69,7 +69,7 @@ def run_cli(debug: bool = False) -> None:
             user_input = input("You: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n\nAiko-chan: ...Fine. I'll be here when you come back. Baka.\n")
-            brain.wait_for_memory()
+            think.wait_for_memory()
             sys.exit(0)
 
         if not user_input:
@@ -81,19 +81,19 @@ def run_cli(debug: bool = False) -> None:
 
             if cmd in ("/quit", "/exit"):
                 print("\nAiko-chan: Already leaving? ...Be safe out there.\n")
-                brain.wait_for_memory()
+                think.wait_for_memory()
                 sys.exit(0)
 
             elif cmd == "/reset":
-                brain.reset_context()
+                think.reset_context()
                 print("[system] Short-term context cleared.\n")
 
             elif cmd == "/memory":
-                all_mem = memory.get_all()
+                all_mem = memorize.get_all()
                 if not all_mem:
-                    print("[memory] No memories stored yet.\n")
+                    print("[memorize] No memories stored yet.\n")
                 else:
-                    print(f"[memory] {len(all_mem)} memories stored:")
+                    print(f"[memorize] {len(all_mem)} memories stored:")
                     for i, m in enumerate(all_mem, 1):
                         text = m.get("memory") or m.get("text") or str(m)
                         print(f"  {i:02d}. {text}")
@@ -109,7 +109,7 @@ def run_cli(debug: bool = False) -> None:
 
         # ── debug: show retrieved memories ────────────────────────────────────
         if debug:
-            hits = memory.search(user_input)
+            hits = memorize.search(user_input)
             if hits:
                 print(f"[debug] {len(hits)} memories retrieved:")
                 for m in hits:
@@ -117,7 +117,7 @@ def run_cli(debug: bool = False) -> None:
                 print()
 
         # ── normal chat turn ──────────────────────────────────────────────────
-        brain.chat(user_input)
+        think.chat(user_input)
         print()
 
 
@@ -128,7 +128,7 @@ if __name__ == "__main__":
 
     if args.clear_mem:
         print("[system] Clearing all memories...")
-        AikoMemory().clear()
+        AikoMemorize().clear()
         sys.exit(0)
 
     run_cli(debug=args.debug)

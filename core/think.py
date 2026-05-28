@@ -13,7 +13,9 @@ import re
 import threading
 from pathlib import Path
 from ollama import Client
+
 from core.memorize import AikoMemorize
+from core.speak import AikoSpeak
 from core.tools import web_search
 
 
@@ -58,13 +60,16 @@ class AikoThink:
     Memory writes run in a background thread — never blocks the chat loop.
     """
 
-    def __init__(self, memorize: AikoMemorize) -> None:
+    def __init__(self, memorize: AikoMemorize, voice: bool = True) -> None:
+        """Initialise Ollama client, memory, persona cache, and optional TTS."""
         self._client     = Client(host=OLLAMA_BASE_URL)
         self._memorize   = memorize
+        self._speak      = AikoSpeak() if voice else None
         self._persona    = _load_persona()
         self._history:   list[dict] = []
         self._mem_thread: threading.Thread | None = None
         print(f"[think] Ollama client ready — model: {OLLAMA_MODEL}")
+        print(f"[think] Voice output: {'on' if voice else 'off'}")
 
     # ── public api ────────────────────────────────────────────────────────────
 
@@ -112,7 +117,11 @@ class AikoThink:
 
         # 8. persist to long-term memory in background
         self._store_async(user_input, response_text)
-
+      
+        # 9. speak response aloud if voice is enabled
+        if self._speak:
+            self._speak.speak(response_text)
+          
         return response_text
 
     def reset_context(self) -> None:

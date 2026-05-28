@@ -21,6 +21,7 @@ dependencies = [
     { name = "ollama" },
     { name = "python-dotenv" },
     { name = "qdrant-client" },
+    { name = "requests" },
     { name = "spacy" },
 ]
 
@@ -33,6 +34,7 @@ requires-dist = [
     { name = "ollama", specifier = ">=0.3.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "qdrant-client", specifier = ">=1.9.0" },
+    { name = "requests", specifier = ">=2.34.2" },
     { name = "spacy", specifier = ">=3.8.14" },
 ]
 

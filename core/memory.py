@@ -39,7 +39,7 @@ MEM0_CONFIG = {
 }
 
 # fixed user id — single-user companion
-AIKO_USER_ID = "oppa"
+AIKO_USER_ID = "OppaAI"
 
 
 # ── memory manager ────────────────────────────────────────────────────────────

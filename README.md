@@ -6,6 +6,8 @@
 This project is a **precursor and testing sandbox** for [Grace / AuRoRA](https://github.com/OppaAI/AGi).  
 Core tech (mem0 + Qdrant memory, Ollama inference, async pipelines) is battle-tested here before graduating to Grace.
 
+![Aiko-chan](assets/phase-1.jpg)
+
 ## Architecture
 
 ```mermaid

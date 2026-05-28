@@ -185,11 +185,13 @@ class AikoBrain:
     def _store_async(self, user_input: str, response_text: str) -> None:
         """Fire memory write in a background thread — non-blocking."""
         def _write():
-            self._memory.add([
-                {"role": "user",      "content": user_input},
-                {"role": "assistant", "content": response_text},
-            ])
-
+            try:
+                self._memory.add([
+                    {"role": "user",      "content": user_input},
+                    {"role": "assistant", "content": response_text},
+                ])
+            except Exception as exc:
+                print(f"[memory] async write failed: {exc}")
         # wait for previous write before starting a new one
         if self._mem_thread and self._mem_thread.is_alive():
             self._mem_thread.join()

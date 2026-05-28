@@ -82,7 +82,7 @@ class AikoBrain:
         memory_block = self._memory.format_for_context(memories)
 
         # 2. build system prompt with memories + search instruction
-        system = _load_persona()
+        system = self._persona
         system = _inject_search_instruction(system)
         if memory_block:
             system = f"{system}\n\n{memory_block}"

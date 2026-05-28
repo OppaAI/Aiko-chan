@@ -16,7 +16,7 @@ from core.memory import AikoMemory
 # ── config ────────────────────────────────────────────────────────────────────
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "gemma4:e2b")
+OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "ministral-3:3b-instruct-2512-q4_K_M")
 
 # soul.md lives at project root — resolve relative to this file
 _PERSONA_PATH = Path(__file__).resolve().parent.parent / "soul.md"

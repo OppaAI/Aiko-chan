@@ -25,7 +25,7 @@ MEM0_CONFIG = {
     "llm": {
         "provider": "ollama",
         "config": {
-            "model": os.getenv("OLLAMA_MODEL", "gemma4:e2b"),
+            "model": os.getenv("OLLAMA_MODEL", "ministral-3:3b-instruct-2512-q4_K_M"),
             "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         },
     },

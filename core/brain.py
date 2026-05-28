@@ -62,10 +62,10 @@ class AikoBrain:
     Manages the short-term context window and long-term mem0 memory.
     Memory writes run in a background thread — never blocks the chat loop.
     """
-
     def __init__(self, memory: AikoMemory) -> None:
         self._client     = Client(host=OLLAMA_BASE_URL)
         self._memory     = memory
+        self._persona    = _load_persona()  # cache once
         self._history:   list[dict] = []
         self._mem_thread: threading.Thread | None = None
         print(f"[brain] Ollama client ready — model: {OLLAMA_MODEL}")

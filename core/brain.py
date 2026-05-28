@@ -8,8 +8,8 @@ Aiko's cognitive loop.
 """
 
 import os
+from pathlib import Path
 from ollama import Client
-from core.persona import get_system_prompt
 from core.memory import AikoMemory
 
 
@@ -17,6 +17,16 @@ from core.memory import AikoMemory
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "llama3.2")
+
+# persona.md lives at project root — resolve relative to this file
+_PERSONA_PATH = Path(__file__).resolve().parent.parent / "persona.md"
+
+
+def _load_persona() -> str:
+    """Load Aiko's system prompt from persona.md at project root."""
+    if not _PERSONA_PATH.exists():
+        raise FileNotFoundError(f"persona.md not found at {_PERSONA_PATH}")
+    return _PERSONA_PATH.read_text(encoding="utf-8").strip()
 
 # how many past turns to keep in the active context window
 CONTEXT_WINDOW_TURNS = int(os.getenv("CONTEXT_WINDOW_TURNS", 20))
@@ -48,7 +58,7 @@ class AikoBrain:
         memory_block  = self._memory.format_for_context(memories)
 
         # 2. build the system prompt (inject memories when present)
-        system = get_system_prompt()
+        system = _load_persona()
         if memory_block:
             system = f"{system}\n\n{memory_block}"
 

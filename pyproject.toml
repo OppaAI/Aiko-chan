@@ -12,5 +12,6 @@ dependencies = [
     "ollama>=0.3.0",
     "python-dotenv>=1.0.0",
     "qdrant-client>=1.9.0",
+    "requests>=2.34.2",
     "spacy>=3.8.14",
 ]

@@ -39,7 +39,7 @@ MEM0_CONFIG = {
 }
 
 # fixed user id — single-user companion
-AIKO_USER_ID = "OppaAI"
+AIKO_USER_ID = "oppa"
 
 
 # ── memory manager ────────────────────────────────────────────────────────────
@@ -60,7 +60,7 @@ class AikoMemory:
         Store a conversation turn (or batch) into long-term memory.
         messages: list of {role, content} dicts.
         """
-        self._mem.add(messages, user_id=user_id)
+        self._mem.add(messages, filters={"user_id": user_id})
 
     def search(
         self,
@@ -72,7 +72,7 @@ class AikoMemory:
         Retrieve the top-k memories relevant to the current query.
         Returns a list of mem0 memory objects.
         """
-        results = self._mem.search(query, user_id=user_id, limit=limit)
+        results = self._mem.search(query, filters={"user_id": user_id}, limit=limit)
         # mem0 returns {"results": [...]} in newer versions
         if isinstance(results, dict):
             return results.get("results", [])
@@ -93,12 +93,12 @@ class AikoMemory:
 
     def get_all(self, user_id: str = AIKO_USER_ID) -> list[dict]:
         """Return all stored memories for a user (for debugging)."""
-        results = self._mem.get_all(user_id=user_id)
+        results = self._mem.get_all(filters={"user_id": user_id})
         if isinstance(results, dict):
             return results.get("results", [])
         return results or []
 
     def clear(self, user_id: str = AIKO_USER_ID) -> None:
         """Wipe all memories for a user. Use carefully."""
-        self._mem.delete_all(user_id=user_id)
+        self._mem.delete_all(filters={"user_id": user_id})
         print(f"[memory] Cleared all memories for user '{user_id}'.")

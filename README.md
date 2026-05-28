@@ -141,6 +141,7 @@ aiko/
 - [x] **Phase 1 — Soul**
   CLI chatbot with persistent memory (mem0 + Qdrant + Ollama).
   Async memory writes. Web search via SearXNG.
+  - [ ] Replace per-turn `thread.join()` with a dedicated worker + queue for truly non-blocking memory writes.
 
 - [ ] **Phase 2 — Voice**
   faster-whisper STT for mic input.

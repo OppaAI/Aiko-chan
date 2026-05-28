@@ -1,4 +1,4 @@
-# Ai-chan 愛ちゃん
+# Aiko-chan 愛子ちゃん
 
 > AI companion, soulmate, and occasional roaster.  
 > Phase 1: CLI chatbot with persistent memory via **mem0 + Qdrant + Ollama**.

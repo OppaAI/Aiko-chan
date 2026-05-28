@@ -5,8 +5,10 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "mem0ai>=0.1.0",
+    "click>=8.4.1",
+    "mem0ai[nlp]>=0.1.0",
     "ollama>=0.3.0",
     "python-dotenv>=1.0.0",
     "qdrant-client>=1.9.0",
+    "spacy>=3.8.14",
 ]

@@ -20,6 +20,7 @@ MEM0_CONFIG = {
             "host": os.getenv("QDRANT_HOST", "localhost"),
             "port": int(os.getenv("QDRANT_PORT", 6333)),
             "collection_name": "aiko_memory",
+            "embedding_model_dims": 768,  # nomic-embed-text-v2-moe output dims
         },
     },
     "llm": {
@@ -34,6 +35,7 @@ MEM0_CONFIG = {
         "config": {
             "model": os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text"),
             "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            "embedding_dims": 768,  # explicitly tell mem0 the output size
         },
     },
 }

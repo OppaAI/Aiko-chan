@@ -196,3 +196,5 @@ Findings from Phase 1 testing (for Grace / AuRoRA adoption):
 ## Support
 If you find this project useful, consider buying me a coffee ☕  
 It helps keep the phases shipping.
+
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/oppaai)

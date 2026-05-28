@@ -1,0 +1,16 @@
+[project]
+name = "ai-chan"
+version = "0.1.0"
+description = "Aiko-chan: AI companion with persistent memory, web search, and conversational interface"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.4.1",
+    "fastembed>=0.8.0",
+    "mem0ai[nlp]>=0.1.0",
+    "ollama>=0.3.0",
+    "python-dotenv>=1.0.0",
+    "qdrant-client>=1.9.0",
+    "requests>=2.34.2",
+    "spacy>=3.8.14",
+]

@@ -125,12 +125,13 @@ aiko/
 │   └── tts.py          # Phase 2 — XTTS v2 TTS
 ├── avatar/
 │   └── index.html      # Phase 3 — VRM avatar viewer
-├── persona.md          # Aiko's personality — edit freely
+├── soul.md              # Aiko's soul and personality — edit freely
 ├── cli.py              # CLI entry point
 ├── docker-compose.yml  # Qdrant
-├── requirements.txt
-├── .env.example
-└── README.md
+├── project.toml        # uv dependencies
+├── uv.lock             # uv dependencies
+├── .env.example        # .env settings example
+└── README.md           # This Readme
 ```
 
 ---

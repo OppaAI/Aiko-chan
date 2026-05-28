@@ -16,16 +16,16 @@ from core.memory import AikoMemory
 # ── config ────────────────────────────────────────────────────────────────────
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "ministral-3:3b-instruct-2512-q4_K_M")
+OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "llama3.2")
 
-# soul.md lives at project root — resolve relative to this file
-_PERSONA_PATH = Path(__file__).resolve().parent.parent / "soul.md"
+# persona.md lives at project root — resolve relative to this file
+_PERSONA_PATH = Path(__file__).resolve().parent.parent / "persona.md"
 
 
 def _load_persona() -> str:
-    """Load Aiko's system prompt from soul.md at project root."""
+    """Load Aiko's system prompt from persona.md at project root."""
     if not _PERSONA_PATH.exists():
-        raise FileNotFoundError(f"soul.md not found at {_PERSONA_PATH}")
+        raise FileNotFoundError(f"persona.md not found at {_PERSONA_PATH}")
     return _PERSONA_PATH.read_text(encoding="utf-8").strip()
 
 # how many past turns to keep in the active context window
@@ -107,7 +107,11 @@ class AikoBrain:
 
         print("\nAiko-chan: ", end="", flush=True)
         for chunk in stream:
-            token = chunk["message"]["content"]
+            # handle both dict and object response formats
+            if hasattr(chunk, "message"):
+                token = chunk.message.content or ""
+            else:
+                token = chunk.get("message", {}).get("content", "") or ""
             print(token, end="", flush=True)
             full_response.append(token)
         print()  # newline after stream ends

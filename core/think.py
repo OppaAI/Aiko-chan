@@ -1,5 +1,5 @@
 """
-core/brain.py
+core/think.py
 
 Aiko's cognitive loop.
   - Retrieves relevant memories before each turn
@@ -13,7 +13,7 @@ import re
 import threading
 from pathlib import Path
 from ollama import Client
-from core.memory import AikoMemory
+from core.memorize import AikoMemorize
 from core.tools import web_search
 
 
@@ -22,25 +22,20 @@ from core.tools import web_search
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "ministral-3:3b-instruct-2512-q4_K_M")
 
-# soul.md lives at project root — resolve relative to this file
 _PERSONA_PATH = Path(__file__).resolve().parent.parent / "soul.md"
 
-# how many past turns to keep in the active context window
 CONTEXT_WINDOW_TURNS = int(os.getenv("CONTEXT_WINDOW_TURNS", 20))
 
-# regex to detect search trigger in LLM output
 _SEARCH_RE = re.compile(r"\[SEARCH:\s*(.+?)\]", re.IGNORECASE)
 
 
 def _load_persona() -> str:
-    """Load Aiko's system prompt from soul.md at project root."""
     if not _PERSONA_PATH.exists():
         raise FileNotFoundError(f"soul.md not found at {_PERSONA_PATH}")
     return _PERSONA_PATH.read_text(encoding="utf-8").strip()
 
 
 def _inject_search_instruction(system: str) -> str:
-    """Append search tool instructions to the system prompt."""
     return system + """
 
 ## Web Search
@@ -54,21 +49,22 @@ Only search when genuinely needed — don't search for things you already know.
 """
 
 
-# ── brain ─────────────────────────────────────────────────────────────────────
+# ── think ─────────────────────────────────────────────────────────────────────
 
-class AikoBrain:
+class AikoThink:
     """
     Aiko's conversational core.
     Manages the short-term context window and long-term mem0 memory.
     Memory writes run in a background thread — never blocks the chat loop.
     """
-    def __init__(self, memory: AikoMemory) -> None:
+
+    def __init__(self, memorize: AikoMemorize) -> None:
         self._client     = Client(host=OLLAMA_BASE_URL)
-        self._memory     = memory
-        self._persona    = _load_persona()  # cache once
+        self._memorize   = memorize
+        self._persona    = _load_persona()
         self._history:   list[dict] = []
         self._mem_thread: threading.Thread | None = None
-        print(f"[brain] Ollama client ready — model: {OLLAMA_MODEL}")
+        print(f"[think] Ollama client ready — model: {OLLAMA_MODEL}")
 
     # ── public api ────────────────────────────────────────────────────────────
 
@@ -78,8 +74,8 @@ class AikoBrain:
         Handles memory retrieval, optional web search, and memory storage.
         """
         # 1. retrieve relevant long-term memories
-        memories     = self._memory.search(user_input)
-        memory_block = self._memory.format_for_context(memories)
+        memories     = self._memorize.search(user_input)
+        memory_block = self._memorize.format_for_context(memories)
 
         # 2. build system prompt with memories + search instruction
         system = self._persona
@@ -104,14 +100,11 @@ class AikoBrain:
             print(f"\n[search] {query}", flush=True)
             results = web_search(query)
 
-            # inject results and call LLM again for final response
             messages.append({"role": "assistant", "content": raw_response})
             messages.append({"role": "user",      "content": results})
             response_text = self._stream_response(messages)
         else:
-            # no search needed — stream the first response
             print("\nAiko-chan: ", end="", flush=True)
-            # re-stream cleanly from the already-fetched response
             response_text = self._stream_text(raw_response)
 
         # 7. append Aiko's response to rolling history
@@ -125,12 +118,12 @@ class AikoBrain:
     def reset_context(self) -> None:
         """Clear the short-term rolling context (long-term memory persists)."""
         self._history.clear()
-        print("[brain] Short-term context cleared.")
+        print("[think] Short-term context cleared.")
 
     def wait_for_memory(self) -> None:
         """Block until any pending memory write completes. Call before exit."""
         if self._mem_thread and self._mem_thread.is_alive():
-            print("[memory] Waiting for memory write to finish...")
+            print("[memorize] Waiting for memory write to finish...")
             self._mem_thread.join()
 
     # ── internal ──────────────────────────────────────────────────────────────
@@ -140,14 +133,18 @@ class AikoBrain:
         Non-streaming LLM call — used for the first pass to detect search triggers.
         Returns the full response string without printing.
         """
-        response = self._client.chat(
-            model=OLLAMA_MODEL,
-            messages=messages,
-            stream=False,
-        )
-        if hasattr(response, "message"):
-            return response.message.content or ""
-        return response.get("message", {}).get("content", "") or ""
+        try:
+            response = self._client.chat(
+                model=OLLAMA_MODEL,
+                messages=messages,
+                stream=False,
+            )
+            if hasattr(response, "message"):
+                return response.message.content or ""
+            return response.get("message", {}).get("content", "") or ""
+        except Exception as exc:
+            print(f"[think] Ollama call failed: {exc}")
+            return ""
 
     def _stream_response(self, messages: list[dict]) -> str:
         """
@@ -155,23 +152,23 @@ class AikoBrain:
         Prints tokens live and returns full assembled string.
         """
         full_response = []
-
-        stream = self._client.chat(
-            model=OLLAMA_MODEL,
-            messages=messages,
-            stream=True,
-        )
-
-        print("\nAiko-chan: ", end="", flush=True)
-        for chunk in stream:
-            if hasattr(chunk, "message"):
-                token = chunk.message.content or ""
-            else:
-                token = chunk.get("message", {}).get("content", "") or ""
-            print(token, end="", flush=True)
-            full_response.append(token)
-        print(flush=True)
-
+        try:
+            stream = self._client.chat(
+                model=OLLAMA_MODEL,
+                messages=messages,
+                stream=True,
+            )
+            print("\nAiko-chan: ", end="", flush=True)
+            for chunk in stream:
+                if hasattr(chunk, "message"):
+                    token = chunk.message.content or ""
+                else:
+                    token = chunk.get("message", {}).get("content", "") or ""
+                print(token, end="", flush=True)
+                full_response.append(token)
+            print(flush=True)
+        except Exception as exc:
+            print(f"\n[think] stream failed: {exc}")
         return "".join(full_response)
 
     def _stream_text(self, text: str) -> str:
@@ -186,13 +183,13 @@ class AikoBrain:
         """Fire memory write in a background thread — non-blocking."""
         def _write():
             try:
-                self._memory.add([
+                self._memorize.add([
                     {"role": "user",      "content": user_input},
                     {"role": "assistant", "content": response_text},
                 ])
             except Exception as exc:
-                print(f"[memory] async write failed: {exc}")
-        # wait for previous write before starting a new one
+                print(f"[memorize] async write failed: {exc}")
+
         if self._mem_thread and self._mem_thread.is_alive():
             self._mem_thread.join()
 

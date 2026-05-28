@@ -190,3 +190,9 @@ Findings from Phase 1 testing (for Grace / AuRoRA adoption):
 - [ ] Does mem0 hallucinate memories from model confabulation?
 - [ ] Is write latency acceptable with async threading?
 - [ ] Is Qdrant stable under continuous writes on Jetson?
+
+---
+
+## Support
+If you find this project useful, consider buying me a coffee ☕  
+It helps keep the phases shipping.

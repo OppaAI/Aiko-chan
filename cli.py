@@ -7,9 +7,12 @@ Usage:
     python cli.py --debug       # show memory debug info each turn
     python cli.py --clear-mem   # wipe all stored memories and exit
 """
-
+from dotenv import load_dotenv
 import argparse
 import sys
+
+load_dotenv()
+
 from core.memory import AikoMemory
 from core.brain  import AikoBrain
 
@@ -66,6 +69,7 @@ def run_cli(debug: bool = False) -> None:
             user_input = input("You: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n\nAiko-chan: ...Fine. I'll be here when you come back. Baka.\n")
+            brain.wait_for_memory()
             sys.exit(0)
 
         if not user_input:
@@ -77,6 +81,7 @@ def run_cli(debug: bool = False) -> None:
 
             if cmd in ("/quit", "/exit"):
                 print("\nAiko-chan: Already leaving? ...Be safe out there.\n")
+                brain.wait_for_memory()
                 sys.exit(0)
 
             elif cmd == "/reset":

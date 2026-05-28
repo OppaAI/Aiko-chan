@@ -33,7 +33,7 @@ MEM0_CONFIG = {
     "embedder": {
         "provider": "ollama",
         "config": {
-            "model": os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text"),
+            "model": os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text-v2-moe"),
             "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             "embedding_dims": 768,  # explicitly tell mem0 the output size
         },
@@ -62,7 +62,7 @@ class AikoMemory:
         Store a conversation turn (or batch) into long-term memory.
         messages: list of {role, content} dicts.
         """
-        self._mem.add(messages, filters={"user_id": user_id})
+        self._mem.add(messages, user_id=user_id)
 
     def search(
         self,
@@ -102,5 +102,5 @@ class AikoMemory:
 
     def clear(self, user_id: str = AIKO_USER_ID) -> None:
         """Wipe all memories for a user. Use carefully."""
-        self._mem.delete_all(filters={"user_id": user_id})
+        self._mem.delete_all(user_id=user_id)
         print(f"[memory] Cleared all memories for user '{user_id}'.")

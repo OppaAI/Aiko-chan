@@ -14,7 +14,7 @@ The goal is to battle-test mem0 + Qdrant memory before committing to Grace's arc
 |---|---|
 | Brain | Ollama (local LLM) |
 | Long-term memory | mem0 + Qdrant (Docker) |
-| Embeddings | Ollama (`nomic-embed-text`) |
+| Embeddings | Ollama (`nomic-embed-text-v2-moe`) |
 | Interface | CLI (Phase 1) |
 
 ---
@@ -25,12 +25,12 @@ The goal is to battle-test mem0 + Qdrant memory before committing to Grace's arc
 
 - [Ollama](https://ollama.com) running locally
 - Docker + Docker Compose
-- Python 3.11+
+- Python 3.10+
 
 ```bash
 # Pull the models you'll use
-ollama pull llama3.2
-ollama pull nomic-embed-text
+ollama pull ministral-3:3b
+ollama pull nomic-embed-text-v2-moe
 ```
 
 ### 2. Start Qdrant
@@ -44,7 +44,7 @@ Qdrant dashboard: http://localhost:6333/dashboard
 ### 3. Install dependencies
 
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
 ### 4. Configure
@@ -57,13 +57,13 @@ cp .env.example .env
 ### 5. Talk to Aiko-chan
 
 ```bash
-python cli.py
+uv run cli.py
 
 # with memory debug output each turn:
-python cli.py --debug
+uv run cli.py --debug
 
 # wipe all stored memories:
-python cli.py --clear-mem
+uv run cli.py --clear-mem
 ```
 
 ---

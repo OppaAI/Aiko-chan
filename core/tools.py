@@ -37,8 +37,10 @@ def web_search(query: str, max_results: int = 3) -> str:
         return f"[search failed: could not reach SearXNG at {SEARXNG_URL}]"
     except requests.exceptions.Timeout:
         return "[search failed: timed out]"
-    except Exception as e:
-        return f"[search failed: {e}]"
+    except requests.exceptions.RequestException as e:
+        return f"[search failed: request error: {e}]"
+    except ValueError:
+        return "[search failed: invalid JSON response]"
 
     results = data.get("results", [])[:max_results]
     if not results:

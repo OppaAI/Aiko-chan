@@ -16,7 +16,6 @@ load_dotenv()
 from core.memorize import AikoMemorize
 from core.think    import AikoThink
 
-
 # ── banner ────────────────────────────────────────────────────────────────────
 
 BANNER = """
@@ -48,6 +47,11 @@ def parse_args() -> argparse.Namespace:
         help="Print retrieved memories each turn",
     )
     parser.add_argument(
+        "--no-voice",
+        action="store_true",
+        help="Disable voice output (TTS)",
+    )
+    parser.add_argument(
         "--clear-mem",
         action="store_true",
         help="Wipe all stored memories and exit",
@@ -60,7 +64,7 @@ def run_cli(debug: bool = False) -> None:
     print("[system] Initialising Aiko-chan...\n")
 
     memorize = AikoMemorize()
-    think    = AikoThink(memorize)
+    think    = AikoThink(memorize, voice=not no_voice)
 
     print("\nAiko-chan is ready. Type /help for commands.\n")
 
@@ -131,4 +135,4 @@ if __name__ == "__main__":
         AikoMemorize().clear()
         sys.exit(0)
 
-    run_cli(debug=args.debug)
+    run_cli(debug=args.debug, no_voice=args.no_voice)

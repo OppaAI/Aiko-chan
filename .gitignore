@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+Aiko.mp3
+Aiko.mp4
+Aiko.wav
+models/

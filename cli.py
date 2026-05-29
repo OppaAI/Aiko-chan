@@ -7,6 +7,9 @@ Usage:
     python cli.py --debug       # show memory debug info each turn
     python cli.py --clear-mem   # wipe all stored memories and exit
 """
+import warnings
+warnings.filterwarnings("ignore")
+
 from dotenv import load_dotenv
 import argparse
 import sys
@@ -59,7 +62,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def run_cli(debug: bool = False) -> None:
+def run_cli(debug: bool = False, no_voice: bool = False) -> None:
     print(BANNER)
     print("[system] Initialising Aiko-chan...\n")
 

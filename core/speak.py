@@ -1,126 +1,89 @@
 """
 core/speak.py
 
-Aiko's voice output via Style-BERT-VITS2 local API.
-Expects Style-BERT-VITS2 server running at SBV2_URL (default: http://localhost:5000).
+Aiko's voice output via RealtimeTTS + Kokoro.
 
 Standalone test:
     python core/speak.py
     python core/speak.py "こんにちは、私はアイコちゃんです！"
-    python core/speak.py "Hello! I'm Aiko-chan." --out output.wav
     python core/speak.py --devices
 """
 
 import os
 import sys
 import argparse
-import requests
-import sounddevice as sd
-import soundfile as sf
-import tempfile
-from pathlib import Path
 
 
 # ── config ────────────────────────────────────────────────────────────────────
 
-SBV2_URL    = os.getenv("SBV2_URL",    "http://localhost:5000")
-SBV2_MODEL  = os.getenv("SBV2_MODEL",  "")           # empty = SBV2 default model
-SBV2_STYLE  = os.getenv("SBV2_STYLE",  "Neutral")
-SBV2_SPEED  = float(os.getenv("SBV2_SPEED", "1.0"))
-SBV2_DEVICE = os.getenv("SBV2_DEVICE", None)          # None = system default output
+KOKORO_VOICE  = os.getenv("KOKORO_VOICE",  "jf_alpha")   # default female voice
+KOKORO_SPEED  = float(os.getenv("KOKORO_SPEED", "1.0"))
+KOKORO_LANG   = os.getenv("KOKORO_LANG",   "en-us")
 
 
 # ── speak ─────────────────────────────────────────────────────────────────────
 
 class AikoSpeak:
     """
-    HTTP client for Style-BERT-VITS2 TTS API.
-    Synthesizes text to audio and plays it via sounddevice.
+    RealtimeTTS wrapper using Kokoro engine.
+    Lazy-loads on first use to keep startup fast.
     """
 
     def __init__(self) -> None:
-        self._base   = SBV2_URL.rstrip("/")
-        self._model  = SBV2_MODEL
-        self._style  = SBV2_STYLE
-        self._speed  = SBV2_SPEED
-        self._device = int(SBV2_DEVICE) if SBV2_DEVICE else None
-        print(f"[speak] Style-BERT-VITS2 at {self._base} | style: {self._style} | speed: {self._speed}")
+        self._stream = None
+        self._ready  = False
+        print(f"[speak] Kokoro ready (lazy) | voice: {KOKORO_VOICE} | speed: {KOKORO_SPEED}")
 
-    def speak(self, text: str, out_path: str | None = None) -> bool:
-        """
-        Synthesize text and play audio.
-        Optionally save to out_path (.wav) instead of playing.
-        Returns True on success, False on failure.
-        """
-        audio_bytes = self._synthesize(text)
-        if not audio_bytes:
+    def warmup(self) -> bool:
+        """Pre-load the engine at startup to avoid first-speak delay."""
+        return self._init_engine()
+
+    def _init_engine(self) -> bool:
+        """Initialise RealtimeTTS Kokoro engine on first use."""
+        if self._ready:
+            return True
+        try:
+            from RealtimeTTS import TextToAudioStream, KokoroEngine
+            engine = KokoroEngine(
+                voice=KOKORO_VOICE,
+                default_speed=KOKORO_SPEED,
+            )
+            self._stream = TextToAudioStream(engine)
+            self._ready  = True
+            print("[speak] Kokoro engine loaded.")
+            return True
+        except Exception as e:
+            print(f"[speak] failed to load Kokoro engine: {e}")
             return False
 
-        if out_path:
-            path = Path(out_path)
-            path.write_bytes(audio_bytes)
-            print(f"[speak] saved to {path}")
-        else:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                f.write(audio_bytes)
-                path = Path(f.name)
+    def speak(self, text: str) -> bool:
+        """
+        Synthesize text and play audio.
+        Returns True on success, False on failure.
+        """
+        if not self._init_engine():
+            return False
+        try:
+            self._stream.feed(text)
+            self._stream.play(log_synthesized_text=False)
+            return True
+        except Exception as e:
+            print(f"[speak] playback error: {e}")
+            return False
 
-        self._play(path)
-
-        if not out_path:
+    def stop(self) -> None:
+        """Stop any ongoing playback."""
+        if self._stream:
             try:
-                path.unlink()
+                self._stream.stop()
             except Exception:
                 pass
 
-        return True
 
-    # ── internal ──────────────────────────────────────────────────────────────
-
-    def _synthesize(self, text: str) -> bytes | None:
-        """
-        Call Style-BERT-VITS2 /voice endpoint and return raw WAV bytes.
-        Returns None on failure.
-        """
-        params = {
-            "text":   text,
-            "style":  self._style,
-            "speed":  self._speed,
-            "format": "wav",
-        }
-        if self._model:
-            params["model_name"] = self._model
-
-        try:
-            response = requests.get(
-                f"{self._base}/voice",
-                params=params,
-                timeout=30,
-            )
-            response.raise_for_status()
-            return response.content
-        except requests.exceptions.ConnectionError:
-            print(f"[speak] could not reach Style-BERT-VITS2 at {self._base}")
-        except requests.exceptions.Timeout:
-            print("[speak] synthesis timed out")
-        except requests.exceptions.RequestException as e:
-            print(f"[speak] request error: {e}")
-        return None
-
-    def _play(self, path: Path) -> None:
-        """Play a WAV file via sounddevice."""
-        try:
-            data, samplerate = sf.read(str(path))
-            sd.play(data, samplerate, device=self._device)
-            sd.wait()
-        except Exception as e:
-            print(f"[speak] playback error: {e}")
-
-
-# ── list audio devices (debug) ────────────────────────────────────────────────
+# ── list audio devices ────────────────────────────────────────────────────────
 
 def list_devices() -> None:
-    """Print all available audio output devices."""
+    import sounddevice as sd
     print("[speak] Available audio output devices:")
     for i, dev in enumerate(sd.query_devices()):
         if dev["max_output_channels"] > 0:
@@ -137,10 +100,9 @@ def _parse_args() -> argparse.Namespace:
         default="こんにちは！私はアイコちゃんです。よろしくね！",
         help="Text to synthesize",
     )
-    parser.add_argument("--out",     default=None,       help="Save WAV to this path instead of playing")
-    parser.add_argument("--devices", action="store_true", help="List audio output devices and exit")
-    parser.add_argument("--style",   default=None,       help="Override SBV2_STYLE")
-    parser.add_argument("--speed",   default=None,       type=float, help="Override SBV2_SPEED")
+    parser.add_argument("--devices", action="store_true", help="List audio output devices")
+    parser.add_argument("--voice",   default=None, help="Override KOKORO_VOICE")
+    parser.add_argument("--speed",   default=None, type=float, help="Override KOKORO_SPEED")
     return parser.parse_args()
 
 
@@ -154,11 +116,11 @@ if __name__ == "__main__":
         list_devices()
         sys.exit(0)
 
-    if args.style:
-        os.environ["SBV2_STYLE"] = args.style
+    if args.voice:
+        os.environ["KOKORO_VOICE"] = args.voice
     if args.speed:
-        os.environ["SBV2_SPEED"] = str(args.speed)
+        os.environ["KOKORO_SPEED"] = str(args.speed)
 
     voice = AikoSpeak()
-    ok    = voice.speak(args.text, out_path=args.out)
+    ok    = voice.speak(args.text)
     sys.exit(0 if ok else 1)

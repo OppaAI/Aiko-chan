@@ -41,13 +41,14 @@ def _inject_search_instruction(system: str) -> str:
     return system + """
 
 ## Web Search
-You have access to the internet via a search tool.
-When you need current information, facts, news, or anything you're unsure about,
-output ONLY this on its own line before your response:
-[SEARCH: your search query here]
+You MUST use this exact format when you need current information:
+[SEARCH: your query here]
 
-You will then receive results and can use them to answer.
-Only search when genuinely needed — don't search for things you already know.
+Output ONLY that line, nothing else, before waiting for results.
+Do NOT answer questions about current events, news, or real-time data without searching first.
+Examples:
+- User asks about today's news → output: [SEARCH: top news today]
+- User asks who is PM of Canada → output: [SEARCH: current Prime Minister Canada 2026]
 """
 
 

@@ -70,7 +70,24 @@ class AikoSpeak:
         except Exception as e:
             print(f"[speak] playback error: {e}")
             return False
-
+            
+    def feed(self, token: str) -> None:
+        """Feed a token into the TTS stream (call during LLM streaming)."""
+        if not self._init_engine():
+            return
+        try:
+            self._stream.feed(token)
+        except Exception as e:
+            print(f"[speak] feed error: {e}")
+    
+    def play_async(self) -> None:
+        """Start async playback — call once after feeding is done, or use play() to block."""
+        if self._stream:
+            try:
+                self._stream.play_async(log_synthesized_text=False)
+            except Exception as e:
+                print(f"[speak] play_async error: {e}")
+                
     def stop(self) -> None:
         """Stop any ongoing playback."""
         if self._stream:
@@ -78,7 +95,6 @@ class AikoSpeak:
                 self._stream.stop()
             except Exception:
                 pass
-
 
 # ── list audio devices ────────────────────────────────────────────────────────
 

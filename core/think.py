@@ -119,10 +119,11 @@ class AikoThink:
         # 8. persist to long-term memory in background
         self._store_async(user_input, response_text)
       
-        # 9. speak response aloud if voice is enabled
-        if self._speak:
-            self._speak.speak(response_text)
-          
+        # step 9 — only speak if voice hasn't already been triggered by streaming
+        if self._speak and not search_match:
+            self._speak.speak(response_text)   # non-search path: speak full text
+        # search path already handled inside _stream_response via feed/play_async
+      
         return response_text
 
     def reset_context(self) -> None:
@@ -176,7 +177,11 @@ class AikoThink:
                     token = chunk.get("message", {}).get("content", "") or ""
                 print(token, end="", flush=True)
                 full_response.append(token)
+                if self._speak and token:
+                    self._speak.feed(token)
             print(flush=True)
+            if self._speak:
+                self._speak.play_async()
         except Exception as exc:
             print(f"\n[think] stream failed: {exc}")
         return "".join(full_response)

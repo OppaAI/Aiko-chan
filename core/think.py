@@ -51,7 +51,6 @@ Examples:
 - User asks who is PM of Canada → output: [SEARCH: current Prime Minister Canada 2026]
 """
 
-
 # ── think ─────────────────────────────────────────────────────────────────────
 
 class AikoThink:

@@ -16,20 +16,10 @@ import threading
 from pathlib import Path
 from ollama import Client
 
-# ── suppress noisy warnings before any heavy imports ─────────────────────────
 warnings.filterwarnings("ignore")
 logging.getLogger("phonemizer").setLevel(logging.ERROR)
 logging.getLogger("torch").setLevel(logging.ERROR)
-os.environ.setdefault("ALSA_PCM_CARD", "default")
 os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
-
-# suppress ALSA/ONNX stderr noise at the C-library level
-import ctypes, ctypes.util
-try:
-    _asound = ctypes.cdll.LoadLibrary(ctypes.util.find_library("asound") or "libasound.so.2")
-    _asound.snd_lib_error_set_handler(ctypes.c_void_p(None))
-except Exception:
-    pass
 
 from core.memorize import AikoMemorize
 from core.speak    import AikoSpeak
@@ -72,53 +62,47 @@ Examples:
 class AikoThink:
     """
     Aiko's conversational core.
-    Manages the short-term context window and long-term mem0 memory.
-    Memory writes and warmup run in background threads — never block the chat loop.
+    speak is injected pre-warmed from cli.py.
+    LLM warmup starts immediately on init in a background thread.
+    cli.py calls join_warmup() to block until both are ready before showing prompt.
     """
 
-    def __init__(self, memorize: AikoMemorize, voice: bool = True) -> None:
-        self._client     = Client(host=OLLAMA_BASE_URL)
-        self._memorize   = memorize
-        self._speak      = AikoSpeak() if voice else None
-        self._persona    = _load_persona()
-        self._history:   list[dict] = []
-        self._mem_thread: threading.Thread | None = None
+    def __init__(self, memorize: AikoMemorize, speak: AikoSpeak | None = None) -> None:
+        self._client         = Client(host=OLLAMA_BASE_URL)
+        self._memorize       = memorize
+        self._speak          = speak
+        self._persona        = _load_persona()
+        self._history:       list[dict] = []
+        self._mem_thread:    threading.Thread | None = None
+        self._warmup_thread: threading.Thread | None = None
 
         print(f"[think] Ollama client ready — model: {OLLAMA_MODEL}")
-        print(f"[think] Voice output: {'on' if voice else 'off'}")
+        print(f"[think] Voice output: {'on' if speak else 'off'}")
 
-        # parallel warmup — LLM + TTS load while user reads the banner
-        self._warmup_thread = threading.Thread(target=self._warmup, daemon=True)
+        self._warmup_thread = threading.Thread(target=self._warmup_llm, daemon=True)
         self._warmup_thread.start()
 
-    def _warmup(self) -> None:
-        """Pre-load LLM and TTS in background so first turn has no cold-start delay."""
-        # warm TTS engine
-        if self._speak:
-            self._speak.warmup()
-
-        # warm LLM — send a minimal no-op prompt to load the model into VRAM
+    def _warmup_llm(self) -> None:
+        """Ping Ollama with a 1-token call to load the model into memory."""
         try:
             self._client.chat(
                 model=OLLAMA_MODEL,
                 messages=[{"role": "user", "content": "hi"}],
                 stream=False,
-                options={"num_predict": 1},   # respond with 1 token — just loads the model
+                options={"num_predict": 1},
             )
             print("[think] LLM warmed up.")
         except Exception as e:
             print(f"[think] LLM warmup failed (non-fatal): {e}")
 
-    def _ensure_warmed(self) -> None:
-        """Block until warmup finishes before the first real chat turn."""
+    def join_warmup(self) -> None:
+        """Block until LLM warmup completes. Called by cli.py before showing prompt."""
         if self._warmup_thread and self._warmup_thread.is_alive():
             self._warmup_thread.join()
 
     # ── public api ────────────────────────────────────────────────────────────
 
     def chat(self, user_input: str) -> str:
-        self._ensure_warmed()                        # no-op after first turn
-
         # 1. retrieve relevant long-term memories
         memories     = self._memorize.search(user_input)
         memory_block = self._memorize.format_for_context(memories)
@@ -157,7 +141,6 @@ class AikoThink:
         return response_text
 
     def reset_context(self) -> None:
-        """Clear short-term rolling context (long-term memory persists)."""
         self._history.clear()
         print("[think] Short-term context cleared.")
 
@@ -169,13 +152,8 @@ class AikoThink:
     # ── internal ──────────────────────────────────────────────────────────────
 
     def _stream_response(self, messages: list[dict]) -> str:
-        """
-        Stream LLM response to console and TTS simultaneously.
-        Console printing happens here — speak.py is silent.
-        TTS is skipped for search-trigger responses.
-        """
         full_response = []
-        tts_started   = False
+        is_search     = False
 
         try:
             stream = self._client.chat(
@@ -185,6 +163,11 @@ class AikoThink:
             )
             print("\nAiko-chan: ", end="", flush=True)
 
+            # start TTS listening BEFORE tokens arrive — Kokoro synthesizes live
+            if self._speak:
+                self._speak.stop()
+                self._speak.start_listening()
+
             for chunk in stream:
                 token = (
                     chunk.message.content
@@ -192,23 +175,31 @@ class AikoThink:
                     else chunk.get("message", {}).get("content", "")
                 ) or ""
 
-                # print token to console (single source of truth)
                 print(token, end="", flush=True)
                 full_response.append(token)
 
-                # feed to TTS only if not a search trigger
+                # detect search trigger — if so, abort TTS for this pass
                 assembled = "".join(full_response)
-                if self._speak and token and not _SEARCH_RE.search(assembled):
-                    self._speak.feed(token)   # silent — no double print
-                    tts_started = True
+                if _SEARCH_RE.search(assembled):
+                    is_search = True
+                    if self._speak:
+                        self._speak.stop()
+                    continue
+
+                if self._speak and token and not is_search:
+                    self._speak.feed(token)
 
             print(flush=True)
 
-            if self._speak and tts_started:
-                self._speak.play_async()
+            # tail sentinel — close the final open sentence
+            if self._speak and not is_search:
+                self._speak.finish()
+                self._speak.wait()
 
         except Exception as exc:
             print(f"\n[think] stream failed: {exc}")
+            if self._speak:
+                self._speak.stop()
 
         return "".join(full_response)
 

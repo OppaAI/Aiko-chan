@@ -26,8 +26,8 @@ load_dotenv()
 
 with silent_stderr():
     from core.memorize import AikoMemorize
-    from core.speak    import AikoSpeak
     from core.think    import AikoThink
+from core.speak import AikoSpeak
 
 # ── banner ────────────────────────────────────────────────────────────────────
 

@@ -178,7 +178,7 @@ class AikoThink:
                 print(token, end="", flush=True)
                 full_response.append(token)
 
-                # detect search trigger — if so, abort TTS for this pass
+                # detect search trigger — abort TTS for this pass
                 assembled = "".join(full_response)
                 if _SEARCH_RE.search(assembled):
                     is_search = True
@@ -191,7 +191,7 @@ class AikoThink:
 
             print(flush=True)
 
-            # tail sentinel — close the final open sentence
+            # flush + drain audio
             if self._speak and not is_search:
                 self._speak.finish()
                 self._speak.wait()

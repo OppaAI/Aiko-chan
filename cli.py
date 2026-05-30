@@ -4,20 +4,46 @@ cli.py
 Aiko-chan CLI — Phase 1 chatbot interface.
 Usage:
     python cli.py               # normal chat
+    python cli.py --no-voice    # disable TTS
     python cli.py --debug       # show memory debug info each turn
     python cli.py --clear-mem   # wipe all stored memories and exit
 """
+
+# ── suppress all warnings before any imports ──────────────────────────────────
 import warnings
 warnings.filterwarnings("ignore")
 
+import os
+import sys
+import logging
+logging.disable(logging.WARNING)           # silence all WARNING and below globally
+
+# suppress ONNX / ALSA noise that bypasses Python's logging (writes direct to stderr)
+import ctypes, ctypes.util
+try:
+    _asound = ctypes.cdll.LoadLibrary(ctypes.util.find_library("asound") or "libasound.so.2")
+    _asound.snd_lib_error_set_handler(ctypes.c_void_p(None))
+except Exception:
+    pass
+
+# redirect stderr briefly during heavy C-extension imports to eat ONNX/ALSA spam
+import io
+_devnull = open(os.devnull, "w")
+
 from dotenv import load_dotenv
 import argparse
-import sys
 
 load_dotenv()
 
+# redirect stderr to /dev/null during noisy imports
+_real_stderr = sys.stderr
+sys.stderr = _devnull
+
 from core.memorize import AikoMemorize
 from core.think    import AikoThink
+
+sys.stderr = _real_stderr                  # restore stderr after imports
+_devnull.close()
 
 # ── banner ────────────────────────────────────────────────────────────────────
 
@@ -35,7 +61,7 @@ HELP_TEXT = """
 Commands:
   /quit  or  /exit    — end the session
   /reset              — clear short-term context (long-term memory persists)
-  /memory             — show all stored memories (debug)
+  /memory             — show all stored memories
   /help               — show this message
 """
 
@@ -44,21 +70,9 @@ Commands:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Aiko-chan CLI")
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Print retrieved memories each turn",
-    )
-    parser.add_argument(
-        "--no-voice",
-        action="store_true",
-        help="Disable voice output (TTS)",
-    )
-    parser.add_argument(
-        "--clear-mem",
-        action="store_true",
-        help="Wipe all stored memories and exit",
-    )
+    parser.add_argument("--debug",     action="store_true", help="Print retrieved memories each turn")
+    parser.add_argument("--no-voice",  action="store_true", help="Disable voice output (TTS)")
+    parser.add_argument("--clear-mem", action="store_true", help="Wipe all stored memories and exit")
     return parser.parse_args()
 
 
@@ -68,6 +82,7 @@ def run_cli(debug: bool = False, no_voice: bool = False) -> None:
 
     memorize = AikoMemorize()
     think    = AikoThink(memorize, voice=not no_voice)
+    # warmup runs in background thread from AikoThink.__init__
 
     print("\nAiko-chan is ready. Type /help for commands.\n")
 

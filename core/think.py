@@ -135,6 +135,8 @@ class AikoThink:
         if self._mem_thread and self._mem_thread.is_alive():
             print("[memorize] Waiting for memory write to finish...")
             self._mem_thread.join()
+        if self._speak:
+            self._speak.shutdown()
 
     # ── internal ──────────────────────────────────────────────────────────────
 

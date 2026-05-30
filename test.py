@@ -16,18 +16,13 @@ import os
 import sys
 import argparse
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
 
 # ── config ────────────────────────────────────────────────────────────────────
 
-KOKORO_VOICE  = os.getenv("KOKORO_VOICE",  "af_heart")
+KOKORO_VOICE  = os.getenv("KOKORO_VOICE",  "af_heart")   # default female voice
 KOKORO_SPEED  = float(os.getenv("KOKORO_SPEED", "1.0"))
 KOKORO_LANG   = os.getenv("KOKORO_LANG",   "en-us")
-KOKORO_DEVICE = int(os.getenv("KOKORO_DEVICE", "-1"))  # 31 = pulse, -1 = default
+
 
 # ── speak ─────────────────────────────────────────────────────────────────────
 
@@ -56,10 +51,7 @@ class AikoSpeak:
                 voice=KOKORO_VOICE,
                 default_speed=KOKORO_SPEED,
             )
-            self._stream = TextToAudioStream(
-                engine,
-                output_device_index=KOKORO_DEVICE if KOKORO_DEVICE >= 0 else None,
-            )
+            self._stream = TextToAudioStream(engine)
             self._ready  = True
             print("[speak] Kokoro engine loaded.")
             return True

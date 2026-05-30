@@ -74,55 +74,41 @@ class AikoThink:
     # ── public api ────────────────────────────────────────────────────────────
 
     def chat(self, user_input: str) -> str:
-        """
-        Process one user turn, return Aiko's full response string.
-        Handles memory retrieval, optional web search, and memory storage.
-        """
         # 1. retrieve relevant long-term memories
         memories     = self._memorize.search(user_input)
         memory_block = self._memorize.format_for_context(memories)
 
-        # 2. build system prompt with memories + search instruction
-        system = self._persona
-        system = _inject_search_instruction(system)
+        # 2. build system prompt
+        system = _inject_search_instruction(self._persona)
         if memory_block:
             system = f"{system}\n\n{memory_block}"
 
-        # 3. append user turn to rolling history
+        # 3. append user turn
         self._history.append({"role": "user", "content": user_input})
 
-        # 4. trim history to context window
+        # 4. trim history
         trimmed  = self._history[-(CONTEXT_WINDOW_TURNS * 2):]
         messages = [{"role": "system", "content": system}] + trimmed
 
-        # 5. first LLM call — may return a search trigger
-        raw_response = self._call_llm(messages)
+        # 5. stream first response — TTS feeds live, search detection inline
+        response_text = self._stream_response(messages)
 
-        # 6. intercept search trigger if present
-        search_match = _SEARCH_RE.search(raw_response)
+        # 6. handle search trigger if present
+        search_match = _SEARCH_RE.search(response_text)
         if search_match:
             query = search_match.group(1).strip()
             print(f"\n[search] {query}", flush=True)
             results = web_search(query)
-
-            messages.append({"role": "assistant", "content": raw_response})
+            messages.append({"role": "assistant", "content": response_text})
             messages.append({"role": "user",      "content": results})
             response_text = self._stream_response(messages)
-        else:
-            print("\nAiko-chan: ", end="", flush=True)
-            response_text = self._stream_text(raw_response)
 
-        # 7. append Aiko's response to rolling history
+        # 7. append to history
         self._history.append({"role": "assistant", "content": response_text})
 
-        # 8. persist to long-term memory in background
+        # 8. persist to memory
         self._store_async(user_input, response_text)
-      
-        # step 9 — only speak if voice hasn't already been triggered by streaming
-        if self._speak and not search_match:
-            self._speak.speak(response_text)   # non-search path: speak full text
-        # search path already handled inside _stream_response via feed/play_async
-      
+
         return response_text
 
     def reset_context(self) -> None:
@@ -131,12 +117,9 @@ class AikoThink:
         print("[think] Short-term context cleared.")
 
     def wait_for_memory(self) -> None:
-        """Block until any pending memory write completes. Call before exit."""
         if self._mem_thread and self._mem_thread.is_alive():
             print("[memorize] Waiting for memory write to finish...")
             self._mem_thread.join()
-        if self._speak:
-            self._speak.shutdown()
 
     # ── internal ──────────────────────────────────────────────────────────────
 
@@ -159,11 +142,8 @@ class AikoThink:
             return ""
 
     def _stream_response(self, messages: list[dict]) -> str:
-        """
-        Streaming LLM call — used for the final response after search injection.
-        Prints tokens live and returns full assembled string.
-        """
         full_response = []
+        tts_started   = False
         try:
             stream = self._client.chat(
                 model=OLLAMA_MODEL,
@@ -178,10 +158,13 @@ class AikoThink:
                     token = chunk.get("message", {}).get("content", "") or ""
                 print(token, end="", flush=True)
                 full_response.append(token)
-                if self._speak and token:
+                # don't feed to TTS if response looks like a search trigger
+                assembled = "".join(full_response)
+                if self._speak and token and not _SEARCH_RE.search(assembled):
                     self._speak.feed(token)
+                    tts_started = True
             print(flush=True)
-            if self._speak:
+            if self._speak and tts_started:
                 self._speak.play_async()
         except Exception as exc:
             print(f"\n[think] stream failed: {exc}")

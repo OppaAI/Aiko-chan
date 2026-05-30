@@ -46,14 +46,11 @@ def _inject_search_instruction(system: str) -> str:
     return system + """
 
 ## Web Search
-You MUST use this exact format when you need current information:
-[SEARCH: your query here]
+You have access to a web search tool. Only search when the user's request requires updated/current real-time facts, news, or external information that you do not possess.
+Do NOT search for conversational greetings, chit-chat, personal questions about yourself or the user (e.g., "have we met before", "introduce yourself"), or general knowledge questions that you already know.
 
-Output ONLY that line, nothing else, before waiting for results.
-Do NOT answer questions about current events, news, or real-time data without searching first.
-Examples:
-- User asks about today's news → output: [SEARCH: top news today]
-- User asks who is PM of Canada → output: [SEARCH: current Prime Minister Canada 2026]
+To perform a search, output exactly this format and nothing else:
+[SEARCH: your query here]
 """
 
 
@@ -128,7 +125,8 @@ class AikoThink:
         search_match = _SEARCH_RE.search(response_text)
         if search_match:
             query = search_match.group(1).strip()
-            print(f"\n[search] {query}", flush=True)
+            if not self._token_callback:
+                print(f"\n[search] {query}", flush=True)
             if self._token_callback:
                 self._token_callback(f"__SEARCHING__: {query}")
             results = web_search(query)
@@ -146,11 +144,9 @@ class AikoThink:
 
     def reset_context(self) -> None:
         self._history.clear()
-        print("[think] Short-term context cleared.")
 
     def wait_for_memory(self) -> None:
         if self._mem_thread and self._mem_thread.is_alive():
-            print("[memorize] Waiting for memory write to finish...")
             self._mem_thread.join()
 
     # ── internal ──────────────────────────────────────────────────────────────

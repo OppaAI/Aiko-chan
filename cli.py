@@ -201,9 +201,9 @@ ARCH_SECTIONS = [
         ("Language",         os.getenv("KOKORO_LANG", "en-us")),
     ]),
     ("HARDWARE", [
-        ("Compute node",     "Jetson Orin Nano  8 GB"),
+        ("Compute node",     "Jetson Orin Nano Super 8 GB"),
         ("Storage",          "1 TB NVMe SSD"),
-        ("Runtime",          "vLLM  +  JetPack 6.x"),
+        ("Runtime",          "Ollama  +  JetPack 6.22"),
         ("Session ID",       SESSION_ID),
     ]),
 ]
@@ -909,8 +909,13 @@ def _run(stdscr, args):
         tui.add_message('you', user_input)
 
         def token_cb(token):
-            tui.stream_token(token)
-            tui._draw(buf=[])
+            if token.startswith("__SEARCHING__:"):
+                query = token.split(":", 1)[1].strip()
+                tui.add_message('sys', f"Searching the web for: \"{query}\"...")
+                tui._draw(buf=[])
+            else:
+                tui.stream_token(token)
+                tui._draw(buf=[])
 
         think.chat(user_input, token_callback=token_cb)
         tui.stream_commit()

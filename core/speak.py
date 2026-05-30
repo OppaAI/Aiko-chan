@@ -29,21 +29,20 @@ except ImportError:
 
 # ── config ────────────────────────────────────────────────────────────────────
 
-# supports single voice ("af_heart") or blend formula ("0.1*af_heart + 0.9*jf_alpha")
 KOKORO_VOICE  = os.getenv("KOKORO_VOICE",  "0.1*af_heart + 0.9*jf_alpha")
 KOKORO_SPEED  = float(os.getenv("KOKORO_SPEED", "1.0"))
 KOKORO_LANG   = os.getenv("KOKORO_LANG",   "en-us")
-KOKORO_DEVICE = int(os.getenv("KOKORO_DEVICE", "-1"))  # 31 = pulse, -1 = default
+KOKORO_DEVICE = int(os.getenv("KOKORO_DEVICE", "-1"))
 
 # ── text sanitization ─────────────────────────────────────────────────────────
 
 _REPLACEMENTS = [
-    (r'\*',    ''),       # asterisk — markdown bold/italic, drop it
-    (r'—',     ', '),     # em dash — replace with pause-friendly comma
-    (r'–',     ', '),     # en dash
-    (r'`',     ''),       # backtick — code formatting, drop it
-    (r'#+ ',   ''),       # markdown headers
-    (r'\[|\]', ''),       # square brackets
+    (r'\*',    ''),
+    (r'—',     ', '),
+    (r'–',     ', '),
+    (r'`',     ''),
+    (r'#+ ',   ''),
+    (r'\[|\]', ''),
 ]
 
 _RE_REPLACEMENTS = [(re.compile(p), r) for p, r in _REPLACEMENTS]
@@ -53,8 +52,8 @@ def sanitize_for_tts(text: str) -> str:
     """Strip/replace symbols the Kokoro phonemizer cannot handle."""
     for pattern, replacement in _RE_REPLACEMENTS:
         text = pattern.sub(replacement, text)
-    text = re.sub(r',\s*,', ',', text)   # collapse double commas left behind
-    text = re.sub(r'\s{2,}', ' ', text)  # collapse extra whitespace
+    text = re.sub(r',\s*,', ',', text)
+    text = re.sub(r'\s{2,}', ' ', text)
     return text.strip()
 
 
@@ -64,16 +63,11 @@ class AikoSpeak:
     """
     RealtimeTTS wrapper using Kokoro engine.
 
-    Two usage patterns:
+    Usage patterns:
+        aiko_speak.speak("Hello!")                        # complete string, non-blocking
+        aiko_speak.feed_and_play(ollama_stream_generator) # LLM stream, non-blocking
 
-    1. Speak a complete string (non-blocking):
-           aiko_speak.speak("Hello!")
-
-    2. Stream LLM tokens (non-blocking, low latency):
-           aiko_speak.feed_and_play(ollama_stream_generator)
-
-    Never mix feed()+play_async() with speak() in the same turn —
-    call stop() first if interrupting mid-playback.
+    Printing to console is the caller's responsibility — speak.py is silent.
     """
 
     def __init__(self) -> None:
@@ -111,29 +105,26 @@ class AikoSpeak:
     def _play_async(self) -> None:
         """Shared play_async call with consistent latency parameters."""
         self._stream.play_async(
-            fast_sentence_fragment=False,       # wait for complete sentences — fixes overlap
-            minimum_sentence_length=20,         # join short fragments before synthesis
-            minimum_first_fragment_length=30,   # hold back until first sentence is solid
-            buffer_threshold_seconds=0.3,       # smooth the seam between sentences
+            fast_sentence_fragment=False,
+            minimum_sentence_length=20,
+            minimum_first_fragment_length=30,
+            buffer_threshold_seconds=0.3,
             language=KOKORO_LANG,
         )
 
     def _sanitized_iterator(self, iterator):
-        """Print raw tokens to console, feed only clean text to TTS."""
+        """Sanitize tokens from an iterator before feeding to TTS. Silent — no printing."""
         for token in iterator:
-            print(token, end='', flush=True)    # raw token to console
             clean = sanitize_for_tts(token)
             if clean:
                 yield clean
-        print()                                 # newline after response ends
 
     # ── public api ─────────────────────────────────────────────────────────────
 
     def speak(self, text: str) -> bool:
         """
-        Synthesize a complete string and play async (non-blocking).
-        Returns immediately — audio plays in background.
-        Call stop() before the next speak() to interrupt.
+        Synthesize a complete string, non-blocking.
+        Caller is responsible for printing to console.
         """
         if not self._init_engine():
             return False
@@ -148,15 +139,13 @@ class AikoSpeak:
 
     def feed(self, token: str) -> None:
         """
-        Feed a single LLM token into the stream.
-        Call play_async() once after all tokens are fed.
-        Prints the raw token to console before sanitizing.
+        Feed a single sanitized token. Silent — caller prints to console.
+        Call play_async() once after the token loop completes.
         """
         if not self._init_engine():
             return
         if not token:
             return
-        print(token, end='', flush=True)
         clean = sanitize_for_tts(token)
         if clean:
             try:
@@ -165,10 +154,7 @@ class AikoSpeak:
                 print(f"\n[speak] feed error: {e}")
 
     def play_async(self) -> None:
-        """
-        Begin async playback after a manual feed() loop.
-        Call this once after your token loop completes.
-        """
+        """Begin async playback after a manual feed() loop."""
         if not self._ready or not self._stream:
             return
         try:
@@ -178,12 +164,8 @@ class AikoSpeak:
 
     def feed_and_play(self, token_iterator) -> None:
         """
-        Feed an entire LLM token iterator and start async playback.
-        Non-blocking — returns as soon as playback starts.
-        Prints raw tokens to console, sanitizes before TTS.
-
-        Usage:
-            aiko_speak.feed_and_play(ollama_stream_generator)
+        Feed an entire token iterator and start async playback. Non-blocking.
+        Sanitizes tokens silently — caller handles console printing separately.
         """
         if not self._init_engine():
             return
@@ -203,10 +185,7 @@ class AikoSpeak:
             time.sleep(0.05)
 
     def stop(self) -> None:
-        """
-        Interrupt current playback immediately.
-        Call before feeding a new response to avoid overlap.
-        """
+        """Interrupt current playback immediately."""
         if self._stream:
             try:
                 self._stream.stop()
@@ -260,6 +239,6 @@ if __name__ == "__main__":
     ok    = voice.speak(args.text)
 
     if args.wait:
-        voice.wait()                            # --wait blocks for testing
+        voice.wait()
 
     sys.exit(0 if ok else 1)

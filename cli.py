@@ -638,7 +638,7 @@ class AikoTUI:
     def _draw_chat_area(self, ct, cb, rx, rw, w):
         pk  = curses.color_pair(CP_PINK)  | curses.A_BOLD
         cy  = curses.color_pair(CP_CYAN)  | curses.A_BOLD
-        pk_ = curses.color_pair(CP_PINK)
+        mv  = curses.color_pair(CP_MAUVE)
         dim = curses.color_pair(CP_DIM)
         pu  = curses.color_pair(CP_PURPLE)
 
@@ -656,7 +656,7 @@ class AikoTUI:
             row = ct + i
             if row >= cb:
                 break
-            attr = cy if kind == 'Y' else (pk_ if kind == 'A' else dim)
+            attr = cy if kind == 'Y' else (mv if kind == 'A' else dim)
             try:
                 self._scr.addstr(row, rx, ' ' * (rw - 1))
             except curses.error:

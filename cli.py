@@ -920,6 +920,7 @@ def _run(stdscr, args):
                     tui.add_message('sys', f'  → {m.get("memory") or m.get("text") or m}')
 
         tui.add_message('you', user_input)
+        tui._draw()
 
         def token_cb(token):
             if token.startswith("__SEARCHING__:"):

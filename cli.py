@@ -49,6 +49,7 @@ with silent_stderr():
 
 SESSION_ID   = time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "ministral-3:3b-instruct-2512-q4_K_M")
+KOKORO_VOICE = os.getenv("KOKORO_VOICE", "0.2*af_nicole + 0.8*jf_alpha")
 
 # ── banner ────────────────────────────────────────────────────────────────────
 
@@ -184,20 +185,20 @@ ARCH_SECTIONS = [
     ("MEMORY SYSTEMS", [
         ("Long-term store",  "mem0  →  Qdrant vector DB"),
         ("Embedding model",  "BGE-base-en-v1.5  (768d)"),
-        ("Short-term ctx",   "Rolling 20-turn window"),
+        ("Short-term ctx",   f"Rolling {os.getenv('CONTEXT_WINDOW_TURNS', '20')}-turn window"),
         ("Recall strategy",  "Semantic + keyword fusion"),
     ]),
     ("COGNITION", [
         ("Inference engine", "Ollama  (local, offline)"),
         ("Active model",     OLLAMA_MODEL),
-        ("Web search",       "DuckDuckGo  (on-demand)"),
+        ("Web search",       "SearXNG  (google, bing, ddg)"),
         ("Persona source",   "soul.md  (persistent)"),
     ]),
     ("VOICE ENGINE", [
         ("TTS backend",      "Kokoro ONNX  (CPU/GPU)"),
-        ("Primary voice",    "af_heart  (en-us female)"),
-        ("Fallback voice",   "jf_alpha  (en-us soft)"),
-        ("Latency target",   "< 300 ms first token"),
+        ("Voice profile",    KOKORO_VOICE),
+        ("Voice speed",      f"{os.getenv('KOKORO_SPEED', '1.0')}x"),
+        ("Language",         os.getenv("KOKORO_LANG", "en-us")),
     ]),
     ("HARDWARE", [
         ("Compute node",     "Jetson Orin Nano  8 GB"),

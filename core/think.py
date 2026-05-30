@@ -129,6 +129,8 @@ class AikoThink:
         if search_match:
             query = search_match.group(1).strip()
             print(f"\n[search] {query}", flush=True)
+            if self._token_callback:
+                self._token_callback(f"__SEARCHING__: {query}")
             results = web_search(query)
             messages.append({"role": "assistant", "content": response_text})
             messages.append({"role": "user",      "content": results})
@@ -162,6 +164,11 @@ class AikoThink:
         full_response = []
         tts_started   = False
 
+        # Buffering mechanism to intercept [SEARCH: query] tags
+        buffer = ""
+        is_searching = False
+        buffering_active = True
+
         try:
             stream = self._client.chat(
                 model=OLLAMA_MODEL,
@@ -176,22 +183,53 @@ class AikoThink:
                     else chunk.get("message", {}).get("content", "")
                 ) or ""
 
-                # route to TUI callback or fall back to plain print
-                if self._token_callback:
-                    self._token_callback(token)
-                else:
-                    if not full_response:
-                        print("\nAiko-chan: ", end="", flush=True)
-                    print(token, end="", flush=True)
-
                 full_response.append(token)
+
+                # Process token streaming and buffering
+                if buffering_active:
+                    buffer += token
+                    buffer_clean = buffer.lower().replace(" ", "")
+                    
+                    if "[search:".startswith(buffer_clean):
+                        # Potential search query, keep buffering
+                        if "[search:".lower() in buffer_clean:
+                            is_searching = True
+                        
+                        if is_searching and "]" in buffer:
+                            buffering_active = False
+                            # Buffered entire search query, do NOT stream it!
+                    else:
+                        # Not a search query, flush buffer and disable buffering
+                        buffering_active = False
+                        if self._token_callback and buffer:
+                            self._token_callback(buffer)
+                        elif not self._token_callback:
+                            if not "".join(full_response[:-1]):
+                                print("\nAiko-chan: ", end="", flush=True)
+                            print(buffer, end="", flush=True)
+                else:
+                    if not is_searching:
+                        # Stream normally
+                        if self._token_callback:
+                            self._token_callback(token)
+                        else:
+                            print(token, end="", flush=True)
 
                 assembled = "".join(full_response)
                 if self._speak and token and not _SEARCH_RE.search(assembled):
                     self._speak.feed(token)
                     tts_started = True
 
-            if not self._token_callback:
+            # If we completed the stream but never broke out of buffering (e.g. short regular text)
+            if buffering_active and buffer and not is_searching:
+                if self._token_callback:
+                    self._token_callback(buffer)
+                else:
+                    if not "".join(full_response[:-len(buffer)]):
+                        print("\nAiko-chan: ", end="", flush=True)
+                    print(buffer, end="", flush=True)
+
+            if not self._token_callback and not is_searching:
                 print(flush=True)
 
             if self._speak and tts_started:

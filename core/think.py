@@ -76,8 +76,8 @@ class AikoThink:
         self._mem_thread:    threading.Thread | None = None
         self._warmup_thread: threading.Thread | None = None
 
-        print(f"[think] Ollama client ready — model: {OLLAMA_MODEL}")
-        print(f"[think] Voice output: {'on' if speak else 'off'}")
+        #print(f"[think] Ollama client ready — model: {OLLAMA_MODEL}")
+        #print(f"[think] Voice output: {'on' if speak else 'off'}")
 
         self._warmup_thread = threading.Thread(target=self._warmup_llm, daemon=True)
         self._warmup_thread.start()
@@ -91,9 +91,10 @@ class AikoThink:
                 stream=False,
                 options={"num_predict": 1},
             )
-            print("[think] LLM warmed up.")
+            #print("[think] LLM warmed up.")
         except Exception as e:
-            print(f"[think] LLM warmup failed (non-fatal): {e}")
+            #print(f"[think] LLM warmup failed (non-fatal): {e}")
+            pass
 
     def join_warmup(self) -> None:
         """Block until LLM warmup completes. Called by cli.py before showing prompt."""
@@ -102,7 +103,8 @@ class AikoThink:
 
     # ── public api ────────────────────────────────────────────────────────────
 
-    def chat(self, user_input: str) -> str:
+    def chat(self, user_input: str, token_callback=None) -> str:
+        self._token_callback = token_callback   # store for _stream_response
         # 1. retrieve relevant long-term memories
         memories     = self._memorize.search(user_input)
         memory_block = self._memorize.format_for_context(memories)
@@ -152,8 +154,13 @@ class AikoThink:
     # ── internal ──────────────────────────────────────────────────────────────
 
     def _stream_response(self, messages: list[dict]) -> str:
+        """
+        Stream LLM response to console and TTS simultaneously.
+        Console printing is the single source of truth — speak.py is silent.
+        TTS skipped if response is a search trigger.
+        """
         full_response = []
-        is_search     = False
+        tts_started   = False
 
         try:
             stream = self._client.chat(
@@ -161,12 +168,6 @@ class AikoThink:
                 messages=messages,
                 stream=True,
             )
-            print("\nAiko-chan: ", end="", flush=True)
-
-            # start TTS listening BEFORE tokens arrive — Kokoro synthesizes live
-            if self._speak:
-                self._speak.stop()
-                self._speak.start_listening()
 
             for chunk in stream:
                 token = (
@@ -175,31 +176,33 @@ class AikoThink:
                     else chunk.get("message", {}).get("content", "")
                 ) or ""
 
-                print(token, end="", flush=True)
+                # route to TUI callback or fall back to plain print
+                if self._token_callback:
+                    self._token_callback(token)
+                else:
+                    if not full_response:
+                        print("\nAiko-chan: ", end="", flush=True)
+                    print(token, end="", flush=True)
+
                 full_response.append(token)
 
-                # detect search trigger — abort TTS for this pass
                 assembled = "".join(full_response)
-                if _SEARCH_RE.search(assembled):
-                    is_search = True
-                    if self._speak:
-                        self._speak.stop()
-                    continue
-
-                if self._speak and token and not is_search:
+                if self._speak and token and not _SEARCH_RE.search(assembled):
                     self._speak.feed(token)
+                    tts_started = True
 
-            print(flush=True)
+            if not self._token_callback:
+                print(flush=True)
 
-            # flush + drain audio
-            if self._speak and not is_search:
-                self._speak.finish()
-                self._speak.wait()
+            if self._speak and tts_started:
+                self._speak.play_async()
 
         except Exception as exc:
-            print(f"\n[think] stream failed: {exc}")
-            if self._speak:
-                self._speak.stop()
+            msg = f"[think] stream failed: {exc}"
+            if self._token_callback:
+                self._token_callback(msg)
+            else:
+                print(f"\n{msg}")
 
         return "".join(full_response)
 

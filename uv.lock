@@ -27,9 +27,10 @@ dependencies = [
     { name = "pyopenjtalk" },
     { name = "python-dotenv" },
     { name = "qdrant-client" },
-    { name = "realtimetts", extra = ["kokoro"] },
+    { name = "realtimetts", extra = ["jp", "kokoro"] },
     { name = "requests" },
     { name = "scipy" },
+    { name = "sentence-transformers" },
     { name = "sounddevice" },
     { name = "soundfile" },
     { name = "spacy" },
@@ -49,9 +50,10 @@ requires-dist = [
     { name = "pyopenjtalk", specifier = ">=0.4.1" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "qdrant-client", specifier = ">=1.9.0" },
-    { name = "realtimetts", extras = ["kokoro"], specifier = ">=0.7.3" },
+    { name = "realtimetts", extras = ["jp", "kokoro"], specifier = ">=0.7.3" },
     { name = "requests", specifier = ">=2.34.2" },
     { name = "scipy", specifier = ">=1.15.3" },
+    { name = "sentence-transformers", specifier = ">=5.5.1" },
     { name = "sounddevice", specifier = ">=0.5.5" },
     { name = "soundfile", specifier = ">=0.13.1" },
     { name = "spacy", specifier = ">=3.8.14" },
@@ -304,6 +306,20 @@ dependencies = [
 sdist = { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/467/1f03314df30ef/curated-transformers-0.1.1.tar.gz", hash = "sha256:4671f03314df30efda2ec2b59bc7692ea34fcea44cb65382342c16684e8a2119" }
 wheels = [
     { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/d71/6063d73d803c6/curated_transformers-0.1.1-py2.py3-none-any.whl", hash = "sha256:d716063d73d803c6925d2dab56fde9b9ab8e89e663c2c0587804944ba488ff01" },
+]
+
+[[package]]
+name = "cutlet"
+version = "0.5.0"
+source = { registry = "https://pypi.jetson-ai-lab.io/jp6/cu126" }
+dependencies = [
+    { name = "fugashi" },
+    { name = "jaconv" },
+    { name = "mojimoji" },
+]
+sdist = { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/5e8/435ba2a46d3b4/cutlet-0.5.0.tar.gz", hash = "sha256:5e8435ba2a46d3b4aa2468f7be6a39da3c33dcfafe8c5c7f976df343eb189927" }
+wheels = [
+    { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/183/eef14b2587c5f/cutlet-0.5.0-py3-none-any.whl", hash = "sha256:183eef14b2587c5f2058208e1df50112105fe68c14d0fa938f7ccd283e255232" },
 ]
 
 [[package]]
@@ -782,6 +798,20 @@ source = { registry = "https://pypi.jetson-ai-lab.io/jp6/cu126" }
 sdist = { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/bb4/13d29f5eea38f/mdurl-0.1.2.tar.gz", hash = "sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba" }
 wheels = [
     { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/840/08a41e51615a4/mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8" },
+]
+
+[[package]]
+name = "mecab-python3"
+version = "1.0.12"
+source = { registry = "https://pypi.jetson-ai-lab.io/jp6/cu126" }
+sdist = { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/9ab/a1e56ef80dd97/mecab_python3-1.0.12.tar.gz", hash = "sha256:9aba1e56ef80dd97147dcbf8e3508147af129fb46cec0e432b85f96a9bdaa4b9" }
+wheels = [
+    { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/276/a49fa86f68e49/mecab_python3-1.0.12-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:276a49fa86f68e49e4b09f66173217b863601bb146c7348b010060a4c10bdb00" },
+    { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/89d/a9bf5ed89e00f/mecab_python3-1.0.12-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:89da9bf5ed89e00fbcb05cd76379d792c508095abda876bf411facb113a4eeb9" },
+    { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/13d/ba27126d1ab8f/mecab_python3-1.0.12-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:13dba27126d1ab8fec64f58256eec74bf3006e9e12db9bbbe8ced0a418af9527" },
+    { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/572/eb9ba804c7196/mecab_python3-1.0.12-cp310-cp310-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:572eb9ba804c71964d999cfcaf2bc3add7d7629522f088e6509c434b8c6686aa" },
+    { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/865/4e3bce320800b/mecab_python3-1.0.12-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:8654e3bce320800b19bb14683db77f7184bcab5f23023827bab97804591ca6a0" },
+    { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/47c/42624e8a40656/mecab_python3-1.0.12-cp310-cp310-win_amd64.whl", hash = "sha256:47c42624e8a406562bab1d9f8ae514bc7761a50c2cd2d6d1ff7101299c406998" },
 ]
 
 [[package]]
@@ -1363,6 +1393,19 @@ wheels = [
 ]
 
 [package.optional-dependencies]
+jp = [
+    { name = "cutlet" },
+    { name = "fugashi" },
+    { name = "jaconv" },
+    { name = "mecab-python3" },
+    { name = "mojimoji" },
+    { name = "pyaudio" },
+    { name = "pydub" },
+    { name = "pyopenjtalk" },
+    { name = "resampy" },
+    { name = "stream2sentence" },
+    { name = "unidic-lite" },
+]
 kokoro = [
     { name = "kokoro" },
     { name = "pyaudio" },
@@ -1509,6 +1552,25 @@ wheels = [
 ]
 
 [[package]]
+name = "scikit-learn"
+version = "1.7.2"
+source = { registry = "https://pypi.jetson-ai-lab.io/jp6/cu126" }
+dependencies = [
+    { name = "joblib" },
+    { name = "numpy" },
+    { name = "scipy" },
+    { name = "threadpoolctl" },
+]
+sdist = { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/20e/9e49ecd130598/scikit_learn-1.7.2.tar.gz", hash = "sha256:20e9e49ecd130598f1ca38a1d85090e1a600147b9c02fa6f15d69cb53d968fda" }
+wheels = [
+    { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/6b3/3579c10a3081d/scikit_learn-1.7.2-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:6b33579c10a3081d076ab403df4a4190da4f4432d443521674637677dc91e61f" },
+    { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/367/49fb62b3d961b/scikit_learn-1.7.2-cp310-cp310-macosx_12_0_arm64.whl", hash = "sha256:36749fb62b3d961b1ce4fedf08fa57a1986cd409eff2d783bca5d4b9b5fce51c" },
+    { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/7a5/8814265dfc52b/scikit_learn-1.7.2-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:7a58814265dfc52b3295b1900cfb5701589d30a8bb026c7540f1e9d3499d5ec8" },
+    { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/4a8/47fea807e278f/scikit_learn-1.7.2-cp310-cp310-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:4a847fea807e278f821a0406ca01e387f97653e284ecbd9750e3ee7c90347f18" },
+    { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/ca2/50e6836d10e6f/scikit_learn-1.7.2-cp310-cp310-win_amd64.whl", hash = "sha256:ca250e6836d10e6f402436d6463d6c0e4d8e0234cfb6a9a47835bd392b852ce5" },
+]
+
+[[package]]
 name = "scipy"
 version = "1.15.3"
 source = { registry = "https://pypi.jetson-ai-lab.io/jp6/cu126" }
@@ -1539,6 +1601,25 @@ dependencies = [
 sdist = { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/bba/71f5520ddd54c/segments-2.4.0.tar.gz", hash = "sha256:bba71f5520ddd54c8aa2f4d765a60618c6862162d6e7356a4a097f2223166f5b" }
 wheels = [
     { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/402/1dc67f201cc03/segments-2.4.0-py2.py3-none-any.whl", hash = "sha256:4021dc67f201cc03c864c74c618bdb163b1af629da3040babbaa37d8813f3db0" },
+]
+
+[[package]]
+name = "sentence-transformers"
+version = "5.5.1"
+source = { registry = "https://pypi.jetson-ai-lab.io/jp6/cu126" }
+dependencies = [
+    { name = "huggingface-hub" },
+    { name = "numpy" },
+    { name = "scikit-learn" },
+    { name = "scipy" },
+    { name = "torch" },
+    { name = "tqdm" },
+    { name = "transformers" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/02b/7740dfc60bdbb/sentence_transformers-5.5.1.tar.gz", hash = "sha256:02b7740dfc60bdbbcb6061625f5d97a5c1a4e2d3baac5f9391b912bb5eae2290" }
+wheels = [
+    { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/4fe/11d433badc528/sentence_transformers-5.5.1-py3-none-any.whl", hash = "sha256:4fe11d433badc5282d32f7fc08bc714216b7a5aca426f9df77a45a554756deb7" },
 ]
 
 [[package]]
@@ -1816,6 +1897,15 @@ wheels = [
 ]
 
 [[package]]
+name = "threadpoolctl"
+version = "3.6.0"
+source = { registry = "https://pypi.jetson-ai-lab.io/jp6/cu126" }
+sdist = { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/8ab/8b4aa3491d812/threadpoolctl-3.6.0.tar.gz", hash = "sha256:8ab8b4aa3491d812b623328249fab5302a68d2d71745c8a4c719a2fcaba9f44e" }
+wheels = [
+    { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/43a/0b8fd5a292850/threadpoolctl-3.6.0-py3-none-any.whl", hash = "sha256:43a0b8fd5a2928500110039e43a5eed8480b918967083ea48dc3ab9f13c4a7fb" },
+]
+
+[[package]]
 name = "tokenizers"
 version = "0.22.2"
 source = { registry = "https://pypi.jetson-ai-lab.io/jp6/cu126" }
@@ -1977,6 +2067,12 @@ dependencies = [
     { name = "wasabi" },
 ]
 sdist = { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/0ab/91c05de342c84/unidic-1.1.0.tar.gz", hash = "sha256:0ab91c05de342c84d2a6314901fd3afb9061ecd7534dd4a0431dccbb87d921b7" }
+
+[[package]]
+name = "unidic-lite"
+version = "1.0.8"
+source = { registry = "https://pypi.jetson-ai-lab.io/jp6/cu126" }
+sdist = { url = "https://pypi.jetson-ai-lab.io/root/pypi/+f/db9/d4572d9fdd4d0/unidic-lite-1.0.8.tar.gz", hash = "sha256:db9d4572d9fdd4d00a97949d4b0741ec480ee05a7e7e2e32f547500dae27b245" }
 
 [[package]]
 name = "uritemplate"

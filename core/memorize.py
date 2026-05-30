@@ -1,18 +1,14 @@
 """
 core/memorize.py
-
 Aiko's persistent memory via mem0 + Qdrant.
 Abstracts all mem0 calls so think.py stays clean.
 Swap this file out if mem0 doesn't make the cut for Grace.
 """
-
 import os
 from typing import Optional
 from mem0 import Memory
 
-
 # ── config ────────────────────────────────────────────────────────────────────
-
 MEM0_CONFIG = {
     "vector_store": {
         "provider": "qdrant",
@@ -31,17 +27,15 @@ MEM0_CONFIG = {
         },
     },
     "embedder": {
-        "provider": "ollama",
+        "provider": "huggingface",
         "config": {
-            "model": os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text-v2-moe"),
-            "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            "model": "BAAI/bge-base-en-v1.5",
             "embedding_dims": 768,
         },
     },
 }
 
 AIKO_USER_ID = "OppaAI"
-
 
 # ── memorize ──────────────────────────────────────────────────────────────────
 
@@ -51,11 +45,13 @@ class AikoMemorize:
     Handles all Qdrant-backed persistence for Aiko-chan.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, silent: bool = False) -> None:
         """Initialise mem0 Memory and connect to Qdrant."""
-        print("[memorize] Connecting to Qdrant and initialising mem0...")
+        if not silent:
+            print("[memorize] Connecting to Qdrant and initialising mem0...")
         self._mem = Memory.from_config(MEM0_CONFIG)
-        print("[memorize] Ready.")
+        if not silent:
+            print("[memorize] Ready.")
 
     def add(self, messages: list[dict], user_id: str = AIKO_USER_ID) -> None:
         """

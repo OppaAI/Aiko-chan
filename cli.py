@@ -7,6 +7,19 @@ Usage:
     python cli.py --no-voice    # disable TTS
     python cli.py --debug       # show memory debug info each turn
     python cli.py --clear-mem   # wipe all stored memories and exit
+
+Layout:
+    ╔══════════════════════════════════════════════════════════╗
+    ║                      BANNER                              ║
+    ╠══════════════╦═══════════════════════════════════════════╣
+    ║  ASCII ART   ║  INIT LOG  /  ARCH INFO                   ║
+    ║  (46 wide)   ╠═══════════════════════════════════════════╣
+    ║              ║  CHAT MESSAGES                            ║
+    ╠══════════════╩═══════════════════════════════════════════╣
+    ║  STATUS BAR (full width)                                 ║
+    ╠══════════════════════════════════════════════════════════╣
+    ║  INPUT (full width)                                      ║
+    ╚══════════════════════════════════════════════════════════╝
 """
 
 import warnings
@@ -49,123 +62,138 @@ BANNER_LINES = [
 ]
 BANNER_H = len(BANNER_LINES)  # 6
 
-# ── anime art (left panel) ────────────────────────────────────────────────────
-# Auto-generated from PNG — 64 chars wide x 50 rows tall
-# Color codes per character: K=skip(black), D=dim, M=mauve, P=pink, W=white
+# ── ASCII art (left panel) ────────────────────────────────────────────────────
+# Generated from PNG — cropped to remove blank left margin.
+# 46 chars wide x 52 rows tall.
+# Color palette indices per character:
+#   0 = skip (black / transparent)
+#   1 = 236  very dark grey
+#   2 = 239  dark grey
+#   3 = 243  mid-dark grey
+#   4 = 246  mid grey
+#   5 = 249  light grey
+#   6 = 253  near-white
+#   7 = 95   warm dark  (muted rose/brown — shadow clothing)
+#   8 = 138  warm mid   (dusty rose — clothing/blossoms)
+#   9 = 181  warm bright (light rose — bright clothing)
 
-ART_W = 64
-ART_H = 50
+ART_W = 46
+ART_H = 52
 
 ANIME_ART_LINES = [
-    '                                               .<zTCfC)7}|CIIiii',
-    "                                              ``:';Ji{C3I1fLJ(v{",
-    "                                            '_<!' !(F}iCfi}CJ(}i",
-    '                                            .` .-^F}|Jis7|(|(7vF',
-    '                                             ,^:/J|)7iJs((vLssLJ',
-    '                              `  ``.`        ^r+*F{iz)z?JJ|7|{fv',
-    "                        --.      `-'_.``   .'--;sJT?ssL/LJiv{{iF",
-    "                       .`    >/ `    `.`.  `'!+cs//*z?z/)vFvsT)?",
-    "                      `.   `^'I* _,   `.    ->rr=>!***r+*/;+sr!!",
-    "                      -'   -+.(ts*!=. `-`  .- -'<+c//c!<=<c))?+c",
-    '                      .`+c  ,Flle}J{`  `.`  .^^_-^=<>c!r/?//c!!+',
-    "                       .?lc 'C[t1[5z `....     `   .`,>!++<+,>;;",
-    "                       `^|n}^:lutuT-..-`-       ```';+<,,-:,':,!",
-    "                        ``>[1rT|v- .```          `'':.::`.,.:-_^",
-    "                      -*TL+i[f1)vv_             `.'-``.` `:..._<",
-    '                      */r*/it|/|(J<,:               -..` `_`. :_',
-    "                      rs?z!sL?*/IFF)z*,            `-.'` `:   ,=",
-    "                      <c*z/??Lsc)oIi7sL_           .'.'. `,   ^=",
-    "                      :,;+czvvvzzi[Iutv!7ic`       .'`-' .,   _,",
-    "                       ->,:;!+><L/7u{u[v*)Fc       -..'- ._   ,=",
-    '                        ^,,,,_>zLL/zil|(,:._=>:   `,`--/+.,   ,;',
-    "                        >>^:,rTLLsTcsuf*_+>cJLr   .' '_c_._   ^>",
-    "                       .+^,+?TLTz=ssc|ec^+>:/LCc  -. __' `^   ^>",
-    "                        ^<!sLsLT!=<T?z|v=<><>cfl'.:--'--  ^   ;>",
-    "`                      `+r?sLLLL>>=*??)}<;<+<_(ZJ`'---''  ,   =>",
-    "-                      -cTsLszss+<+zzvC3F<+<<^+}J'-``.-- `,.` =^",
-    ":                      ^Trcz*/zz?z)(7{I{7<=;>>=. -'`-:-.`._`  =_",
-    "_`                     -;J{f}JfC{?LF(i7v/*!<:.`  `'.-:-.--,   ;,",
-    ":.                      ([l[n{lCuI?ii|CJIn3CT,   .':--'----   ;^",
-    "--                     ![Julu11C}nuI}!zi)7C3Cv*' ._'''---'-   ^^",
-    "`'`                   ;{(F[ttlI{([ll17zL}1FT[t{3J<``-...`.:   ,,",
-    "`-..                 /ivzlult[3CFltluu{|vC}|Jnt{[}?'``   `:   ,_",
-    "`-'                 >uJv/}ff}{|I[l1}TcL3{*vsF{(ifF|, ``` `.   ,_",
-    "``:.               `7Fzs/c(iiJ*i}{{CfJL()J)7vL7itt}z..-`  -   '=",
-    ". ''                =}uzs)n[uo3TvsI[1fLTT;rJ?sC{?TLr`     .   _^",
-    ': .:                <}()vcTTT)(tu)*c!!rs/rJ7|(Lr_,.  `  ` -   _=',
-    "=` '.               '??cLTvT?rr)(s*)FC}I3;*Lzc<-`---.-    '   ^=",
-    ">' ..                 .L1fII}}r ^zI33If1T        .'.`--`  '   =>",
-    "=,``.                  7fCCC}f_  z1C}}}f'        .       `'   ;!",
-    ':;``.                 .i}C}C3? ` TfC}}3z         .` `.    -   >r',
-    "`>'``                 -{f}}fC-   vi}}fC-      `` .`  .   :'   ;r",
-    " _,                   ^3}ff1c   `FII}1/        ```'-'`  -+'   =r",
-    " .=.                  +1IfIC.   _IIfIf'           .`_^`  `_   =r",
-    "  ^'     ``           L1ff1*    ^1If1v           `-.^!=  .:   =r",
-    ". :=  `` ` `` ```    _fIf3C.    .{I}1)           `-`;+'  .:   =r",
-    "-``=.             ` -FI{fC^      L3}I|            ` :=,  .'   ^+",
-    "`. ':               s3}}3! ` ` ``J3}f{.     ` ``   ` `>. ..   ^+",
-    '..`.-``            :fffIi.      `{3IIC` ````` ```   ``^- .cl(-^<',
-    ":`. `  `           !3CC3!       'Cf}f7         `         .^s+`,>",
-    ',.` `    `         ?3CI{-       ;If}1?              ` `  .-   ^>',
+    "                             '<!(}]\\l)})}]]\\{\\",
+    '                             `--+/{\\[]]t}?()l{',
+    '                         .-:=,..!)\\}{[]{[{I([\\',
+    '                         .- `- ^]{/(/?))//))|/',
+    "                          .'`'?((|)\\(i/)Ii??i)",
+    '           .              `=+~i{{(i|<?(|(||/{i',
+    "     ``.       `-_`      `--'~I(|i!ii!l(\\I}}}\\",
+    '    .`.   _,     .`. .  .-_,:!??>>??!>I|{II|(i',
+    '    `    `_1= ..    ..    ^!!=~=<<<!++i!<=!+>=',
+    "   `-   .< ?1,,!`   -.   ` .':^^<<<==,;~^i|>^=",
+    "   `.', ._+[rj{^(;  ..   `-:__;~+<<!~=+<?i!<=+",
+    '    .>/` _]jrrrj1`   `.   ``_.  ---,^<<>=~^^^,',
+    "    .<c1+ =Jj]cc>  `.`..        .-:~^;,',;-:,=",
+    "      :/x)`It](; `.`..         ..':::'``'-_-',",
+    "    -;;_\\c)/l?: .              .'`` -` `'.-`';",
+    '   ,ilI!\\c[[)(\\<              .......  ._..._,',
+    "   ><~=+|}|~i{I!~+_              .-.-  ._ . _'",
+    "   ~?i?=!!?!</t}}!?!-            ```-  .'   ,,",
+    '   ^~=<!!ili>>jj/[|?+_-          -```` .:   ::',
+    "   `_,^~<lii>>itJ]J1<l1[~.       ``.-` `'   ''",
+    "    `;'_:^;:;??>]}1r]~+??_ .    ._.--- -_   :,",
+    "     ::''''^?il?+Ij\\\\~:`-^~=    -_ --|,`'   :;",
+    "     ^;:_:+lii!l!<[jI';^^ili,   -` ':~.`_   ,;",
+    "    .~:'=?liii,<l<iJ/'^~::ll]- .-..''` .:   ,;",
+    '     :~=?i?il<,,?i>l\\;^^^^^ic) -_`--`` .:   ;;',
+    '     ~+!iiiil~;,=???[i:^^~:~tc;.-`-`_` .:   ;;',
+    "    `+l?i?!?i=^^<!!{[]<^~^^_I]<.` ..-. `'.  ,:",
+    "    ,l++!<>>!!!i(|/][\\?,;^;;'..-`.---. `'   ;_",
+    "    -;i/{}l}\\{i!{|\\()>=~;:`.   ``.-_`.`-'   ;'",
+    '     lJrjc{r[r]?I[)[|\\c1{(~    `--`---`-`   ;:',
+    "    ;J(trjt]]{cj[]!+\\|I[t]I<_  _'---`-`-`   ,:",
+    "   _\\\\(Jrrr][|jrjt)+!/]/i{c{[);` ````..`-   ':",
+    "  ~)(!1jttj]}|rttjc})i}j[(]J\\rJ),..    `_   :'",
+    ' _r)l>rtttt]}ttrt{II/r>??l{1}{/(l.     .`   :_',
+    " /[>I>>|))I+{j1}/(?</\\I))(/!l]cr)'.``. .`   _,",
+    '.<){<!itjrj{ili{ccJ(i|?^li>(r)())+      .   _:',
+    " ^t1lI?}{{[1{1Il)??+!!~+|||il>~~:       `   ',",
+    ' ^(?!?++<<=+[r(=^!il)\\i!)((I+``.  .     `   :,',
+    "  ,^>\\{[}/|<:=>I[]tt1j~.::-. ..-'-`-.  .-   ,;",
+    '    |1}}[[t> .^1[[}}1(         `   ..   -   ;^',
+    '   ./}}}}}{-  ~1}[[}],         `       .-   ;=',
+    '   `{[}}}1<   <}{[}1I          `  ..    `   ^+',
+    '   _}[[}[\\.   ?{[[[]:       ...`.  .  -^`   ;+',
+    "   ;t[[[1=    (1][t|           .--'.  -:-   ;+",
+    '   +t][]{.   .}1[[1;           .. ,:`  ._   ;=',
+    '   (1[[t+    .}1[]}.           ```^~:  --   ,=',
+    '  ~1[[1\\.     l1}][-           .`.=;-  `-   ,=',
+    " '[[{]\\_      =1[[]:              _'_  `-   ,~",
+    ' (]}[1~       ?1[[1^        .    . _~. -.`  ,~',
+    ",][[]\\.       |1][1;  ...   ..     .'. -!x(`:^",
+    "!]}}]=        )]}}}'                   `:!, :;",
+    '|]}]{`       -}[][].                   ``   :^',
 ]
 
-# Per-character color map: one string per row, same length as art line
-# K=transparent/skip, D=dim grey, M=mauve/light-purple, P=hot-pink, W=white
 ANIME_ART_COLORS = [
-    'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKDDDMMMDDMDMMMMDD',
-    'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKDDDMMMMMMDDDDM',
-    'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKDDKKDDDMDMMMMMDDMD',
-    'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKDDMDDDDDDDDDDDD',
-    'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKDDKDDDDDDDDDDDDDDDD',
-    'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKDDDDDMDDDDDDDDDDMMD',
-    'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKDDDDDDDDDDDDDMMMD',
-    'KKKKKKKKKKKKKKKKKKKKKKKKKKKDDKKKKKKKKKKKKKKDDDDDDDDDDDDDDDDDDDDD',
-    'KKKKKKKKKKKKKKKKKKKKKKKKKKKKDKMDKKDKKKKKKKKKKDDDDDDDDDDDDDDDDDDD',
-    'KKKKKKKKKKKKKKKKKKKKKKKKKKKKDKDMDDDDKKKKKKKKKKKKDDDDDDDDDDDDDDDD',
-    'KKKKKKKKKKKKKKKKKKKKKKKKDDKKDDMMMMDMKKKKKKKKKDDKKDDDDDDDDDDDDDDD',
-    'KKKKKKKKKKKKKKKKKKKKKKKKDMDKKMMMMMMDKKKKKKKKKKKKKKKKKDDDDDDDDDDD',
-    'KKKKKKKKKKKKKKKKKKKKKKKKDDMMDKMMMMDKKKKKKKKKKKKKKKKKDDDDDKKDKKDD',
-    'KKKKKKKKKKKKKKKKKKKKKKKKKKDMMDDDDKKKKKKKKKKKKKKKKKKKKKKKKKDKKKKD',
-    'KKKKKKKKKKKKKKKKKKKKKKKDDDDMMMMDDDKKKKKKKKKKKKKKKKKKKKKKKKKKKKKD',
-    'KKKKKKKKKKKKKKKKKKKKKKDDDDDMMDDDDDDKKKKKKKKKKKKKKKKKKKKKKKKKKKKK',
-    'KKKKKKKKKKKKKKKKKKKKKKDDDDDDDDDDMDDDDDDKKKKKKKKKKKKKKKKKKKKKKKDD',
-    'KKKKKKKKKKKKKKKKKKKKKKDDDDDDDDDDDMMDDDDKKKKKKKKKKKKKKKKKKKDKKKDD',
-    'KKKKKKKKKKKKKKKKKKKKKKKDDDDDDDDDDMMMMMDDDMDKKKKKKKKKKKKKKKDKKKKD',
-    'KKKKKKKKKKKKKKKKKKKKKKKKDDKDDDDDDDDMMMMDDDDDKKKKKKKKKKKKKKKKKKDD',
-    'KKKKKKKKKKKKKKKKKKKKKKKKDDKDKKDDDDDDMMDDKKKKDDKKKKKKKKKDDKDKKKDD',
-    'KKKKKKKKKKKKKKKKKKKKKKKKDDDKKDDDDDDDDMMDKDDDDDDKKKKKKKKDKKKKKKDD',
-    'KKKKKKKKKKKKKKKKKKKKKKKKDDKDDDDDDDDDDDMDDDDKDDMDKKKKKKKKKKDKKKDD',
-    'KKKKKKKKKKKKKKKKKKKKKKKKDDDDDDDDDDDDDDDDDDDDDDMMKKKKKKKKKKDKKKDD',
-    'KKKKKKKKKKKKKKKKKKKKKKKKDDDDDDDDDDDDDDDMDDDDDKDMDKKKKKKKKKDKKKDD',
-    'KKKKKKKKKKKKKKKKKKKKKKKKDDDDDDDDDDDDDDMMDDDDDDDMDKKKKKKKKKDKKKDD',
-    'KKKKKKKKKKKKKKKKKKKKKKKDDDDDDDDDDDDDDMMMDDDDDDDKKKKKKKKKKKKKKKDK',
-    'KKKKKKKKKKKKKKKKKKKKKKKKDDMMMDMMMDDDDDDDDDDDKKKKKKKKKKKKKKDKKKDD',
-    'KKKKKKKKKKKKKKKKKKKKKKKKDMMMMMMMMMDDDDMDMMMMDKKKKKKKKKKKKKKKKKDD',
-    'KKKKKKKKKKKKKKKKKKKKKKKDMDMMMMMMMMMMMDDDDDMMMDDKKKKKKKKKKKKKKKDD',
-    'KKKKKKKKKKKKKKKKKKKKKKDMDDMMMMMMDMMMMDDDMMDDMMMMDDKKKKKKKKKKKKKD',
-    'KKKKKKKKKKKKKKKKKKKKKDDDDMMMMMMMDMMMMMMDDMMDDMMMMMDKKKKKKKKKKKDK',
-    'KKKKKKKKKKKKKKKKKKKKDMDDDMMMMMDMMMMMDDDMMDDDDMDDMDDKKKKKKKKKKKKK',
-    'KKKKKKKKKKKKKKKKKKKKDDDDDDDMDDDDMMMMMDDDDDDDDDDDMMMDKKKKKKKKKKKD',
-    'KKKKKKKKKKKKKKKKKKKKDMMDDDMMMMMDDDMMMMDDDDDDDDMMDDDDKKKKKKKKKKKD',
-    'KKKKKKKKKKKKKKKKKKKKDMDDDDDDDDDMMDDDDDDDDDDDDDDDKKKKKKKKKKKKKKKD',
-    'DKKKKKKKKKKKKKKKKKKKKDDDDDDDDDDDDDDDDMMMMDDDDDDKKKKKKKKKKKKKKKDD',
-    'DKKKKKKKKKKKKKKKKKKKKKKDMMMMMMDKDDMMMMMMDKKKKKKKKKKKKKKKKKKKKKDD',
-    'DKKKKKKKKKKKKKKKKKKKKKKDMMMMMMKKKDMMMMMMKKKKKKKKKKKKKKKKKKKKKKDD',
-    'KDKKKKKKKKKKKKKKKKKKKKKMMMMMMDKKKDMMMMMDKKKKKKKKKKKKKKKKKKKKKKDD',
-    'KDKKKKKKKKKKKKKKKKKKKKKMMMMMMKKKKDDMMMMKKKKKKKKKKKKKKKKKKKKKKKDD',
-    'KKDKKKKKKKKKKKKKKKKKKKDMMMMMDKKKKDMMMMDKKKKKKKKKKKKKKKKKKDKKKKDD',
-    'KKDKKKKKKKKKKKKKKKKKKKDMMMMMKKKKKMMMMMKKKKKKKKKKKKKKKDKKKKKKKKDD',
-    'KKDKKKKKKKKKKKKKKKKKKKDMMMMDKKKKDMMMMDKKKKKKKKKKKKKKDDDKKKKKKKDD',
-    'KKKDKKKKKKKKKKKKKKKKKKMMMMMKKKKKKMMMMDKKKKKKKKKKKKKKDDKKKKKKKKDD',
-    'KKKDKKKKKKKKKKKKKKKKKDMMMMDKKKKKKDMMMDKKKKKKKKKKKKKKKDKKKKKKKKDD',
-    'KKKKKKKKKKKKKKKKKKKKDMMMMDKKKKKKKDMMMMKKKKKKKKKKKKKKKKDKKKKKKKDD',
-    'KKKKKKKKKKKKKKKKKKKKMMMMDKKKKKKKKMMMMMKKKKKKKKKKKKKKKKDKKKDMDKDD',
-    'KKKKKKKKKKKKKKKKKKKDMMMMDKKKKKKKKMMMMDKKKKKKKKKKKKKKKKKKKKDDDKDD',
-    'DKKKKKKKKKKKKKKKKKKDMMMMKKKKKKKKDMMMMDKKKKKKKKKKKKKKKKKKKKKKKKDD',
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,7,2,3,3,3,3,2,3,3,3,3,3,3,3,3,3],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,2,3,3,3,3,3,3,4,3,2,3,3,2,3],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,2,1,0,0,2,3,3,3,3,3,3,3,3,3,8,8,3,3],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,1,3,3,3,3,3,2,3,3,3,3,3,3,8,3],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,1,2,8,8,8,8,3,3,2,3,8,8,8,8,8,8,3],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,2,2,2,3,3,3,2,3,2,2,8,8,8,8,3,3,3,8],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1,1,2,8,8,8,8,8,8,8,8,8,8,3,2,3,3,3,3],
+    [0,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,8,8,8,7,7,8,8,7,7,8,3,3,8,8,8,8,8],
+    [0,0,0,0,0,0,0,0,0,0,1,3,2,0,0,0,0,0,0,0,0,0,0,0,0,0,1,7,7,7,1,7,7,7,7,7,7,7,8,8,2,7,7,7,7,7],
+    [0,0,0,0,0,0,0,0,0,2,0,2,4,1,1,2,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,7,7,7,7,7,7,7,7,7,8,8,7,7,7],
+    [0,0,0,0,0,1,1,0,0,1,2,3,4,4,3,1,3,1,0,0,0,0,0,0,0,0,1,1,1,1,1,2,7,7,7,7,7,2,7,7,8,8,7,7,7,7],
+    [0,0,0,0,0,2,3,0,0,1,3,4,4,4,4,4,4,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,1,7,7,7,7,7,7,1,7,7,1],
+    [0,0,0,0,0,2,4,3,2,0,2,4,4,3,4,4,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,7],
+    [0,0,0,0,0,0,1,3,4,3,0,2,4,3,3,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,0,0,1,1,1,0,1,1],
+    [0,0,0,0,1,7,7,1,3,4,3,3,8,8,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,7],
+    [0,0,0,1,8,8,8,7,3,4,3,3,3,3,3,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,1,1],
+    [0,0,0,7,7,7,7,7,3,8,3,7,8,3,2,2,1,2,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,1,1],
+    [0,0,0,7,8,8,8,7,7,7,8,7,7,3,4,3,3,7,2,2,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,1,0,0,0,1,1],
+    [0,0,0,7,7,7,7,7,8,8,8,8,7,7,4,4,3,3,8,8,2,1,1,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,1,0,0,0,1,1],
+    [0,0,0,0,1,7,7,7,7,8,8,8,7,7,8,4,4,3,4,3,2,2,3,3,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,1,1],
+    [0,0,0,0,0,7,1,1,7,7,7,7,7,8,8,7,3,3,3,4,3,7,2,2,2,1,0,0,0,0,0,0,0,1,0,0,1,0,0,0,1,0,0,0,1,1],
+    [0,0,0,0,0,1,7,7,1,1,1,7,8,8,8,8,7,2,4,3,3,7,7,0,1,1,1,2,0,0,0,0,0,1,0,1,0,3,1,0,1,0,0,0,1,1],
+    [0,0,0,0,0,1,7,7,1,1,7,8,8,8,7,8,7,7,3,4,2,1,7,7,7,8,2,8,1,0,0,0,0,0,0,1,1,1,0,0,1,0,0,0,1,1],
+    [0,0,0,0,0,7,7,1,7,8,8,8,8,8,7,7,8,7,8,4,3,1,7,7,7,1,2,8,3,1,0,0,0,0,0,1,1,0,0,0,1,0,0,0,1,1],
+    [0,0,0,0,0,1,7,7,8,8,8,8,8,7,7,7,8,8,7,8,3,7,7,7,7,7,7,2,4,3,0,0,1,0,1,0,0,0,0,0,1,0,0,0,1,1],
+    [0,0,0,0,0,7,7,8,8,8,8,8,8,7,7,7,7,8,8,8,3,2,7,7,7,7,7,7,4,4,1,0,1,0,0,0,1,0,0,0,1,0,0,0,1,1],
+    [0,0,0,0,0,7,8,8,8,8,8,8,8,7,7,7,7,7,8,3,3,3,2,7,7,7,7,7,2,3,2,0,0,0,0,0,0,0,0,0,1,0,0,0,1,1],
+    [0,0,0,0,1,8,7,7,7,7,7,7,7,7,8,8,8,3,3,3,3,3,2,7,7,7,7,7,1,0,0,1,0,0,1,1,0,0,0,0,1,0,0,0,1,1],
+    [0,0,0,0,1,7,2,3,3,3,2,3,3,3,2,2,3,3,3,3,3,2,2,1,7,7,0,0,0,0,0,0,0,0,1,1,0,0,0,1,1,0,0,0,1,1],
+    [0,0,0,0,0,2,4,4,4,4,3,4,3,4,3,2,2,3,3,3,3,3,4,3,3,3,2,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0,0,0,1,1],
+    [0,0,0,0,1,4,3,4,4,4,4,3,3,3,4,4,3,3,2,2,3,3,2,3,4,3,2,2,1,0,0,1,1,1,0,0,0,0,0,0,0,0,0,0,1,1],
+    [0,0,0,1,3,3,3,4,4,4,4,3,3,3,4,4,4,4,3,2,2,3,3,3,2,3,4,3,3,3,1,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1],
+    [0,0,1,3,3,2,3,4,4,4,4,3,3,3,4,4,4,4,4,3,3,2,3,4,3,3,3,4,3,4,4,3,1,0,0,0,0,0,0,0,1,0,0,0,1,1],
+    [0,1,4,3,2,2,4,4,4,4,4,3,3,4,4,4,4,3,2,2,3,4,2,2,2,2,3,3,3,3,3,3,2,0,0,0,0,0,0,0,0,0,0,0,1,1],
+    [0,3,3,2,2,2,2,3,3,3,2,2,3,4,3,3,3,3,2,2,3,3,2,3,3,3,3,2,2,3,4,4,3,1,0,0,0,0,0,0,0,0,0,0,1,1],
+    [0,2,3,3,2,2,2,4,4,4,4,3,2,2,2,3,4,4,4,3,2,3,2,1,2,2,2,3,4,3,3,3,3,2,0,0,0,0,0,0,0,0,0,0,1,1],
+    [0,1,4,3,2,2,2,3,3,3,3,3,3,3,2,2,3,8,8,2,2,2,7,2,3,3,3,2,2,2,1,1,1,0,0,0,0,0,0,0,0,0,0,0,1,1],
+    [0,1,3,2,2,2,2,7,7,7,7,2,3,4,3,2,7,7,8,2,3,3,2,2,3,3,3,2,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1],
+    [0,0,1,1,2,3,3,3,3,3,8,7,1,2,2,2,3,3,4,4,3,4,2,0,1,1,1,0,0,0,0,0,1,0,0,1,0,0,0,0,1,0,0,0,1,1],
+    [0,0,0,0,3,4,3,3,3,3,4,2,0,0,1,3,3,3,3,3,3,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1],
+    [0,0,0,0,3,3,3,3,3,3,3,0,0,0,1,3,3,3,3,3,3,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,2],
+    [0,0,0,0,3,3,3,3,3,3,2,0,0,0,2,3,3,3,3,3,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,2],
+    [0,0,0,1,3,3,3,3,3,3,0,0,0,0,2,3,3,3,3,3,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,1,2],
+    [0,0,0,1,4,3,3,3,4,2,0,0,0,0,3,4,3,3,4,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,1,1,0,0,0,0,1,2],
+    [0,0,0,2,4,3,3,3,3,0,0,0,0,0,3,3,3,3,3,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,1,0,0,0,1,2],
+    [0,0,0,3,3,3,3,4,2,0,0,0,0,0,3,3,3,3,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,0,0,0,1,0,0,0,1,2],
+    [0,0,1,3,3,3,3,3,0,0,0,0,0,0,2,3,3,3,3,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,1,0,0,0,0,1,0,0,0,1,2],
+    [0,1,3,3,3,3,3,1,0,0,0,0,0,0,2,3,3,3,3,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,0,1,1],
+    [0,3,3,3,3,3,1,0,0,0,0,0,0,0,2,4,3,3,3,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,1,1],
+    [1,3,3,3,3,3,0,0,0,0,0,0,0,0,3,4,3,3,3,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,2,4,3,0,1,1],
+    [2,3,3,3,3,2,0,0,0,0,0,0,0,0,3,3,3,3,3,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,2,1,0,1,1],
+    [3,3,3,3,3,0,0,0,0,0,0,0,0,0,3,3,3,3,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1],
 ]
 
-# Left panel width = art width + 2 border chars (║ on each side)
-LEFT_W = ART_W + 2   # = 66
+# Palette: index → terminal 256-color number (or None to skip)
+ART_PALETTE = [None, 236, 239, 243, 246, 249, 253, 95, 138, 181]
+
+LEFT_W = ART_W + 2   # art + left/right border chars = 48
 
 # ── architecture sections ─────────────────────────────────────────────────────
 
@@ -196,6 +224,9 @@ ARCH_SECTIONS = [
     ]),
 ]
 
+# Precompute how many rows arch needs
+ARCH_ROWS = sum(1 + len(items) for _, items in ARCH_SECTIONS) + 2  # header + rule + sections
+
 # ── init step definitions ─────────────────────────────────────────────────────
 
 INIT_STEPS = {
@@ -209,40 +240,24 @@ INIT_STEPS = {
     'speak_skip':   ('Voice Output',      'TTS disabled  (--no-voice)'),
 }
 
-# ── spinner ───────────────────────────────────────────────────────────────────
-
-SPINNER = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
+SPINNER   = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
 HELP_TEXT = "/quit /exit — end  │  /reset — clear context  │  /memory — show memories  │  /help"
 
-# ── colour pairs ─────────────────────────────────────────────────────────────
-#
-#  CP_PINK    198  hot pink       — primary accent, borders, banner, art pink
-#  CP_CYAN     51  electric cyan  — secondary, values, chat You
-#  CP_PURPLE  135  purple         — section headers
-#  CP_MAUVE   177  light purple   — art midtones, sub-labels
-#  CP_DIM     240  dim grey       — art darks, detail text
-#  CP_WHITE    15  bright white   — done ticks, art highlights
-#  CP_SBARBG       status bar     — black on pink
-#  CP_INPUTBG      input line     — cyan on very dark
+# ── colour pairs ──────────────────────────────────────────────────────────────
+# Pairs 1-8: UI chrome
+# Pairs 9-17: art palette (one per non-None palette entry)
 
-CP_PINK    = 1
-CP_CYAN    = 2
-CP_PURPLE  = 3
-CP_MAUVE   = 4
-CP_DIM     = 5
-CP_WHITE   = 6
-CP_SBARBG  = 7
-CP_INPUTBG = 8
+CP_PINK    = 1   # 198 hot pink    — borders, banner, accent
+CP_CYAN    = 2   # 51  cyan        — You text, init spinner
+CP_PURPLE  = 3   # 135 purple      — section headers, dividers
+CP_MAUVE   = 4   # 177 mauve       — arch values, sub-labels
+CP_DIM     = 5   # 240 dim grey    — detail text, timestamps
+CP_WHITE   = 6   # 15  white       — done ticks
+CP_SBARBG  = 7   # black on pink   — status bar
+CP_INPUTBG = 8   # cyan on dark    — input line
 
-# Map art color codes to curses pair numbers
-_ART_COLOR_MAP = {
-    'K': None,    # transparent / skip
-    'D': CP_DIM,
-    'M': CP_MAUVE,
-    'P': CP_PINK,
-    'W': CP_WHITE,
-}
-
+# Art palette pairs: index 1..8 of ART_PALETTE → curses pair CP_ART_BASE+idx
+CP_ART_BASE = 8   # pairs 9..16
 
 def init_colours() -> None:
     curses.start_color()
@@ -255,6 +270,20 @@ def init_colours() -> None:
     curses.init_pair(CP_WHITE,    15,  -1)
     curses.init_pair(CP_SBARBG,   16, 198)
     curses.init_pair(CP_INPUTBG,  51,  -1)
+    # Art palette (skip index 0 which is None)
+    for idx, color256 in enumerate(ART_PALETTE):
+        if color256 is not None:
+            curses.init_pair(CP_ART_BASE + idx, color256, -1)
+
+def _art_attr(palette_idx: int) -> int:
+    """Return curses attr for a palette index (0 = skip → -1)."""
+    if palette_idx == 0:
+        return -1
+    attr = curses.color_pair(CP_ART_BASE + palette_idx)
+    # Add bold for brighter/warmer entries
+    if palette_idx in (5, 6, 9):  # light grey, near-white, warm bright
+        attr |= curses.A_BOLD
+    return attr
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -263,22 +292,22 @@ def init_colours() -> None:
 
 class AikoTUI:
     """
-    Fixed layout:
-      Row 0            : top border  ╔═══╗
-      Rows 1..BANNER_H : banner text
-      Row BANNER_H+1   : banner-bottom / panel-top divider  ╠═══╦═══╣
-      Rows BT+1..BT+PH : side panels  (left art | right init/arch)
-      Row BT+PH+1      : panel-bottom / chat-top border  ╠═══╩═══╣
-      Rows ..h-4       : chat scrollback
-      Row h-3          : separator  ╠═══╣
-      Row h-2          : status bar (pink bg)
-      Row h-1          : separator + input bar
+    Layout rows:
+      0               : top border
+      1..BANNER_H     : banner
+      BANNER_H+1      : banner-bot / panel-top divider   ╠═══╦═══╣
+      PT..PT+ART_H-1  : left=art | right=init or arch    ║   ║   ║
+      PT+ART_H        : arch-bot / chat-top separator    ║   ╠═══╣
+      PT+ART_H+1..CB  : left=art-cont (blank) | right=chat
+      CB              : separator                         ╠═══════╣
+      CB+1            : status bar (full width, pink bg)
+      CB+2            : separator                         ╠═══════╣
+      CB+3            : input (full width)
+      CB+4            : bottom border
     """
 
-    PANEL_H    = ART_H        # side panels as tall as the art
-    INPUT_H    = 1
-    SBAR_H     = 1
-
+    INPUT_H = 1
+    SBAR_H  = 1
     INPUT_PROMPT = "  ❯  "
 
     def __init__(self, stdscr, no_voice=False, debug=False):
@@ -303,24 +332,27 @@ class AikoTUI:
     # ── layout helpers ────────────────────────────────────────────────────────
 
     @property
-    def _panel_row_top(self):
-        return BANNER_H + 2
+    def _pt(self):
+        """Panel top row (first row inside the art/right-panel area)."""
+        return BANNER_H + 2   # row 0 border + BANNER_H rows + 1 divider
 
     @property
-    def _panel_row_bot(self):
-        return self._panel_row_top + self.PANEL_H
+    def _arch_sep_row(self):
+        """Row of the horizontal line separating arch from chat."""
+        return self._pt + ARCH_ROWS
 
     @property
-    def _chat_row_top(self):
-        return self._panel_row_bot + 1
+    def _chat_top(self):
+        return self._arch_sep_row + 1
 
-    def _chat_row_bot(self, h):
-        return h - self.SBAR_H - self.INPUT_H - 2
+    def _chat_bot(self, h):
+        """Exclusive bottom of chat area."""
+        return h - self.SBAR_H - self.INPUT_H - 3  # sep + sbar + sep + input + bot-border
 
     def _dims(self):
         return self._scr.getmaxyx()
 
-    # ── low-level draw ────────────────────────────────────────────────────────
+    # ── low-level helpers ─────────────────────────────────────────────────────
 
     def _wr(self, y, x, text, attr=0):
         h, w = self._dims()
@@ -331,20 +363,6 @@ class AikoTUI:
             return
         try:
             self._scr.addstr(y, x, text[:avail], attr)
-        except curses.error:
-            pass
-
-    def _hline(self, y, x, ch, n, attr=0):
-        h, w = self._dims()
-        if y < 0 or y >= h:
-            return
-        n = min(n, w - x - 1)
-        if n <= 0:
-            return
-        try:
-            self._scr.attron(attr)
-            self._scr.hline(y, x, ch, n)
-            self._scr.attroff(attr)
         except curses.error:
             pass
 
@@ -369,63 +387,46 @@ class AikoTUI:
         tag = f" Aiko Agent v2.0  [{SESSION_ID}]  {int(time.time()-self._ts)}s "
         self._wr(BANNER_H, w-1-len(tag), tag, dim)
 
-        div_row = BANNER_H + 1
-        self._wr(div_row, 0,
+        # divider with column split
+        self._wr(BANNER_H+1, 0,
             '╠' + '═'*(LEFT_W-1) + '╦' + '═'*(w-LEFT_W-2) + '╣', pk)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # DRAW SIDE PANELS
+    # DRAW LEFT COLUMN (art, full height from panel top to chat bot)
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _draw_side_panels(self, h, w):
-        pk   = curses.color_pair(CP_PINK)   | curses.A_BOLD
-        cy   = curses.color_pair(CP_CYAN)   | curses.A_BOLD
-        pu   = curses.color_pair(CP_PURPLE) | curses.A_BOLD
-        mv   = curses.color_pair(CP_MAUVE)
-        dim  = curses.color_pair(CP_DIM)
-        wh   = curses.color_pair(CP_WHITE)  | curses.A_BOLD
+    def _draw_left_col(self, h, w):
+        pk = curses.color_pair(CP_PINK) | curses.A_BOLD
+        pt = self._pt
+        cb = self._chat_bot(h)
 
-        pt = self._panel_row_top
-        pb = self._panel_row_bot
-
-        # outer borders for every panel row
-        for r in range(pt, pb):
-            self._wr(r, 0,      '║', pk)
-            self._wr(r, LEFT_W, '║', pk)
-            self._wr(r, w-1,    '║', pk)
-
-        # ── per-character coloured ASCII art ─────────────────────────────────
-        for i in range(min(ART_H, pb - pt)):
-            row      = pt + i
+        # Draw the art rows
+        for i in range(ART_H):
+            row = pt + i
+            if row > cb:
+                break
             art_line = ANIME_ART_LINES[i] if i < len(ANIME_ART_LINES) else ''
-            clr_line = ANIME_ART_COLORS[i] if i < len(ANIME_ART_COLORS) else ''
-            x        = 1   # start inside left border
+            clr_row  = ANIME_ART_COLORS[i] if i < len(ANIME_ART_COLORS) else []
 
-            # Draw character by character with per-char color
+            self._wr(row, 0, '║', pk)
+            x = 1
             for col_idx, ch in enumerate(art_line):
                 if x >= LEFT_W:
                     break
-                color_code = clr_line[col_idx] if col_idx < len(clr_line) else 'K'
-                pair_id    = _ART_COLOR_MAP.get(color_code)
-                if pair_id is None or ch == ' ':
-                    # transparent / space — just advance
+                pidx  = clr_row[col_idx] if col_idx < len(clr_row) else 0
+                attr  = _art_attr(pidx)
+                if attr < 0 or ch == ' ':
                     try:
-                        self._scr.move(row, x)
-                        self._scr.addch(' ')
+                        self._scr.addch(row, x, ' ')
                     except curses.error:
                         pass
                 else:
-                    attr = curses.color_pair(pair_id)
-                    # Bold on brighter tones for contrast
-                    if color_code in ('P', 'W'):
-                        attr |= curses.A_BOLD
                     try:
                         self._scr.addstr(row, x, ch, attr)
                     except curses.error:
                         pass
                 x += 1
-
-            # Pad the rest of the art column with spaces to clear stale chars
+            # Pad remaining art columns
             while x < LEFT_W:
                 try:
                     self._scr.addch(row, x, ' ')
@@ -433,31 +434,67 @@ class AikoTUI:
                     pass
                 x += 1
 
-        # bottom panel border ╠═══╩═══╣
-        self._wr(pb, 0,
-            '╠' + '═'*(LEFT_W-1) + '╩' + '═'*(w-LEFT_W-2) + '╣', pk)
-
-        # ── clear right panel and redraw ──────────────────────────────────────
-        rx = LEFT_W + 2
-        rw = w - LEFT_W - 4
-        for r in range(pt, pb):
+        # Rows below art (blank, still inside left column)
+        for row in range(pt + ART_H, cb + 1):
+            self._wr(row, 0, '║', pk)
             try:
-                self._scr.move(r, LEFT_W + 1)
-                self._scr.clrtoeol()
+                self._scr.move(row, 1)
+                # clear to the divider
+                self._scr.addstr(row, 1, ' ' * (LEFT_W - 1))
             except curses.error:
                 pass
-            self._wr(r, w-1, '║', pk)
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # DRAW RIGHT COLUMN (init/arch on top, chat below)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _draw_right_col(self, h, w):
+        pk  = curses.color_pair(CP_PINK)   | curses.A_BOLD
+        pt  = self._pt
+        sep = self._arch_sep_row
+        cb  = self._chat_bot(h)
+
+        rx  = LEFT_W + 1          # first content col (after ║)
+        rw  = w - LEFT_W - 2      # usable width (before right border ║)
+
+        # Right border for the whole column
+        for row in range(pt, cb + 1):
+            self._wr(row, LEFT_W, '║', pk)
+            self._wr(row, w-1,    '║', pk)
+
+        # Clear right panel area
+        for row in range(pt, sep):
+            try:
+                self._scr.move(row, rx)
+                self._scr.addstr(row, rx, ' ' * (rw - 1))
+            except curses.error:
+                pass
+
+        # ── top section: init or arch ─────────────────────────────────────────
         if self._phase == 'init':
-            self._draw_right_init(pt, pb, rx, rw, dim, cy, pu, mv, wh, pk)
+            self._draw_right_init(pt, sep, rx, rw)
         else:
-            self._draw_right_arch(pt, pb, rx, rw, dim, cy, pu, pk)
+            self._draw_right_arch(pt, sep, rx, rw)
 
-    # ── right panel: init loading ─────────────────────────────────────────────
+        # ── separator between arch and chat ───────────────────────────────────
+        self._wr(sep, 0,
+            '║' + ' '*(LEFT_W-1) +
+            '╠' + '═'*(w-LEFT_W-2) + '╣', pk)
 
-    def _draw_right_init(self, pt, pb, rx, rw, dim, cy, pu, mv, wh, pk):
-        self._wr(pt,   rx, "INITIALISING NEURAL SYSTEMS", pk)
-        self._wr(pt+1, rx, '─' * min(32, rw), pu)
+        # ── chat section ──────────────────────────────────────────────────────
+        self._draw_chat_area(sep + 1, cb, rx, rw, w)
+
+    # ── right panel: init log ─────────────────────────────────────────────────
+
+    def _draw_right_init(self, pt, pb, rx, rw):
+        pk  = curses.color_pair(CP_PINK)   | curses.A_BOLD
+        cy  = curses.color_pair(CP_CYAN)   | curses.A_BOLD
+        pu  = curses.color_pair(CP_PURPLE) | curses.A_BOLD
+        dim = curses.color_pair(CP_DIM)
+        wh  = curses.color_pair(CP_WHITE)  | curses.A_BOLD
+
+        self._wr(pt,   rx, " INITIALISING NEURAL SYSTEMS", pk)
+        self._wr(pt+1, rx, ' ─' * min(16, (rw-1)//2), pu)
 
         row = pt + 2
         for (key, state, detail) in self._init_log:
@@ -468,66 +505,69 @@ class AikoTUI:
 
             if state == 'loading':
                 sp = SPINNER[self._frame]
-                self._wr(row, rx,    f" {sp} ", cy)
-                self._wr(row, rx+3,  f"{lbl:<20}", curses.color_pair(CP_CYAN)|curses.A_BOLD)
-                self._wr(row, rx+23, txt[:rw-24], dim)
+                self._wr(row, rx,    f"  {sp} ", cy)
+                self._wr(row, rx+4,  f"{lbl:<20}", cy)
+                self._wr(row, rx+24, txt[:rw-25], dim)
             elif state == 'done':
-                self._wr(row, rx,    " ✓ ", wh)
-                self._wr(row, rx+3,  f"{lbl:<20}", curses.color_pair(CP_WHITE)|curses.A_BOLD)
-                self._wr(row, rx+23, txt[:rw-24], dim)
+                self._wr(row, rx,    "  ✓ ", wh)
+                self._wr(row, rx+4,  f"{lbl:<20}", wh)
+                self._wr(row, rx+24, txt[:rw-25], dim)
             elif state == 'skip':
-                self._wr(row, rx,    " – ", dim)
-                self._wr(row, rx+3,  f"{lbl:<20}", dim)
-                self._wr(row, rx+23, txt[:rw-24], dim)
+                self._wr(row, rx,    "  – ", dim)
+                self._wr(row, rx+4,  f"{lbl:<20}", dim)
+                self._wr(row, rx+24, txt[:rw-25], dim)
             elif state == 'error':
-                self._wr(row, rx,    " ✗ ", curses.color_pair(CP_PINK)|curses.A_BOLD)
-                self._wr(row, rx+3,  f"{lbl:<20}", curses.color_pair(CP_PINK)|curses.A_BOLD)
-                self._wr(row, rx+23, txt[:rw-24], curses.color_pair(CP_MAUVE))
+                self._wr(row, rx,    "  ✗ ", pk)
+                self._wr(row, rx+4,  f"{lbl:<20}", pk)
+                self._wr(row, rx+24, txt[:rw-25], curses.color_pair(CP_MAUVE))
             row += 1
 
         all_fin = (len(self._init_log) > 0 and
                    all(s in ('done','skip','error') for (_,s,_) in self._init_log))
-        if all_fin and row <= pb - 2:
-            self._wr(row+1, rx, "[ ALL SYSTEMS ONLINE ]",
+        if all_fin and row < pb - 1:
+            self._wr(row+1, rx, "  [ ALL SYSTEMS ONLINE ]",
                      curses.color_pair(CP_CYAN)|curses.A_BOLD)
 
-    # ── right panel: architecture ─────────────────────────────────────────────
+    # ── right panel: arch ─────────────────────────────────────────────────────
 
-    def _draw_right_arch(self, pt, pb, rx, rw, dim, cy, pu, pk):
-        self._wr(pt,   rx, "NEURAL ARCHITECTURE", curses.color_pair(CP_CYAN)|curses.A_BOLD)
-        self._wr(pt+1, rx, '─' * min(24, rw), pu)
+    def _draw_right_arch(self, pt, pb, rx, rw):
+        pk  = curses.color_pair(CP_PINK)   | curses.A_BOLD
+        cy  = curses.color_pair(CP_CYAN)   | curses.A_BOLD
+        pu  = curses.color_pair(CP_PURPLE) | curses.A_BOLD
+        mv  = curses.color_pair(CP_MAUVE)
+        dim = curses.color_pair(CP_DIM)
+
+        self._wr(pt,   rx, " NEURAL ARCHITECTURE", cy)
+        self._wr(pt+1, rx, ' ─' * min(16, (rw-1)//2), pu)
 
         row = pt + 2
         for section, items in ARCH_SECTIONS:
             if row >= pb - 1:
                 break
-            self._wr(row, rx, f" {section}",
-                     curses.color_pair(CP_PINK)|curses.A_BOLD)
+            self._wr(row, rx, f"  {section}", pk)
             row += 1
             for name, val in items:
                 if row >= pb:
                     break
-                self._wr(row, rx,     f"  {name:<18}", curses.color_pair(CP_DIM))
-                self._wr(row, rx+20,  val[:rw-21],     curses.color_pair(CP_MAUVE))
+                self._wr(row, rx,     f"    {name:<18}", dim)
+                self._wr(row, rx+22,  val[:rw-23],       mv)
                 row += 1
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # DRAW CHAT AREA
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── chat area ─────────────────────────────────────────────────────────────
 
-    def _render_lines(self, w):
-        avail = w - 4
+    def _render_lines(self, rw):
+        avail = rw - 2
         out   = []
         for sender, text in self._messages:
             if sender == 'you':
-                pre   = "  You ❯  "
+                pre   = " You ❯  "
                 ind   = " " * len(pre)
                 lines = textwrap.wrap(text, avail - len(pre)) or [""]
                 out.append(('Y', pre + lines[0]))
                 for l in lines[1:]:
                     out.append(('Y', ind + l))
             elif sender == 'aiko':
-                pre   = "  Aiko ♡  "
+                pre   = " Aiko ♡  "
                 ind   = " " * len(pre)
                 lines = textwrap.wrap(text, avail - len(pre)) or [""]
                 out.append(('A', pre + lines[0]))
@@ -537,7 +577,7 @@ class AikoTUI:
             elif sender == 'sys':
                 out.append(('S', f"  ◈  {text}"))
         if self._streaming:
-            pre   = "  Aiko ♡  "
+            pre   = " Aiko ♡  "
             ind   = " " * len(pre)
             lines = textwrap.wrap(self._streaming, avail - len(pre)) or [""]
             out.append(('A', pre + lines[0]))
@@ -545,21 +585,16 @@ class AikoTUI:
                 out.append(('A', ind + l))
         return out
 
-    def _draw_chat(self, h, w):
+    def _draw_chat_area(self, ct, cb, rx, rw, w):
         pk  = curses.color_pair(CP_PINK)  | curses.A_BOLD
         cy  = curses.color_pair(CP_CYAN)  | curses.A_BOLD
         pk_ = curses.color_pair(CP_PINK)
         dim = curses.color_pair(CP_DIM)
+        pu  = curses.color_pair(CP_PURPLE)
 
-        ct  = self._chat_row_top
-        cb  = self._chat_row_bot(h)
-        ch  = cb - ct
+        ch = cb - ct
 
-        for r in range(ct, cb):
-            self._wr(r, 0,   '║', pk)
-            self._wr(r, w-1, '║', pk)
-
-        rendered   = self._render_lines(w)
+        rendered   = self._render_lines(rw)
         total      = len(rendered)
         max_scroll = max(0, total - ch)
         self._scroll = max(0, min(self._scroll, max_scroll))
@@ -568,44 +603,45 @@ class AikoTUI:
         visible = rendered[start:start+ch]
 
         for i, (kind, line) in enumerate(visible):
-            r = ct + i
-            if r >= cb:
+            row = ct + i
+            if row >= cb:
                 break
             attr = cy if kind == 'Y' else (pk_ if kind == 'A' else dim)
+            # Clear the right panel portion of this row
             try:
-                self._scr.move(r, 1)
-                self._scr.clrtoeol()
+                self._scr.addstr(row, rx, ' ' * (rw - 1))
             except curses.error:
                 pass
-            self._wr(r, 1, line[:w-2], attr)
-            self._wr(r, w-1, '║', pk)
+            self._wr(row, rx, line[:rw-1], attr)
+            self._wr(row, w-1, '║', pk)
 
-        for r in range(ct + len(visible), cb):
+        # Clear empty rows
+        for row in range(ct + len(visible), cb):
             try:
-                self._scr.move(r, 1)
-                self._scr.clrtoeol()
+                self._scr.addstr(row, rx, ' ' * (rw - 1))
             except curses.error:
                 pass
-            self._wr(r, 0, '║', pk)
-            self._wr(r, w-1, '║', pk)
+            self._wr(row, w-1, '║', pk)
 
         if self._scroll > 0:
-            hint = f" ↑ {self._scroll} lines  PgDn to return "
-            self._wr(ct, w - len(hint) - 2, hint, curses.color_pair(CP_PURPLE))
+            hint = f" ↑{self._scroll}  PgDn↓ "
+            self._wr(ct, w - len(hint) - 2, hint, pu)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # DRAW STATUS BAR + INPUT
+    # STATUS BAR + INPUT  (full screen width)
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _draw_sbar_input(self, h, w, buf):
+    def _draw_chrome(self, h, w, buf):
         pk   = curses.color_pair(CP_PINK)   | curses.A_BOLD
         sbar = curses.color_pair(CP_SBARBG) | curses.A_BOLD
         inp  = curses.color_pair(CP_INPUTBG)
 
-        cb = self._chat_row_bot(h)
+        cb = self._chat_bot(h)
 
-        self._wr(cb, 0, '╠' + '═'*(w-2) + '╣', pk)
+        # chat-area bottom border (full width)
+        self._wr(cb, 0, '╠' + '═'*(LEFT_W-1) + '╩' + '═'*(w-LEFT_W-2) + '╣', pk)
 
+        # status bar (full width)
         sr      = cb + 1
         elapsed = int(time.time() - self._ts)
         left    = f"  ✦ {OLLAMA_MODEL}  │  mem0·Qdrant  │  Kokoro TTS  │  {SESSION_ID}  "
@@ -613,9 +649,11 @@ class AikoTUI:
         bar     = left + ' '*max(0, w - len(left) - len(right)) + right
         self._wr(sr, 0, bar[:w], sbar)
 
+        # separator above input (full width)
         ir = sr + 1
         self._wr(ir, 0, '╠' + '═'*(w-2) + '╣', pk)
 
+        # input line (full width)
         inp_r   = ir + 1
         content = self.INPUT_PROMPT + ''.join(buf)
         line    = content[:w-1].ljust(w-1)
@@ -626,10 +664,12 @@ class AikoTUI:
             pass
         self._wr(inp_r, 0, line, inp)
 
+        # bottom border
         bot_r = inp_r + 1
         if bot_r < h:
             self._wr(bot_r, 0, '╚' + '═'*(w-2) + '╝', pk)
 
+        # cursor
         cx = min(len(content), w-2)
         try:
             self._scr.move(inp_r, cx)
@@ -643,16 +683,16 @@ class AikoTUI:
     def _draw(self, buf=None):
         with self._lock:
             h, w = self._dims()
-            # Need enough room: banner(8) + panels(50) + chat(≥4) + chrome(4) = ~66 min
-            if h < 30 or w < 100:
-                self._wr(0, 0, f"Terminal too small: {w}x{h} (need 100x30 minimum)", 0)
+            min_h = BANNER_H + 2 + ART_H + 8
+            if h < min_h or w < 90:
+                self._wr(0, 0, f"Terminal too small: {w}x{h} (need 90x{min_h})", 0)
                 self._scr.refresh()
                 return
             self._draw_banner(h, w)
-            self._draw_side_panels(h, w)
+            self._draw_left_col(h, w)
+            self._draw_right_col(h, w)
             if self._phase == 'chat':
-                self._draw_chat(h, w)
-                self._draw_sbar_input(h, w, buf if buf is not None else [])
+                self._draw_chrome(h, w, buf if buf is not None else [])
             self._scr.refresh()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -719,14 +759,15 @@ class AikoTUI:
                 if buf: buf.pop()
             elif ch == curses.KEY_PPAGE:
                 with self._lock:
-                    rendered = self._render_lines(w)
-                    ch_h = self._chat_row_bot(h) - self._chat_row_top
+                    rw = w - LEFT_W - 2
+                    rendered = self._render_lines(rw)
+                    ch_h = self._chat_bot(h) - self._chat_top
                     self._scroll = min(
                         self._scroll + max(1, ch_h - 2),
                         max(0, len(rendered) - ch_h))
             elif ch == curses.KEY_NPAGE:
                 with self._lock:
-                    ch_h = self._chat_row_bot(h) - self._chat_row_top
+                    ch_h = self._chat_bot(h) - self._chat_top
                     self._scroll = max(0, self._scroll - max(1, ch_h - 2))
             elif ch in ('\x03', '\x04'):
                 curses.curs_set(0)

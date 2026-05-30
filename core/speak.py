@@ -8,9 +8,10 @@ Install:
     uv add "realtimetts[kokoro]"
 
 Standalone test:
-    python -m core.speak
-    python -m core.speak "Hello, I'm Aiko!"
-    python -m core.speak --devices
+    python core/speak.py
+    python core/speak.py "Hello, I'm Aiko!"
+    python core/speak.py --devices
+    python core/speak.py --wait "Block until done."
 """
 
 import os
@@ -24,6 +25,8 @@ try:
     load_dotenv()
 except ImportError:
     pass
+
+from core.silence import silent_stderr
 
 # ── config ────────────────────────────────────────────────────────────────────
 
@@ -60,29 +63,23 @@ def sanitize_for_tts(text: str) -> str:
 class AikoSpeak:
     """
     RealtimeTTS wrapper using Kokoro engine.
-
-    Streaming usage (LLM token-by-token):
-        speaker.start_listening()
-        for token in llm_stream:
-            speaker.feed(token)
-        speaker.finish()   # flush final open sentence
-        speaker.wait()     # block until audio drains
-
-    Single-string usage:
-        speaker.speak("Hello!")   # blocks until done
+    ALSA/PyAudio C-level noise suppressed via fd-level stderr redirect.
+    Printing to console is the caller's responsibility — speak.py is silent.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, silent: bool = False) -> None:
         self._stream = None
         self._ready  = False
-        print(f"[speak] Kokoro ready (lazy) | voice: {KOKORO_VOICE} | speed: {KOKORO_SPEED}")
+        self._silent = silent
+        if not silent:
+            print(f"[speak] Kokoro ready (lazy) | voice: {KOKORO_VOICE} | speed: {KOKORO_SPEED}")
 
     def warmup(self) -> bool:
         """Pre-load the engine — called from background thread in cli.py."""
         return self._init_engine()
 
     def _init_engine(self) -> bool:
-        """Initialise Kokoro engine."""
+        """Initialise Kokoro engine. ALSA device probe silenced via fd redirect."""
         if self._ready:
             return True
         try:
@@ -91,15 +88,15 @@ class AikoSpeak:
                 voice=KOKORO_VOICE,
                 default_speed=KOKORO_SPEED,
             )
-            # No silent_stderr here — swallowing errors at init causes silent failures later
-            self._stream = TextToAudioStream(
-                engine,
-                output_device_index=KOKORO_DEVICE if KOKORO_DEVICE >= 0 else None,
-                frames_per_buffer=8192,
-                playout_chunk_size=8192,
-            )
+            with silent_stderr():
+                self._stream = TextToAudioStream(
+                    engine,
+                    output_device_index=KOKORO_DEVICE if KOKORO_DEVICE >= 0 else None,
+                    frames_per_buffer=4096,   # prevents PCM underruns on Jetson
+                )
             self._ready = True
-            print(f"[speak] Kokoro engine loaded | voice: {KOKORO_VOICE!r}")
+            if not getattr(self, '_silent', False):
+                print(f"[speak] Kokoro engine loaded | voice: {KOKORO_VOICE!r}")
             return True
         except Exception as e:
             print(f"[speak] failed to load Kokoro engine: {e}")
@@ -107,16 +104,25 @@ class AikoSpeak:
 
     # ── internal ───────────────────────────────────────────────────────────────
 
-    def _play_params(self) -> dict:
-        return dict(
-            fast_sentence_fragment=False,
-            minimum_sentence_length=15,
-            minimum_first_fragment_length=30,
-            buffer_threshold_seconds=0.2,
-            language=KOKORO_LANG,
-        )
+    def _play_async(self) -> None:
+        """
+        Shared play_async with tuned latency params.
+        fast_sentence_fragment=False  — wait for complete sentences, no missing words
+        minimum_sentence_length=15    — don't fire on very short fragments
+        minimum_first_fragment_length=20 — hold first chunk until solid
+        buffer_threshold_seconds=0.3  — enough buffer to prevent underruns
+        """
+        with silent_stderr():
+            self._stream.play_async(
+                fast_sentence_fragment=False,
+                minimum_sentence_length=15,
+                minimum_first_fragment_length=20,
+                buffer_threshold_seconds=0.3,
+                language=KOKORO_LANG,
+            )
 
     def _sanitized_iterator(self, iterator):
+        """Sanitize tokens silently — caller handles console printing."""
         for token in iterator:
             clean = sanitize_for_tts(token)
             if clean:
@@ -125,23 +131,23 @@ class AikoSpeak:
     # ── public api ─────────────────────────────────────────────────────────────
 
     def speak(self, text: str) -> bool:
-        """Synthesize a complete string, blocking until audio finishes."""
+        """Synthesize a complete string, non-blocking. Caller prints to console."""
         if not self._init_engine():
             return False
         try:
+            self.stop()
             self._stream.feed(sanitize_for_tts(text))
-            self._stream.play(**self._play_params())
+            self._play_async()
             return True
         except Exception as e:
             print(f"[speak] speak error: {e}")
             return False
 
     def feed(self, token: str) -> None:
-        """
-        Feed a single token during streaming.
-        Call start_listening() before the first feed().
-        """
-        if not self._ready or not token:
+        """Feed a single token to TTS. Silent — caller prints to console."""
+        if not self._init_engine():
+            return
+        if not token:
             return
         clean = sanitize_for_tts(token)
         if clean:
@@ -150,37 +156,22 @@ class AikoSpeak:
             except Exception as e:
                 print(f"\n[speak] feed error: {e}")
 
-    def start_listening(self) -> None:
-        """
-        Start async playback before tokens arrive so Kokoro synthesizes live.
-        After all tokens: call finish() then wait().
-        """
-        if not self._init_engine():
-            return
-        try:
-            self._stream.play_async(**self._play_params())
-        except Exception as e:
-            print(f"[speak] start_listening error: {e}")
-
-    def finish(self) -> None:
-        """
-        Flush the final open sentence after all tokens have been fed.
-        Call before wait().
-        """
+    def play_async(self) -> None:
+        """Begin async playback after a manual feed() loop."""
         if not self._ready or not self._stream:
             return
         try:
-            self._stream.feed("  .  ")
+            self._play_async()
         except Exception as e:
-            print(f"[speak] finish error: {e}")
+            print(f"[speak] play_async error: {e}")
 
     def feed_and_play(self, token_iterator) -> None:
-        """Feed a token iterator and play synchronously. Blocks until done."""
+        """Feed a token iterator and start async playback. Non-blocking."""
         if not self._init_engine():
             return
+        self.stop()
         self._stream.feed(self._sanitized_iterator(token_iterator))
-        self._stream.feed("  .  ")
-        self._stream.play(**self._play_params())
+        self._play_async()
 
     def is_playing(self) -> bool:
         if not self._stream:
@@ -188,7 +179,6 @@ class AikoSpeak:
         return self._stream.is_playing()
 
     def wait(self) -> None:
-        """Block until audio playback finishes."""
         while self.is_playing():
             time.sleep(0.05)
 
@@ -219,6 +209,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--devices", action="store_true")
     parser.add_argument("--voice",   default=None)
     parser.add_argument("--speed",   default=None, type=float)
+    parser.add_argument("--wait",    action="store_true")
     return parser.parse_args()
 
 
@@ -233,7 +224,10 @@ if __name__ == "__main__":
 
     if args.voice: os.environ["KOKORO_VOICE"] = args.voice
     if args.speed: os.environ["KOKORO_SPEED"] = str(args.speed)
+    KOKORO_VOICE = os.getenv("KOKORO_VOICE", "0.2*af_nicole + 0.8*jf_alpha")
 
     voice = AikoSpeak()
     ok    = voice.speak(args.text)
+    if args.wait:
+        voice.wait()
     sys.exit(0 if ok else 1)

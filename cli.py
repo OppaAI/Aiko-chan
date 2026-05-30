@@ -343,11 +343,19 @@ class AikoTUI:
         h, w = self._dims()
         if y < 0 or y >= h or x < 0 or x >= w:
             return
-        avail = w - x - 1
+        avail = w - x
         if avail <= 0:
             return
         try:
-            self._scr.addstr(y, x, text[:avail], attr)
+            if y == h - 1 and x + len(text) >= w:
+                # Safe handling for the bottom-right corner to prevent terminal scrolling
+                self._scr.addstr(y, x, text[:w - x - 1], attr)
+                try:
+                    self._scr.insstr(y, w - 1, text[w - x - 1:w - x], attr)
+                except curses.error:
+                    pass
+            else:
+                self._scr.addstr(y, x, text[:avail], attr)
         except curses.error:
             pass
 
@@ -460,8 +468,8 @@ class AikoTUI:
             self._draw_right_arch(pt, sep, rx, rw)
 
         # ── arch/chat divider ─────────────────────────────────────────────────
-        self._wr(sep, 0,
-            '║' + ' '*(LEFT_W-1) + '╠' + '═'*(w-LEFT_W-2) + '╣', pk)
+        self._wr(sep, LEFT_W,
+            '╠' + '═'*(w-LEFT_W-2) + '╣', pk)
 
         # ── chat area ─────────────────────────────────────────────────────────
         self._draw_chat_area(sep + 1, cb, rx, rw, w)
@@ -471,7 +479,7 @@ class AikoTUI:
         self._wr(sbar_sep, LEFT_W,   '╠', pk)
         self._wr(sbar_sep, w - 1,    '╣', pk)
         try:
-            self._scr.addstr(sbar_sep, LEFT_W + 1, '═' * (rw - 1), curses.color_pair(CP_PINK) | curses.A_BOLD)
+            self._scr.addstr(sbar_sep, LEFT_W + 1, '═' * rw, curses.color_pair(CP_PINK) | curses.A_BOLD)
         except curses.error:
             pass
 
@@ -492,14 +500,14 @@ class AikoTUI:
         self._wr(ir, LEFT_W,   '╠', pk)
         self._wr(ir, w - 1,    '╣', pk)
         try:
-            self._scr.addstr(ir, LEFT_W + 1, '═' * (rw - 1), curses.color_pair(CP_PINK) | curses.A_BOLD)
+            self._scr.addstr(ir, LEFT_W + 1, '═' * rw, curses.color_pair(CP_PINK) | curses.A_BOLD)
         except curses.error:
             pass
 
         # ── input line (right panel only) ─────────────────────────────────────
         inp_r   = ir + 1
         content = self.INPUT_PROMPT + ''.join(buf)
-        line    = content[:rw - 1].ljust(rw - 1)
+        line    = content[:rw].ljust(rw)
         try:
             self._scr.addstr(inp_r, rx, line, inp_attr)
         except curses.error:
@@ -511,7 +519,7 @@ class AikoTUI:
             self._wr(bot_r, LEFT_W, '╩', pk)
             self._wr(bot_r, w - 1,  '╝', pk)
             try:
-                self._scr.addstr(bot_r, LEFT_W + 1, '═' * (rw - 1), curses.color_pair(CP_PINK) | curses.A_BOLD)
+                self._scr.addstr(bot_r, LEFT_W + 1, '═' * rw, curses.color_pair(CP_PINK) | curses.A_BOLD)
             except curses.error:
                 pass
 
@@ -601,14 +609,14 @@ class AikoTUI:
         out   = []
         for sender, text in self._messages:
             if sender == 'you':
-                pre   = " You ❯  "
+                pre   = " You: "
                 ind   = " " * len(pre)
                 lines = textwrap.wrap(text, avail - len(pre)) or [""]
                 out.append(('Y', pre + lines[0]))
                 for l in lines[1:]:
                     out.append(('Y', ind + l))
             elif sender == 'aiko':
-                pre   = " Aiko ♡  "
+                pre   = " Aiko: "
                 ind   = " " * len(pre)
                 lines = textwrap.wrap(text, avail - len(pre)) or [""]
                 out.append(('A', pre + lines[0]))
@@ -618,7 +626,7 @@ class AikoTUI:
             elif sender == 'sys':
                 out.append(('S', f"  ◈  {text}"))
         if self._streaming:
-            pre   = " Aiko ♡  "
+            pre   = " Aiko: "
             ind   = " " * len(pre)
             lines = textwrap.wrap(self._streaming, avail - len(pre)) or [""]
             out.append(('A', pre + lines[0]))

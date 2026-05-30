@@ -224,7 +224,7 @@ INIT_STEPS = {
 }
 
 SPINNER   = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
-HELP_TEXT = "/quit /exit — end  │  /reset — clear context  │  /memory — show memories  │  /help"
+HELP_TEXT = "/quit /exit — end  │  /reset — clear context  │  /voice — toggle voice  │  /clear — wipe memories  │  /memory — show memories  │  /help"
 
 # ── colour pairs ──────────────────────────────────────────────────────────────
 # Pairs 1-8: UI chrome
@@ -248,7 +248,7 @@ def init_colours() -> None:
     curses.init_pair(CP_CYAN,     51,  -1)
     curses.init_pair(CP_PURPLE,  135,  -1)
     curses.init_pair(CP_MAUVE,   177,  -1)
-    curses.init_pair(CP_DIM,     240,  -1)
+    curses.init_pair(CP_DIM,     245,  -1)
     curses.init_pair(CP_WHITE,    15,  -1)
     curses.init_pair(CP_SBARBG,   16, 198)
     curses.init_pair(CP_INPUTBG,  51,  -1)
@@ -892,6 +892,19 @@ def _run(stdscr, args):
                     tui.add_message('sys', f'{len(all_mem)} memories stored:')
                     for i, m in enumerate(all_mem, 1):
                         tui.add_message('sys', f'  {i:02d}. {m.get("memory") or m.get("text") or m}')
+            elif cmd == '/voice':
+                if think._speak:
+                    think._speak = None
+                    tui.add_message('sys', 'Voice output: DISABLED')
+                else:
+                    if not speak:
+                        speak = AikoSpeak(silent=True)
+                        speak.warmup()
+                    think._speak = speak
+                    tui.add_message('sys', 'Voice output: ENABLED')
+            elif cmd == '/clear':
+                memorize.clear()
+                tui.add_message('sys', 'All persistent memories cleared from database.')
             elif cmd == '/help':
                 tui.add_message('sys', HELP_TEXT)
             else:

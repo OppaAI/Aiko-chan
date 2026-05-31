@@ -32,7 +32,7 @@ OLLAMA_BASE_URL      = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL         = os.getenv("OLLAMA_MODEL",    "ministral-3:3b-instruct-2512-q4_K_M")
 CONTEXT_WINDOW_TURNS = int(os.getenv("CONTEXT_WINDOW_TURNS", 20))
 
-_PERSONA_PATH = Path(__file__).resolve().parent.parent / "soul.md"
+_PERSONA_PATH = Path(__file__).resolve().parent.parent / "persona" / "soul.md"
 _SEARCH_RE    = re.compile(r"\[SEARCH:\s*(.+?)\]", re.IGNORECASE)
 
 

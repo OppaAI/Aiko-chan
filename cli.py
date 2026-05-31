@@ -55,10 +55,18 @@ def _load_identity(path: str = "persona/identity.md") -> dict:
     """
     Parse identity.md and return:
       banner_lines  : list[str]
-      art_lines     : list[str]
+      art_lines     : list[str]   — exact character rows, backticks preserved
       art_colors    : list[list[int]]
       art_w         : int
       art_h         : int
+
+    Art lines are delimited by '---ART---' / '---END---' sentinels (not
+    backtick fences) because the art itself contains backtick sequences that
+    would prematurely close any markdown code fence.
+
+    Banner and color map still use backtick fences since they contain no
+    backtick characters.
+
     Falls back to empty defaults if the file is missing.
     """
     result = {
@@ -70,35 +78,42 @@ def _load_identity(path: str = "persona/identity.md") -> dict:
     }
 
     try:
-        text = open(path, encoding="utf-8").read()
+        lines = open(path, encoding="utf-8").readlines()
+        text  = "".join(lines)
     except FileNotFoundError:
         return result
 
-    # ── banner: first fenced block after "## Banner Lines" ──────────────────
+    # ── banner: backtick-fenced block after "## Banner Lines" ────────────────
     banner_m = re.search(
         r'## Banner Lines\s*```[^\n]*\n(.*?)```',
         text, re.DOTALL
     )
     if banner_m:
         result["banner_lines"] = banner_m.group(1).splitlines()
-        # strip trailing blank line that may appear inside the fence
         while result["banner_lines"] and not result["banner_lines"][-1].strip():
             result["banner_lines"].pop()
 
-    # ── art lines: fenced block after "### Art Lines" ────────────────────────
-    art_m = re.search(
-        r'### Art Lines\s*```[^\n]*\n(.*?)```',
-        text, re.DOTALL
-    )
-    if art_m:
-        raw = art_m.group(1).splitlines()
-        # keep lines that are non-empty OR are meaningful whitespace-only art rows
-        # (we keep all of them to preserve row indexing)
-        result["art_lines"] = raw
-        result["art_h"] = len(raw)
-        result["art_w"] = max((len(l) for l in raw), default=46)
+    # ── art lines: sentinel-delimited block ---ART--- … ---END--- ─────────────
+    # Read line-by-line to preserve exact whitespace; rstrip('\n') only.
+    in_art = False
+    art_rows: list[str] = []
+    for raw_line in lines:
+        stripped = raw_line.rstrip('\n')
+        if stripped.strip() == '---ART---':
+            in_art = True
+            continue
+        if stripped.strip() == '---END---':
+            in_art = False
+            continue
+        if in_art:
+            art_rows.append(stripped)
 
-    # ── color map: json block after "### Art Color Map" ───────────────────────
+    if art_rows:
+        result["art_lines"] = art_rows
+        result["art_h"] = len(art_rows)
+        result["art_w"] = max((len(l) for l in art_rows), default=46)
+
+    # ── color map: backtick-fenced json block after "### Art Color Map" ───────
     cmap_m = re.search(
         r'### Art Color Map\s*```json\s*\n(.*?)```',
         text, re.DOTALL
@@ -341,6 +356,23 @@ class AikoTUI:
         # Panel-top divider: ╠═══╦═══╣
         self._wr(BANNER_H+1, 0,
             '╠' + '═'*(LEFT_W-1) + '╦' + '═'*(w-LEFT_W-2) + '╣', pk)
+
+    def _draw_clock_only(self):
+        """Redraw only the clock cell in row 1 — no full repaint."""
+        with self._lock:
+            h, w = self._dims()
+            wh = curses.color_pair(CP_WHITE) | curses.A_BOLD
+            clock_str = f" {time.strftime('%B %d, %Y  %I:%M:%S %p')} "
+        self._wr(1, w - 1 - len(clock_str), clock_str, wh)
+        # Restore cursor to input line after clock repaint
+        rx = LEFT_W + 1
+        rw = w - LEFT_W - 2
+        inp_r = self._chat_bot(h) + 3  # sbar_sep(+1) + sbar(+1) + inp_sep(+1)
+        try:
+            self._scr.move(inp_r, rx)
+        except curses.error:
+            pass
+        self._scr.refresh()
 
     # ─────────────────────────────────────────────────────────────────────────
     # DRAW LEFT COLUMN — art fills entire height from pt to bottom border
@@ -730,7 +762,7 @@ class AikoTUI:
         stop_tick = threading.Event()
         def _ticker():
             while not stop_tick.is_set():
-                self._draw(buf=buf)
+                self._draw_clock_only()
                 stop_tick.wait(1.0)
         tick_t = threading.Thread(target=_ticker, daemon=True)
         tick_t.start()

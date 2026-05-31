@@ -20,13 +20,17 @@ Layout (all panels confined to right column for chat/status/input):
     ║                  ╠═══════════════════════════════════════╣
     ║                  ║  INPUT (right panel only)             ║
     ╚══════════════════╩═══════════════════════════════════════╝
+
+Identity data (banner text, ASCII art) is loaded from identity.md at startup.
 """
 
 import warnings
 warnings.filterwarnings("ignore")
 
 import os
+import re
 import sys
+import json
 import curses
 import logging
 import textwrap
@@ -45,139 +49,91 @@ with silent_stderr():
     from core.speak    import AikoSpeak
     from core.think    import AikoThink
 
+# ── identity (loaded from identity.md) ───────────────────────────────────────
+
+def _load_identity(path: str = "persona/identity.md") -> dict:
+    """
+    Parse identity.md and return:
+      banner_lines  : list[str]
+      art_lines     : list[str]
+      art_colors    : list[list[int]]
+      art_w         : int
+      art_h         : int
+    Falls back to empty defaults if the file is missing.
+    """
+    result = {
+        "banner_lines": [],
+        "art_lines": [],
+        "art_colors": [],
+        "art_w": 46,
+        "art_h": 44,
+    }
+
+    try:
+        text = open(path, encoding="utf-8").read()
+    except FileNotFoundError:
+        return result
+
+    # ── banner: first fenced block after "## Banner Lines" ──────────────────
+    banner_m = re.search(
+        r'## Banner Lines\s*```[^\n]*\n(.*?)```',
+        text, re.DOTALL
+    )
+    if banner_m:
+        result["banner_lines"] = banner_m.group(1).splitlines()
+        # strip trailing blank line that may appear inside the fence
+        while result["banner_lines"] and not result["banner_lines"][-1].strip():
+            result["banner_lines"].pop()
+
+    # ── art lines: fenced block after "### Art Lines" ────────────────────────
+    art_m = re.search(
+        r'### Art Lines\s*```[^\n]*\n(.*?)```',
+        text, re.DOTALL
+    )
+    if art_m:
+        raw = art_m.group(1).splitlines()
+        # keep lines that are non-empty OR are meaningful whitespace-only art rows
+        # (we keep all of them to preserve row indexing)
+        result["art_lines"] = raw
+        result["art_h"] = len(raw)
+        result["art_w"] = max((len(l) for l in raw), default=46)
+
+    # ── color map: json block after "### Art Color Map" ───────────────────────
+    cmap_m = re.search(
+        r'### Art Color Map\s*```json\s*\n(.*?)```',
+        text, re.DOTALL
+    )
+    if cmap_m:
+        try:
+            result["art_colors"] = json.loads(cmap_m.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    return result
+
+
+_IDENTITY = _load_identity()
+
+BANNER_LINES = _IDENTITY["banner_lines"]
+BANNER_H     = len(BANNER_LINES)   # typically 6
+
+ANIME_ART_LINES  = _IDENTITY["art_lines"]
+ANIME_ART_COLORS = _IDENTITY["art_colors"]
+ART_W = _IDENTITY["art_w"]
+ART_H = _IDENTITY["art_h"]
+
 # ── session ───────────────────────────────────────────────────────────────────
 
 SESSION_ID   = time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "ministral-3:3b-instruct-2512-q4_K_M")
 KOKORO_VOICE = os.getenv("KOKORO_VOICE", "0.2*af_nicole + 0.8*jf_alpha")
 
-# ── banner ────────────────────────────────────────────────────────────────────
+# Identity / owner fields from .env
+AI_NAME    = os.getenv("AI_NAME",    "Aiko")
+OWNER_NAME = os.getenv("OWNER_NAME", "")
+USER_ID    = os.getenv("USER_ID",    "")
 
-BANNER_LINES = [
-    " █████╗ ██╗██╗  ██╗ ██████╗       ██████╗██╗  ██╗ █████╗ ███╗  ██╗",
-    "██╔══██╗██║██║ ██╔╝██╔═══██╗     ██╔════╝██║  ██║██╔══██╗████╗ ██║",
-    "███████║██║█████╔╝ ██║   ██║  ─  ██║     ███████║███████║██╔██╗██║",
-    "██╔══██║██║██╔═██╗ ██║   ██║     ██║     ██╔══██║██╔══██║██║╚████║",
-    "██║  ██║██║██║  ██╗╚██████╔╝     ╚██████╗██║  ██║██║  ██║██║  ███║",
-    "╚═╝  ╚═╝╚═╝╚═╝  ╚═╝ ╚═════╝       ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝   ╚═╝",
-]
-BANNER_H = len(BANNER_LINES)  # 6
-
-# ── ASCII art (left panel) ────────────────────────────────────────────────────
-# Generated from source image, cropped to character, 60x50.
-# Color palette indices per character:
-#   0 = skip (transparent/black)
-#   1 = 236  very dark grey
-#   2 = 239  dark grey
-#   3 = 243  mid-dark grey
-#   4 = 246  mid grey
-#   5 = 249  light grey
-#   6 = 253  near-white
-#   7 = 95   warm dark  (muted rose/maroon — shadow clothing)
-#   8 = 138  warm mid   (dusty rose — mid clothing)
-#   9 = 181  warm bright (light rose — bright clothing/skin)
-
-ART_W = 46
-ART_H = 44
-
-ANIME_ART_LINES = [
-    '                                            ·.',
-    '                                          ```·',
-    '                                              ',
-    '                                           ·:.',
-    '                                           `.:',
-    '                             ```              ',
-    '                     ,,                    .:.',
-    '                   ` ,J+   `              `,;;',
-    '            `      +` =J=`·=:                `',
-    '              .·   `·+1JJ7f·,=.            `·`',
-    '              li    iJYYYYY7J7`            ```',
-    '             `lCt,  :1YJ77YCC;                ',
-    '              .iJC1; .JCJJCf,                 ',
-    '                 =CY=:=it=`                   ',
-    '            :;++,.1C11Yl===:                  ',
-    '           ,+;;+++7YJtl=7+ll                  ',
-    '          `+;,,:,:lll;:;i7i++,+:·             ',
-    '           :;++=,,+;++;;,1Y17f;;=+·           ',
-    '           ,:::,;+++===;,=YCfl7f=;;·``        ',
-    '            ` ..:,;====;;;=7CJ7YY1;:f17=·     ',
-    '             `.` `·:..··,=+;lY1fYJY;:+iti·    ',
-    '              ·`````·`·,+==+;+l7Yl1i``   `··. ',
-    '              :·.````,==+===+,;tY7l;`...,=i++`',
-    '             .:·``·:+==+=+.;=+,+1Cf·`...`.=+=f',
-    '             `···:+==+=+=,··;=+;+17:·...··:=+J',
-    '             `:::;++++==+....++;+,t=·....:··=Y',
-    '             ·:,+==+====+·..·,++=i17;`:....`.t',
-    '             :+=++++;;+++:.:,;+,i1f77;.:....`,',
-    '             ++,,;;,,;;;;+++llll11Jlt;··....··',
-    '             ..=ttf7=l1l7li,tf=tlit=:::..·    ',
-    '              fCJYYCJlC11C1i:l1l11ii7C7ftl;·  ',
-    '             tCl7YJJYf1YiYYY7f7l:+tt=l7JY7i;. ',
-    '            ,CiiCJJYYJ1Y=1YJYY7f;:+l1tii=1Y1tf',
-    '          :=i1,7JJJJJYf7ilYJJJJJ7=l+lJCJfiJY1t',
-    '         :Yi=+;CYYJJYCJ11fJJJYYJ71l1l=llii=YCY',
-    '        :Y1=l;+ff11fflltYYJJ7fi,:;lJ7;+i=i1tii',
-    '        tt=;++,:itttti:l1fftff11i+ii=il=t==i+f',
-    '        .=J7+,i+JCYYYC7====iCCYYJi=il,·:ii;+lJ',
-    '        .111iii,tttttf1fY7i+==;,,.;;,,:iiill+;',
-    '        ·ii+;;+:,,,,,.,tJ7i;.:;=iittf=:lllli=;',
-    '         `:::ltf111tl=,·.,;;f177JJ77J: `··``  ',
-    '            ;711111117,  `.171111117+         ',
-    '            i1f1111f1l    .11111117t          ',
-    '            t1ff11111·    ,7ff11111.          ',
-]
-
-ANIME_ART_COLORS = [
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 7],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 2],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 8, 7],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 8],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 7, 8, 7],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 3, 6, 4, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 8, 8, 8],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 4, 2, 0, 4, 6, 4, 1, 2, 4, 3, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2, 2, 0, 0, 0, 2, 2, 4, 5, 6, 6, 5, 5, 2, 3, 4, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 1],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 4, 4, 0, 0, 0, 1, 4, 9, 6, 6, 6, 6, 6, 5, 6, 5, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 4, 6, 5, 3, 1, 0, 3, 5, 6, 6, 5, 5, 6, 6, 6, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 4, 6, 6, 5, 3, 0, 2, 6, 6, 6, 6, 6, 5, 3, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 4, 6, 6, 4, 3, 8, 8, 9, 8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 8, 8, 8, 8, 7, 5, 6, 5, 5, 6, 9, 8, 4, 4, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 8, 8, 8, 8, 8, 5, 6, 6, 5, 4, 4, 5, 4, 4, 4, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 8, 8, 8, 9, 5, 4, 4, 4, 8, 8, 3, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 5, 6, 5, 5, 5, 8, 8, 8, 8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 7, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 6, 6, 5, 5, 5, 9, 8, 8, 3, 2, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 7, 7, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 5, 6, 6, 5, 6, 6, 5, 8, 8, 5, 5, 5, 4, 2, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 7, 7, 1, 7, 7, 7, 7, 7, 7, 7, 8, 8, 8, 8, 9, 6, 5, 5, 6, 6, 6, 8, 8, 4, 4, 5, 4, 2, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 7, 7, 7, 7, 7, 7, 7, 7, 7, 8, 8, 8, 8, 8, 8, 8, 4, 5, 6, 4, 5, 4, 7, 7, 0, 0, 1, 2, 2, 2, 2, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 7, 7, 7, 7, 7, 1, 7, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 5, 6, 5, 4, 3, 7, 7, 7, 7, 8, 8, 8, 8, 8, 1],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 8, 7, 7, 7, 7, 8, 8, 8, 8, 8, 8, 8, 7, 8, 8, 8, 8, 8, 5, 6, 5, 7, 7, 7, 7, 7, 7, 7, 8, 8, 8, 5],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 7, 7, 7, 8, 8, 8, 8, 8, 8, 8, 8, 8, 7, 7, 8, 8, 8, 8, 8, 5, 5, 3, 7, 7, 7, 7, 7, 7, 8, 8, 8, 6],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 8, 7, 8, 8, 8, 8, 8, 8, 8, 8, 8, 7, 7, 7, 7, 8, 8, 8, 8, 8, 5, 8, 7, 7, 7, 7, 7, 8, 7, 7, 8, 6],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 7, 7, 7, 7, 8, 8, 8, 8, 8, 5, 5, 3, 7, 7, 7, 7, 7, 7, 7, 7, 9],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 7, 7, 8, 8, 8, 8, 8, 4, 5, 5, 5, 5, 4, 7, 7, 7, 7, 7, 7, 7, 8],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 5, 5, 5, 5, 5, 4, 5, 8, 7, 7, 7, 7, 7, 7, 7, 7],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 7, 4, 5, 5, 5, 5, 4, 4, 5, 5, 5, 4, 4, 3, 5, 5, 4, 5, 4, 4, 5, 4, 3, 8, 8, 7, 7, 7, 1, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 5, 6, 6, 6, 6, 6, 6, 4, 6, 5, 5, 6, 5, 4, 3, 5, 5, 4, 5, 5, 4, 4, 5, 6, 5, 5, 5, 4, 3, 2, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 6, 4, 5, 6, 6, 6, 6, 5, 5, 6, 4, 6, 6, 6, 5, 5, 5, 4, 3, 4, 5, 5, 4, 5, 5, 6, 6, 5, 4, 3, 2, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 6, 4, 4, 6, 6, 6, 6, 6, 6, 5, 6, 4, 5, 6, 6, 6, 6, 5, 5, 3, 3, 4, 4, 5, 5, 4, 4, 4, 5, 6, 5, 5, 5],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 4, 4, 5, 3, 5, 6, 6, 6, 6, 6, 6, 5, 5, 4, 4, 6, 6, 6, 6, 6, 6, 5, 4, 4, 4, 4, 6, 6, 6, 5, 4, 6, 6, 5, 5],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 6, 4, 4, 4, 3, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 6, 6, 6, 6, 6, 6, 5, 5, 4, 5, 4, 4, 4, 4, 4, 4, 4, 6, 6, 6],
-    [0, 0, 0, 0, 0, 0, 0, 0, 3, 6, 5, 4, 4, 3, 4, 5, 5, 5, 5, 5, 5, 4, 4, 5, 6, 6, 6, 6, 5, 5, 4, 3, 3, 3, 4, 6, 5, 3, 4, 4, 4, 4, 5, 5, 4, 4],
-    [0, 0, 0, 0, 0, 0, 0, 1, 5, 5, 4, 3, 4, 4, 3, 3, 4, 5, 5, 5, 5, 4, 3, 4, 5, 5, 5, 5, 5, 5, 5, 5, 4, 4, 4, 4, 4, 4, 5, 4, 5, 4, 4, 4, 4, 5],
-    [0, 0, 0, 0, 0, 0, 0, 0, 2, 4, 6, 5, 4, 3, 4, 4, 6, 6, 6, 6, 6, 6, 5, 4, 4, 4, 4, 4, 6, 6, 6, 6, 6, 4, 4, 4, 4, 3, 7, 3, 4, 4, 3, 4, 5, 6],
-    [0, 0, 0, 0, 0, 0, 0, 0, 2, 5, 5, 5, 4, 4, 4, 3, 5, 9, 9, 9, 9, 5, 5, 5, 6, 5, 4, 4, 4, 8, 8, 8, 8, 3, 3, 3, 8, 8, 8, 4, 4, 4, 4, 4, 4, 3],
-    [0, 0, 0, 0, 0, 0, 0, 0, 2, 4, 4, 4, 3, 3, 8, 8, 8, 8, 8, 8, 8, 7, 3, 5, 5, 5, 4, 3, 7, 8, 8, 8, 8, 9, 9, 9, 9, 8, 3, 4, 4, 4, 4, 4, 4, 3],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 3, 3, 9, 9, 9, 9, 5, 9, 9, 9, 8, 8, 2, 2, 3, 3, 8, 9, 9, 5, 5, 6, 6, 5, 5, 6, 3, 0, 2, 2, 2, 2, 1, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 5, 5, 5, 5, 5, 5, 5, 5, 5, 3, 0, 0, 1, 2, 5, 5, 5, 5, 5, 5, 5, 5, 5, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 5, 5, 5, 5, 5, 5, 5, 5, 4, 1, 0, 0, 0, 2, 5, 5, 5, 5, 5, 5, 5, 5, 5, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5, 5, 5, 5, 2, 0, 0, 0, 0, 3, 5, 5, 5, 5, 5, 5, 5, 5, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-]
-
-# Palette: index → terminal 256-color number (or None to skip)
-ART_PALETTE = [None, 236, 239, 243, 246, 249, 253, 95, 138, 181]
-
-LEFT_W = ART_W + 2   # 48: art cols + left/right border chars
+LEFT_W = ART_W + 2   # art cols + left/right border chars
 
 # ── architecture sections ─────────────────────────────────────────────────────
 
@@ -192,7 +148,7 @@ ARCH_SECTIONS = [
         ("Inference engine", "Ollama  (local, offline)"),
         ("Active model",     OLLAMA_MODEL),
         ("Web search",       "SearXNG  (google, bing, ddg)"),
-        ("Persona source",   "soul.md  (persistent)"),
+        ("Persona source",   "persona/soul.md  (persistent)"),
     ]),
     ("VOICE ENGINE", [
         ("TTS backend",      "Kokoro ONNX  (CPU/GPU)"),
@@ -223,8 +179,7 @@ INIT_STEPS = {
     'speak_skip':   ('Voice Output',      'TTS disabled  (--no-voice)'),
 }
 
-SPINNER   = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
-HELP_TEXT = "/quit /exit — end  │  /reset — clear context  │  /voice — toggle voice  │  /clear — wipe memories  │  /memory — show memories  │  /help"
+SPINNER = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
 
 # ── colour pairs ──────────────────────────────────────────────────────────────
 # Pairs 1-8: UI chrome
@@ -239,7 +194,10 @@ CP_WHITE   = 6   # 15  white       — done ticks
 CP_SBARBG  = 7   # black on pink   — status bar bg
 CP_INPUTBG = 8   # cyan on dark    — input line
 
-CP_ART_BASE = 8   # art palette pairs start at 9
+CP_ART_BASE = 8  # art palette pairs start at 9
+
+# Palette: index → terminal 256-color number (or None to skip)
+ART_PALETTE = [None, 236, 239, 243, 246, 249, 253, 95, 138, 181]
 
 def init_colours() -> None:
     curses.start_color()
@@ -273,13 +231,13 @@ class AikoTUI:
     """
     Layout:
       Row 0           : top border
-      Rows 1..BANNER_H: banner
+      Rows 1..BANNER_H: banner text
       Row BANNER_H+1  : banner-bottom / panel-top divider  ╠═══╦═══╣
       Rows PT..bottom : left=art | right=init/arch/chat/sbar/input
       Row h-1         : bottom border
 
-    Key change: status bar and input are INSIDE the right column only.
-    The left column (art) runs the full height from panel-top to bottom border.
+    Clock and owner tag are placed in the top-right of banner rows 1–2,
+    never overwriting the last banner art line.
     """
 
     INPUT_PROMPT = "  ❯  "
@@ -321,21 +279,8 @@ class AikoTUI:
     def _dims(self):
         return self._scr.getmaxyx()
 
-    def _right_content_rows(self, h):
-        """
-        Right column interior height (excluding top/bot borders + banner).
-        Breakdown from chat_top to (h-2):
-          - dynamic chat rows
-          - 1 row: sbar separator
-          - 1 row: sbar
-          - 1 row: input separator
-          - 1 row: input
-        """
-        return h - self._pt - 1  # rows available from pt to (h-2) inclusive
-
     def _chat_bot(self, h):
         """Last chat row (exclusive bottom for chat text)."""
-        # From bottom: border at h-1, input at h-2, inp-sep at h-3, sbar at h-4, sbar-sep at h-5
         return h - 6
 
     # ── low-level ─────────────────────────────────────────────────────────────
@@ -349,7 +294,6 @@ class AikoTUI:
             return
         try:
             if y == h - 1 and x + len(text) >= w:
-                # Safe handling for the bottom-right corner to prevent terminal scrolling
                 self._scr.addstr(y, x, text[:w - x - 1], attr)
                 try:
                     self._scr.insstr(y, w - 1, text[w - x - 1:w - x], attr)
@@ -365,11 +309,14 @@ class AikoTUI:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _draw_banner(self, h, w):
-        pk  = curses.color_pair(CP_PINK) | curses.A_BOLD
-        dim = curses.color_pair(CP_DIM)
+        pk = curses.color_pair(CP_PINK)  | curses.A_BOLD
+        wh = curses.color_pair(CP_WHITE) | curses.A_BOLD
+        cy = curses.color_pair(CP_CYAN)  | curses.A_BOLD
 
+        # Top border
         self._wr(0, 0, '╔' + '═'*(w-2) + '╗', pk)
 
+        # Banner art lines (rows 1 … BANNER_H)
         for i, line in enumerate(BANNER_LINES):
             row = 1 + i
             pad = max(1, (w - len(line)) // 2)
@@ -378,10 +325,20 @@ class AikoTUI:
             self._wr(row, w-1, '║', pk)
             self._wr(row, pad, line, pk)
 
-        tag = f" Aiko v0.1.1  [{SESSION_ID}]  {int(time.time()-self._ts)}s "
-        self._wr(BANNER_H, w-1-len(tag), tag, dim)
+        # ── info overlays — placed in rows 1 and 2, right-aligned ────────────
+        # Row 1: live clock (ticks every second)
+        clock_str = f" {time.strftime('%B %d, %Y  %I:%M:%S %p')} "
+        self._wr(1, w - 1 - len(clock_str), clock_str, wh)
 
-        # panel-top divider: ╠═══╦═══╣
+        # Row 2: version + owner name  (no elapsed-seconds suffix)
+        ver_parts = [f" {AI_NAME} v0.1.1"]
+        if USER_ID:
+            ver_parts.append(f"[{USER_ID}]")
+        ver_parts.append(f"[{SESSION_ID}] ")
+        ver_str = "  │  ".join(ver_parts)
+        self._wr(2, w - 1 - len(ver_str), ver_str, cy)
+
+        # Panel-top divider: ╠═══╦═══╣
         self._wr(BANNER_H+1, 0,
             '╠' + '═'*(LEFT_W-1) + '╦' + '═'*(w-LEFT_W-2) + '╣', pk)
 
@@ -390,9 +347,9 @@ class AikoTUI:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _draw_left_col(self, h, w):
-        pk = curses.color_pair(CP_PINK) | curses.A_BOLD
-        pt = self._pt
-        bot = h - 2  # last content row (row h-1 is the bottom border)
+        pk  = curses.color_pair(CP_PINK) | curses.A_BOLD
+        pt  = self._pt
+        bot = h - 2
 
         for row in range(pt, bot + 1):
             art_idx = row - pt
@@ -425,13 +382,11 @@ class AikoTUI:
                         pass
                     x += 1
             else:
-                # blank rows below art
                 try:
                     self._scr.addstr(row, 1, ' ' * (LEFT_W - 1))
                 except curses.error:
                     pass
 
-        # bottom-left corner connector
         self._wr(h-1, 0, '╚', pk)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -439,76 +394,83 @@ class AikoTUI:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _draw_right_col(self, h, w, buf):
-        pk  = curses.color_pair(CP_PINK) | curses.A_BOLD
+        pk        = curses.color_pair(CP_PINK)   | curses.A_BOLD
         sbar_attr = curses.color_pair(CP_SBARBG) | curses.A_BOLD
         inp_attr  = curses.color_pair(CP_INPUTBG)
 
         pt  = self._pt
-        sep = self._arch_sep_row   # row of arch/chat divider
-        cb  = self._chat_bot(h)    # last chat text row (exclusive)
+        sep = self._arch_sep_row
+        cb  = self._chat_bot(h)
 
-        rx  = LEFT_W + 1           # first content col in right panel
-        rw  = w - LEFT_W - 2       # usable width (before right border)
+        rx  = LEFT_W + 1
+        rw  = w - LEFT_W - 2
 
-        # Right border for entire right column (pt to h-2)
+        # Right-column vertical borders
         for row in range(pt, h - 1):
             self._wr(row, LEFT_W, '║', pk)
             self._wr(row, w - 1,  '║', pk)
 
-        # Clear top section
+        # Clear arch/init area
         for row in range(pt, sep):
             try:
                 self._scr.addstr(row, rx, ' ' * (rw - 1))
             except curses.error:
                 pass
 
-        # ── top: init or arch ─────────────────────────────────────────────────
         if self._phase == 'init':
             self._draw_right_init(pt, sep, rx, rw)
         else:
             self._draw_right_arch(pt, sep, rx, rw)
 
-        # ── arch/chat divider ─────────────────────────────────────────────────
+        # Arch/chat separator
         self._wr(sep, LEFT_W,
             '╠' + '═'*(w-LEFT_W-2) + '╣', pk)
 
-        # ── chat area ─────────────────────────────────────────────────────────
         self._draw_chat_area(sep + 1, cb, rx, rw, w)
 
-        # ── chat/sbar separator ───────────────────────────────────────────────
+        # Chat/sbar separator
         sbar_sep = cb + 1
         self._wr(sbar_sep, LEFT_W,   '╠', pk)
         self._wr(sbar_sep, w - 1,    '╣', pk)
         try:
-            self._scr.addstr(sbar_sep, LEFT_W + 1, '═' * rw, curses.color_pair(CP_PINK) | curses.A_BOLD)
+            self._scr.addstr(sbar_sep, LEFT_W + 1, '═' * rw,
+                             curses.color_pair(CP_PINK) | curses.A_BOLD)
         except curses.error:
             pass
 
-        # ── status bar (right panel only) ─────────────────────────────────────
-        sr      = sbar_sep + 1
-        elapsed = int(time.time() - self._ts)
-        model_short = OLLAMA_MODEL[:20]
-        left  = f"  ✦ {model_short}  │  mem0  │  Kokoro  │  {SESSION_ID[:18]}  "
-        right = f"  {elapsed}s  "
-        bar   = left + ' ' * max(0, rw - len(left) - len(right)) + right
+        # ── status bar ────────────────────────────────────────────────────────
+        sr         = sbar_sep + 1
+        left_parts = ["✦", AI_NAME, OLLAMA_MODEL, "mem0", "Kokoro", SESSION_ID]
+        if USER_ID:
+            left_parts.insert(1, USER_ID)
+        right = "  "   # no elapsed seconds here
+
+        left = "  " + "  │  ".join(left_parts) + "  "
+        while len(left) + len(right) > rw and left_parts:
+            left_parts.pop()
+            left = "  " + "  │  ".join(left_parts) + "  "
+
+        bar = left + ' ' * max(0, rw - len(left) - len(right)) + right
         try:
-            self._scr.addstr(sr, rx, bar[:rw], sbar_attr)
+            self._scr.addstr(sr, rx, bar[:rw - 1], sbar_attr)
         except curses.error:
             pass
 
-        # ── sbar/input separator ──────────────────────────────────────────────
+        # Sbar/input separator
         ir = sr + 1
         self._wr(ir, LEFT_W,   '╠', pk)
         self._wr(ir, w - 1,    '╣', pk)
         try:
-            self._scr.addstr(ir, LEFT_W + 1, '═' * rw, curses.color_pair(CP_PINK) | curses.A_BOLD)
+            self._scr.addstr(ir, LEFT_W + 1, '═' * rw,
+                             curses.color_pair(CP_PINK) | curses.A_BOLD)
         except curses.error:
             pass
 
-        # ── input line (right panel only) ─────────────────────────────────────
+        # ── input line ────────────────────────────────────────────────────────
         inp_r   = ir + 1
         content = self.INPUT_PROMPT + ''.join(buf)
-        line    = content[:rw].ljust(rw)
+        visible_start = max(0, len(content) - rw + 1)
+        line = content[visible_start:].ljust(rw)
         try:
             self._scr.addstr(inp_r, rx, line, inp_attr)
         except curses.error:
@@ -520,14 +482,14 @@ class AikoTUI:
             self._wr(bot_r, LEFT_W, '╩', pk)
             self._wr(bot_r, w - 1,  '╝', pk)
             try:
-                self._scr.addstr(bot_r, LEFT_W + 1, '═' * rw, curses.color_pair(CP_PINK) | curses.A_BOLD)
+                self._scr.addstr(bot_r, LEFT_W + 1, '═' * rw,
+                                 curses.color_pair(CP_PINK) | curses.A_BOLD)
             except curses.error:
                 pass
 
-        # Full bottom border left portion (╚...═...╩ already drawn by left col + right col)
         self._wr(bot_r, 0, '╚' + '═' * (LEFT_W - 1), pk)
 
-        # cursor
+        # Reposition cursor to end of input line
         cx = min(rx + len(content), w - 2)
         try:
             self._scr.move(inp_r, cx)
@@ -538,13 +500,12 @@ class AikoTUI:
 
     def _draw_right_init(self, pt, pb, rx, rw):
         pk  = curses.color_pair(CP_PINK)   | curses.A_BOLD
-        cy  = curses.color_pair(CP_CYAN)   | curses.A_BOLD
-        pu  = curses.color_pair(CP_PURPLE) | curses.A_BOLD
+        cy  = curses.color_pair(CP_CYAN)
         dim = curses.color_pair(CP_DIM)
-        wh  = curses.color_pair(CP_WHITE)  | curses.A_BOLD
+        wh  = curses.color_pair(CP_WHITE)
 
-        self._wr(pt,   rx, " INITIALISING NEURAL SYSTEMS", pk)
-        self._wr(pt+1, rx, ' ─' * min(16, (rw-1)//2), pu)
+        self._wr(pt,   rx, " INITIALIZING NEURAL SYSTEMS", pk)
+        self._wr(pt+1, rx, ' ─' * min(14, (rw-1)//2), pk)
 
         row = pt + 2
         for (key, state, detail) in self._init_log:
@@ -555,11 +516,11 @@ class AikoTUI:
 
             if state == 'loading':
                 sp = SPINNER[self._frame]
-                self._wr(row, rx,    f"  {sp} ", cy)
-                self._wr(row, rx+4,  f"{lbl:<20}", cy)
+                self._wr(row, rx,    f"  {sp} ", wh)
+                self._wr(row, rx+4,  f"{lbl:<20}", wh)
                 self._wr(row, rx+24, txt[:rw-25], dim)
             elif state == 'done':
-                self._wr(row, rx,    "  ✓ ", wh)
+                self._wr(row, rx,    "  ✓ ", cy)
                 self._wr(row, rx+4,  f"{lbl:<20}", wh)
                 self._wr(row, rx+24, txt[:rw-25], dim)
             elif state == 'skip':
@@ -567,8 +528,8 @@ class AikoTUI:
                 self._wr(row, rx+4,  f"{lbl:<20}", dim)
                 self._wr(row, rx+24, txt[:rw-25], dim)
             elif state == 'error':
-                self._wr(row, rx,    "  ✗ ", pk)
-                self._wr(row, rx+4,  f"{lbl:<20}", pk)
+                self._wr(row, rx,    "  ✗ ", wh)
+                self._wr(row, rx+4,  f"{lbl:<20}", wh)
                 self._wr(row, rx+24, txt[:rw-25], curses.color_pair(CP_MAUVE))
             row += 1
 
@@ -576,31 +537,30 @@ class AikoTUI:
                    all(s in ('done','skip','error') for (_,s,_) in self._init_log))
         if all_fin and row < pb - 1:
             self._wr(row+1, rx, "  [ ALL SYSTEMS ONLINE ]",
-                     curses.color_pair(CP_CYAN)|curses.A_BOLD)
+                     curses.color_pair(CP_CYAN) | curses.A_BOLD)
 
     # ── right panel: arch ─────────────────────────────────────────────────────
 
     def _draw_right_arch(self, pt, pb, rx, rw):
         pk  = curses.color_pair(CP_PINK)   | curses.A_BOLD
         cy  = curses.color_pair(CP_CYAN)   | curses.A_BOLD
-        pu  = curses.color_pair(CP_PURPLE) | curses.A_BOLD
         mv  = curses.color_pair(CP_MAUVE)
-        dim = curses.color_pair(CP_DIM)
+        wh  = curses.color_pair(CP_WHITE)
 
-        self._wr(pt,   rx, " NEURAL ARCHITECTURE", cy)
-        self._wr(pt+1, rx, ' ─' * min(16, (rw-1)//2), pu)
+        self._wr(pt,   rx, " NEURAL ARCHITECTURE", pk)
+        self._wr(pt+1, rx, ' ─' * min(10, (rw-1)//2), pk)
 
         row = pt + 2
         for section, items in ARCH_SECTIONS:
             if row >= pb - 1:
                 break
-            self._wr(row, rx, f"  {section}", pk)
+            self._wr(row, rx, f"  {section}", cy)
             row += 1
             for name, val in items:
                 if row >= pb:
                     break
-                self._wr(row, rx,     f"    {name:<18}", dim)
-                self._wr(row, rx+22,  val[:rw-23],       mv)
+                self._wr(row, rx,    f"    {name:<18}", wh)
+                self._wr(row, rx+22, val[:rw-23],       mv)
                 row += 1
 
     # ── chat area ─────────────────────────────────────────────────────────────
@@ -610,14 +570,14 @@ class AikoTUI:
         out   = []
         for sender, text in self._messages:
             if sender == 'you':
-                pre   = " You: "
+                pre   = f" {USER_ID}: "
                 ind   = " " * len(pre)
                 lines = textwrap.wrap(text, avail - len(pre)) or [""]
                 out.append(('Y', pre + lines[0]))
                 for l in lines[1:]:
                     out.append(('Y', ind + l))
             elif sender == 'aiko':
-                pre   = " Aiko: "
+                pre   = f" {AI_NAME}: "
                 ind   = " " * len(pre)
                 lines = textwrap.wrap(text, avail - len(pre)) or [""]
                 out.append(('A', pre + lines[0]))
@@ -627,7 +587,7 @@ class AikoTUI:
             elif sender == 'sys':
                 out.append(('S', f"  ◈  {text}"))
         if self._streaming:
-            pre   = " Aiko: "
+            pre   = f" {AI_NAME}: "
             ind   = " " * len(pre)
             lines = textwrap.wrap(self._streaming, avail - len(pre)) or [""]
             out.append(('A', pre + lines[0]))
@@ -636,8 +596,8 @@ class AikoTUI:
         return out
 
     def _draw_chat_area(self, ct, cb, rx, rw, w):
-        pk  = curses.color_pair(CP_PINK)  | curses.A_BOLD
-        cy  = curses.color_pair(CP_CYAN)  | curses.A_BOLD
+        pk  = curses.color_pair(CP_PINK)   | curses.A_BOLD
+        cy  = curses.color_pair(CP_CYAN)
         mv  = curses.color_pair(CP_MAUVE)
         dim = curses.color_pair(CP_DIM)
         pu  = curses.color_pair(CP_PURPLE)
@@ -656,13 +616,32 @@ class AikoTUI:
             row = ct + i
             if row >= cb:
                 break
-            attr = cy if kind == 'Y' else (mv if kind == 'A' else dim)
+            if kind == 'Y':
+                prefix    = " You: "
+                bold_attr = cy | curses.A_BOLD
+                text_attr = cy
+            elif kind == 'A':
+                prefix    = f" {AI_NAME}: "
+                bold_attr = mv | curses.A_BOLD
+                text_attr = mv
+            else:
+                prefix    = ""
+                bold_attr = dim
+                text_attr = dim
+
             try:
                 self._scr.addstr(row, rx, ' ' * (rw - 1))
             except curses.error:
                 pass
-            self._wr(row, rx, line[:rw-1], attr)
-            self._wr(row, w-1, '║', pk)
+
+            if prefix and line.startswith(prefix):
+                self._wr(row, rx, prefix, bold_attr)
+                self._wr(row, rx + len(prefix),
+                          line[len(prefix):][:rw - len(prefix) - 1], text_attr)
+            else:
+                self._wr(row, rx, line[:rw - 1], text_attr)
+
+            self._wr(row, w - 1, '║', pk)
 
         for row in range(ct + len(visible), cb):
             try:
@@ -682,7 +661,6 @@ class AikoTUI:
     def _draw(self, buf=None):
         with self._lock:
             h, w = self._dims()
-            # Minimum: banner(8) + arch_rows + chat(3) + sbar(1) + inp(1) + borders(3)
             min_h = BANNER_H + 2 + ARCH_ROWS + 8
             min_w = LEFT_W + 40
             if h < min_h or w < min_w:
@@ -740,45 +718,65 @@ class AikoTUI:
                 self._scroll = 0
 
     # ─────────────────────────────────────────────────────────────────────────
-    # INPUT LOOP
+    # INPUT LOOP — ticker thread keeps clock/uptime alive while idle/typing
     # ─────────────────────────────────────────────────────────────────────────
 
     def get_input(self):
-        h, w = self._dims()
-        buf  = []
+        buf = []
         curses.curs_set(1)
-        self._scr.nodelay(False)
+        self._scr.nodelay(True)  # non-blocking so ticker can run
 
-        while True:
-            self._draw(buf=buf)
-            try:
-                ch = self._scr.get_wch()
-            except curses.error:
-                continue
+        # Background ticker: redraws every second to update clock
+        stop_tick = threading.Event()
+        def _ticker():
+            while not stop_tick.is_set():
+                self._draw(buf=buf)
+                stop_tick.wait(1.0)
+        tick_t = threading.Thread(target=_ticker, daemon=True)
+        tick_t.start()
 
-            if ch in ('\n', '\r', curses.KEY_ENTER):
-                break
-            elif ch in (curses.KEY_BACKSPACE, '\x7f', '\b'):
-                if buf: buf.pop()
-            elif ch == curses.KEY_PPAGE:
-                with self._lock:
-                    rw = w - LEFT_W - 2
-                    rendered = self._render_lines(rw)
-                    ch_h = self._chat_bot(h) - self._chat_top
-                    self._scroll = min(
-                        self._scroll + max(1, ch_h - 2),
-                        max(0, len(rendered) - ch_h))
-            elif ch == curses.KEY_NPAGE:
-                with self._lock:
-                    ch_h = self._chat_bot(h) - self._chat_top
-                    self._scroll = max(0, self._scroll - max(1, ch_h - 2))
-            elif ch in ('\x03', '\x04'):
-                curses.curs_set(0)
-                raise KeyboardInterrupt
-            elif isinstance(ch, str) and ch.isprintable():
-                buf.append(ch)
+        try:
+            while True:
+                try:
+                    ch = self._scr.get_wch()
+                except curses.error:
+                    time.sleep(0.05)  # yield CPU
+                    continue
 
-        curses.curs_set(0)
+                h, w = self._dims()
+
+                if ch in ('\n', '\r', curses.KEY_ENTER):
+                    break
+                elif ch in (curses.KEY_BACKSPACE, '\x7f', '\b'):
+                    if buf: buf.pop()
+                elif ch == curses.KEY_PPAGE:
+                    with self._lock:
+                        rw = w - LEFT_W - 2
+                        rendered = self._render_lines(rw)
+                        ch_h = self._chat_bot(h) - self._chat_top
+                        self._scroll = min(
+                            self._scroll + max(1, ch_h - 2),
+                            max(0, len(rendered) - ch_h))
+                elif ch == curses.KEY_NPAGE:
+                    with self._lock:
+                        ch_h = self._chat_bot(h) - self._chat_top
+                        self._scroll = max(0, self._scroll - max(1, ch_h - 2))
+                elif ch in ('\x03', '\x04'):
+                    curses.curs_set(0)
+                    stop_tick.set()
+                    tick_t.join()
+                    raise KeyboardInterrupt
+                elif isinstance(ch, str) and ch.isprintable():
+                    buf.append(ch)
+
+                # Redraw immediately on keypress for responsive feel
+                self._draw(buf=buf)
+
+        finally:
+            stop_tick.set()
+            tick_t.join()
+            curses.curs_set(0)
+
         return ''.join(buf).strip()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -906,7 +904,29 @@ def _run(stdscr, args):
                 memorize.clear()
                 tui.add_message('sys', 'All persistent memories cleared from database.')
             elif cmd == '/help':
-                tui.add_message('sys', HELP_TEXT)
+                tui.add_message('sys', '/quit /exit    — end session')
+                tui.add_message('sys', '/reset         — clear context')
+                tui.add_message('sys', '/voice         — toggle voice')
+                tui.add_message('sys', '/clear         — wipe memories')
+                tui.add_message('sys', '/memory        — show memories')
+                tui.add_message('sys', '/web <query>   — web search')
+                tui.add_message('sys', '/help          — show this list')
+            elif cmd.startswith('/web '):
+                query = user_input[5:].strip()
+                if query:
+                    tui.add_message('sys', f'Searching: "{query}"')
+                    tui._draw()
+                    from core.tools import web_search
+                    results = web_search(query)
+                    think._history.append({"role": "user", "content": results})
+                    def token_cb(token):
+                        tui.stream_token(token)
+                        tui._draw(buf=[])
+                    think.chat(f"Based on the search results, answer: {query}", token_callback=token_cb)
+                    tui.stream_commit()
+                    tui._draw()
+                else:
+                    tui.add_message('sys', 'Usage: /web <query>')
             else:
                 tui.add_message('sys', f'Unknown command: {user_input}')
             tui._draw()
@@ -925,7 +945,7 @@ def _run(stdscr, args):
         def token_cb(token):
             if token.startswith("__SEARCHING__:"):
                 query = token.split(":", 1)[1].strip()
-                tui.add_message('sys', f"Searching the web for: \"{query}\"...")
+                tui.add_message('sys', f'Searching the web for: "{query}"...')
                 tui._draw(buf=[])
             else:
                 tui.stream_token(token)

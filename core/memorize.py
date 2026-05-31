@@ -4,6 +4,9 @@ Aiko's persistent memory via mem0 + Qdrant.
 Abstracts all mem0 calls so think.py stays clean.
 Swap this file out if mem0 doesn't make the cut for Grace.
 """
+from dotenv import load_dotenv
+load_dotenv()
+
 import os
 from typing import Optional
 from mem0 import Memory
@@ -31,6 +34,7 @@ MEM0_CONFIG = {
         "config": {
             "model": "BAAI/bge-base-en-v1.5",
             "embedding_dims": 768,
+            #"model_kwargs": {"device": "cpu"},
         },
     },
 }
@@ -47,6 +51,10 @@ class AikoMemorize:
 
     def __init__(self, silent: bool = False) -> None:
         """Initialise mem0 Memory and connect to Qdrant."""
+        os.environ.setdefault(
+            "FASTEMBED_CACHE_PATH",
+            os.path.expanduser(os.getenv("FASTEMBED_CACHE_PATH", "~/.cache/fastembed"))
+        )
         if not silent:
             print("[memorize] Connecting to Qdrant and initialising mem0...")
         self._mem = Memory.from_config(MEM0_CONFIG)
@@ -98,4 +106,4 @@ class AikoMemorize:
     def clear(self, user_id: str = AIKO_USER_ID) -> None:
         """Wipe all memories for a user. Use carefully."""
         self._mem.delete_all(user_id=user_id)
-        print(f"[memorize] Cleared all memories for user '{user_id}'.")
+        #print(f"[memorize] Cleared all memories for user '{user_id}'.")

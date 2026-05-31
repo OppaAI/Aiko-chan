@@ -1,6 +1,6 @@
 services:
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.18.1
     container_name: aiko_qdrant
     restart: unless-stopped
     ports:
@@ -12,7 +12,7 @@ services:
       - QDRANT__SERVICE__GRPC_PORT=6334
 
   searxng:
-    image: searxng/searxng:latest
+    image: searxng/searxng:2026.5.31-300695de5
     container_name: aiko_searxng
     restart: unless-stopped
     ports:

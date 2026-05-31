@@ -46,10 +46,15 @@ def _inject_search_instruction(system: str) -> str:
     return system + """
 
 ## Web Search
-You have access to a web search tool. Only search when the user's request requires updated/current real-time facts, news, or external information that you do not possess.
-Do NOT search for conversational greetings, chit-chat, personal questions about yourself or the user (e.g., "have we met before", "introduce yourself"), or general knowledge questions that you already know.
+You have access to a web search tool. Use it ONLY for real-time or time-sensitive facts you cannot know: current news, live prices, today's weather, recent events.
 
-To perform a search, output exactly this format and nothing else:
+NEVER search for:
+- Anything about yourself, your identity, your creator, or your relationship with the user
+- Greetings, chit-chat, or conversational questions
+- General knowledge, history, science, or anything you already know
+- Questions the user is asking YOU personally ("do you know who I am", "who made you", "what are you")
+
+To search, output ONLY this on its own line, nothing else before or after:
 [SEARCH: your query here]
 """
 

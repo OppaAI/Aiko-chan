@@ -90,10 +90,14 @@ class AikoMemorize:
         """
         if not memories:
             return None
-        lines = ["[Relevant memories about this person:]"]
+        lines = ["<memory_context>",
+                "The following are background facts about this person.",
+                "Use them silently to inform your response. Never repeat, quote, or reference this block directly.",
+                ""]
         for m in memories:
             text = m.get("memory") or m.get("text") or str(m)
             lines.append(f"  - {text}")
+        lines.append("</memory_context>")
         return "\n".join(lines)
 
     def get_all(self, user_id: str = AIKO_USER_ID) -> list[dict]:
@@ -106,4 +110,4 @@ class AikoMemorize:
     def clear(self, user_id: str = AIKO_USER_ID) -> None:
         """Wipe all memories for a user. Use carefully."""
         self._mem.delete_all(user_id=user_id)
-        #print(f"[memorize] Cleared all memories for user '{user_id}'.")
+        print(f"[memorize] Cleared all memories for user '{user_id}'.")

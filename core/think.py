@@ -23,7 +23,7 @@ os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 
 from core.memorize import AikoMemorize
 from core.speak    import AikoSpeak
-from core.tools    import web_search
+#from core.tools    import web_search
 
 
 # ── config ────────────────────────────────────────────────────────────────────
@@ -33,7 +33,7 @@ OLLAMA_MODEL         = os.getenv("OLLAMA_MODEL",    "ministral-3:3b-instruct-251
 CONTEXT_WINDOW_TURNS = int(os.getenv("CONTEXT_WINDOW_TURNS", 20))
 
 _PERSONA_PATH = Path(__file__).resolve().parent.parent / "persona" / "soul.md"
-_SEARCH_RE    = re.compile(r"\[SEARCH:\s*(.+?)\]", re.IGNORECASE)
+#_SEARCH_RE    = re.compile(r"\[SEARCH:\s*(.+?)\]", re.IGNORECASE)
 
 
 def _load_persona() -> str:
@@ -41,23 +41,27 @@ def _load_persona() -> str:
         raise FileNotFoundError(f"soul.md not found at {_PERSONA_PATH}")
     return _PERSONA_PATH.read_text(encoding="utf-8").strip()
 
-
-def _inject_search_instruction(system: str) -> str:
-    return system + """
+#def _inject_search_instruction(system: str) -> str:
+#    return system + """
 
 ## Web Search
-You have access to a web search tool. Use it ONLY for real-time or time-sensitive facts you cannot know: current news, live prices, today's weather, recent events.
+#You have access to a web search tool. Use it ONLY for real-time or time-sensitive facts you cannot know: current news, live prices, today's weather, recent events.
 
-NEVER search for:
-- Anything about yourself, your identity, your creator, or your relationship with the user
-- Greetings, chit-chat, or conversational questions
-- General knowledge, history, science, or anything you already know
-- Questions the user is asking YOU personally ("do you know who I am", "who made you", "what are you")
-
-To search, output ONLY this on its own line, nothing else before or after:
-[SEARCH: your query here]
-"""
-
+#NEVER search for:
+#- Anything about yourself, your identity, your creator, or your relationship with the user
+#- Greetings, chit-chat, or conversational questions
+#- General knowledge, history, science, or anything you already know
+#- Questions the user is asking YOU personally
+#
+#To search, output ONLY this on its own line, nothing else before or after:
+#[SEARCH: your query here]
+#
+## Grounding Rule
+#When search results are provided to you, they represent current ground truth.
+#You MUST base your answer on the search results.
+#Do NOT contradict or ignore search results with your own prior knowledge.
+#If the search results conflict with what you think you know, the search results are correct.
+#"""
 
 # ── think ─────────────────────────────────────────────────────────────────────
 
@@ -112,7 +116,7 @@ class AikoThink:
         memory_block = self._memorize.format_for_context(memories)
 
         # 2. build system prompt
-        system = _inject_search_instruction(self._persona)
+        system = self._persona
         if memory_block:
             system = f"{system}\n\n{memory_block}"
 

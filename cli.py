@@ -378,7 +378,7 @@ class AikoTUI:
             self._wr(row, w-1, '║', pk)
             self._wr(row, pad, line, pk)
 
-        tag = f" Aiko v2.0  [{SESSION_ID}]  {int(time.time()-self._ts)}s "
+        tag = f" Aiko v0.1.1  [{SESSION_ID}]  {int(time.time()-self._ts)}s "
         self._wr(BANNER_H, w-1-len(tag), tag, dim)
 
         # panel-top divider: ╠═══╦═══╣

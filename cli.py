@@ -356,24 +356,25 @@ class AikoTUI:
         # Panel-top divider: ╠═══╦═══╣
         self._wr(BANNER_H+1, 0,
             '╠' + '═'*(LEFT_W-1) + '╦' + '═'*(w-LEFT_W-2) + '╣', pk)
-
+            
     def _draw_clock_only(self):
         """Redraw only the clock cell in row 1 — no full repaint."""
         with self._lock:
             h, w = self._dims()
             wh = curses.color_pair(CP_WHITE) | curses.A_BOLD
             clock_str = f" {time.strftime('%B %d, %Y  %I:%M:%S %p')} "
-        self._wr(1, w - 1 - len(clock_str), clock_str, wh)
-        # Restore cursor to input line after clock repaint
-        rx = LEFT_W + 1
-        rw = w - LEFT_W - 2
-        inp_r = self._chat_bot(h) + 3  # sbar_sep(+1) + sbar(+1) + inp_sep(+1)
-        try:
-            self._scr.move(inp_r, rx)
-        except curses.error:
-            pass
-        self._scr.refresh()
-
+            self._wr(1, w - 1 - len(clock_str), clock_str, wh)
+            rx = LEFT_W + 1
+            rw = w - LEFT_W - 2
+            inp_r = self._chat_bot(h) + 4
+            content = self.INPUT_PROMPT + ''.join(getattr(self, '_input_buf', []))
+            cx = min(rx + len(content), w - 2)
+            try:
+                self._scr.move(inp_r, cx)
+            except curses.error:
+                pass
+            self._scr.refresh()
+        
     # ─────────────────────────────────────────────────────────────────────────
     # DRAW LEFT COLUMN — art fills entire height from pt to bottom border
     # ─────────────────────────────────────────────────────────────────────────
@@ -755,6 +756,7 @@ class AikoTUI:
 
     def get_input(self):
         buf = []
+        self._input_buf = buf
         curses.curs_set(1)
         self._scr.nodelay(True)  # non-blocking so ticker can run
 
@@ -977,6 +979,7 @@ def _run(stdscr, args):
         def token_cb(token):
             if token.startswith("__SEARCHING__:"):
                 query = token.split(":", 1)[1].strip()
+                tui.stream_commit()          # discard any partial [SEARCH:...] that leaked
                 tui.add_message('sys', f'Searching the web for: "{query}"...')
                 tui._draw(buf=[])
             else:

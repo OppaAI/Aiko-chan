@@ -348,7 +348,7 @@ class AikoTUI:
         self._wr(1, w - 1 - len(clock_str), clock_str, wh)
 
         # Row 2: version tag
-        ver_str = f" {AI_NAME} v0.1.1 "
+        ver_str = f" {AI_NAME} v0.1.5 "
         self._wr(2, w - 1 - len(ver_str), ver_str, cy)
 
         # Panel-top divider: ╠═══╦═══╣

@@ -8,13 +8,14 @@ Aiko's cognitive loop.
   - Stores the turn into long-term memory after each response (background thread)
 """
 
+import logging
 import os
+import threading
+from ollama import Client
+from pathlib import Path
+import queue
 import re
 import warnings
-import logging
-import threading
-from pathlib import Path
-from ollama import Client
 
 warnings.filterwarnings("ignore")
 logging.getLogger("phonemizer").setLevel(logging.ERROR)
@@ -79,7 +80,9 @@ class AikoThink:
         self._speak          = speak
         self._persona        = _load_persona()
         self._history:       list[dict] = []
-        self._mem_thread:    threading.Thread | None = None
+        self._mem_queue = queue.Queue()
+        self._mem_worker = threading.Thread(target=self._mem_write_loop, daemon=True)
+        self._mem_worker.start()
         self._warmup_thread: threading.Thread | None = None
 
         #print(f"[think] Ollama client ready — model: {OLLAMA_MODEL}")
@@ -155,9 +158,8 @@ class AikoThink:
         self._history.clear()
 
     def wait_for_memory(self) -> None:
-        if self._mem_thread and self._mem_thread.is_alive():
-            self._mem_thread.join()
-
+        self._mem_queue.join()
+      
     # ── internal ──────────────────────────────────────────────────────────────
 
     def _stream_response(self, messages: list[dict]) -> str:
@@ -261,8 +263,13 @@ class AikoThink:
         return "".join(full_response)
 
     def _store_async(self, user_input: str, response_text: str) -> None:
-        """Fire memory write in a background thread — non-blocking."""
-        def _write():
+        """Enqueue memory write — never blocks the chat path."""
+        self._mem_queue.put((user_input, response_text))
+    
+    def _mem_write_loop(self) -> None:
+        """Serial background worker — processes writes in order."""
+        while True:
+            user_input, response_text = self._mem_queue.get()
             try:
                 self._memorize.add([
                     {"role": "user",      "content": user_input},
@@ -270,9 +277,5 @@ class AikoThink:
                 ])
             except Exception as exc:
                 print(f"[memorize] async write failed: {exc}")
-
-        if self._mem_thread and self._mem_thread.is_alive():
-            self._mem_thread.join()
-
-        self._mem_thread = threading.Thread(target=_write, daemon=True)
-        self._mem_thread.start()
+            finally:
+                self._mem_queue.task_done()

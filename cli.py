@@ -938,11 +938,14 @@ def _run(stdscr, args):
     memorize = memorize[0]
     think    = think_ref[0]
 
+    tts_enabled = not args.text   # mirrors startup mode
+    asr_enabled = not args.text   # mirrors startup mode
+
     # ── main loop ─────────────────────────────────────────────────────────────
     while True:
         try:
-            if listen:
-                user_input = tui.get_voice_input(listen)
+            if listen and asr_enabled:
+                user_input = tui.get_voice_input(listen)                
             else:
                 user_input = tui.get_input()
         except KeyboardInterrupt:
@@ -957,7 +960,21 @@ def _run(stdscr, args):
 
         if user_input.startswith('/'):
             cmd = user_input.lower()
-            if cmd in ('/quit', '/exit'):
+            if cmd == '/voice':
+                if speak is None:
+                    tui.add_message('sys', 'TTS unavailable — started in --text mode.')
+                else:
+                    tts_enabled = not tts_enabled
+                    think.set_speak(speak if tts_enabled else None)
+                    state = 'ON  🔊' if tts_enabled else 'OFF 🔇'
+                    tui.add_message('sys', f'Voice output (TTS): {state}')
+            elif cmd == '/listen':
+                if listen is None:
+                    tui.add_message('sys', 'ASR unavailable — started in --text mode.')
+                else:
+                    asr_enabled = not asr_enabled
+                    state = 'ON  🎤' if asr_enabled else 'OFF ⌨'
+                    tui.add_message('sys', f'Voice input  (ASR): {state}')            if cmd in ('/quit', '/exit'):
                 tui.add_message('sys', 'Already leaving? ...Be safe out there.')
                 tui._draw()
                 think.wait_for_memory()
@@ -983,6 +1000,8 @@ def _run(stdscr, args):
                 tui.add_message('sys', '/clear         — wipe long-term memories')
                 tui.add_message('sys', '/memory        — show stored memories')
                 tui.add_message('sys', '/web <query>   — web search')
+                tui.add_message('sys', '/voice         — toggle TTS on/off')
+                tui.add_message('sys', '/listen        — toggle ASR on/off')
                 tui.add_message('sys', '/help          — show this list')
             elif cmd.startswith('/web '):
                 query = user_input[5:].strip()

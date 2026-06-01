@@ -157,7 +157,6 @@ aiko/
   * Decoupled LLM → TTS pipeline.
   * Callback-based response streaming.
   * Realtime speech synthesis.
-  * Migration from Kokoro to PocketTTS.
   * Background LLM warmup to eliminate cold-start latency.
   * Background TTS warmup to eliminate cold-start latency.
   * Soul persona system (`persona/soul.md`).
@@ -177,7 +176,7 @@ aiko/
   * Push-to-talk mode.
   * Voice Activity Detection (VAD).
   * XTTS v2 anime voice profile.
-  * Replace PocketTTS with XTTS v2.
+  * Replace TTS with XTTS v2.
   * Fully hands-free voice conversations on Jetson.
 
 * [ ] **Phase 3 — Face**

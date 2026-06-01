@@ -164,8 +164,8 @@ class AikoListen:
                                 break                            # utterance complete
                         # pre-speech silence — discard to avoid bloating buffer
 
-        except sd.PortAudioError as exc:
-            print(f"[listen] microphone error: {exc}")
+        except sd.PortAudioError:
+            _cb(status_callback, "__IDLE__")
             return None
 
         if speech_count < MIN_SPEECH_CHUNKS:

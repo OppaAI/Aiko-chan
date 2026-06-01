@@ -974,7 +974,8 @@ def _run(stdscr, args):
                 else:
                     asr_enabled = not asr_enabled
                     state = 'ON  🎤' if asr_enabled else 'OFF ⌨'
-                    tui.add_message('sys', f'Voice input  (ASR): {state}')            if cmd in ('/quit', '/exit'):
+                    ui.add_message('sys', f'Voice input  (ASR): {state}')
+            elif cmd in ('/quit', '/exit'):                   
                 tui.add_message('sys', 'Already leaving? ...Be safe out there.')
                 tui._draw()
                 think.wait_for_memory()

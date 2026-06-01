@@ -3,8 +3,8 @@ cli.py
 
 Aiko-chan CLI — full-screen curses TUI, cyberpunk edition.
 Usage:
-    python cli.py               # normal chat
-    python cli.py --no-voice    # disable TTS
+    python cli.py               # full voice — ASR (faster-whisper) + TTS (Kokoro)
+    python cli.py --text        # keyboard input + no TTS
     python cli.py --debug       # show memory debug info each turn
     python cli.py --clear-mem   # wipe all stored memories and exit
 
@@ -189,9 +189,11 @@ INIT_STEPS = {
     'mem_qdrant':   ('Vector Database',   'Connecting to Qdrant  ·  localhost:6333'),
     'mem_embed':    ('Embedding Model',   'Loading BGE-base-en-v1.5  ·  768-dim vectors'),
     'mem_ready':    ('Memory Cortex',     'mem0 ready  ·  long-term recall online'),
-    'speak_kokoro': ('TTS Engine',        'Initializing Kokoro Engine  ·  Female voice speaking English with a hint of Japanese ascent'),
+    'speak_kokoro': ('TTS Engine',        'Initializing Kokoro Engine  ·  Female voice'),
     'speak_ready':  ('Voice Output',      'Audio pipeline ready  ·  24 kHz sample-rate'),
-    'speak_skip':   ('Voice Output',      'TTS disabled  (--no-voice)'),
+    'speak_skip':   ('Voice Output',      'TTS disabled  (--text mode)'),
+    'listen_ready': ('Speech Input',      'faster-whisper ready  ·  base.en model loaded'),
+    'listen_skip':  ('Speech Input',      'ASR disabled  (--text mode)'),
 }
 
 SPINNER = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
@@ -345,14 +347,14 @@ class AikoTUI:
         clock_str = f" {time.strftime('%B %d, %Y  %I:%M:%S %p')} "
         self._wr(1, w - 1 - len(clock_str), clock_str, wh)
 
-        # Row 2: version + owner name  (no elapsed-seconds suffix)
+        # Row 2: version tag
         ver_str = f" {AI_NAME} v0.1.1 "
         self._wr(2, w - 1 - len(ver_str), ver_str, cy)
 
         # Panel-top divider: ╠═══╦═══╣
         self._wr(BANNER_H+1, 0,
             '╠' + '═'*(LEFT_W-1) + '╦' + '═'*(w-LEFT_W-2) + '╣', pk)
-            
+
     def _draw_clock_only(self):
         """Redraw only the clock cell in row 1 — no full repaint."""
         with self._lock:
@@ -370,7 +372,7 @@ class AikoTUI:
             except curses.error:
                 pass
             self._scr.refresh()
-        
+
     # ─────────────────────────────────────────────────────────────────────────
     # DRAW LEFT COLUMN — art fills entire height from pt to bottom border
     # ─────────────────────────────────────────────────────────────────────────
@@ -472,7 +474,7 @@ class AikoTUI:
         left_parts = ["✦", AI_NAME, OLLAMA_MODEL, "mem0", "Kokoro", SESSION_ID]
         if USER_ID:
             left_parts.insert(1, USER_ID)
-        right = "  "   # no elapsed seconds here
+        right = "  "
 
         left = "  " + "  │  ".join(left_parts) + "  "
         while len(left) + len(right) > rw and left_parts:
@@ -747,16 +749,15 @@ class AikoTUI:
                 self._scroll = 0
 
     # ─────────────────────────────────────────────────────────────────────────
-    # INPUT LOOP — ticker thread keeps clock/uptime alive while idle/typing
+    # INPUT LOOP — ticker thread keeps clock alive while idle/typing
     # ─────────────────────────────────────────────────────────────────────────
 
     def get_input(self):
         buf = []
         self._input_buf = buf
         curses.curs_set(1)
-        self._scr.nodelay(True)  # non-blocking so ticker can run
+        self._scr.nodelay(True)
 
-        # Background ticker: redraws every second to update clock
         stop_tick = threading.Event()
         def _ticker():
             while not stop_tick.is_set():
@@ -770,7 +771,7 @@ class AikoTUI:
                 try:
                     ch = self._scr.get_wch()
                 except curses.error:
-                    time.sleep(0.05)  # yield CPU
+                    time.sleep(0.05)
                     continue
 
                 h, w = self._dims()
@@ -799,7 +800,6 @@ class AikoTUI:
                 elif isinstance(ch, str) and ch.isprintable():
                     buf.append(ch)
 
-                # Redraw immediately on keypress for responsive feel
                 self._draw(buf=buf)
 
         finally:
@@ -808,6 +808,47 @@ class AikoTUI:
             curses.curs_set(0)
 
         return ''.join(buf).strip()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # VOICE INPUT — show listening indicator while waiting for speech
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def get_voice_input(self, listen):
+        """
+        Block on listen.listen(), updating the input line with a mic indicator.
+        Returns transcribed text or "" on silence/error.
+        """
+        self._input_buf = []
+        result_holder  = [None]
+        done_event     = threading.Event()
+
+        def _status_cb(token):
+            if token == '__LISTENING__':
+                with self._lock:
+                    self._input_buf = list("🎤  Listening …")
+            elif token == '__TRANSCRIBING__':
+                with self._lock:
+                    self._input_buf = list("⚙  Transcribing …")
+            elif token == '__IDLE__':
+                with self._lock:
+                    self._input_buf = []
+            self._draw(buf=list(self._input_buf))
+
+        def _run():
+            result_holder[0] = listen.listen(status_callback=_status_cb)
+            done_event.set()
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+
+        # Keep clock ticking while waiting
+        while not done_event.is_set():
+            self._draw_clock_only()
+            done_event.wait(1.0)
+
+        self._input_buf = []
+        self._draw(buf=[])
+        return result_holder[0] or ""
 
     # ─────────────────────────────────────────────────────────────────────────
     # SPIN LOOP
@@ -828,15 +869,16 @@ class AikoTUI:
 
 def parse_args():
     p = argparse.ArgumentParser(description="Aiko-chan CLI")
+    p.add_argument("--text",      action="store_true",
+                   help="text input + no TTS (default: voice ASR + TTS)")
     p.add_argument("--debug",     action="store_true")
-    p.add_argument("--no-voice",  action="store_true")
     p.add_argument("--clear-mem", action="store_true")
     return p.parse_args()
 
 
 def _run(stdscr, args):
-    tui   = AikoTUI(stdscr, no_voice=args.no_voice, debug=args.debug)
-    speak = AikoSpeak(silent=True) if not args.no_voice else None
+    tui   = AikoTUI(stdscr, no_voice=args.text, debug=args.debug)
+    speak = AikoSpeak(silent=True) if not args.text else None
 
     memorize  = [None]
     think_ref = [None]
@@ -871,14 +913,22 @@ def _run(stdscr, args):
     t1.start(); t2.start()
     t1.join();  t2.join()
 
-    if speak:
+    # ── voice init (skipped in --text mode) ───────────────────────────────────
+    listen = None
+    if not args.text:
         tui.step_loading('speak_kokoro')
         speak.warmup()
         tui.step_done('speak_kokoro')
         tui.step_loading('speak_ready')
         tui.step_done('speak_ready')
+        tui.step_loading('listen_ready')
+        from core.listen import AikoListen
+        listen = AikoListen()
+        listen.join_warmup()
+        tui.step_done('listen_ready')
     else:
         tui.step_skip('speak_skip')
+        tui.step_skip('listen_skip')
 
     spin_stop.set()
     spin_t.join()
@@ -888,9 +938,13 @@ def _run(stdscr, args):
     memorize = memorize[0]
     think    = think_ref[0]
 
+    # ── main loop ─────────────────────────────────────────────────────────────
     while True:
         try:
-            user_input = tui.get_input()
+            if listen:
+                user_input = tui.get_voice_input(listen)
+            else:
+                user_input = tui.get_input()
         except KeyboardInterrupt:
             tui.add_message('sys', "Fine... I'll be here when you come back.")
             tui._draw()
@@ -920,25 +974,14 @@ def _run(stdscr, args):
                     tui.add_message('sys', f'{len(all_mem)} memories stored:')
                     for i, m in enumerate(all_mem, 1):
                         tui.add_message('sys', f'  {i:02d}. {m.get("memory") or m.get("text") or m}')
-            elif cmd == '/voice':
-                if think._speak:
-                    think._speak = None
-                    tui.add_message('sys', 'Voice output: DISABLED')
-                else:
-                    if not speak:
-                        speak = AikoSpeak(silent=True)
-                        speak.warmup()
-                    think._speak = speak
-                    tui.add_message('sys', 'Voice output: ENABLED')
             elif cmd == '/clear':
                 memorize.clear()
                 tui.add_message('sys', 'All persistent memories cleared from database.')
             elif cmd == '/help':
                 tui.add_message('sys', '/quit /exit    — end session')
-                tui.add_message('sys', '/reset         — clear context')
-                tui.add_message('sys', '/voice         — toggle voice')
-                tui.add_message('sys', '/clear         — wipe memories')
-                tui.add_message('sys', '/memory        — show memories')
+                tui.add_message('sys', '/reset         — clear short-term context')
+                tui.add_message('sys', '/clear         — wipe long-term memories')
+                tui.add_message('sys', '/memory        — show stored memories')
                 tui.add_message('sys', '/web <query>   — web search')
                 tui.add_message('sys', '/help          — show this list')
             elif cmd.startswith('/web '):
@@ -975,7 +1018,7 @@ def _run(stdscr, args):
         def token_cb(token):
             if token.startswith("__SEARCHING__:"):
                 query = token.split(":", 1)[1].strip()
-                tui.stream_commit()          # discard any partial [SEARCH:...] that leaked
+                tui.stream_commit()
                 tui.add_message('sys', f'Searching the web for: "{query}"...')
                 tui._draw(buf=[])
             else:

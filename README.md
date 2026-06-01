@@ -143,37 +143,35 @@ aiko/
 - [x] **Phase 1 — Soul**
   CLI chatbot with persistent memory (mem0 + Qdrant + Ollama).
   Async memory writes. Web search via SearXNG.
-  - [ ] Replace per-turn `thread.join()` with a dedicated worker + queue for truly non-blocking memory writes.
-
+- [x] **Phase 1.5 — Stream**
+  Streaming architecture overhaul. Decoupled LLM-to-TTS pipeline (RealtimeTTS + Kokoro/PocketTTS).
+  Background warmup to eliminate cold-start latency. Soul persona system (`persona/soul.md`).
+  Non-blocking memory queue (dedicated worker replaces per-turn `thread.join()`).
+  Jetson AI Lab dependency index.
 - [ ] **Phase 2 — Voice**
   faster-whisper STT for mic input.
-  XTTS v2 TTS with anime voice profile.
+  XTTS v2 TTS with anime voice profile (replaces Kokoro).
   Push-to-talk or VAD (voice activity detection).
   Fully hands-free conversation on Jetson.
-
 - [ ] **Phase 3 — Face**
   VRM/VRoid 3D avatar rendered in browser via `@pixiv/three-vrm`.
   Expression states: idle, happy, annoyed, flustered, thinking.
   Lip sync driven by TTS audio output.
   WebSocket bridge: Python backend → browser frontend.
-
 - [ ] **Phase 4 — Presence**
   Emotion state machine — Aiko tracks mood across the conversation.
   Proactive messages — she reaches out when she hasn't heard from you.
   Long-term relationship progression — her tone evolves over time.
   Deeper memory: episodic recall, shared references, inside jokes.
-
 - [ ] **Phase 5 — Mobile**
   React Native or Flutter app.
   WAN access — talk to Aiko from anywhere via phone.
   Push notifications for proactive messages.
   Voice-first UI with avatar.
-
 - [ ] **Phase 6 — Multimodal**
   Camera / CV input — she can see what you share with her.
   Image understanding: "what do you think of this?" with photo.
   Optional: she reacts to your expressions via webcam.
-
 - [ ] **Phase 7 — Autonomy**
   Aiko runs on a schedule independently.
   Reads news, learns new things, forms opinions.

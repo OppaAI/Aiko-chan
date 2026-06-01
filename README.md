@@ -140,51 +140,99 @@ aiko/
 
 ## Roadmap
 
-- [x] **Phase 1 — Soul**
-  CLI chatbot with persistent memory (mem0 + Qdrant + Ollama).
-  Async memory writes. Web search via SearXNG.
+# Roadmap
 
-- [x] **Phase 1.5 — Stream**
-  Aiko-chan TUI CLI with cyberpunk ASCII art layout.
-  Streaming architecture overhaul. Decoupled LLM-to-TTS pipeline (RealtimeTTS + Kokoro/PocketTTS).
-  Background warmup to eliminate cold-start latency. Soul persona system (`persona/soul.md`).
-  Non-blocking memory queue (dedicated worker replaces per-turn `thread.join()`).
-  Jetson AI Lab dependency index.
+* [x] **Phase 1 — Soul**
 
-- [ ] **Phase 2 — Voice**
-  faster-whisper STT for mic input.
-  XTTS v2 TTS with anime voice profile (replaces Kokoro).
-  Push-to-talk or VAD (voice activity detection).
-  Fully hands-free conversation on Jetson.
+  * CLI chatbot architecture.
+  * Local inference via Ollama.
+  * Persistent memory using mem0 + Qdrant.
+  * Async memory writes.
+  * Web search integration via SearXNG.
 
-- [ ] **Phase 3 — Face**
-  VRM/VRoid 3D avatar rendered in browser via `@pixiv/three-vrm`.
-  Expression states: idle, happy, annoyed, flustered, thinking.
-  Lip sync driven by TTS audio output.
-  WebSocket bridge: Python backend → browser frontend.
+* [x] **Phase 1.5 — Stream**
 
-- [ ] **Phase 4 — Presence**
-  Emotion state machine — Aiko tracks mood across the conversation.
-  Proactive messages — she reaches out when she hasn't heard from you.
-  Long-term relationship progression — her tone evolves over time.
-  Deeper memory: episodic recall, shared references, inside jokes.
+  * Aiko-chan TUI CLI with cyberpunk ASCII interface.
+  * Streaming inference architecture overhaul.
+  * Decoupled LLM → TTS pipeline.
+  * Callback-based response streaming.
+  * Realtime speech synthesis.
+  * Migration from Kokoro to PocketTTS.
+  * Background LLM warmup to eliminate cold-start latency.
+  * Background TTS warmup to eliminate cold-start latency.
+  * Soul persona system (`persona/soul.md`).
+  * Identity metadata and character framework.
+  * Architectural renaming (`brain → think`, `memory → memorize`).
+  * Non-blocking memory queue worker.
+  * Removal of synchronous memory write bottlenecks.
+  * CLI execution flow refactor.
+  * Command-line argument parser redesign.
+  * Audio streaming stability improvements.
+  * Search output filtering and instruction refinement.
+  * Jetson AI Lab dependency migration.
 
-- [ ] **Phase 5 — Mobile**
-  React Native or Flutter app.
-  WAN access — talk to Aiko from anywhere via phone.
-  Push notifications for proactive messages.
-  Voice-first UI with avatar.
+* [ ] **Phase 2 — Voice**
 
-- [ ] **Phase 6 — Multimodal**
-  Camera / CV input — she can see what you share with her.
-  Image understanding: "what do you think of this?" with photo.
-  Optional: she reacts to your expressions via webcam.
+  * Microphone input via faster-whisper.
+  * Push-to-talk mode.
+  * Voice Activity Detection (VAD).
+  * XTTS v2 anime voice profile.
+  * Replace PocketTTS with XTTS v2.
+  * Fully hands-free voice conversations on Jetson.
 
-- [ ] **Phase 7 — Autonomy**
-  Aiko runs on a schedule independently.
-  Reads news, learns new things, forms opinions.
-  Brings topics *to* you instead of only reacting.
-  Optional: social media presence, posts on your behalf.
+* [ ] **Phase 3 — Face**
+
+  * VRM/VRoid avatar support.
+  * Browser-based rendering via `@pixiv/three-vrm`.
+  * Expression system:
+
+    * Idle
+    * Happy
+    * Annoyed
+    * Flustered
+    * Thinking
+  * Lip-sync driven by generated speech audio.
+  * WebSocket bridge between Python backend and browser frontend.
+  * Real-time avatar interaction.
+
+* [ ] **Phase 4 — Presence**
+
+  * Persistent emotional state machine.
+  * Mood tracking across conversations.
+  * Long-term relationship progression.
+  * Shared references and inside jokes.
+  * Episodic memory recall.
+  * Context-aware personality evolution.
+  * Proactive messaging when inactive for extended periods.
+
+* [ ] **Phase 5 — Mobile**
+
+  * Mobile application.
+  * React Native or Flutter frontend.
+  * WAN access from anywhere.
+  * Push notifications.
+  * Voice-first user experience.
+  * Avatar integration on mobile devices.
+
+* [ ] **Phase 6 — Multimodal**
+
+  * Camera and computer vision input.
+  * Image understanding and discussion.
+  * Visual context integration into conversations.
+  * Webcam-based expression awareness.
+  * User-shared image analysis.
+
+* [ ] **Phase 7 — Autonomy**
+
+  * Scheduled independent operation.
+  * Background information gathering.
+  * News and knowledge consumption.
+  * Topic discovery and self-directed exploration.
+  * Initiates conversations instead of only responding.
+  * Develops persistent interests and opinions.
+  * Optional social media presence.
+  * Optional autonomous content posting.
+
 
 ---
 

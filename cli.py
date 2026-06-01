@@ -166,7 +166,7 @@ ARCH_SECTIONS = [
         ("Persona source",   "persona/soul.md  (persistent)"),
     ]),
     ("VOICE ENGINE", [
-        ("TTS backend",      "Kokoro ONNX  (CPU/GPU)"),
+        ("TTS backend",      "Realtime TTS + Kokoro"),
         ("Voice profile",    KOKORO_VOICE),
         ("Voice speed",      f"{os.getenv('KOKORO_SPEED', '1.0')}x"),
         ("Language",         os.getenv("KOKORO_LANG", "en-us")),
@@ -189,7 +189,7 @@ INIT_STEPS = {
     'mem_qdrant':   ('Vector Database',   'Connecting to Qdrant  ·  localhost:6333'),
     'mem_embed':    ('Embedding Model',   'Loading BGE-base-en-v1.5  ·  768-dim vectors'),
     'mem_ready':    ('Memory Cortex',     'mem0 ready  ·  long-term recall online'),
-    'speak_kokoro': ('TTS Engine',        'Initialising Kokoro ONNX  ·  voice: af_heart'),
+    'speak_kokoro': ('TTS Engine',        'Initializing Kokoro Engine  ·  Female voice speaking English with a hint of Japanese ascent'),
     'speak_ready':  ('Voice Output',      'Audio pipeline ready  ·  24 kHz sample-rate'),
     'speak_skip':   ('Voice Output',      'TTS disabled  (--no-voice)'),
 }

@@ -6,21 +6,23 @@
 This project is a **precursor and testing sandbox** for [Grace / AuRoRA](https://github.com/OppaAI/AGi).  
 Core tech (mem0 + Qdrant memory, Ollama inference, async pipelines) is battle-tested here before graduating to Grace.
 
-![Aiko-chan](assets/phase-1.jpg)
+![Aiko-chan](assets/phase-1.5.jpg)
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    subgraph P1["Phase 1 — current"]
-        YOU[You / CLI] --> BRAIN[Brain\nOllama LLM]
-        BRAIN <-->|async write| MEM[Memory\nmem0 + Qdrant]
-        BRAIN <-->|on demand| SEARCH[Web search\nSearXNG]
+    subgraph P15["Phase 1.5 — current"]
+        YOU[You / TUI] --> THINK[Think\nOllama LLM]
+        THINK <-->|async write| MEM[Memorize\nmem0 + Qdrant]
+        THINK <-->|on demand| SEARCH[Web search\nSearXNG]
+        THINK --> SPEAK[Speak\nKokoro TTS]
+        LISTEN[Listen\nfaster-whisper ASR] --> THINK
     end
 
     subgraph P2["Phase 2 — voice"]
-        STT[STT\nfaster-whisper] --> TTS[TTS\nXTTS v2]
-        TTS --> VAD[VAD\nSilero]
+        VAD[VAD\nSilero]
+        PTT[Push-to-talk]
     end
 
     subgraph P3["Phase 3 — face"]
@@ -36,10 +38,9 @@ flowchart TD
         PRESENCE --> MOBILE --> MULTI --> AUTO
     end
 
-    P1 --> P2 --> P3 --> P4567
+    P15 --> P2 --> P3 --> P4567
     MEM -.->|findings| GRACE[Grace / AuRoRA]
 ```
-
 
 ---
 
@@ -51,7 +52,9 @@ flowchart TD
 | Long-term memory | mem0 + Qdrant (Docker) |
 | Embeddings | Ollama (`nomic-embed-text-v2-moe`) |
 | Web search | SearXNG (local, self-hosted) |
-| Interface | CLI → Voice → Avatar → Mobile |
+| TTS | Kokoro (via RealtimeTTS) |
+| ASR | faster-whisper |
+| Interface | TUI → Voice → Avatar → Mobile |
 
 ---
 
@@ -68,7 +71,7 @@ flowchart TD
 ollama pull nomic-embed-text-v2-moe
 ```
 
-### 2. Start Qdrant
+### 2. Start Qdrant + SearXNG (Docker containers)
 
 ```bash
 docker compose up -d
@@ -86,18 +89,22 @@ uv sync
 
 ```bash
 cp .env.example .env
-# edit .env — set your Ollama URL, model, SearXNG URL
+# edit .env — set your Ollama URL, model, SearXNG URL, Kokoro voice
 ```
 
 ### 5. Talk to Aiko-chan
 
 ```bash
+# Full voice mode — ASR input + TTS output
 uv run python cli.py
 
-# with memory debug output each turn:
+# Text mode — keyboard input, no TTS
+uv run python cli.py --text
+
+# Show memory debug output each turn
 uv run python cli.py --debug
 
-# wipe all stored memories:
+# Wipe all stored memories and exit
 uv run python cli.py --clear-mem
 ```
 
@@ -109,7 +116,11 @@ uv run python cli.py --clear-mem
 |---|---|
 | `/quit` or `/exit` | End the session |
 | `/reset` | Clear short-term context (long-term memory persists) |
-| `/memory` | Print all stored memories (debug) |
+| `/memory` | Print all stored memories |
+| `/clear` | Wipe all long-term memories from the database |
+| `/web <query>` | Run a web search and ask Aiko about the results |
+| `/voice` | Toggle TTS on/off at runtime |
+| `/listen` | Toggle ASR on/off at runtime (falls back to keyboard) |
 | `/help` | Show command list |
 
 ---
@@ -119,28 +130,26 @@ uv run python cli.py --clear-mem
 ```text
 aiko/
 ├── core/
-│   ├── brain.py        # Ollama chat loop, search intercept, async memory
-│   ├── memory.py       # mem0 + Qdrant wrapper
-│   └── tools.py        # Web search via SearXNG
-├── voice/
-│   ├── stt.py          # Phase 2 — faster-whisper STT
-│   └── tts.py          # Phase 2 — XTTS v2 TTS
-├── avatar/
-│   └── index.html      # Phase 3 — VRM avatar viewer
-├── soul.md              # Aiko's soul and personality — edit freely
-├── cli.py              # CLI entry point
+│   ├── think.py        # Ollama chat loop, streaming, search intercept, warmup
+│   ├── memorize.py     # mem0 + Qdrant wrapper, async queue worker
+│   ├── speak.py        # Kokoro TTS pipeline, background warmup
+│   ├── listen.py       # faster-whisper ASR, VAD, status callbacks
+│   ├── tools.py        # Web search via SearXNG
+│   └── silence.py      # Stderr suppression utility
+├── persona/
+│   ├── soul.md         # Aiko's personality, rules, and voice — edit freely
+│   └── identity.md     # Banner text, ASCII art, and color map for TUI
+├── cli.py              # Curses TUI entry point
 ├── docker-compose.yml  # Qdrant
-├── project.toml        # uv dependencies
-├── uv.lock             # uv dependencies
-├── .env.example        # .env settings example
-└── README.md           # This Readme
+├── pyproject.toml      # uv dependencies
+├── uv.lock             # uv lockfile
+├── .env.example        # Environment variable reference
+└── README.md           # This file
 ```
 
 ---
 
 ## Roadmap
-
-# Roadmap
 
 * [x] **Phase 1 — Soul**
 
@@ -156,11 +165,11 @@ aiko/
   * Streaming inference architecture overhaul.
   * Decoupled LLM → TTS pipeline.
   * Callback-based response streaming.
-  * Realtime speech synthesis.
+  * Realtime speech synthesis via Kokoro.
   * Background LLM warmup to eliminate cold-start latency.
   * Background TTS warmup to eliminate cold-start latency.
   * Soul persona system (`persona/soul.md`).
-  * Identity metadata and character framework.
+  * Identity metadata and character framework (`persona/identity.md`).
   * Architectural renaming (`brain → think`, `memory → memorize`).
   * Non-blocking memory queue worker.
   * Removal of synchronous memory write bottlenecks.
@@ -175,21 +184,13 @@ aiko/
   * Microphone input via faster-whisper.
   * Push-to-talk mode.
   * Voice Activity Detection (VAD).
-  * XTTS v2 anime voice profile.
-  * Replace TTS with XTTS v2.
   * Fully hands-free voice conversations on Jetson.
 
 * [ ] **Phase 3 — Face**
 
   * VRM/VRoid avatar support.
   * Browser-based rendering via `@pixiv/three-vrm`.
-  * Expression system:
-
-    * Idle
-    * Happy
-    * Annoyed
-    * Flustered
-    * Thinking
+  * Expression system (idle, happy, annoyed, flustered, thinking).
   * Lip-sync driven by generated speech audio.
   * WebSocket bridge between Python backend and browser frontend.
   * Real-time avatar interaction.
@@ -206,12 +207,11 @@ aiko/
 
 * [ ] **Phase 5 — Mobile**
 
-  * Mobile application.
-  * React Native or Flutter frontend.
+  * Mobile application (React Native or Flutter).
   * WAN access from anywhere.
   * Push notifications.
   * Voice-first user experience.
-  * Avatar integration on mobile devices.
+  * Avatar integration on mobile.
 
 * [ ] **Phase 6 — Multimodal**
 
@@ -225,13 +225,10 @@ aiko/
 
   * Scheduled independent operation.
   * Background information gathering.
-  * News and knowledge consumption.
   * Topic discovery and self-directed exploration.
   * Initiates conversations instead of only responding.
   * Develops persistent interests and opinions.
-  * Optional social media presence.
-  * Optional autonomous content posting.
-
+  * Optional social media presence and autonomous content posting.
 
 ---
 

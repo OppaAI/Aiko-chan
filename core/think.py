@@ -157,6 +157,10 @@ class AikoThink:
     def reset_context(self) -> None:
         self._history.clear()
 
+    def set_speak(self, speak):
+      """Hot-swap the TTS backend. Pass None to silence, speak instance to restore."""
+      self._speak = speak
+    
     def wait_for_memory(self) -> None:
         self._mem_queue.join()
       

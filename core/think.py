@@ -131,17 +131,17 @@ class AikoThink:
         response_text = self._stream_response(messages)
 
         # 6. handle search trigger if present
-        search_match = _SEARCH_RE.search(response_text)
-        if search_match:
-            query = search_match.group(1).strip()
-            if not self._token_callback:
-                print(f"\n[search] {query}", flush=True)
-            if self._token_callback:
-                self._token_callback(f"__SEARCHING__: {query}")
-            results = web_search(query)
-            messages.append({"role": "assistant", "content": response_text})
-            messages.append({"role": "user",      "content": results})
-            response_text = self._stream_response(messages)
+        #search_match = _SEARCH_RE.search(response_text)
+        #if search_match:
+        #    query = search_match.group(1).strip()
+        #    if not self._token_callback:
+        #        print(f"\n[search] {query}", flush=True)
+        #    if self._token_callback:
+        #        self._token_callback(f"__SEARCHING__: {query}")
+        #    results = web_search(query)
+        #    messages.append({"role": "assistant", "content": response_text})
+        #    messages.append({"role": "user",      "content": results})
+        #    response_text = self._stream_response(messages)
 
         # 7. append assistant turn to history
         self._history.append({"role": "assistant", "content": response_text})
@@ -179,6 +179,17 @@ class AikoThink:
                 model=OLLAMA_MODEL,
                 messages=messages,
                 stream=True,
+                options={
+                    "num_ctx":        4096,   # context window size
+                    "temperature":    0.75,   # creative but not unhinged
+                    "repeat_penalty": 1.18,   # firm anti-loop
+                    "repeat_last_n":  256,    # long lookback for repetition detection
+                    "num_predict":    400,    # hard cap — no infinite loops
+                    "top_p":          0.90,   # nucleus sampling, keeps it natural
+                    "top_k":          40,     # standard
+                    "tfs_z":          1.0,    # tail-free sampling off (neutral)
+                    "stop":           ["<|im_end|>", "</s>", "[INST]"],
+                }
             )
 
             for chunk in stream:
@@ -221,7 +232,7 @@ class AikoThink:
                             print(token, end="", flush=True)
 
                 assembled = "".join(full_response)
-                if self._speak and token and not _SEARCH_RE.search(assembled):
+                if self._speak and token: # and not _SEARCH_RE.search(assembled):
                     self._speak.feed(token)
                     tts_started = True
 

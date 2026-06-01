@@ -325,7 +325,7 @@ class AikoTUI:
 
     def _draw_banner(self, h, w):
         pk = curses.color_pair(CP_PINK)  | curses.A_BOLD
-        wh = curses.color_pair(CP_WHITE) | curses.A_BOLD
+        wh = curses.color_pair(CP_WHITE)
         cy = curses.color_pair(CP_CYAN)  | curses.A_BOLD
 
         # Top border
@@ -346,11 +346,7 @@ class AikoTUI:
         self._wr(1, w - 1 - len(clock_str), clock_str, wh)
 
         # Row 2: version + owner name  (no elapsed-seconds suffix)
-        ver_parts = [f" {AI_NAME} v0.1.1"]
-        if USER_ID:
-            ver_parts.append(f"[{USER_ID}]")
-        ver_parts.append(f"[{SESSION_ID}] ")
-        ver_str = "  │  ".join(ver_parts)
+        ver_str = f" {AI_NAME} v0.1.1 "
         self._wr(2, w - 1 - len(ver_str), ver_str, cy)
 
         # Panel-top divider: ╠═══╦═══╣
@@ -650,7 +646,7 @@ class AikoTUI:
             if row >= cb:
                 break
             if kind == 'Y':
-                prefix    = " You: "
+                prefix    = f" {USER_ID}: "
                 bold_attr = cy | curses.A_BOLD
                 text_attr = cy
             elif kind == 'A':

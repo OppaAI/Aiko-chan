@@ -27,7 +27,8 @@ flowchart TD
 
     subgraph P2["Phase 2 — voice"]
         VAD[VAD\nSilero]
-        PTT[Push-to-talk]
+        IRT[Interactive talk]
+        VCL[Voice Cloning TTS]
     end
 
     subgraph P3["Phase 3 — face"]

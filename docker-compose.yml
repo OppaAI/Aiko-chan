@@ -19,8 +19,11 @@ services:
       - "8081:8080"
     volumes:
       - ./searxng:/etc/searxng
+    env_file:
+      - .env
     environment:
       - SEARXNG_BASE_URL=http://localhost:8081
+      - SEARXNG_SECRET=${SEARXNG_SECRET}
 
 volumes:
   qdrant_data:

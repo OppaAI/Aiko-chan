@@ -1,7 +1,7 @@
 use_default_settings: true
 
 server:
-  secret_key: "90499db6cc90ebb5ff132f491bb4281c0f01878413895b2124c57219dad5ba42"
+  secret_key: "change-me"
   limiter: false
   image_proxy: false
   method: "GET"

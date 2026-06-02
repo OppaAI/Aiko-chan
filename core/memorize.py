@@ -37,9 +37,11 @@ MEM0_CONFIG = {
         "config": {
             "model": "BAAI/bge-base-en-v1.5",
             "embedding_dims": 768,
-            # FIX: Fastembed uses "onnx_providers" to choose the device.
-            # Specifying 'CPUExecutionProvider' strictly locks it out of CUDA.
-            "onnx_providers": ["CPUExecutionProvider"],
+            # FIX: Nest the ONNX execution provider inside model_kwargs.
+            # This passes Mem0 validation while forcing FastEmbed onto the CPU.
+            "model_kwargs": {
+                "onnx_providers": ["CPUExecutionProvider"]
+            },
         },
     },
 }

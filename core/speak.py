@@ -169,9 +169,12 @@ class AikoSpeak:
         """Feed a token iterator and start async playback. Non-blocking."""
         if not self._init_engine():
             return
-        self.stop()
-        self._stream.feed(self._sanitized_iterator(token_iterator))
-        self._play_async()
+        try:
+            self.stop()
+            self._stream.feed(self._sanitized_iterator(token_iterator))
+            self._play_async()
+        except Exception as e:
+            print(f"[speak] feed_and_play error: {e}")
 
     def is_playing(self) -> bool:
         if not self._stream:

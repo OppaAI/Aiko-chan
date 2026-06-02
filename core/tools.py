@@ -41,7 +41,10 @@ def web_search(query: str, max_results: int = 3) -> str:
         return f"[search failed: request error: {e}]"
     except ValueError:
         return "[search failed: invalid JSON response]"
-
+        
+    if not isinstance(data, dict):
+        return "[search failed: unexpected response format]"
+        
     results = data.get("results", [])[:max_results]
     if not results:
         return f"[no results found for: {query}]"

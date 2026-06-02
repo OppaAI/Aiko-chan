@@ -6,21 +6,23 @@
 This project is a **precursor and testing sandbox** for [Grace / AuRoRA](https://github.com/OppaAI/AGi).  
 Core tech (mem0 + Qdrant memory, Ollama inference, async pipelines) is battle-tested here before graduating to Grace.
 
-![Aiko-chan](assets/phase-1.jpg)
+![Aiko-chan](assets/phase-1.5.jpg)
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    subgraph P1["Phase 1 — current"]
-        YOU[You / CLI] --> BRAIN[Brain\nOllama LLM]
-        BRAIN <-->|async write| MEM[Memory\nmem0 + Qdrant]
-        BRAIN <-->|on demand| SEARCH[Web search\nSearXNG]
+    subgraph P15["Phase 1.5 — current"]
+        YOU[You / TUI] --> THINK[Think\nOllama LLM]
+        THINK <-->|async write| MEM[Memorize\nmem0 + Qdrant]
+        THINK <-->|on demand| SEARCH[Web search\nSearXNG]
+        THINK --> SPEAK[Speak\nKokoro TTS]
+        LISTEN[Listen\nfaster-whisper ASR] --> THINK
     end
 
     subgraph P2["Phase 2 — voice"]
-        STT[STT\nfaster-whisper] --> TTS[TTS\nXTTS v2]
-        TTS --> VAD[VAD\nSilero]
+        VAD[VAD\nSilero]
+        PTT[Push-to-talk]
     end
 
     subgraph P3["Phase 3 — face"]
@@ -36,10 +38,9 @@ flowchart TD
         PRESENCE --> MOBILE --> MULTI --> AUTO
     end
 
-    P1 --> P2 --> P3 --> P4567
+    P15 --> P2 --> P3 --> P4567
     MEM -.->|findings| GRACE[Grace / AuRoRA]
 ```
-
 
 ---
 
@@ -51,7 +52,9 @@ flowchart TD
 | Long-term memory | mem0 + Qdrant (Docker) |
 | Embeddings | Ollama (`nomic-embed-text-v2-moe`) |
 | Web search | SearXNG (local, self-hosted) |
-| Interface | CLI → Voice → Avatar → Mobile |
+| TTS | Kokoro (via RealtimeTTS) |
+| ASR | faster-whisper |
+| Interface | TUI → Voice → Avatar → Mobile |
 
 ---
 
@@ -61,14 +64,19 @@ flowchart TD
 
 - [Ollama](https://ollama.com) running locally or on a remote server
 - Docker + Docker Compose
-- Python 3.10+
+- Python **3.10 exactly** (3.11+ not supported — Jetson AI Lab wheels are 3.10-only)
 - [uv](https://github.com/astral-sh/uv)
 
 ```bash
 ollama pull nomic-embed-text-v2-moe
 ```
 
-### 2. Start Qdrant
+### 2. Start Qdrant + SearXNG (Docker containers)
+> **SearXNG config:** The `./searxng/` directory must contain a `settings.yml`
+> before starting. A minimal template is included in the repo.
+> `SEARXNG_BASE_URL` is used internally by the container to generate links.
+> `SEARXNG_URL` in your `.env` is what Aiko uses to call the search API —
+> it must match the host port mapping (`http://localhost:8081`).
 
 ```bash
 docker compose up -d
@@ -86,18 +94,22 @@ uv sync
 
 ```bash
 cp .env.example .env
-# edit .env — set your Ollama URL, model, SearXNG URL
+# edit .env — set your Ollama URL, model, SearXNG URL, Kokoro voice
 ```
 
 ### 5. Talk to Aiko-chan
 
 ```bash
+# Full voice mode — ASR input + TTS output
 uv run python cli.py
 
-# with memory debug output each turn:
+# Text mode — keyboard input, no TTS
+uv run python cli.py --text
+
+# Show memory debug output each turn
 uv run python cli.py --debug
 
-# wipe all stored memories:
+# Wipe all stored memories and exit
 uv run python cli.py --clear-mem
 ```
 
@@ -109,7 +121,11 @@ uv run python cli.py --clear-mem
 |---|---|
 | `/quit` or `/exit` | End the session |
 | `/reset` | Clear short-term context (long-term memory persists) |
-| `/memory` | Print all stored memories (debug) |
+| `/memory` | Print all stored memories |
+| `/clear` | Wipe all long-term memories from the database |
+| `/web <query>` | Run a web search and ask Aiko about the results |
+| `/voice` | Toggle TTS on/off at runtime |
+| `/listen` | Toggle ASR on/off at runtime (falls back to keyboard) |
 | `/help` | Show command list |
 
 ---
@@ -119,66 +135,105 @@ uv run python cli.py --clear-mem
 ```text
 aiko/
 ├── core/
-│   ├── brain.py        # Ollama chat loop, search intercept, async memory
-│   ├── memory.py       # mem0 + Qdrant wrapper
-│   └── tools.py        # Web search via SearXNG
-├── voice/
-│   ├── stt.py          # Phase 2 — faster-whisper STT
-│   └── tts.py          # Phase 2 — XTTS v2 TTS
-├── avatar/
-│   └── index.html      # Phase 3 — VRM avatar viewer
-├── soul.md              # Aiko's soul and personality — edit freely
-├── cli.py              # CLI entry point
+│   ├── think.py        # Ollama chat loop, streaming, search intercept, warmup
+│   ├── memorize.py     # mem0 + Qdrant wrapper, async queue worker
+│   ├── speak.py        # Kokoro TTS pipeline, background warmup
+│   ├── listen.py       # faster-whisper ASR, VAD, status callbacks
+│   ├── tools.py        # Web search via SearXNG
+│   └── silence.py      # Stderr suppression utility
+├── persona/
+│   ├── soul.md         # Aiko's personality, rules, and voice — edit freely
+│   └── identity.md     # Banner text, ASCII art, and color map for TUI
+├── cli.py              # Curses TUI entry point
 ├── docker-compose.yml  # Qdrant
-├── project.toml        # uv dependencies
-├── uv.lock             # uv dependencies
-├── .env.example        # .env settings example
-└── README.md           # This Readme
+├── pyproject.toml      # uv dependencies
+├── uv.lock             # uv lockfile
+├── .env.example        # Environment variable reference
+└── README.md           # This file
 ```
 
 ---
 
 ## Roadmap
 
-- [x] **Phase 1 — Soul**
-  CLI chatbot with persistent memory (mem0 + Qdrant + Ollama).
-  Async memory writes. Web search via SearXNG.
-  - [ ] Replace per-turn `thread.join()` with a dedicated worker + queue for truly non-blocking memory writes.
+* [x] **Phase 1 — Soul**
 
-- [ ] **Phase 2 — Voice**
-  faster-whisper STT for mic input.
-  XTTS v2 TTS with anime voice profile.
-  Push-to-talk or VAD (voice activity detection).
-  Fully hands-free conversation on Jetson.
+  * CLI chatbot architecture.
+  * Local inference via Ollama.
+  * Persistent memory using mem0 + Qdrant.
+  * Async memory writes.
+  * Web search integration via SearXNG.
 
-- [ ] **Phase 3 — Face**
-  VRM/VRoid 3D avatar rendered in browser via `@pixiv/three-vrm`.
-  Expression states: idle, happy, annoyed, flustered, thinking.
-  Lip sync driven by TTS audio output.
-  WebSocket bridge: Python backend → browser frontend.
+* [x] **Phase 1.5 — Stream**
 
-- [ ] **Phase 4 — Presence**
-  Emotion state machine — Aiko tracks mood across the conversation.
-  Proactive messages — she reaches out when she hasn't heard from you.
-  Long-term relationship progression — her tone evolves over time.
-  Deeper memory: episodic recall, shared references, inside jokes.
+  * Aiko-chan TUI CLI with cyberpunk ASCII interface.
+  * Streaming inference architecture overhaul.
+  * Decoupled LLM → TTS pipeline.
+  * Callback-based response streaming.
+  * Realtime speech synthesis via Kokoro.
+  * Background LLM warmup to eliminate cold-start latency.
+  * Background TTS warmup to eliminate cold-start latency.
+  * Soul persona system (`persona/soul.md`).
+  * Identity metadata and character framework (`persona/identity.md`).
+  * Architectural renaming (`brain → think`, `memory → memorize`).
+  * Non-blocking memory queue worker.
+  * Removal of synchronous memory write bottlenecks.
+  * CLI execution flow refactor.
+  * Command-line argument parser redesign.
+  * Audio streaming stability improvements.
+  * Search output filtering and instruction refinement.
+  * Jetson AI Lab dependency migration.
 
-- [ ] **Phase 5 — Mobile**
-  React Native or Flutter app.
-  WAN access — talk to Aiko from anywhere via phone.
-  Push notifications for proactive messages.
-  Voice-first UI with avatar.
+* [ ] **Phase 2 — Voice**
 
-- [ ] **Phase 6 — Multimodal**
-  Camera / CV input — she can see what you share with her.
-  Image understanding: "what do you think of this?" with photo.
-  Optional: she reacts to your expressions via webcam.
+  * Microphone input via faster-whisper.
+  * Push-to-talk mode.
+  * Voice Activity Detection (VAD).
+  * Fully hands-free voice conversations on Jetson.
 
-- [ ] **Phase 7 — Autonomy**
-  Aiko runs on a schedule independently.
-  Reads news, learns new things, forms opinions.
-  Brings topics *to* you instead of only reacting.
-  Optional: social media presence, posts on your behalf.
+* [ ] **Phase 3 — Face**
+
+  * VRM/VRoid avatar support.
+  * Browser-based rendering via `@pixiv/three-vrm`.
+  * Expression system (idle, happy, annoyed, flustered, thinking).
+  * Lip-sync driven by generated speech audio.
+  * WebSocket bridge between Python backend and browser frontend.
+  * Real-time avatar interaction.
+
+* [ ] **Phase 4 — Presence**
+
+  * Persistent emotional state machine.
+  * Mood tracking across conversations.
+  * Long-term relationship progression.
+  * Shared references and inside jokes.
+  * Episodic memory recall.
+  * Context-aware personality evolution.
+  * Proactive messaging when inactive for extended periods.
+
+* [ ] **Phase 5 — Mobile**
+
+  * Mobile application (React Native or Flutter).
+  * WAN access from anywhere.
+  * Push notifications.
+  * Voice-first user experience.
+  * Avatar integration on mobile.
+
+* [ ] **Phase 6 — Multimodal**
+
+  * Camera and computer vision input.
+  * Image understanding and discussion.
+  * Visual context integration into conversations.
+  * Webcam-based expression awareness.
+  * User-shared image analysis.
+
+* [ ] **Phase 7 — Autonomy**
+
+  * Scheduled independent operation.
+  * Background information gathering.
+  * Topic discovery and self-directed exploration.
+  * Initiates conversations instead of only responding.
+  * Develops persistent interests and opinions.
+  * Optional social media presence and autonomous content posting.
 
 ---
 

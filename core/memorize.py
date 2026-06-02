@@ -29,7 +29,6 @@ MEM0_CONFIG = {
             "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             "temperature": 0,
             "max_tokens": 200,
-            "ollama_num_ctx": 512,  # tiny context for extraction only
         },
     },
     "embedder": {

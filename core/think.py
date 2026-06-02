@@ -211,17 +211,18 @@ class AikoThink:
                 if buffering_active:
                     buffer += token
                     buffer_clean = buffer.lower().replace(" ", "")
-                    
-                    if "[search:".startswith(buffer_clean):
-                        # Potential search query, keep buffering
-                        if "[search:".lower() in buffer_clean:
-                            is_searching = True
-                        
-                        if is_searching and "]" in buffer:
+                
+                    if is_searching:
+                        # Already confirmed a search tag — keep buffering until closing ]
+                        if "]" in buffer:
                             buffering_active = False
-                            # Buffered entire search query, do NOT stream it!
+                            # Full [search: query] captured, do NOT stream it
+                    elif "[search:".startswith(buffer_clean):
+                        # Still a valid prefix — check if we've crossed the threshold
+                        if "[search:" in buffer_clean:
+                            is_searching = True
                     else:
-                        # Not a search query, flush buffer and disable buffering
+                        # Not a search tag — flush buffer
                         buffering_active = False
                         if self._token_callback and buffer:
                             self._token_callback(buffer)

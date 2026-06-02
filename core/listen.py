@@ -12,16 +12,17 @@ Dependencies:
     (CUDA optional — falls back to CPU automatically)
 """
 
+from faster_whisper import WhisperModel
 import io
 import logging
+from math import gcd
+import numpy as np
 import os
 import queue
+import sounddevice as sd
+from scipy.signal import resample_poly
 import threading
 import warnings
-
-import numpy as np
-import sounddevice as sd
-from faster_whisper import WhisperModel
 
 warnings.filterwarnings("ignore")
 logging.getLogger("faster_whisper").setLevel(logging.ERROR)
@@ -31,18 +32,22 @@ logging.getLogger("faster_whisper").setLevel(logging.ERROR)
 WHISPER_MODEL_SIZE  = os.getenv("WHISPER_MODEL",      "distil-large-v3.5")
 WHISPER_DEVICE      = os.getenv("WHISPER_DEVICE",     "auto")
 WHISPER_COMPUTE     = os.getenv("WHISPER_COMPUTE",    "float16")
-WHISPER_LANG        = os.getenv("WHISPER_LANG",          "en")
+WHISPER_LANG        = os.getenv("WHISPER_LANG",       "en")
 VAD_SILENCE_MS      = int(os.getenv("LISTEN_VAD_SILENCE_MS", 300))
 VAD_PAD_MS          = int(os.getenv("LISTEN_VAD_PAD_MS",     100))
 
-SAMPLE_RATE         = int(os.getenv("LISTEN_SAMPLE_RATE",    16000))
-CHUNK_DURATION_MS   = int(os.getenv("LISTEN_CHUNK_MS",       30))    # ms per audio chunk
-SILENCE_THRESHOLD   = float(os.getenv("LISTEN_SILENCE_DB",   0.015)) # RMS energy gate
-SILENCE_CHUNKS      = int(os.getenv("LISTEN_SILENCE_CHUNKS", 40))    # ~1.2 s of silence → stop
-MIN_SPEECH_CHUNKS   = int(os.getenv("LISTEN_MIN_CHUNKS",     10))    # ignore clips shorter than ~0.3 s
-MAX_RECORD_SECONDS  = int(os.getenv("LISTEN_MAX_SECONDS",    30))    # hard ceiling
+SAMPLE_RATE         = 16000                                          # Whisper target
+CAPTURE_RATE        = int(os.getenv("LISTEN_CAPTURE_RATE", 48000))  # device native
+LISTEN_DEVICE       = os.getenv("LISTEN_DEVICE", None)              # None = default
+DEVICE_INDEX        = int(LISTEN_DEVICE) if LISTEN_DEVICE else None
 
-_CHUNK_SAMPLES = int(SAMPLE_RATE * CHUNK_DURATION_MS / 1000)
+CHUNK_DURATION_MS   = int(os.getenv("LISTEN_CHUNK_MS",       30))
+SILENCE_THRESHOLD   = float(os.getenv("LISTEN_SILENCE_DB",   0.015))
+SILENCE_CHUNKS      = int(os.getenv("LISTEN_SILENCE_CHUNKS", 40))
+MIN_SPEECH_CHUNKS   = int(os.getenv("LISTEN_MIN_CHUNKS",     10))
+MAX_RECORD_SECONDS  = int(os.getenv("LISTEN_MAX_SECONDS",    30))
+
+_CHUNK_SAMPLES = int(CAPTURE_RATE * CHUNK_DURATION_MS / 1000)  # at capture rate
 _MAX_CHUNKS    = int(MAX_RECORD_SECONDS * 1000 / CHUNK_DURATION_MS)
 
 
@@ -143,10 +148,11 @@ class AikoListen:
 
         try:
             with sd.InputStream(
-                samplerate=SAMPLE_RATE,
+                samplerate=CAPTURE_RATE,
                 channels=1,
                 dtype="float32",
                 blocksize=_CHUNK_SAMPLES,
+                device=DEVICE_INDEX,
             ) as stream:
                 for _ in range(_MAX_CHUNKS):
                     chunk, _ = stream.read(_CHUNK_SAMPLES)
@@ -174,7 +180,14 @@ class AikoListen:
         if speech_count < MIN_SPEECH_CHUNKS:
             return None   # too short — noise or accidental trigger
 
-        return np.concatenate(audio_chunks, axis=0).flatten()
+        audio = np.concatenate(audio_chunks, axis=0).flatten()
+
+        # resample from CAPTURE_RATE → SAMPLE_RATE
+        if CAPTURE_RATE != SAMPLE_RATE:
+            g = gcd(CAPTURE_RATE, SAMPLE_RATE)
+            audio = resample_poly(audio, SAMPLE_RATE // g, CAPTURE_RATE // g)
+
+        return audio.astype(np.float32)
 
     # ── transcription ─────────────────────────────────────────────────────────
 

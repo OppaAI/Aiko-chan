@@ -142,7 +142,7 @@ def _db_size_str() -> str:
         with urllib.request.urlopen(url, timeout=1) as r:
             data = json.loads(r.read())
         points = data["result"]["points_count"]
-        return f"{points} mem"
+        return f"{points} entries"
     except Exception:
         return "? mem"
 

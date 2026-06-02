@@ -26,6 +26,8 @@ dependencies = [
     "soundfile>=0.13.1",
     "spacy>=3.8.14",
     "torch",
+    "torchaudio>=2.10.0",
+    "torchvision>=0.26.0",
     "unidic>=1.1.0",
 ]
 

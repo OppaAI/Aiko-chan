@@ -37,6 +37,8 @@ dependencies = [
     { name = "soundfile" },
     { name = "spacy" },
     { name = "torch" },
+    { name = "torchaudio" },
+    { name = "torchvision" },
     { name = "unidic" },
 ]
 
@@ -63,6 +65,8 @@ requires-dist = [
     { name = "soundfile", specifier = ">=0.13.1" },
     { name = "spacy", specifier = ">=3.8.14" },
     { name = "torch", path = "../wheels/torch-2.11.0-cp310-cp310-linux_aarch64.whl" },
+    { name = "torchaudio", specifier = ">=2.10.0", index = "https://pypi.jetson-ai-lab.io/jp6/cu126" },
+    { name = "torchvision", specifier = ">=0.26.0", index = "https://pypi.jetson-ai-lab.io/jp6/cu126" },
     { name = "unidic", specifier = ">=1.1.0" },
 ]
 
@@ -2040,6 +2044,30 @@ requires-dist = [
     { name = "typing-extensions", specifier = ">=4.10.0" },
 ]
 provides-extras = ["optree", "opt-einsum", "pyyaml"]
+
+[[package]]
+name = "torchaudio"
+version = "2.10.0"
+source = { registry = "https://pypi.jetson-ai-lab.io/jp6/cu126" }
+dependencies = [
+    { name = "torch" },
+]
+wheels = [
+    { url = "https://pypi.jetson-ai-lab.io/jp6/cu126/+f/692/6eb2c403d4e0e/torchaudio-2.10.0-cp310-cp310-linux_aarch64.whl", hash = "sha256:6926eb2c403d4e0ed7585c3a4f2d5c69f3ddb91d040ed85bb6e88d9b339e4087" },
+]
+
+[[package]]
+name = "torchvision"
+version = "0.26.0"
+source = { registry = "https://pypi.jetson-ai-lab.io/jp6/cu126" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pillow" },
+    { name = "torch" },
+]
+wheels = [
+    { url = "https://pypi.jetson-ai-lab.io/jp6/cu126/+f/d11/6f08d3d62417d/torchvision-0.26.0-cp310-cp310-linux_aarch64.whl", hash = "sha256:d116f08d3d62417dc36cbf41923e491b8b49b77399575f0878ae391e6e77a159" },
+]
 
 [[package]]
 name = "tqdm"

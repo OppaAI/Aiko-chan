@@ -193,9 +193,10 @@ aiko/
 * [ ] **Phase 2 — Voice**
 
   * Microphone input via faster-whisper.
-  * Push-to-talk mode.
+  * Interactive Talk mode.
   * Voice Activity Detection (VAD).
   * Fully hands-free voice conversations on Jetson.
+  * TTS voice cloning exploration and integration (eg. XTTS, PocketTTS)
 
 * [ ] **Phase 3 — Face**
 

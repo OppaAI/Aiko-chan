@@ -92,17 +92,17 @@ class AikoThink:
         self._warmup_thread.start()
 
     def _warmup_llm(self) -> None:
-        """Ping Ollama with a 1-token call to load the model into memory."""
         try:
             self._client.chat(
                 model=OLLAMA_MODEL,
                 messages=[{"role": "user", "content": "hi"}],
                 stream=False,
-                options={"num_predict": 1},
+                options={
+                    "num_predict": 1,
+                    "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", 2048)),
+                },
             )
-            #print("[think] LLM warmed up.")
-        except Exception as e:
-            #print(f"[think] LLM warmup failed (non-fatal): {e}")
+        except Exception:
             pass
 
     def join_warmup(self) -> None:

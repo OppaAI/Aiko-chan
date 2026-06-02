@@ -866,11 +866,11 @@ class AikoTUI:
     # ─────────────────────────────────────────────────────────────────────────
 
     def get_voice_input(self, listen):
-            self._input_buf = []
-            result_holder   = [None]
-            done_event      = threading.Event()
+        self._input_buf = []
+        result_holder   = [None]
+        done_event      = threading.Event()
 
-            def _status_cb(token):
+        def _status_cb(token):
             if token == '__LISTENING__':
                 with self._lock:
                     self._input_buf = list("🎤  Listening …")

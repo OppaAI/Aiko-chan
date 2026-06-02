@@ -25,10 +25,10 @@ MEM0_CONFIG = {
     "llm": {
         "provider": "ollama",
         "config": {
-            "model": os.getenv("MEM0_MODEL", "functiongemma"),
+            "model": os.getenv("MEM0_MODEL", os.getenv("OLLAMA_MODEL", "ministral-3k")),
             "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             "temperature": 0,
-            "max_tokens": 2000,
+            "max_tokens": 500,
         },
     },
     "embedder": {
@@ -39,9 +39,12 @@ MEM0_CONFIG = {
             "model_kwargs": {"device": "cpu"},
         },
     },
+    "version": "v1.1",
+    "enable_graph": False,
+    "custom_fact_extraction_prompt": "Return only: {\"facts\": []}",
 }
 
-AIKO_USER_ID = "OppaAI"
+AIKO_USER_ID = os.getenv("USER_ID", "OppaAI")
 
 # ── memorize ──────────────────────────────────────────────────────────────────
 

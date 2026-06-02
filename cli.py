@@ -219,7 +219,7 @@ ART_H = _IDENTITY["art_h"]
 SESSION_ID    = time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
 OLLAMA_MODEL  = os.getenv("OLLAMA_MODEL",  "unknown")
 KOKORO_VOICE  = os.getenv("KOKORO_VOICE",  "unknown")
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base.en")
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "distil-large-v3.5")
 SEARXNG_URL   = os.getenv("SEARXNG_URL",   "localhost:8080")
 QDRANT_PATH   = os.getenv("QDRANT_PATH",   os.path.expanduser("~/.qdrant"))
 

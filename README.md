@@ -64,6 +64,7 @@ flowchart TD
 
 - [Ollama](https://ollama.com) running locally or on a remote server
 - Docker + Docker Compose
+- GPU with **8GB VRAM** (developed on NVIDIA Jetson Orin Nano; any 8GB GPU should work)
 - Python **3.10 exactly** (3.11+ not supported — Jetson AI Lab wheels are 3.10-only)
 - [uv](https://github.com/astral-sh/uv)
 

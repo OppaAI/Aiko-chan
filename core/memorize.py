@@ -42,12 +42,7 @@ MEM0_CONFIG = {
         "config": {
             "model": "BAAI/bge-base-en-v1.5",
             "embedding_dims": 768,
-            # FIX: Use "device": "cpu" inside model_kwargs. 
-            # This is valid for SentenceTransformer and forces PyTorch to process
-            # the embedding layers outside the CUDA runtime workspace.
-            "model_kwargs": {
-                "device": "cpu"
-            },
+            #"model_kwargs": {"device": "cpu"},
         },
     },
 }

@@ -72,6 +72,11 @@ ollama pull nomic-embed-text-v2-moe
 ```
 
 ### 2. Start Qdrant + SearXNG (Docker containers)
+> **SearXNG config:** The `./searxng/` directory must contain a `settings.yml`
+> before starting. A minimal template is included in the repo.
+> `SEARXNG_BASE_URL` is used internally by the container to generate links.
+> `SEARXNG_URL` in your `.env` is what Aiko uses to call the search API —
+> it must match the host port mapping (`http://localhost:8081`).
 
 ```bash
 docker compose up -d

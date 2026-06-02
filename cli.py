@@ -1352,6 +1352,9 @@ def _run(stdscr, args):
         tui.step_loading('mem_ready')
         mem_ready.set()
         tui.step_done('mem_ready')
+        
+        from core.dream import start as start_dream_scheduler
+        start_dream_scheduler(memorize[0])
 
     t1 = threading.Thread(target=init_think,    daemon=True)
     t2 = threading.Thread(target=init_memorize, daemon=True)

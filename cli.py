@@ -565,7 +565,7 @@ class AikoTUI:
         db_str    = f"DB {_db_size_str(QDRANT_PATH)}"
         tok_str   = f"{s['tokens']:,} tkns"
         toks_str  = f"{s['tok_s']:.1f} t/s" if s['tok_s'] > 0 else "— t/s"
-        up_str    = f"⬆️ {_fmt_uptime(time.time() - self._ts)}"
+        up_str    = f"▲ {_fmt_uptime(time.time() - self._ts)}"
 
         segments = [mode_str, ram_str, db_str, tok_str, toks_str, up_str]
 

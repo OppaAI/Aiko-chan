@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
+import threading  # Added for asynchronous background execution
 from typing import Optional
 from mem0 import Memory
 
@@ -36,7 +37,9 @@ MEM0_CONFIG = {
         "config": {
             "model": "BAAI/bge-base-en-v1.5",
             "embedding_dims": 768,
-            #"model_kwargs": {"device": "cpu"},
+            # CRITICAL FIX 1: Force embedding math onto the CPU.
+            # This keeps your GPU VRAM completely clear for Ollama.
+            "model_kwargs": {"device": "cpu"}, 
         },
     },
 }
@@ -60,29 +63,29 @@ class AikoMemorize:
         if not silent:
             print("[memorize] Connecting to Qdrant and initialising mem0...")
         self._mem = Memory.from_config(MEM0_CONFIG)
-        # Pin model in VRAM: patch mem0's internal Ollama client so every call
-        # includes keep_alive=-1, preventing the model from being unloaded
-        # between memory operations (which would force a costly reload).
-        self._patch_keep_alive()
+        
+        # CRITICAL FIX 2: Removed self._patch_keep_alive() 
+        # Forcing keep_alive=-1 blocks Ollama's capacity to switch models 
+        # dynamically, resulting in OOM crashes when the chatbot takes a turn.
+        
         if not silent:
             print("[memorize] Ready.")
-
-    @staticmethod
-    def _patch_keep_alive() -> None:
-        """Monkey-patch ollama.Client.chat to always send keep_alive=-1."""
-        from ollama import Client
-        _original_chat = Client.chat
-        def _chat_with_keep_alive(self_client, *args, **kwargs):
-            kwargs.setdefault("keep_alive", -1)
-            return _original_chat(self_client, *args, **kwargs)
-        Client.chat = _chat_with_keep_alive
 
     def add(self, messages: list[dict], user_id: str = AIKO_USER_ID) -> None:
         """
         Store a conversation turn (or batch) into long-term memory.
-        messages: list of {role, content} dicts.
+        Runs asynchronously in a background thread so it never blocks or 
+        drops the main chatbot LLM sequence.
         """
-        self._mem.add(messages, user_id=user_id)
+        def _bg_add():
+            try:
+                self._mem.add(messages, user_id=user_id)
+            except Exception as e:
+                # Fails silently in background so your chat session stays alive
+                print(f"\n[memorize-error] Background save failed: {e}")
+
+        # CRITICAL FIX 3: Fire-and-forget threading structure
+        threading.Thread(target=_bg_add, daemon=True).start()
 
     def search(
         self,

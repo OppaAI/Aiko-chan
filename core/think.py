@@ -8,13 +8,14 @@ Aiko's cognitive loop.
   - Stores the turn into long-term memory after each response (background thread)
 """
 
+import logging
 import os
+import threading
+from ollama import Client
+from pathlib import Path
+import queue
 import re
 import warnings
-import logging
-import threading
-from pathlib import Path
-from ollama import Client
 
 warnings.filterwarnings("ignore")
 logging.getLogger("phonemizer").setLevel(logging.ERROR)
@@ -79,7 +80,9 @@ class AikoThink:
         self._speak          = speak
         self._persona        = _load_persona()
         self._history:       list[dict] = []
-        self._mem_thread:    threading.Thread | None = None
+        self._mem_queue = queue.Queue()
+        self._mem_worker = threading.Thread(target=self._mem_write_loop, daemon=True)
+        self._mem_worker.start()
         self._warmup_thread: threading.Thread | None = None
 
         #print(f"[think] Ollama client ready — model: {OLLAMA_MODEL}")
@@ -154,10 +157,13 @@ class AikoThink:
     def reset_context(self) -> None:
         self._history.clear()
 
+    def set_speak(self, speak):
+      """Hot-swap the TTS backend. Pass None to silence, speak instance to restore."""
+      self._speak = speak
+    
     def wait_for_memory(self) -> None:
-        if self._mem_thread and self._mem_thread.is_alive():
-            self._mem_thread.join()
-
+        self._mem_queue.join()
+      
     # ── internal ──────────────────────────────────────────────────────────────
 
     def _stream_response(self, messages: list[dict]) -> str:
@@ -205,17 +211,18 @@ class AikoThink:
                 if buffering_active:
                     buffer += token
                     buffer_clean = buffer.lower().replace(" ", "")
-                    
-                    if "[search:".startswith(buffer_clean):
-                        # Potential search query, keep buffering
-                        if "[search:".lower() in buffer_clean:
-                            is_searching = True
-                        
-                        if is_searching and "]" in buffer:
+                
+                    if is_searching:
+                        # Already confirmed a search tag — keep buffering until closing ]
+                        if "]" in buffer:
                             buffering_active = False
-                            # Buffered entire search query, do NOT stream it!
+                            # Full [search: query] captured, do NOT stream it
+                    elif "[search:".startswith(buffer_clean):
+                        # Still a valid prefix — check if we've crossed the threshold
+                        if "[search:" in buffer_clean:
+                            is_searching = True
                     else:
-                        # Not a search query, flush buffer and disable buffering
+                        # Not a search tag — flush buffer
                         buffering_active = False
                         if self._token_callback and buffer:
                             self._token_callback(buffer)
@@ -261,8 +268,13 @@ class AikoThink:
         return "".join(full_response)
 
     def _store_async(self, user_input: str, response_text: str) -> None:
-        """Fire memory write in a background thread — non-blocking."""
-        def _write():
+        """Enqueue memory write — never blocks the chat path."""
+        self._mem_queue.put((user_input, response_text))
+    
+    def _mem_write_loop(self) -> None:
+        """Serial background worker — processes writes in order."""
+        while True:
+            user_input, response_text = self._mem_queue.get()
             try:
                 self._memorize.add([
                     {"role": "user",      "content": user_input},
@@ -270,9 +282,5 @@ class AikoThink:
                 ])
             except Exception as exc:
                 print(f"[memorize] async write failed: {exc}")
-
-        if self._mem_thread and self._mem_thread.is_alive():
-            self._mem_thread.join()
-
-        self._mem_thread = threading.Thread(target=_write, daemon=True)
-        self._mem_thread.start()
+            finally:
+                self._mem_queue.task_done()

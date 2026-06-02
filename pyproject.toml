@@ -27,5 +27,11 @@ dependencies = [
 ]
 
 [[tool.uv.index]]
+name = "jetson"
 url = "https://pypi.jetson-ai-lab.io/jp6/cu126"
-default = true
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "jetson" }]
+torchaudio = [{ index = "jetson" }]
+torchvision = [{ index = "jetson" }]

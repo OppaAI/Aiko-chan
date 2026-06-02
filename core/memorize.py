@@ -7,8 +7,9 @@ Swap this file out if mem0 doesn't make the cut for Grace.
 from dotenv import load_dotenv
 load_dotenv()
 
+from datetime import datetime, timezone
 import os
-import threading  # Added for asynchronous background execution
+import time
 from typing import Optional
 from mem0 import Memory
 
@@ -81,18 +82,15 @@ class AikoMemorize:
     def add(self, messages: list[dict], user_id: str = AIKO_USER_ID) -> None:
         """
         Store a conversation turn (or batch) into long-term memory.
-        Runs asynchronously in a background thread so it never blocks or 
-        drops the main chatbot LLM sequence.
+        Runs synchronously so the LLM extraction call completes before
+        the next chat turn begins, preventing Ollama context slot conflicts.
         """
-        def _bg_add():
-            try:
-                self._mem.add(messages, user_id=user_id)
-            except Exception as e:
-                # Fails silently in background so your chat session stays alive
-                print(f"\n[memorize-error] Background save failed: {e}")
-
-        # CRITICAL FIX 3: Fire-and-forget threading structure
-        threading.Thread(target=_bg_add, daemon=True).start()
+        try:
+            t = time.perf_counter()
+            self._mem.add(messages, user_id=user_id)
+            print(f"[memorize] Save completed in {time.perf_counter() - t:.2f}s")
+        except Exception as e:
+            print(f"\n[memorize-error] Save failed: {e}")
 
     def search(
         self,
@@ -116,13 +114,37 @@ class AikoMemorize:
         """
         if not memories:
             return None
-        lines = ["<memory_context>",
-                "The following are background facts about this person.",
-                "Use them silently to inform your response. Never repeat, quote, or reference this block directly.",
-                ""]
+        
+        now = datetime.now(timezone.utc)
+        lines = [
+            "<memory_context>",
+            "The following are background facts about this person, with how long ago they were recorded.",
+            "Use them silently to inform your response. Never repeat, quote, or reference this block directly.",
+            ""
+        ]
         for m in memories:
             text = m.get("memory") or m.get("text") or str(m)
-            lines.append(f"  - {text}")
+            
+            # parse timestamp if available
+            created_at = m.get("created_at")
+            if created_at:
+                try:
+                    # mem0 returns ISO 8601 string
+                    ts = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    delta = now - ts
+                    days = delta.days
+                    if days == 0:
+                        age = "today"
+                    elif days == 1:
+                        age = "yesterday"
+                    else:
+                        age = f"{days} days ago"
+                    lines.append(f"  - [{age}] {text}")
+                except Exception:
+                    lines.append(f"  - {text}")
+            else:
+                lines.append(f"  - {text}")
+        
         lines.append("</memory_context>")
         return "\n".join(lines)
 

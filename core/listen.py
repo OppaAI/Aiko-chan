@@ -28,9 +28,9 @@ logging.getLogger("faster_whisper").setLevel(logging.ERROR)
 
 # ── config ────────────────────────────────────────────────────────────────────
 
-WHISPER_MODEL_SIZE  = os.getenv("WHISPER_MODEL",      "base.en")   # tiny.en / base.en / small.en
-WHISPER_DEVICE      = os.getenv("WHISPER_DEVICE",     "auto")       # auto | cpu | cuda
-WHISPER_COMPUTE     = os.getenv("WHISPER_COMPUTE",    "default")    # default | int8 | float16
+WHISPER_MODEL_SIZE  = os.getenv("WHISPER_MODEL",      "distil-large-v3.5")
+WHISPER_DEVICE      = os.getenv("WHISPER_DEVICE",     "auto")
+WHISPER_COMPUTE     = os.getenv("WHISPER_COMPUTE",    "float16")
 WHISPER_LANG        = os.getenv("WHISPER_LANG",          "en")
 VAD_SILENCE_MS      = int(os.getenv("LISTEN_VAD_SILENCE_MS", 300))
 VAD_PAD_MS          = int(os.getenv("LISTEN_VAD_PAD_MS",     100))
@@ -53,7 +53,7 @@ def _resolve_device(device_hint: str) -> tuple[str, str]:
     try:
         import torch
         if torch.cuda.is_available():
-            return "cuda", "float16" if WHISPER_COMPUTE == "default" else WHISPER_COMPUTE
+            return "cuda", ("float16" if WHISPER_COMPUTE == "default" else WHISPER_COMPUTE)
     except ImportError:
         pass
     return "cpu", "int8" if WHISPER_COMPUTE == "default" else WHISPER_COMPUTE

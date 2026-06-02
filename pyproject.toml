@@ -7,6 +7,7 @@ readme = "README.md"
 dependencies = [
     "click>=8.4.1",
     "fastembed>=0.8.0",
+    "faster-whisper>=1.2.1",
     "fugashi>=1.5.2",
     "jaconv>=0.5.0",
     "mem0ai[nlp]>=0.1.0",
@@ -23,6 +24,7 @@ dependencies = [
     "sounddevice>=0.5.5",
     "soundfile>=0.13.1",
     "spacy>=3.8.14",
+    "torch",
     "unidic>=1.1.0",
 ]
 
@@ -32,6 +34,6 @@ url = "https://pypi.jetson-ai-lab.io/jp6/cu126"
 explicit = true
 
 [tool.uv.sources]
-torch = [{ index = "jetson" }]
 torchaudio = [{ index = "jetson" }]
 torchvision = [{ index = "jetson" }]
+torch = { path = "../wheels/torch-2.11.0-cp310-cp310-linux_aarch64.whl" }

@@ -31,6 +31,9 @@ logging.getLogger("faster_whisper").setLevel(logging.ERROR)
 WHISPER_MODEL_SIZE  = os.getenv("WHISPER_MODEL",      "base.en")   # tiny.en / base.en / small.en
 WHISPER_DEVICE      = os.getenv("WHISPER_DEVICE",     "auto")       # auto | cpu | cuda
 WHISPER_COMPUTE     = os.getenv("WHISPER_COMPUTE",    "default")    # default | int8 | float16
+WHISPER_LANG        = os.getenv("WHISPER_LANG",          "en")
+VAD_SILENCE_MS      = int(os.getenv("LISTEN_VAD_SILENCE_MS", 300))
+VAD_PAD_MS          = int(os.getenv("LISTEN_VAD_PAD_MS",     100))
 
 SAMPLE_RATE         = int(os.getenv("LISTEN_SAMPLE_RATE",    16000))
 CHUNK_DURATION_MS   = int(os.getenv("LISTEN_CHUNK_MS",       30))    # ms per audio chunk
@@ -183,17 +186,17 @@ class AikoListen:
         with self._lock:
             segments, _ = self._model.transcribe(
                 audio,
-                language="en",
+                language=WHISPER_LANG,
                 beam_size=5,
-                vad_filter=True,            # faster-whisper built-in VAD post-filter
+                vad_filter=True,
                 vad_parameters={
-                    "min_silence_duration_ms": 300,
-                    "speech_pad_ms": 100,
+                    "min_silence_duration_ms": VAD_SILENCE_MS,
+                    "speech_pad_ms":           VAD_PAD_MS,
                 },
                 condition_on_previous_text=False,
             )
             return " ".join(seg.text.strip() for seg in segments).strip()
-
+        
     # ── warmup ────────────────────────────────────────────────────────────────
 
     def _warmup(self) -> None:

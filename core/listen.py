@@ -29,7 +29,7 @@ logging.getLogger("faster_whisper").setLevel(logging.ERROR)
 
 # ── config ────────────────────────────────────────────────────────────────────
 
-WHISPER_MODEL_SIZE  = os.getenv("WHISPER_MODEL",      "distil-large-v3.5")
+WHISPER_MODEL_SIZE  = os.getenv("WHISPER_MODEL",      "turbo")
 WHISPER_DEVICE      = os.getenv("WHISPER_DEVICE",     "auto")
 WHISPER_COMPUTE     = os.getenv("WHISPER_COMPUTE",    "float16")
 WHISPER_LANG        = os.getenv("WHISPER_LANG",       "en")

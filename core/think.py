@@ -186,7 +186,7 @@ class AikoThink:
                 messages=messages,
                 stream=True,
                 options={
-                    "num_ctx":        3072,   # context window size
+                    "num_ctx":        int(os.getenv("OLLAMA_NUM_CTX", 2048)),
                     "temperature":    0.75,   # creative but not unhinged
                     "repeat_penalty": 1.18,   # firm anti-loop
                     "repeat_last_n":  128,    # long lookback for repetition detection

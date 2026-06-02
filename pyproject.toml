@@ -6,6 +6,7 @@ description = "Aiko-chan: AI companion with persistent memory, web search, and c
 readme = "README.md"
 dependencies = [
     "click>=8.4.1",
+    "ctranslate2",
     "fastembed>=0.8.0",
     "faster-whisper>=1.2.1",
     "fugashi>=1.5.2",
@@ -37,3 +38,4 @@ explicit = true
 torchaudio = [{ index = "jetson" }]
 torchvision = [{ index = "jetson" }]
 torch = { path = "../wheels/torch-2.11.0-cp310-cp310-linux_aarch64.whl" }
+ctranslate2 = { path = "../wheels/ctranslate2-4.7.2-cp310-cp310-linux_aarch64.whl" }

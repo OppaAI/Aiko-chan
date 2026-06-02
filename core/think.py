@@ -84,7 +84,7 @@ class AikoThink:
         self._mem_worker = threading.Thread(target=self._mem_write_loop, daemon=True)
         self._mem_worker.start()
     
-        self._memorize.cleanup()  # ✅ prune decayed memories at boot
+        self._memorize.cleanup()      # ✅ prune decayed memories at boot
     
         self._warmup_thread = threading.Thread(target=self._warmup_llm, daemon=True)
         self._warmup_thread.start()

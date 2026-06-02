@@ -6,9 +6,22 @@ Abstracts all mem0 calls so think.py stays clean.
 Memory lifecycle:
   - Every search() call increments access_count and updates last_accessed_at
     in Qdrant payload, enabling Ebbinghaus-style exponential decay scoring.
+  - dream() runs nightly (00:00) as a consolidation pass — no new vectors
+    are written. It boosts salient memories, merges near-duplicates, then
+    prunes decayed entries. Order matters: boost before prune so boosted
+    memories aren't immediately swept.
   - cleanup() deletes memories below decay threshold, with grace period
     protection for newly created entries.
   - decay logic lives in core/decay.py (pure math, no I/O).
+
+Dream pass overview:
+  1. Boost  — increment access_count on memories matching salience heuristics
+              (keyword signals, high prior access, recency) so they survive decay.
+  2. Merge  — cosine-similarity search per memory; near-duplicates above
+              threshold are collapsed: keep the higher access_count copy,
+              delete the redundant one via mem0 to stay in sync.
+  3. Prune  — standard cleanup() pass; runs after boost so newly protected
+              memories aren't caught in the sweep.
 """
 from dotenv import load_dotenv
 load_dotenv()
@@ -56,23 +69,43 @@ MEM0_CONFIG = {
     },
 }
 
-USER_ID = os.getenv("USER_ID", "OppaAI")
-QDRANT_COLLECTION = "aiko_memory"
+USER_ID            = os.getenv("USER_ID", "OppaAI")
+QDRANT_COLLECTION  = "aiko_memory"
+
+# Cosine similarity threshold for near-duplicate detection during dream pass.
+# 0.92 is conservative — only collapses near-identical phrasings.
+# Lower (e.g. 0.85) catches more semantic duplicates but risks false merges.
+DREAM_MERGE_THRESHOLD = float(os.getenv("DREAM_MERGE_THRESHOLD", 0.92))
+
+# access_count boost applied to salient memories during dream pass.
+DREAM_BOOST_AMOUNT = int(os.getenv("DREAM_BOOST_AMOUNT", 2))
+
+# Salience keywords — memories containing these are boosted during dream pass.
+_SALIENCE_KEYWORDS = frozenset([
+    "name", "called", "likes", "loves", "hates", "dislikes", "always", "never",
+    "important", "remember", "favourite", "favorite", "birthday", "works",
+    "lives", "studying", "job", "afraid", "dream", "goal",
+])
 
 # ── memorize ──────────────────────────────────────────────────────────────────
 
 class AikoMemorize:
     """
-    Thin wrapper around mem0 Memory with Ebbinghaus decay lifecycle.
+    Thin wrapper around mem0 Memory with Ebbinghaus decay lifecycle
+    and a nightly dream() consolidation pass.
 
     Access tracking:
         Every search() call updates Qdrant payload fields (access_count,
         last_accessed_at) so the decay formula has fresh data.
 
+    Dream pass (call nightly at 00:00):
+        1. Boost salient memories' access_count so they survive decay.
+        2. Merge near-duplicate vectors — keeps higher-access copy.
+        3. Prune decayed memories via cleanup().
+
     Cleanup:
-        Call cleanup() periodically (e.g. once per session startup) to prune
-        memories whose weighted decay score has dropped below CLEANUP_THRESHOLD.
-        Memories under 14 days old are grace-protected from deletion.
+        Also available standalone — deletes memories below decay threshold,
+        with grace period protection for newly created entries.
     """
 
     def __init__(self, silent: bool = False) -> None:
@@ -87,7 +120,7 @@ class AikoMemorize:
         if not silent:
             print("[memorize] Connecting to Qdrant and initialising mem0...")
 
-        self._mem = Memory.from_config(MEM0_CONFIG)
+        self._mem    = Memory.from_config(MEM0_CONFIG)
         self._qdrant = QdrantClient(host=qdrant_host, port=qdrant_port)
 
         if not silent:
@@ -115,7 +148,7 @@ class AikoMemorize:
 
     # ── read ───────────────────────────────────────────────────────────────────
 
-    def search(self, query: str,  user_id: str = USER_ID,  limit: int = 5) -> list[dict]:
+    def search(self, query: str, user_id: str = USER_ID, limit: int = 5) -> list[dict]:
         """
         Retrieve top-k memories relevant to the current query.
 
@@ -147,7 +180,7 @@ class AikoMemorize:
                     self._qdrant.set_payload(
                         collection_name=QDRANT_COLLECTION,
                         payload={
-                            "access_count": min(current_count + 1, 255),  # cap at 255
+                            "access_count":    min(current_count + 1, 255),  # cap at 255
                             "last_accessed_at": now,
                         },
                         points=[mem_id],
@@ -165,7 +198,7 @@ class AikoMemorize:
         if not memories:
             return None
 
-        now = datetime.now(timezone.utc)
+        now   = datetime.now(timezone.utc)
         lines = [
             "<memory_context>",
             "The following are background facts about this person, with how long ago they were recorded.",
@@ -173,13 +206,13 @@ class AikoMemorize:
             "",
         ]
         for m in memories:
-            text = m.get("memory") or m.get("text") or str(m)
+            text       = m.get("memory") or m.get("text") or str(m)
             created_at = m.get("created_at")
             if created_at:
                 try:
-                    ts = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    ts    = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
                     delta = now - ts
-                    days = delta.days
+                    days  = delta.days
                     if days == 0:
                         age = "today"
                     elif days == 1:
@@ -195,13 +228,228 @@ class AikoMemorize:
         lines.append("</memory_context>")
         return "\n".join(lines)
 
+    # ── dream pass ─────────────────────────────────────────────────────────────
+
+    def dream(
+        self,
+        user_id:   str   = USER_ID,
+        dry_run:   bool  = False,
+        threshold: float = DREAM_MERGE_THRESHOLD,
+    ) -> dict:
+        """
+        Nightly memory consolidation pass. No new vectors are written.
+
+        Stages (in order):
+          1. Boost  — salient memories get +DREAM_BOOST_AMOUNT access_count.
+          2. Merge  — near-duplicate pairs (cosine >= threshold) are collapsed;
+                      higher access_count copy survives, other is deleted.
+          3. Prune  — standard decay cleanup runs last, after boosts are applied,
+                      so newly protected memories aren't swept.
+
+        Args:
+            dry_run:   Report actions without writing or deleting anything.
+            threshold: Cosine similarity cutoff for duplicate detection.
+
+        Returns dict: {boosted, merged, pruned, duration_s}
+        """
+        t_start = time.perf_counter()
+        print(f"[dream] {'(dry-run) ' if dry_run else ''}Starting consolidation pass...")
+
+        all_mems = self.get_all(user_id=user_id)
+        if not all_mems:
+            print("[dream] No memories found — nothing to do.")
+            return {"boosted": 0, "merged": 0, "pruned": 0, "duration_s": 0.0}
+
+        mem_ids     = [str(m.get("id", "")) for m in all_mems if m.get("id")]
+        payload_map = self._batch_get_payloads(mem_ids)   # single round-trip
+
+        # Stage 1 — boost
+        boosted = self._dream_boost(all_mems, payload_map, dry_run=dry_run)
+
+        # Stage 2 — merge
+        merged  = self._dream_merge(mem_ids, threshold=threshold, dry_run=dry_run)
+
+        # Stage 3 — prune (re-fetch payload_map so boosts are visible)
+        prune_result = self.cleanup(user_id=user_id, dry_run=dry_run)
+        pruned       = prune_result.get("deleted", 0)
+
+        duration = round(time.perf_counter() - t_start, 2)
+        print(
+            f"[dream] {'(dry-run) ' if dry_run else ''}"
+            f"Done — boosted={boosted}, merged={merged}, pruned={pruned}, "
+            f"duration={duration}s"
+        )
+        return {"boosted": boosted, "merged": merged, "pruned": pruned, "duration_s": duration}
+
+    def _dream_boost(
+        self,
+        all_mems:    list[dict],
+        payload_map: dict,
+        dry_run:     bool = False,
+    ) -> int:
+        """
+        Increment access_count on memories that match salience heuristics.
+
+        Salience criteria (any one triggers boost):
+          - Text contains a keyword from _SALIENCE_KEYWORDS
+          - access_count >= 3 (user has repeatedly surfaced this memory)
+          - created_at within the last 7 days (recency grace boost)
+
+        Returns count of memories boosted.
+        """
+        now     = datetime.now(timezone.utc)
+        boosted = 0
+
+        for m in all_mems:
+            mem_id = str(m.get("id", ""))
+            if not mem_id:
+                continue
+
+            text = (m.get("memory") or "").lower()
+            ac, _la = payload_map.get(mem_id, (0, "never"))
+
+            # Recency check
+            is_recent = False
+            created_at = m.get("created_at", "")
+            if created_at:
+                try:
+                    ts        = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    is_recent = (now - ts).days <= 7
+                except Exception:
+                    pass
+
+            is_salient = (
+                any(kw in text for kw in _SALIENCE_KEYWORDS)
+                or ac >= 3
+                or is_recent
+            )
+
+            if not is_salient:
+                continue
+
+            if not dry_run:
+                try:
+                    self._qdrant.set_payload(
+                        collection_name=QDRANT_COLLECTION,
+                        payload={"access_count": min(ac + DREAM_BOOST_AMOUNT, 255)},
+                        points=[mem_id],
+                    )
+                except Exception as e:
+                    print(f"[dream-warn] Boost failed for {mem_id}: {e}")
+                    continue
+
+            boosted += 1
+
+        if boosted:
+            print(f"[dream] {'(dry-run) ' if dry_run else ''}Boosted {boosted} memories.")
+        return boosted
+
+    def _dream_merge(
+        self,
+        mem_ids:   list[str],
+        threshold: float = DREAM_MERGE_THRESHOLD,
+        dry_run:   bool  = False,
+    ) -> int:
+        """
+        Detect and collapse near-duplicate memory vectors.
+
+        For each memory, searches Qdrant for neighbors above the cosine
+        threshold. When a duplicate pair is found, the lower access_count
+        copy is deleted. Tracks already-deleted IDs to avoid double-deletes
+        in the same pass.
+
+        Performance note: one retrieve(with_vectors=True) + one search() per
+        memory → 2N Qdrant calls. At typical Aiko memory counts (<500) this
+        is fast (<2s). If it ever slows, batch-retrieve all vectors first.
+
+        Returns count of memories deleted as duplicates.
+        """
+        deleted_ids: set[str] = set()
+        merged = 0
+
+        for mem_id in mem_ids:
+            if mem_id in deleted_ids:
+                continue  # already consumed by an earlier merge
+
+            vector = self._get_vector(mem_id)
+            if not vector:
+                continue
+
+            try:
+                neighbors = self._qdrant.search(
+                    collection_name=QDRANT_COLLECTION,
+                    query_vector=vector,
+                    limit=4,                    # self + up to 3 near-dupes
+                    score_threshold=threshold,
+                    with_payload=True,
+                )
+            except Exception as e:
+                print(f"[dream-warn] Similarity search failed for {mem_id}: {e}")
+                continue
+
+            for neighbor in neighbors:
+                neighbor_id = str(neighbor.id)
+                if neighbor_id == mem_id:
+                    continue  # skip self
+                if neighbor_id in deleted_ids:
+                    continue  # already gone
+
+                n_merged = self._resolve_duplicate(
+                    mem_id, neighbor_id, neighbor.score, dry_run=dry_run
+                )
+                if n_merged:
+                    deleted_ids.add(neighbor_id)
+                    merged += 1
+
+        if merged:
+            print(f"[dream] {'(dry-run) ' if dry_run else ''}Merged {merged} duplicate memories.")
+        return merged
+
+    def _resolve_duplicate(
+        self,
+        id_a:    str,
+        id_b:    str,
+        score:   float,
+        dry_run: bool = False,
+    ) -> bool:
+        """
+        Compare two near-duplicate memories and delete the weaker one.
+
+        Keeps the copy with higher access_count. On a tie, keeps id_a
+        (the query origin) and deletes id_b.
+
+        Returns True if a deletion occurred (or would occur in dry_run).
+        """
+        payload_map = self._batch_get_payloads([id_a, id_b])
+        ac_a, _ = payload_map.get(id_a, (0, "never"))
+        ac_b, _ = payload_map.get(id_b, (0, "never"))
+        loser   = id_b if ac_a >= ac_b else id_a
+
+        if dry_run:
+            print(
+                f"[dream] (dry-run) Would merge: score={score:.3f} "
+                f"ac_a={ac_a} ac_b={ac_b} → delete {loser}"
+            )
+            return True
+
+        try:
+            self._mem.delete(memory_id=loser)
+            print(
+                f"[dream] Merged duplicate (score={score:.3f}, "
+                f"ac_a={ac_a}, ac_b={ac_b}) → deleted {loser}"
+            )
+            return True
+        except Exception as e:
+            print(f"[dream-warn] Merge delete failed for {loser}: {e}")
+            return False
+
     # ── lifecycle ──────────────────────────────────────────────────────────────
 
     def cleanup(
         self,
-        user_id: str = USER_ID,
+        user_id:   str   = USER_ID,
         threshold: float = CLEANUP_THRESHOLD,
-        dry_run: bool = False,
+        dry_run:   bool  = False,
     ) -> dict:
         """
         Prune decayed memories below threshold score.
@@ -228,24 +476,24 @@ class AikoMemorize:
             return {"deleted": 0, "kept": 0, "failed": 0}
 
         # Batch retrieve all Qdrant payloads — single round-trip
-        mem_ids = [str(m.get("id", "")) for m in all_mems if m.get("id")]
+        mem_ids     = [str(m.get("id", "")) for m in all_mems if m.get("id")]
         payload_map = self._batch_get_payloads(mem_ids)
 
         candidates = []
-        kept = 0
+        kept       = 0
 
         for m in all_mems:
-            mem_id = str(m.get("id", ""))
-            ac, la = payload_map.get(mem_id, (0, "never"))
+            mem_id     = str(m.get("id", ""))
+            ac, la     = payload_map.get(mem_id, (0, "never"))
             created_at = m.get("created_at", "")
 
             if should_cleanup(ac, la, created_at):
                 w = compute_weighted_score(ac, la)
                 candidates.append({
-                    "id": mem_id,
-                    "memory": m.get("memory", "")[:120],
-                    "access_count": ac,
-                    "weighted_score": round(w, 4),
+                    "id":               mem_id,
+                    "memory":           m.get("memory", "")[:120],
+                    "access_count":     ac,
+                    "weighted_score":   round(w, 4),
                     "last_accessed_at": la,
                 })
             else:
@@ -258,7 +506,7 @@ class AikoMemorize:
             return {"deleted": 0, "kept": kept, "failed": 0, "candidates": candidates}
 
         deleted = []
-        failed = []
+        failed  = []
         for c in candidates:
             try:
                 self._mem.delete(memory_id=c["id"])
@@ -309,3 +557,21 @@ class AikoMemorize:
         except Exception as e:
             print(f"[memorize-warn] Batch payload fetch failed: {e}")
             return {}
+
+    def _get_vector(self, mem_id: str) -> list[float]:
+        """
+        Retrieve the raw embedding vector for a single memory from Qdrant.
+        Used by _dream_merge() to run similarity searches.
+        Returns empty list on failure — callers should skip on empty.
+        """
+        try:
+            pts = self._qdrant.retrieve(
+                collection_name=QDRANT_COLLECTION,
+                ids=[mem_id],
+                with_vectors=True,
+            )
+            if pts and pts[0].vector:
+                return pts[0].vector
+        except Exception as e:
+            print(f"[memorize-warn] Vector fetch failed for {mem_id}: {e}")
+        return []

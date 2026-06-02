@@ -36,7 +36,7 @@ MEM0_CONFIG = {
         "config": {
             "model": "BAAI/bge-base-en-v1.5",
             "embedding_dims": 768,
-            "model_kwargs": {"device": "cpu"},
+            #"model_kwargs": {"device": "cpu"},
         },
     },
 }

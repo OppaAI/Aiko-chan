@@ -92,7 +92,7 @@ class AikoListen:
         """Block until Whisper model is warm. Call from cli.py before first prompt."""
         self._warmup_done.wait()
 
-    def listen(self, status_callback=None) -> str:
+    def listen(self, status_callback=None, wait_fn=None) -> str:
         """
         Block until one complete speech utterance is captured and transcribed.
 
@@ -103,6 +103,8 @@ class AikoListen:
         Returns:
             Transcribed text string, or "" if nothing intelligible was captured.
         """
+        if wait_fn:
+            wait_fn()
         audio = self._record(status_callback)
         if audio is None:
             _cb(status_callback, "__IDLE__")

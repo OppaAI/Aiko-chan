@@ -865,7 +865,7 @@ class AikoTUI:
     # VOICE INPUT
     # ─────────────────────────────────────────────────────────────────────────
 
-    def get_voice_input(self, listen):
+    def get_voice_input(self, listen, wait_fn=None):
         self._input_buf = []
         result_holder   = [None]
         done_event      = threading.Event()
@@ -882,13 +882,14 @@ class AikoTUI:
                     self._input_buf = []
             self._draw(buf=list(self._input_buf))
 
-            def _run():
-                result_holder[0] = listen.listen(
-                    status_callback=_status_cb,
-                    wait_fn=wait_fn,
-                )
+        def _run():
+            result_holder[0] = listen.listen(
+                status_callback=_status_cb,
+                wait_fn=wait_fn,
+            )
+            done_event.set()
 
-            threading.Thread(target=_run, daemon=True).start()
+        threading.Thread(target=_run, daemon=True).start()
 
         while not done_event.is_set():
             self._draw_clock_only()

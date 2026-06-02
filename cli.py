@@ -257,6 +257,7 @@ INIT_STEPS = {
     'think_warmup': ('Model Warm-up',    'Loading weights, running prefill pass …'),
     'mem_qdrant':   ('Vector Database',  'Connecting to Qdrant  ·  localhost:6333'),
     'mem_embed':    ('Embedding Model',  'Loading BGE-base-en-v1.5  ·  768-dim vectors'),
+    'mem_cleanup':  ('Memory Lifecycle', 'Pruning decayed memories …'),
     'mem_ready':    ('Memory Cortex',    'mem0 ready  ·  long-term recall online'),
     'speak_kokoro': ('TTS Engine',       f'Initializing Kokoro  ·  {KOKORO_VOICE}'),
     'speak_ready':  ('Voice Output',     'Audio pipeline ready  ·  24 kHz'),
@@ -955,6 +956,9 @@ def _run(stdscr, args):
         tui.step_done('mem_qdrant')
         tui.step_loading('mem_embed')
         tui.step_done('mem_embed')
+        tui.step_loading('mem_cleanup')
+        memorize[0].cleanup()
+        tui.step_done('mem_cleanup')
         tui.step_loading('mem_ready')
         mem_ready.set()
         tui.step_done('mem_ready')

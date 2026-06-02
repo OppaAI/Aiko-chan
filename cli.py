@@ -135,22 +135,16 @@ def _ram_used_str() -> str:
     except Exception:
         return "? GB"
 
-def _db_size_str(db_path: str) -> str:
-    """Return human-readable size of Qdrant storage directory."""
+def _db_size_str() -> str:
     try:
-        total = 0
-        for dirpath, _, filenames in os.walk(db_path):
-            for fname in filenames:
-                try:
-                    total += os.path.getsize(os.path.join(dirpath, fname))
-                except OSError:
-                    pass
-        if total == 0:
-            return "0 MB"
-        mb = total / 1024 / 1024
-        return f"{mb:.0f} MB" if mb >= 1 else f"{total // 1024} KB"
+        import urllib.request, json
+        url = "http://localhost:6333/collections/aiko_memory"
+        with urllib.request.urlopen(url, timeout=1) as r:
+            data = json.loads(r.read())
+        points = data["result"]["points_count"]
+        return f"{points} mem"
     except Exception:
-        return "? MB"
+        return "? mem"
 
 def _fmt_uptime(seconds: float) -> str:
     s = int(seconds)
@@ -221,7 +215,6 @@ OLLAMA_MODEL  = os.getenv("OLLAMA_MODEL",  "unknown")
 KOKORO_VOICE  = os.getenv("KOKORO_VOICE",  "unknown")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "distil-large-v3.5")
 SEARXNG_URL   = os.getenv("SEARXNG_URL",   "localhost:8080")
-QDRANT_PATH   = os.getenv("QDRANT_PATH",   os.path.expanduser("~/.qdrant"))
 
 AI_NAME = os.getenv("AI_NAME", "Aiko")
 USER_ID = os.getenv("USER_ID", "")
@@ -562,7 +555,7 @@ class AikoTUI:
         mode_str = "  ".join(mode_parts)
 
         ram_str   = f"RAM {_ram_used_str()}"
-        db_str    = f"DB {_db_size_str(QDRANT_PATH)}"
+        db_str    = f"DB {_db_size_str()}"
         tok_str   = f"{s['tokens']:,} tkns"
         toks_str  = f"{s['tok_s']:.1f} t/s" if s['tok_s'] > 0 else "— t/s"
         up_str    = f"▲ {_fmt_uptime(time.time() - self._ts)}"
@@ -873,11 +866,11 @@ class AikoTUI:
     # ─────────────────────────────────────────────────────────────────────────
 
     def get_voice_input(self, listen):
-        self._input_buf = []
-        result_holder   = [None]
-        done_event      = threading.Event()
+            self._input_buf = []
+            result_holder   = [None]
+            done_event      = threading.Event()
 
-        def _status_cb(token):
+            def _status_cb(token):
             if token == '__LISTENING__':
                 with self._lock:
                     self._input_buf = list("🎤  Listening …")
@@ -889,11 +882,13 @@ class AikoTUI:
                     self._input_buf = []
             self._draw(buf=list(self._input_buf))
 
-        def _run():
-            result_holder[0] = listen.listen(status_callback=_status_cb)
-            done_event.set()
+            def _run():
+                result_holder[0] = listen.listen(
+                    status_callback=_status_cb,
+                    wait_fn=wait_fn,
+                )
 
-        threading.Thread(target=_run, daemon=True).start()
+            threading.Thread(target=_run, daemon=True).start()
 
         while not done_event.is_set():
             self._draw_clock_only()
@@ -998,7 +993,10 @@ def _run(stdscr, args):
     while True:
         try:
             if listen and asr_enabled:
-                user_input = tui.get_voice_input(listen)
+                user_input = tui.get_voice_input(
+                    listen,
+                    wait_fn=speak.wait if speak else None,
+                )
             else:
                 user_input = tui.get_input()
         except KeyboardInterrupt:

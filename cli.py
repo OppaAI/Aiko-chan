@@ -131,7 +131,7 @@ def _ram_used_str() -> str:
         avail = vals.get("MemAvailable", 0)
         used  = (total - avail) / 1024 / 1024   # GB
         total_gb = total / 1024 / 1024
-        return f"{used:.1f}/{total_gb:.0f} GB"
+        return f"{used:.1f}/{total_gb:.1f} GB"  # :.1f instead of :.0f
     except Exception:
         return "? GB"
 
@@ -782,8 +782,11 @@ class AikoTUI:
     def stream_token(self, token):
         with self._lock:
             self._streaming += token
-            self._stats['tokens']   += 1
-            self._stats['turn_tok'] += 1
+            count = len(token)
+            self._stats['tokens']   += count
+            self._stats['turn_tok'] += count
+            if self._stats['turn_start'] is None:
+                self._stats['turn_start'] = time.time()
 
     def stream_commit(self):
         with self._lock:

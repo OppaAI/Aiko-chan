@@ -37,9 +37,9 @@ MEM0_CONFIG = {
         "config": {
             "model": "BAAI/bge-base-en-v1.5",
             "embedding_dims": 768,
-            # CRITICAL FIX 1: Force embedding math onto the CPU.
-            # This keeps your GPU VRAM completely clear for Ollama.
-            "model_kwargs": {"device": "cpu"}, 
+            # FIX: Fastembed uses "onnx_providers" to choose the device.
+            # Specifying 'CPUExecutionProvider' strictly locks it out of CUDA.
+            "onnx_providers": ["CPUExecutionProvider"],
         },
     },
 }

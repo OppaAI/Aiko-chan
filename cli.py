@@ -83,7 +83,7 @@ def _read_sys_info() -> dict:
 
     ram_kb = info.get("ram_total_kb", 0)
     ram_gb = ram_kb / 1024 / 1024
-    info["ram"] = f"{ram_gb:.0f} GB" if ram_gb >= 1 else f"{ram_kb // 1024} MB"
+    info["ram"] = f"{ram_gb:.1f} GB" if ram_gb >= 1 else f"{ram_kb // 1024} MB"
 
     # Root partition size
     try:
@@ -556,7 +556,7 @@ class AikoTUI:
 
         ram_str   = f"RAM {_ram_used_str()}"
         db_str    = f"DB {_db_size_str()}"
-        tok_str   = f"{s['tokens']:,} tkns"
+        tok_str   = f"{s['tokens']:,} tokens"
         toks_str  = f"{s['tok_s']:.1f} t/s" if s['tok_s'] > 0 else "— t/s"
         up_str    = f"▲ {_fmt_uptime(time.time() - self._ts)}"
 

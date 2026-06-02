@@ -1,7 +1,9 @@
 # Aiko-chan 愛子ちゃん
 
-> AI companion, soulmate, and occasional roaster.
+> AI companion, soulmate, and occasional roaster
 > A vibe-coded AI waifu built for real conversation, persistent memory, and eventually — a face and a voice.
+> 
+> Runs fully local on 8GB VRAM GPU (or Jetson Orin Nano). No cloud. No subscriptions. Just vibes.
 
 This project is a **precursor and testing sandbox** for [Grace / AuRoRA](https://github.com/OppaAI/AGi).  
 Core tech (mem0 + Qdrant memory, Ollama inference, async pipelines) is battle-tested here before graduating to Grace.

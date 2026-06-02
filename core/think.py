@@ -75,19 +75,17 @@ class AikoThink:
     """
 
     def __init__(self, memorize: AikoMemorize, speak: AikoSpeak | None = None) -> None:
-        self._client         = Client(host=OLLAMA_BASE_URL)
-        self._memorize       = memorize
-        self._speak          = speak
-        self._persona        = _load_persona()
-        self._history:       list[dict] = []
-        self._mem_queue = queue.Queue()
+        self._client   = Client(host=OLLAMA_BASE_URL)
+        self._memorize = memorize
+        self._speak    = speak
+        self._persona  = _load_persona()
+        self._history: list[dict] = []
+        self._mem_queue  = queue.Queue()
         self._mem_worker = threading.Thread(target=self._mem_write_loop, daemon=True)
         self._mem_worker.start()
-        self._warmup_thread: threading.Thread | None = None
-
-        #print(f"[think] Ollama client ready — model: {OLLAMA_MODEL}")
-        #print(f"[think] Voice output: {'on' if speak else 'off'}")
-
+    
+        self._memorize.cleanup()  # ✅ prune decayed memories at boot
+    
         self._warmup_thread = threading.Thread(target=self._warmup_llm, daemon=True)
         self._warmup_thread.start()
 

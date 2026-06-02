@@ -23,6 +23,10 @@ MEM0_CONFIG = {
             "embedding_model_dims": 768,
         },
     },
+    # CRITICAL: Use the SAME model as the chatbot by default.
+    # If MEM0_MODEL is unset, falls back to OLLAMA_MODEL so Ollama only manages
+    # ONE model in VRAM. Setting a different model causes Ollama to evict the
+    # main model on every mem0 call → 1-5s reload lag + OOM risk with ASR/TTS.
     "llm": {
         "provider": "ollama",
         "config": {

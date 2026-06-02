@@ -97,6 +97,7 @@ class AikoThink:
                 model=OLLAMA_MODEL,
                 messages=[{"role": "user", "content": "hi"}],
                 stream=False,
+                keep_alive=-1,
                 options={
                     "num_predict": 1,
                     "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", 2048)),
@@ -185,6 +186,7 @@ class AikoThink:
                 model=OLLAMA_MODEL,
                 messages=messages,
                 stream=True,
+                keep_alive=-1,
                 options={
                     "num_ctx":        int(os.getenv("OLLAMA_NUM_CTX", 2048)),
                     "temperature":    0.75,   # creative but not unhinged

@@ -60,8 +60,22 @@ class AikoMemorize:
         if not silent:
             print("[memorize] Connecting to Qdrant and initialising mem0...")
         self._mem = Memory.from_config(MEM0_CONFIG)
+        # Pin model in VRAM: patch mem0's internal Ollama client so every call
+        # includes keep_alive=-1, preventing the model from being unloaded
+        # between memory operations (which would force a costly reload).
+        self._patch_keep_alive()
         if not silent:
             print("[memorize] Ready.")
+
+    @staticmethod
+    def _patch_keep_alive() -> None:
+        """Monkey-patch ollama.Client.chat to always send keep_alive=-1."""
+        from ollama import Client
+        _original_chat = Client.chat
+        def _chat_with_keep_alive(self_client, *args, **kwargs):
+            kwargs.setdefault("keep_alive", -1)
+            return _original_chat(self_client, *args, **kwargs)
+        Client.chat = _chat_with_keep_alive
 
     def add(self, messages: list[dict], user_id: str = AIKO_USER_ID) -> None:
         """

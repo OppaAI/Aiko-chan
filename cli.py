@@ -1007,10 +1007,20 @@ def _run(stdscr, args):
             elif cmd.startswith('/web '):
                 query = user_input[5:].strip()
                 if query:
+                    try:
+                        from core.tools import web_search
+                    except ImportError as e:
+                        tui.add_message('sys', f'Web search unavailable: {e}')
+                        tui._draw()
+                        continue
                     tui.add_message('sys', f'Searching: "{query}"')
                     tui._draw()
-                    from core.tools import web_search
-                    results = web_search(query)
+                    try:
+                        results = web_search(query)
+                    except Exception as e:
+                        tui.add_message('sys', f'Search failed: {e}')
+                        tui._draw()
+                        continue
                     think._history.append({"role": "user", "content": results})
                     def token_cb(token):
                         tui.stream_token(token)

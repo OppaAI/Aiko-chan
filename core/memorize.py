@@ -25,10 +25,11 @@ MEM0_CONFIG = {
     "llm": {
         "provider": "ollama",
         "config": {
-            "model": os.getenv("MEM0_MODEL", os.getenv("OLLAMA_MODEL", "ministral-3k")),
+            "model": os.getenv("MEM0_MODEL", os.getenv("OLLAMA_MODEL")),
             "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             "temperature": 0,
-            "max_tokens": 500,
+            "max_tokens": 200,
+            "ollama_num_ctx": 512,  # tiny context for extraction only
         },
     },
     "embedder": {
@@ -39,9 +40,6 @@ MEM0_CONFIG = {
             "model_kwargs": {"device": "cpu"},
         },
     },
-    "version": "v1.1",
-    "enable_graph": False,
-    "custom_fact_extraction_prompt": "Return only: {\"facts\": []}",
 }
 
 AIKO_USER_ID = os.getenv("USER_ID", "OppaAI")

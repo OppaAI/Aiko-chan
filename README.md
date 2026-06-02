@@ -64,7 +64,7 @@ flowchart TD
 
 - [Ollama](https://ollama.com) running locally or on a remote server
 - Docker + Docker Compose
-- Python 3.10+
+- Python **3.10 exactly** (3.11+ not supported — Jetson AI Lab wheels are 3.10-only)
 - [uv](https://github.com/astral-sh/uv)
 
 ```bash

@@ -545,20 +545,20 @@ class AikoTUI:
         Single status line with live system + session metrics.
         Segments drop off right-to-left if terminal is too narrow.
 
-            🎤 ASR  │  RAM 5.6/8 GB  │  DB 142 MB  │  847 tok  │  23.4 tok/s  │  ↑00:12:34
+            ☊ ASR  │  RAM 5.6/7.4 GB  │  DB 142 entries  │  847 tok  │  23.4 tok/s  │  ↑0 0:12:34
         """
         s = self._stats
 
         mode_parts = []
-        mode_parts.append("🎤 ASR" if s['asr_on'] else "⌨  TXT")
-        mode_parts.append("🔊 TTS" if s['tts_on'] else "🔇 TTS")
+        mode_parts.append("☊ ASR" if s['asr_on'] else "⌨  TXT")
+        mode_parts.append("🎙 TTS" if s['tts_on'] else "🔇 TTS")
         mode_str = "  ".join(mode_parts)
 
         ram_str   = f"RAM {_ram_used_str()}"
         db_str    = f"DB {_db_size_str()}"
         tok_str   = f"{s['tokens']:,} tokens"
         toks_str  = f"{s['tok_s']:.1f} t/s" if s['tok_s'] > 0 else "— t/s"
-        up_str    = f"▲ {_fmt_uptime(time.time() - self._ts)}"
+        up_str    = f"↑ {_fmt_uptime(time.time() - self._ts)}"
 
         segments = [mode_str, ram_str, db_str, tok_str, toks_str, up_str]
 

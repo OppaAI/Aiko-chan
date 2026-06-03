@@ -13,6 +13,8 @@ Memory lifecycle:
   - cleanup() deletes memories below decay threshold, with grace period
     protection for newly created entries.
   - Decay logic lives in core/forget.py (pure math, no I/O).
+  - Pinned memories (created via pin()) are permanently immune to decay
+    cleanup and dream pruning. The pinned flag lives in Qdrant payload.
 
 Dream pass overview:
   1. Boost  — increment access_count on memories matching salience heuristics
@@ -20,14 +22,17 @@ Dream pass overview:
   2. Merge  — cosine-similarity search per memory; near-duplicates above
               threshold are collapsed: keep the higher access_count copy,
               delete the redundant one via mem0 to stay in sync.
+              Pinned memories are never chosen as the loser in a merge.
   3. Prune  — standard cleanup() pass; runs after boost so newly protected
               memories aren't caught in the sweep.
+              Pinned memories are skipped entirely.
 """
 from dotenv import load_dotenv
 load_dotenv()
 
 from datetime import datetime, timezone
 import os
+import threading
 import time
 from typing import Optional
 
@@ -100,14 +105,22 @@ class AikoMemorize:
         Every search() call updates Qdrant payload fields (access_count,
         last_accessed_at) so the decay formula has fresh data.
 
+    Pinned memories:
+        Created via pin() — the pinned=True Qdrant payload flag makes them
+        immune to cleanup(), dream prune, and dream merge (as the loser).
+        No changes to forget.py are required; the guard lives here.
+
     Dream pass (call nightly at 00:00):
         1. Boost salient memories' access_count so they survive decay.
         2. Merge near-duplicate vectors — keeps higher-access copy.
+           Pinned memories are never deleted as a merge loser.
         3. Prune decayed memories via cleanup().
+           Pinned memories are skipped entirely.
 
     Cleanup:
         Also available standalone — deletes memories below decay threshold,
         with grace period protection for newly created entries.
+        Pinned memories are always kept regardless of score.
     """
 
     def __init__(self, silent: bool = False) -> None:
@@ -150,7 +163,7 @@ class AikoMemorize:
         except Exception as e:
             log.error(f"Save failed: {e}")
             return False
-          
+
     def add_async(self, messages, user_id=USER_ID) -> None:
         """Fire-and-forget add() — doesn't block the chat loop."""
         threading.Thread(
@@ -158,7 +171,47 @@ class AikoMemorize:
             args=(messages, user_id),
             daemon=True,
         ).start()
-  
+
+    def pin(self, messages: list[dict], user_id: str = USER_ID) -> bool:
+        """
+        Store messages and immediately mark all resulting memories as pinned.
+
+        Pinned memories are permanently immune to:
+          - decay cleanup (cleanup() skips them regardless of score)
+          - dream pruning (dream() prune stage skips them)
+          - dream merging (never chosen as the loser in a duplicate collapse)
+
+        Uses a before/after snapshot of get_all() to identify the IDs that
+        mem0 created, then sets pinned=True in their Qdrant payload. Works
+        correctly when mem0 extracts multiple memories from a single turn.
+
+        Returns True on success, False on any failure (check logs).
+        """
+        try:
+            before  = {str(m["id"]) for m in self.get_all(user_id=user_id)}
+            ok      = self.add(messages, user_id=user_id)
+            if not ok:
+                return False
+            after   = {str(m["id"]) for m in self.get_all(user_id=user_id)}
+            new_ids = list(after - before)
+            if new_ids:
+                self._qdrant.set_payload(
+                    collection_name=QDRANT_COLLECTION,
+                    payload={"pinned": True},
+                    points=new_ids,
+                )
+                log.info(f"Pinned {len(new_ids)} memories: {new_ids}")
+            else:
+                # mem0 may have de-duplicated and updated an existing memory
+                # rather than inserting a new one — nothing new to pin, but
+                # the add itself succeeded, so treat as success.
+                log.info("pin(): add succeeded but no new memory IDs detected "
+                         "(mem0 may have merged with an existing entry).")
+            return True
+        except Exception as e:
+            log.error(f"Pin failed: {e}")
+            return False
+
     # ── read ───────────────────────────────────────────────────────────────────
 
     def search(self, query: str, user_id: str = USER_ID, limit: int = 5) -> list[dict]:
@@ -256,8 +309,10 @@ class AikoMemorize:
           1. Boost  — salient memories get +DREAM_BOOST_AMOUNT access_count.
           2. Merge  — near-duplicate pairs (cosine >= threshold) are collapsed;
                       higher access_count copy survives, other is deleted.
+                      Pinned memories are never chosen as the loser.
           3. Prune  — standard decay cleanup runs last, after boosts are applied,
                       so newly protected memories aren't swept.
+                      Pinned memories are always kept.
 
         Args:
             dry_run:   Report actions without writing or deleting anything.
@@ -308,6 +363,8 @@ class AikoMemorize:
           - access_count >= 3 (user has repeatedly surfaced this memory)
           - created_at within the last 7 days (recency grace boost)
 
+        Pinned memories pass through the boost unchanged — they don't need it.
+
         Returns count of memories boosted.
         """
         now     = datetime.now(timezone.utc)
@@ -316,6 +373,11 @@ class AikoMemorize:
         for m in all_mems:
             mem_id = str(m.get("id", ""))
             if not mem_id:
+                continue
+
+            # Pinned memories are immortal — boosting them is harmless but
+            # wasteful; skip so the log stays clean.
+            if self._is_pinned(mem_id):
                 continue
 
             text = (m.get("memory") or "").lower()
@@ -371,6 +433,9 @@ class AikoMemorize:
         copy is deleted. Tracks already-deleted IDs to avoid double-deletes
         in the same pass.
 
+        Pinned memories are skipped as query origins and are never chosen as
+        the loser in _resolve_duplicate() — a pinned memory always survives.
+
         Performance note: one retrieve(with_vectors=True) + one search() per
         memory → 2N Qdrant calls. At typical Aiko memory counts (<500) this
         is fast (<2s). If it ever slows, batch-retrieve all vectors first.
@@ -383,6 +448,13 @@ class AikoMemorize:
         for mem_id in mem_ids:
             if mem_id in deleted_ids:
                 continue  # already consumed by an earlier merge
+
+            # Don't initiate a merge search from a pinned memory — it can
+            # never be deleted anyway, so any pair it finds would either
+            # result in nothing (if the neighbor is also pinned) or delete
+            # the neighbor, which may be surprising. Safer to skip entirely.
+            if self._is_pinned(mem_id):
+                continue
 
             vector = self._get_vector(mem_id)
             if not vector:
@@ -431,8 +503,16 @@ class AikoMemorize:
         Keeps the copy with higher access_count. On a tie, keeps id_a
         (the query origin) and deletes id_b.
 
+        If either memory is pinned, the merge is aborted — a pinned memory
+        is never deleted regardless of access_count comparison.
+
         Returns True if a deletion occurred (or would occur in dry_run).
         """
+        # Never delete a pinned copy even if it's the lower-access one.
+        if self._is_pinned(id_a) or self._is_pinned(id_b):
+            log.info(f"Skipping merge: one or both of ({id_a}, {id_b}) is pinned.")
+            return False
+
         payload_map = self._batch_get_payloads([id_a, id_b])
         ac_a, _ = payload_map.get(id_a, (0, "never"))
         ac_b, _ = payload_map.get(id_b, (0, "never"))
@@ -474,6 +554,9 @@ class AikoMemorize:
         Grace period (14 days) protects newly created memories from deletion
         even if they score below threshold.
 
+        Pinned memories are unconditionally kept — the pinned flag overrides
+        all decay scoring. No changes to forget.py are required.
+
         Args:
             threshold: Override decay threshold (default: CLEANUP_THRESHOLD = 0.05).
             dry_run:   If True, report candidates without deleting.
@@ -499,6 +582,11 @@ class AikoMemorize:
             mem_id     = str(m.get("id", ""))
             ac, la     = payload_map.get(mem_id, (0, "never"))
             created_at = m.get("created_at", "")
+
+            # Pinned memories are immortal — skip decay check entirely.
+            if self._is_pinned(mem_id):
+                kept += 1
+                continue
 
             if should_cleanup(ac, la, created_at):
                 w = compute_weighted_score(ac, la)
@@ -588,3 +676,22 @@ class AikoMemorize:
         except Exception as e:
             log.warning(f"Vector fetch failed for {mem_id}: {e}")
         return []
+
+    def _is_pinned(self, mem_id: str) -> bool:
+        """
+        Return True if the Qdrant payload has pinned=True for this memory.
+
+        Used as a guard in cleanup(), _dream_merge(), and _resolve_duplicate()
+        to make pinned memories permanently immune to all deletion paths.
+        Defaults to False on any error — safe because a False miss at worst
+        leaves a memory subject to normal decay, not silently deletes it.
+        """
+        try:
+            pts = self._qdrant.retrieve(
+                collection_name=QDRANT_COLLECTION,
+                ids=[mem_id],
+                with_payload=True,
+            )
+            return bool(pts and pts[0].payload.get("pinned", False))
+        except Exception:
+            return False  # safe default — don't delete on retrieval error

@@ -14,7 +14,7 @@ Responsibilities:
     - Boot all cognitive subsystems in parallel (AikoThink, AikoMemorize)
     - Drive the TUI init phase and transition to active chat
     - Run the main input → inference → render loop
-    - Handle commands (/quit, /reset, /memory, /clear, /voice, /listen, /web, /help)
+    - Handle commands (/quit, /reset, /memory, /clear, /remember, /voice, /listen, /web, /help)
     - Clean shutdown on Ctrl-C / Ctrl-D
 """
 
@@ -212,6 +212,23 @@ def _run(stdscr, args):
                 memorize.clear()
                 tui.add_message('sys', 'All persistent memories cleared.')
 
+            elif cmd == '/remember':
+                # Pin the last user + assistant exchange permanently.
+                turn = think.last_turn()  # returns (user_text, assistant_text) or None
+                if not turn:
+                    tui.add_message('sys', 'Nothing to remember yet — send a message first.')
+                else:
+                    user_text, ai_text = turn
+                    msgs = [
+                        {"role": "user",      "content": user_text},
+                        {"role": "assistant", "content": ai_text},
+                    ]
+                    ok = memorize.pin(msgs)
+                    if ok:
+                        tui.add_message('sys', "Got it — I'll remember that forever. 📌")
+                    else:
+                        tui.add_message('sys', 'Failed to pin memory — check logs.')
+
             elif cmd == '/voice':
                 if speak is None:
                     tui.add_message('sys', 'TTS unavailable — started in --text mode.')
@@ -236,6 +253,7 @@ def _run(stdscr, args):
                     '/quit /exit    — end session',
                     '/reset         — clear short-term context',
                     '/clear         — wipe long-term memories',
+                    '/remember      — pin last turn forever (decay-proof)',
                     '/memory        — show stored memories',
                     '/web <query>   — web search',
                     '/voice         — toggle TTS on/off',

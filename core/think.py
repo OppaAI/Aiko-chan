@@ -122,7 +122,27 @@ class AikoThink:
 
     def reset_context(self) -> None:
         self._history.clear()
-
+      
+    def last_turn(self) -> tuple[str, str] | None:
+            """Return the latest complete user/assistant exchange, if one exists."""
+            assistant_text: str | None = None
+    
+            for message in reversed(self._history):
+                role = message.get("role")
+                content = (message.get("content") or "").strip()
+                if not content:
+                    continue
+    
+                if assistant_text is None:
+                    if role == "assistant":
+                        assistant_text = content
+                    continue
+    
+                if role == "user":
+                    return content, assistant_text
+    
+            return None
+  
     def set_speak(self, speak):
         """Hot-swap the TTS backend. Pass None to silence, speak instance to restore."""
         self._speak = speak
@@ -242,7 +262,7 @@ class AikoThink:
         while True:
             user_input, response_text = self._mem_queue.get()
             try:
-                self._memorize.add_async([
+                self._memorize.add([
                     {"role": "user",      "content": user_input},
                     {"role": "assistant", "content": response_text},
                 ])

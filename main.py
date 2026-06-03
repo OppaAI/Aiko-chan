@@ -11,7 +11,7 @@ Usage:
 
 Responsibilities:
     - Parse CLI arguments
-    - Boot all cognitive subsystems in parallel (AikoThink, AikoMemorize)
+    - Delegate subsystem boot to core/wakeup.py
     - Drive the TUI init phase and transition to active chat
     - Run the main input → inference → render loop
     - Handle commands (/quit, /reset, /memory, /clear, /remember, /think,
@@ -38,13 +38,12 @@ load_dotenv()
 
 from core.silence import silent_stderr
 from core.log     import get_logger
+from core.wakeup  import AikoWakeup
 
 log = get_logger(__name__)
 
 with silent_stderr():
     from core.memorize import AikoMemorize
-    from core.speak    import AikoSpeak
-    from core.think    import AikoThink
 
 from tui.tui import AikoTUI
 
@@ -81,18 +80,12 @@ def _run(stdscr, args):
 
     Stages:
         1. Spawn the TUI and begin the init spin loop.
-        2. Boot AikoThink and AikoMemorize in parallel threads.
-        3. Warm up TTS and ASR if voice mode is active.
-        4. Transition the TUI to the active chat phase.
-        5. Enter the main input → inference → render loop.
-        6. On exit, wait for any background memory writes to complete.
+        2. Delegate all subsystem boot to AikoWakeup, passing TUI callbacks.
+        3. Transition the TUI to the active chat phase.
+        4. Enter the main input → inference → render loop.
+        5. On exit, wait for any background memory writes to complete.
     """
-    tui   = AikoTUI(stdscr, no_voice=args.text, debug=args.debug)
-    speak = AikoSpeak(silent=True) if not args.text else None
-
-    memorize  = [None]
-    think_ref = [None]
-    mem_ready = threading.Event()
+    tui = AikoTUI(stdscr, no_voice=args.text, debug=args.debug)
 
     # ── init spin ─────────────────────────────────────────────────────────────
 
@@ -100,56 +93,18 @@ def _run(stdscr, args):
     spin_t    = threading.Thread(target=tui.spin_loop, args=(spin_stop,), daemon=True)
     spin_t.start()
 
-    # ── parallel boot ─────────────────────────────────────────────────────────
+    # ── boot all subsystems via wakeup ────────────────────────────────────────
 
-    def init_think():
-        tui.step_loading('think_start')
-        think_ref[0] = AikoThink(None, speak=speak)
-        tui.step_done('think_start')
-        tui.step_loading('think_warmup')
-        think_ref[0].join_warmup()
-        tui.step_done('think_warmup')
-        mem_ready.wait()
-        think_ref[0]._memorize = memorize[0]
+    result = AikoWakeup(text_mode=args.text).boot(
+        on_loading = tui.step_loading,
+        on_done    = tui.step_done,
+        on_skip    = tui.step_skip,
+    )
 
-    def init_memorize():
-        tui.step_loading('mem_qdrant')
-        memorize[0] = AikoMemorize(silent=True)
-        tui.step_done('mem_qdrant')
-        tui.step_loading('mem_embed')
-        tui.step_done('mem_embed')
-        tui.step_loading('mem_cleanup')
-        memorize[0].cleanup()
-        tui.step_done('mem_cleanup')
-        tui.step_loading('mem_ready')
-        mem_ready.set()
-        tui.step_done('mem_ready')
-
-        from core.dream import start as start_dream_scheduler
-        start_dream_scheduler(memorize[0])
-
-    t1 = threading.Thread(target=init_think,    daemon=True)
-    t2 = threading.Thread(target=init_memorize, daemon=True)
-    t1.start(); t2.start()
-    t1.join();  t2.join()
-
-    # ── voice subsystems ──────────────────────────────────────────────────────
-
-    listen = None
-    if not args.text:
-        tui.step_loading('speak_miotts')
-        speak.warmup()
-        tui.step_done('speak_miotts')
-        tui.step_loading('speak_ready')
-        tui.step_done('speak_ready')
-        tui.step_loading('listen_ready')
-        from core.listen import AikoListen
-        listen = AikoListen()
-        listen.join_warmup()
-        tui.step_done('listen_ready')
-    else:
-        tui.step_skip('speak_skip')
-        tui.step_skip('listen_skip')
+    think    = result.think
+    memorize = result.memorize
+    speak    = result.speak
+    listen   = result.listen
 
     # ── transition to chat ────────────────────────────────────────────────────
 
@@ -158,8 +113,6 @@ def _run(stdscr, args):
     tui.status_finish()
     tui._draw()
 
-    memorize    = memorize[0]
-    think       = think_ref[0]
     tts_enabled = not args.text
     asr_enabled = not args.text
 
@@ -215,8 +168,8 @@ def _run(stdscr, args):
                 tui.add_message('sys', 'All persistent memories cleared.')
 
             elif cmd == '/remember':
-                # Pin the last user + assistant exchange permanently.
-                turn = think.last_turn()  # returns (user_text, assistant_text) or None
+                # pin the last user + assistant exchange permanently
+                turn = think.last_turn()
                 if not turn:
                     tui.add_message('sys', 'Nothing to remember yet — send a message first.')
                 else:
@@ -239,7 +192,7 @@ def _run(stdscr, args):
                     tui._draw()
                     continue
 
-                think.set_reasoning(True)   # single-shot — auto-resets after this turn
+                think.set_reasoning(True)
                 tui.add_message('you', f'[think] {query}')
                 tui.turn_start()
                 tui._draw()
@@ -260,17 +213,15 @@ def _run(stdscr, args):
                             if "</think>" in assembled:
                                 in_think_block = False
                                 think_closed   = True
-                            return  # suppress scratchpad from main stream
+                            return
 
-                    # Past the </think> block — stream the real answer
                     tui.stream_token(token)
                     tui._draw(buf=[])
 
                 think.chat(query, token_callback=_think_token_cb)
 
-                # Extract scratchpad and show summary in sys panel
-                assembled_full    = "".join(raw_chunks)
-                scratchpad_match  = re.search(r"<think>(.*?)</think>", assembled_full, re.DOTALL)
+                assembled_full   = "".join(raw_chunks)
+                scratchpad_match = re.search(r"<think>(.*?)</think>", assembled_full, re.DOTALL)
                 if scratchpad_match:
                     inner = scratchpad_match.group(1).strip()
                     if inner:

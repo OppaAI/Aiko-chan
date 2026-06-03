@@ -26,7 +26,7 @@ import os
 import re
 import textwrap
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import requests
@@ -138,9 +138,10 @@ def _build_hugo_post(
     prose:      str,
     ascii_art:  str,
     date:       datetime,
+    write_time: datetime,
     mem_count:  int,
 ) -> tuple[str, str]:
-    """
+     """
     Assemble Hugo front matter + body.
 
     Returns (slug, markdown_content).
@@ -158,7 +159,7 @@ def _build_hugo_post(
     front_matter = (
         f'---\n'
         f'title: "{date_str} Reflection"\n'
-        f'date: {date.strftime("%Y-%m-%dT%H:%M:%S+00:00")}\n'
+        f'date: {write_time.strftime("%Y-%m-%dT%H:%M:%S+00:00")}\n'
         f'draft: false\n'
         f'tags:\n'
         f'{tags_yaml}\n'
@@ -255,8 +256,9 @@ def generate_and_post(
 
     Returns dict: {success, slug, word_count, mem_count, duration_s, prose, ascii_art}
     """
-    t_start = time.perf_counter()
-    date    = date or datetime.now(timezone.utc)
+    t_start    = time.perf_counter()
+    write_time = datetime.now(timezone.utc)
+    date       = date or write_time - timedelta(days=1)
 
     if not OLLAMA_MODEL:
         log.error("OLLAMA_MODEL not set.")
@@ -294,7 +296,7 @@ def generate_and_post(
         ascii_art = "  ~  ( Aiko )  ~\n   `-- * --'"
 
     # Step 3: Build Hugo post
-    slug, content = _build_hugo_post(prose, ascii_art, date, len(snippets))
+    slug, content = _build_hugo_post(prose, ascii_art, date, write_time, len(snippets))
 
     duration = round(time.perf_counter() - t_start, 2)
 

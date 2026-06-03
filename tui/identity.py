@@ -13,10 +13,13 @@ Exports:
 """
 
 import json
+import os
 import re
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_DEFAULT_IDENTITY = os.path.join(_HERE, "..", "persona", "identity.md")
 
-def load_identity(path: str = "persona/identity.md") -> dict:
+def load_identity(path: str = _DEFAULT_IDENTITY) -> dict:
     """
     Awaken Aiko's sense of self by parsing the identity manifest from disk.
 

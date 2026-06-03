@@ -2,7 +2,7 @@
 core/dream.py
 Schedules Aiko's nightly dream() consolidation pass at 00:00 local time.
 
-Usage — call start() once during Aiko startup (e.g. in main.py):
+Usage — call start() once during Aiko startup (e.g. in UI):
     from core.dream import start as start_dream_scheduler
     start_dream_scheduler(memorize_instance)
 

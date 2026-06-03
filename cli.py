@@ -3,7 +3,7 @@ cli.py
 
 Aiko-chan CLI — full-screen curses TUI, cyberpunk edition.
 Usage:
-    python cli.py               # full voice — ASR (faster-whisper) + TTS (Kokoro)
+    python cli.py               # full voice — ASR (faster-whisper) + TTS (MioTTS)
     python cli.py --text        # keyboard input + no TTS
     python cli.py --debug       # show memory debug info each turn
     python cli.py --clear-mem   # wipe all stored memories and exit
@@ -273,7 +273,6 @@ ART_H = _IDENTITY["art_h"]
 
 SESSION_ID    = time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
 OLLAMA_MODEL  = os.getenv("OLLAMA_MODEL",  "unknown")
-KOKORO_VOICE  = os.getenv("KOKORO_VOICE",  "unknown")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "distil-large-v3.5")
 SEARXNG_URL   = os.getenv("SEARXNG_URL",   "localhost:8080")
 
@@ -296,8 +295,8 @@ ARCH_SECTIONS = [
         ("Web search",       SEARXNG_URL),
     ]),
     ("VOICE ENGINE", [
-        ("TTS backend",   "Realtime TTS + Kokoro"),
-        ("Voice profile", KOKORO_VOICE),
+        ("TTS backend",   "MioTTS 0.1B"),
+        ("Voice preset",  os.getenv("MIOTTS_PRESET", "jp_female")),
         ("ASR model",     WHISPER_MODEL),
     ]),
     ("HARDWARE", [
@@ -320,7 +319,7 @@ INIT_STEPS = {
     'mem_embed':    ('Embedding Model',  'Loading BGE-base-en-v1.5  ·  768-dim vectors'),
     'mem_cleanup':  ('Memory Lifecycle', 'Pruning decayed memories …'),
     'mem_ready':    ('Memory Cortex',    'mem0 ready  ·  long-term recall online'),
-    'speak_kokoro': ('TTS Engine',       f'Initializing Kokoro  ·  {KOKORO_VOICE}'),
+    'speak_miotts': ('TTS Engine', f'Initializing MioTTS  ·  {os.getenv("MIOTTS_PRESET", "jp_female")}'),
     'speak_ready':  ('Voice Output',     'Audio pipeline ready  ·  24 kHz'),
     'speak_skip':   ('Voice Output',     'TTS disabled  (--text mode)'),
     'listen_ready': ('Speech Input',     f'faster-whisper ready  ·  {WHISPER_MODEL}'),
@@ -1145,9 +1144,9 @@ def _run(stdscr, args):
 
     listen = None
     if not args.text:
-        tui.step_loading('speak_kokoro')
+        tui.step_loading('speak_miotts')
         speak.warmup()
-        tui.step_done('speak_kokoro')
+        tui.step_done('speak_miotts')
         tui.step_loading('speak_ready')
         tui.step_done('speak_ready')
         tui.step_loading('listen_ready')

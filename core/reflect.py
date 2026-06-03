@@ -170,15 +170,7 @@ def _build_hugo_post(
 
     # Body — ASCII art in a code block labelled "fallback" (matches your existing style)
     ascii_block = f"```fallback\n{ascii_art}\n```"
-
-    body = textwrap.dedent(f"""
-        {prose}
-
-        {ascii_block}
-
-        *Generated from {mem_count} memories on {date_str}.*
-    """).strip()
-
+    body = f"{prose}\n\n{ascii_block}\n\n*Generated from {mem_count} memories on {date_str}.*"
     content = f"{front_matter}\n\n{body}\n"
     return slug, content
 

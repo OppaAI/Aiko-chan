@@ -4,7 +4,7 @@ core/listen.py
 Aiko's speech-to-text input layer.
   - Captures microphone audio with Silero VAD (neural, energy-independent)
   - Transcribes via faster-whisper in a background thread
-  - Exposes listen() (blocking) and listen_async() (callback) for cli.py
+  - Exposes listen() (blocking) and listen_async() (callback) for main.py
   - Warm-up call on init loads both Whisper and Silero models immediately
 
 Dependencies:

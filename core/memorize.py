@@ -43,7 +43,17 @@ from core.log import get_logger
 
 log = get_logger(__name__)
 
+# ── boot labels ───────────────────────────────────────────────────────────────
+
+BOOT_LABELS = {
+    'mem_qdrant':   'Connecting to Qdrant...',
+    'mem_embed':    'Loading fastembed model (BAAI/bge-base-en-v1.5)...',
+    'mem_cleanup':  'Running memory cleanup...',
+    'mem_ready':    'Memory backend ready',
+}
+
 # ── config ────────────────────────────────────────────────────────────────────
+
 MEM0_CONFIG = {
     "vector_store": {
         "provider": "qdrant",
@@ -100,6 +110,11 @@ class AikoMemorize:
     Thin wrapper around mem0 Memory with Ebbinghaus decay lifecycle
     and a nightly dream() consolidation pass.
 
+    Boot sequence (called by wakeup.py in order):
+        memorize = AikoMemorize()   # connects Qdrant + initialises mem0
+                                    # (mem0 init loads fastembed model internally)
+        memorize.cleanup()          # prune decayed memories on startup
+
     Access tracking:
         Every search() call updates Qdrant payload fields (access_count,
         last_accessed_at) so the decay formula has fresh data.
@@ -123,20 +138,23 @@ class AikoMemorize:
     """
 
     def __init__(self, silent: bool = False) -> None:
-        """Initialise mem0 Memory, Qdrant client, and connect."""
+        """
+        Connect to Qdrant and initialise mem0 Memory.
+        mem0 init triggers fastembed model download/load on first run.
+        """
         qdrant_host = os.getenv("QDRANT_HOST", "localhost")
         qdrant_port = int(os.getenv("QDRANT_PORT", 6333))
 
         if not silent:
             log.info("Connecting to Qdrant and initialising mem0...")
 
-        self._mem    = Memory.from_config(MEM0_CONFIG)
+        self._mem    = Memory.from_config(MEM0_CONFIG)   # loads fastembed internally
         self._qdrant = QdrantClient(host=qdrant_host, port=qdrant_port)
 
         if not silent:
             log.info("Ready.")
 
-    # ── write ──────────────────────────────────────────────────────────────────
+    # ── write ─────────────────────────────────────────────────────────────────
 
     def add(self, messages: list[dict], user_id: str = USER_ID) -> bool:
         """
@@ -150,14 +168,13 @@ class AikoMemorize:
         """
         try:
             t = time.perf_counter()
-            # Strip think-tags from any response mem0 receives
             import re, mem0.memory.main as _m0
             _orig = _m0.remove_code_blocks
             _m0.remove_code_blocks = lambda t: re.sub(
                 r"<think>.*?</think>", "", _orig(t), flags=re.DOTALL
             ).strip()
             self._mem.add(messages, user_id=user_id)
-            _m0.remove_code_blocks = _orig  # restore after
+            _m0.remove_code_blocks = _orig
             log.info(f"Save completed in {time.perf_counter() - t:.2f}s")
             return True
         except Exception as e:
@@ -188,11 +205,6 @@ class AikoMemorize:
             pin_ids = list(after - before)
 
             if not pin_ids:
-                # If the normal background save already stored this turn, mem0
-                # can de-duplicate pin() into an existing memory instead of
-                # creating a new point. In that case, pin the best memories that
-                # match this turn so /remember still makes the interaction
-                # decay-proof rather than silently succeeding with no pinned ID.
                 query = "\n".join(
                     (m.get("content") or "").strip()
                     for m in messages
@@ -219,7 +231,7 @@ class AikoMemorize:
             log.error(f"Pin failed: {e}")
             return False
 
-    # ── read ───────────────────────────────────────────────────────────────────
+    # ── read ──────────────────────────────────────────────────────────────────
 
     def search(self, query: str, user_id: str = USER_ID, limit: int = 5) -> list[dict]:
         """
@@ -233,7 +245,6 @@ class AikoMemorize:
             results = results.get("results", [])
         results = results or []
 
-        # Track access for each returned memory
         if results:
             now = datetime.now(timezone.utc).isoformat()
             for r in results:
@@ -253,7 +264,7 @@ class AikoMemorize:
                     self._qdrant.set_payload(
                         collection_name=QDRANT_COLLECTION,
                         payload={
-                            "access_count":     min(current_count + 1, 255),  # cap at 255
+                            "access_count":     min(current_count + 1, 255),
                             "last_accessed_at": now,
                         },
                         points=[mem_id],
@@ -301,7 +312,7 @@ class AikoMemorize:
         lines.append("</memory_context>")
         return "\n".join(lines)
 
-    # ── dream pass ─────────────────────────────────────────────────────────────
+    # ── dream pass ────────────────────────────────────────────────────────────
 
     def dream(
         self,
@@ -336,15 +347,10 @@ class AikoMemorize:
             return {"boosted": 0, "merged": 0, "pruned": 0, "duration_s": 0.0}
 
         mem_ids     = [str(m.get("id", "")) for m in all_mems if m.get("id")]
-        payload_map = self._batch_get_payloads(mem_ids)   # single round-trip
+        payload_map = self._batch_get_payloads(mem_ids)
 
-        # Stage 1 — boost
-        boosted = self._dream_boost(all_mems, payload_map, dry_run=dry_run)
-
-        # Stage 2 — merge
-        merged  = self._dream_merge(mem_ids, threshold=threshold, dry_run=dry_run)
-
-        # Stage 3 — prune (re-fetch payload_map so boosts are visible)
+        boosted      = self._dream_boost(all_mems, payload_map, dry_run=dry_run)
+        merged       = self._dream_merge(mem_ids, threshold=threshold, dry_run=dry_run)
         prune_result = self.cleanup(user_id=user_id, dry_run=dry_run)
         pruned       = prune_result.get("deleted", 0)
 
@@ -382,15 +388,12 @@ class AikoMemorize:
             if not mem_id:
                 continue
 
-            # Pinned memories are immortal — boosting them is harmless but
-            # wasteful; skip so the log stays clean.
             if self._is_pinned(mem_id):
                 continue
 
             text = (m.get("memory") or "").lower()
             ac, _la = payload_map.get(mem_id, (0, "never"))
 
-            # Recency check
             is_recent  = False
             created_at = m.get("created_at", "")
             if created_at:
@@ -443,10 +446,6 @@ class AikoMemorize:
         Pinned memories are skipped as query origins and are never chosen as
         the loser in _resolve_duplicate() — a pinned memory always survives.
 
-        Performance note: one retrieve(with_vectors=True) + one search() per
-        memory → 2N Qdrant calls. At typical Aiko memory counts (<500) this
-        is fast (<2s). If it ever slows, batch-retrieve all vectors first.
-
         Returns count of memories deleted as duplicates.
         """
         deleted_ids: set[str] = set()
@@ -454,12 +453,8 @@ class AikoMemorize:
 
         for mem_id in mem_ids:
             if mem_id in deleted_ids:
-                continue  # already consumed by an earlier merge
+                continue
 
-            # Don't initiate a merge search from a pinned memory — it can
-            # never be deleted anyway, so any pair it finds would either
-            # result in nothing (if the neighbor is also pinned) or delete
-            # the neighbor, which may be surprising. Safer to skip entirely.
             if self._is_pinned(mem_id):
                 continue
 
@@ -471,7 +466,7 @@ class AikoMemorize:
                 neighbors = self._qdrant.search(
                     collection_name=QDRANT_COLLECTION,
                     query_vector=vector,
-                    limit=4,                    # self + up to 3 near-dupes
+                    limit=4,
                     score_threshold=threshold,
                     with_payload=True,
                 )
@@ -482,9 +477,9 @@ class AikoMemorize:
             for neighbor in neighbors:
                 neighbor_id = str(neighbor.id)
                 if neighbor_id == mem_id:
-                    continue  # skip self
+                    continue
                 if neighbor_id in deleted_ids:
-                    continue  # already gone
+                    continue
 
                 n_merged = self._resolve_duplicate(
                     mem_id, neighbor_id, neighbor.score, dry_run=dry_run
@@ -515,7 +510,6 @@ class AikoMemorize:
 
         Returns True if a deletion occurred (or would occur in dry_run).
         """
-        # Never delete a pinned copy even if it's the lower-access one.
         if self._is_pinned(id_a) or self._is_pinned(id_b):
             log.info(f"Skipping merge: one or both of ({id_a}, {id_b}) is pinned.")
             return False
@@ -543,7 +537,7 @@ class AikoMemorize:
             log.warning(f"Merge delete failed for {loser}: {e}")
             return False
 
-    # ── lifecycle ──────────────────────────────────────────────────────────────
+    # ── lifecycle ─────────────────────────────────────────────────────────────
 
     def cleanup(
         self,
@@ -562,7 +556,7 @@ class AikoMemorize:
         even if they score below threshold.
 
         Pinned memories are unconditionally kept — the pinned flag overrides
-        all decay scoring. No changes to forget.py are required.
+        all decay scoring.
 
         Args:
             threshold: Override decay threshold (default: CLEANUP_THRESHOLD = 0.05).
@@ -578,7 +572,6 @@ class AikoMemorize:
         if not all_mems:
             return {"deleted": 0, "kept": 0, "failed": 0}
 
-        # Batch retrieve all Qdrant payloads — single round-trip
         mem_ids     = [str(m.get("id", "")) for m in all_mems if m.get("id")]
         payload_map = self._batch_get_payloads(mem_ids)
 
@@ -590,7 +583,6 @@ class AikoMemorize:
             ac, la     = payload_map.get(mem_id, (0, "never"))
             created_at = m.get("created_at", "")
 
-            # Pinned memories are immortal — skip decay check entirely.
             if self._is_pinned(mem_id):
                 kept += 1
                 continue
@@ -625,7 +617,7 @@ class AikoMemorize:
         log.info(f"Cleanup: deleted={len(deleted)}, kept={kept}, failed={len(failed)}")
         return {"deleted": len(deleted), "kept": kept, "failed": len(failed)}
 
-    # ── debug ──────────────────────────────────────────────────────────────────
+    # ── debug ─────────────────────────────────────────────────────────────────
 
     def get_all(self, user_id: str = USER_ID) -> list[dict]:
         """Return all stored memories for a user (for debugging)."""
@@ -639,7 +631,7 @@ class AikoMemorize:
         self._mem.delete_all(user_id=user_id)
         log.info(f"Cleared all memories for user '{user_id}'.")
 
-    # ── internal ───────────────────────────────────────────────────────────────
+    # ── internal ──────────────────────────────────────────────────────────────
 
     def _batch_get_payloads(self, mem_ids: list[str]) -> dict:
         """
@@ -701,4 +693,4 @@ class AikoMemorize:
             )
             return bool(pts and pts[0].payload.get("pinned", False))
         except Exception:
-            return False  # safe default — don't delete on retrieval error
+            return False

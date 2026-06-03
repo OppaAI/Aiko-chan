@@ -1,5 +1,5 @@
 """
-core/identity.py
+tui/identity.py
 Loads Aiko's identity manifest from persona/identity.md.
 
 Exports:

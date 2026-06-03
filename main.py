@@ -14,12 +14,14 @@ Responsibilities:
     - Boot all cognitive subsystems in parallel (AikoThink, AikoMemorize)
     - Drive the TUI init phase and transition to active chat
     - Run the main input → inference → render loop
-    - Handle commands (/quit, /reset, /memory, /clear, /remember, /voice, /listen, /web, /help)
+    - Handle commands (/quit, /reset, /memory, /clear, /remember, /think,
+                       /voice, /listen, /web, /help)
     - Clean shutdown on Ctrl-C / Ctrl-D
 """
 
 import argparse
 import os
+import re
 import sys
 import threading
 import time
@@ -230,12 +232,61 @@ def _run(stdscr, args):
                     else:
                         tui.add_message('sys', 'Failed to pin memory — check logs.')
 
+            elif cmd.startswith('/think'):
+                query = user_input[6:].strip()
+                if not query:
+                    tui.add_message('sys', 'Usage: /think <question>')
+                    tui._draw()
+                    continue
+
+                think.set_reasoning(True)   # single-shot — auto-resets after this turn
+                tui.add_message('you', f'[think] {query}')
+                tui.turn_start()
+                tui._draw()
+
+                raw_chunks     = []
+                in_think_block = False
+                think_closed   = False
+
+                def _think_token_cb(token):
+                    nonlocal in_think_block, think_closed
+                    raw_chunks.append(token)
+                    assembled = "".join(raw_chunks)
+
+                    if not think_closed:
+                        if "<think>" in assembled and not in_think_block:
+                            in_think_block = True
+                        if in_think_block:
+                            if "</think>" in assembled:
+                                in_think_block = False
+                                think_closed   = True
+                            return  # suppress scratchpad from main stream
+
+                    # Past the </think> block — stream the real answer
+                    tui.stream_token(token)
+                    tui._draw(buf=[])
+
+                think.chat(query, token_callback=_think_token_cb)
+
+                # Extract scratchpad and show summary in sys panel
+                assembled_full    = "".join(raw_chunks)
+                scratchpad_match  = re.search(r"<think>(.*?)</think>", assembled_full, re.DOTALL)
+                if scratchpad_match:
+                    inner = scratchpad_match.group(1).strip()
+                    if inner:
+                        tui.add_message('sys',
+                            f'[scratchpad] {inner[:300]}{"…" if len(inner) > 300 else ""}')
+
+                tui.stream_commit()
+                tui._draw()
+                continue
+
             elif cmd == '/voice':
                 if speak is None:
                     tui.add_message('sys', 'TTS unavailable — started in --text mode.')
                 else:
                     tts_enabled = not tts_enabled
-                    think._speak = speak if tts_enabled else None
+                    think.set_speak(speak if tts_enabled else None)
                     tui._stats['tts_on'] = tts_enabled
                     tui.add_message('sys',
                         f'Voice output (TTS): {"ON  🔊" if tts_enabled else "OFF 🔇"}')
@@ -251,15 +302,16 @@ def _run(stdscr, args):
 
             elif cmd == '/help':
                 for line in [
-                    '/quit /exit    — end session',
-                    '/reset         — clear short-term context',
-                    '/clear         — wipe long-term memories',
-                    '/remember      — pin last turn forever (decay-proof)',
-                    '/memory        — show stored memories',
-                    '/web <query>   — web search',
-                    '/voice         — toggle TTS on/off',
-                    '/listen        — toggle ASR on/off',
-                    '/help          — show this list',
+                    '/quit /exit        — end session',
+                    '/reset             — clear short-term context',
+                    '/clear             — wipe long-term memories',
+                    '/remember          — pin last turn forever (decay-proof)',
+                    '/memory            — show stored memories',
+                    '/think <question>  — reason step-by-step (single-shot, 3× token budget)',
+                    '/web <query>       — web search',
+                    '/voice             — toggle TTS on/off',
+                    '/listen            — toggle ASR on/off',
+                    '/help              — show this list',
                 ]:
                     tui.add_message('sys', line)
 

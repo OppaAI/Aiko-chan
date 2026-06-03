@@ -34,7 +34,7 @@ from core.identity import (
     ANIME_ART_LINES, ANIME_ART_COLORS,
     ART_W, ART_H,
 )
-from core.sysinfo import _ram_used_str, _db_size_str, _fmt_uptime
+from core.health import _ram_used_str, _db_size_str, _fmt_uptime
 
 # ── env ───────────────────────────────────────────────────────────────────────
 

@@ -47,7 +47,6 @@ log = get_logger(__name__)
 
 BOOT_LABELS = {
     'mem_qdrant':   'Connecting to Qdrant...',
-    'mem_embed':    'Loading fastembed model (BAAI/bge-base-en-v1.5)...',
     'mem_cleanup':  'Running memory cleanup...',
     'mem_ready':    'Memory backend ready',
 }

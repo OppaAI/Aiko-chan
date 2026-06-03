@@ -44,9 +44,12 @@ import uuid
 logging.disable(logging.WARNING)
 
 from core.silence import silent_stderr
-from dotenv import load_dotenv
+from core.log     import get_logger
+from dotenv       import load_dotenv
 import argparse
 load_dotenv()
+
+log = get_logger(__name__)
 
 with silent_stderr():
     from core.memorize import AikoMemorize
@@ -145,11 +148,11 @@ def _ram_used_str() -> str:
                     vals[k.strip()] = int(v.split()[0])  # KB
                 if len(vals) == 2:
                     break
-        total = vals.get("MemTotal",     0)
-        avail = vals.get("MemAvailable", 0)
-        used  = (total - avail) / 1024 / 1024   # GB
+        total    = vals.get("MemTotal",     0)
+        avail    = vals.get("MemAvailable", 0)
+        used     = (total - avail) / 1024 / 1024   # GB
         total_gb = total / 1024 / 1024
-        return f"{used:.1f}/{total_gb:.1f} GB"  # :.1f instead of :.0f
+        return f"{used:.1f}/{total_gb:.1f} GB"
     except Exception:
         return "? GB"
 
@@ -293,9 +296,9 @@ ARCH_SECTIONS = [
         ("Web search",       SEARXNG_URL),
     ]),
     ("VOICE ENGINE", [
-        ("TTS backend",  "Realtime TTS + Kokoro"),
+        ("TTS backend",   "Realtime TTS + Kokoro"),
         ("Voice profile", KOKORO_VOICE),
-        ("ASR model",    WHISPER_MODEL),
+        ("ASR model",     WHISPER_MODEL),
     ]),
     ("HARDWARE", [
         ("CPU",          _SYS.get("cpu",     "unknown")),
@@ -386,9 +389,9 @@ def _art_attr(palette_idx: int) -> int:
     return attr
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
 # AikoTUI
-# ─────────────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
 
 class AikoTUI:
     """
@@ -432,10 +435,10 @@ class AikoTUI:
 
         # vitals — updated externally by _run
         self._stats: dict = {
-            'tokens':     0,      # session total tokens received
-            'turn_tok':   0,      # tokens this turn
-            'turn_start': None,   # time.time() when current turn began
-            'tok_s':      0.0,    # tok/s of last completed turn
+            'tokens':     0,
+            'turn_tok':   0,
+            'turn_start': None,
+            'tok_s':      0.0,
             'asr_on':     not no_voice,
             'tts_on':     not no_voice,
         }
@@ -517,14 +520,6 @@ class AikoTUI:
         """
         Render the top banner region: the decorative header, centred identity
         lines, live clock, and version tag.
-
-        The banner occupies rows 0 through BANNER_H + 1. The bottom row draws
-        the T-junction border that separates the banner from the two-column
-        body below.
-
-        Args:
-            h: Terminal height.
-            w: Terminal width.
         """
         pk = curses.color_pair(CP_PINK)  | curses.A_BOLD
         wh = curses.color_pair(CP_WHITE)
@@ -552,10 +547,6 @@ class AikoTUI:
     def _draw_clock_only(self):
         """
         Refresh only the clock and cursor position without redrawing the full frame.
-
-        Called by the background tick thread during input so the clock stays
-        alive while the rest of the layout remains static, avoiding expensive
-        full redraws on every second tick.
         """
         with self._lock:
             h, w = self._dims()
@@ -578,15 +569,6 @@ class AikoTUI:
         """
         Paint the left column with Aiko's ASCII art portrait using the
         per-character colour map loaded from identity.md.
-
-        Each cell is resolved through the art palette; transparent cells
-        (palette index 0) and spaces are written as plain spaces to preserve
-        the terminal's background colour. Rows below the art height are
-        padded with spaces to clear any stale content.
-
-        Args:
-            h: Terminal height.
-            w: Terminal width.
         """
         pk  = curses.color_pair(CP_PINK) | curses.A_BOLD
         pt  = self._pt
@@ -630,15 +612,6 @@ class AikoTUI:
         """
         Render the entire right column: vertical borders, upper info panel
         (init log or arch), chat area, vitals bar, and input line.
-
-        Delegates sub-region drawing to dedicated methods and stitches the
-        separators and bottom border around them. Cursor position is set to
-        the end of the current input buffer after each render.
-
-        Args:
-            h:   Terminal height.
-            w:   Terminal width.
-            buf: Current input buffer (list of chars) for the input line.
         """
         pk        = curses.color_pair(CP_PINK)   | curses.A_BOLD
         sbar_attr = curses.color_pair(CP_SBARBG) | curses.A_BOLD
@@ -711,24 +684,7 @@ class AikoTUI:
     # ── vitals bar ────────────────────────────────────────────────────────────
 
     def _draw_vitals(self, row: int, rx: int, rw: int, attr):
-        """
-        Render the live session vitals as a single status line.
-
-        Segments are built left-to-right and silently dropped if the terminal
-        is too narrow, so the bar degrades gracefully rather than wrapping.
-        Displayed metrics: input/output mode flags, RAM usage, Qdrant entry
-        count, cumulative session tokens, tok/s of the last completed turn,
-        and session uptime.
-
-        Format (at full width):
-            ☊ ASR  │  RAM 5.6/7.4 GB  │  DB 142 entries  │  847 tok  │  23.4 t/s  │  ↑ 0:12:34
-
-        Args:
-            row:  Row to render the vitals bar on.
-            rx:   Left column start (right panel interior).
-            rw:   Available width for the bar content.
-            attr: Curses attribute to apply (typically the status-bar colour pair).
-        """
+        """Render the live session vitals as a single status line."""
         s = self._stats
 
         mode_parts = []
@@ -736,22 +692,20 @@ class AikoTUI:
         mode_parts.append("🎙 TTS" if s['tts_on'] else "🔇 TTS")
         mode_str = "  ".join(mode_parts)
 
-        ram_str   = f"RAM {_ram_used_str()}"
-        db_str    = f"DB {_db_size_str()}"
-        tok_str   = f"{s['tokens']:,} tokens"
-        toks_str  = f"{s['tok_s']:.1f} t/s" if s['tok_s'] > 0 else "— t/s"
-        up_str    = f"↑ {_fmt_uptime(time.time() - self._ts)}"
+        ram_str  = f"RAM {_ram_used_str()}"
+        db_str   = f"DB {_db_size_str()}"
+        tok_str  = f"{s['tokens']:,} tokens"
+        toks_str = f"{s['tok_s']:.1f} t/s" if s['tok_s'] > 0 else "— t/s"
+        up_str   = f"↑ {_fmt_uptime(time.time() - self._ts)}"
 
         segments = [mode_str, ram_str, db_str, tok_str, toks_str, up_str]
 
-        # Build bar right-to-left, dropping segments if they don't fit
         sep   = "  │  "
         built = ""
         for seg in segments:
             candidate = (built + sep + seg) if built else ("  " + seg)
             if len(candidate) + 2 <= rw:
                 built = candidate
-            # if it doesn't fit, skip — don't truncate mid-segment
 
         bar = built.ljust(rw - 1)
         try:    self._scr.addstr(row, rx, bar[:rw - 1], attr)
@@ -760,20 +714,7 @@ class AikoTUI:
     # ── init log ──────────────────────────────────────────────────────────────
 
     def _draw_right_init(self, pt, pb, rx, rw):
-        """
-        Render the boot sequence log in the upper right panel during the init phase.
-
-        Each step in _init_log is displayed with a spinner, check, dash, or
-        cross glyph depending on its state. When all steps have settled to a
-        terminal state (done / skip / error), an 'ALL SYSTEMS ONLINE' banner
-        is appended below the log.
-
-        Args:
-            pt: Top row of the panel region.
-            pb: Bottom row of the panel region (exclusive).
-            rx: Left edge column of the right panel interior.
-            rw: Available width of the right panel interior.
-        """
+        """Render the boot sequence log in the upper right panel during the init phase."""
         pk  = curses.color_pair(CP_PINK)  | curses.A_BOLD
         cy  = curses.color_pair(CP_CYAN)
         dim = curses.color_pair(CP_DIM)
@@ -816,19 +757,7 @@ class AikoTUI:
     # ── arch panel ────────────────────────────────────────────────────────────
 
     def _draw_right_arch(self, pt, pb, rx, rw):
-        """
-        Render the static neural architecture summary in the upper right panel.
-
-        Displays the ARCH_SECTIONS table — memory systems, cognition,
-        voice engine, and hardware — once the init phase has completed and
-        the TUI has transitioned to chat phase.
-
-        Args:
-            pt: Top row of the panel region.
-            pb: Bottom row of the panel region (exclusive).
-            rx: Left edge column of the right panel interior.
-            rw: Available width of the right panel interior.
-        """
+        """Render the static neural architecture summary in the upper right panel."""
         pk = curses.color_pair(CP_PINK)  | curses.A_BOLD
         cy = curses.color_pair(CP_CYAN)  | curses.A_BOLD
         mv = curses.color_pair(CP_MAUVE)
@@ -856,23 +785,6 @@ class AikoTUI:
         """
         Flatten the message log and active streaming buffer into a list of
         typed display lines suitable for the chat viewport.
-
-        Each message is word-wrapped to fit the available column width.
-        Continuation lines are indented to align with the text after the
-        sender prefix. A blank separator line is appended after each AI
-        response. System messages receive a ◈ prefix glyph.
-
-        The current streaming fragment, if non-empty, is appended as a
-        live AI line that updates on each token arrival.
-
-        Args:
-            rw: Available column width for the chat region.
-
-        Returns:
-            A list of (kind, line) tuples where kind is one of:
-                'Y' — user message line
-                'A' — AI message line
-                'S' — system / separator line
         """
         avail = rw - 2
         out   = []
@@ -901,21 +813,7 @@ class AikoTUI:
         return out
 
     def _draw_chat_area(self, ct, cb, rx, rw, w):
-        """
-        Render the visible slice of the chat history into the chat viewport.
-
-        Applies scroll offset so the most recent content is always shown by
-        default, and draws a scroll hint glyph in the top-right corner when
-        the user has scrolled up. Sender prefixes are bolded relative to
-        continuation lines to maintain visual hierarchy.
-
-        Args:
-            ct: Top row of the chat region (inclusive).
-            cb: Bottom row of the chat region (exclusive).
-            rx: Left edge column of the right panel interior.
-            rw: Available width of the right panel interior.
-            w:  Full terminal width (used for right border placement).
-        """
+        """Render the visible slice of the chat history into the chat viewport."""
         pk  = curses.color_pair(CP_PINK)   | curses.A_BOLD
         cy  = curses.color_pair(CP_CYAN)
         mv  = curses.color_pair(CP_MAUVE)
@@ -971,18 +869,7 @@ class AikoTUI:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _draw(self, buf=None):
-        """
-        Execute a full repaint of the entire TUI surface under the draw lock.
-
-        Checks minimum terminal dimensions before drawing; renders a plain
-        error string if the terminal is too small rather than attempting a
-        partial draw that would corrupt the layout. All sub-region draw calls
-        are made from here in layout order: banner → left column → right column.
-
-        Args:
-            buf: Input buffer (list of chars) to pass to the right-column
-                 renderer for the input line. Defaults to an empty list.
-        """
+        """Execute a full repaint of the entire TUI surface under the draw lock."""
         with self._lock:
             h, w = self._dims()
             min_h = BANNER_H + 2 + ARCH_ROWS + 8
@@ -1004,17 +891,7 @@ class AikoTUI:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _upsert_step(self, key, state, detail=''):
-        """
-        Insert or update a boot step entry in the init log under the draw lock.
-
-        If a step with the given key already exists it is updated in-place,
-        preserving display order. New steps are appended.
-
-        Args:
-            key:    Step identifier string matching an INIT_STEPS key.
-            state:  One of 'loading', 'done', 'skip', or 'error'.
-            detail: Optional override text shown next to the step label.
-        """
+        """Insert or update a boot step entry in the init log under the draw lock."""
         with self._lock:
             for i, (k, s, d) in enumerate(self._init_log):
                 if k == key:
@@ -1039,13 +916,7 @@ class AikoTUI:
         self._upsert_step(key, 'error',   detail)
 
     def status_finish(self):
-        """
-        Transition the TUI from the init phase to the active chat phase.
-
-        Switches the upper right panel from the boot log to the static
-        architecture summary. Should be called once all init threads have
-        joined and the cognitive subsystems are fully online.
-        """
+        """Transition the TUI from the init phase to the active chat phase."""
         with self._lock:
             self._phase = 'chat'
 
@@ -1054,31 +925,13 @@ class AikoTUI:
     # ─────────────────────────────────────────────────────────────────────────
 
     def add_message(self, sender, text):
-        """
-        Commit a completed message to the conversation log.
-
-        Resets the scroll position to the bottom so the new message is
-        immediately visible. Thread-safe.
-
-        Args:
-            sender: One of 'you', 'aiko', or 'sys'.
-            text:   The message content string.
-        """
+        """Commit a completed message to the conversation log."""
         with self._lock:
             self._messages.append((sender, text))
             self._scroll = 0
 
     def stream_token(self, token):
-        """
-        Ingest an incoming token into the live streaming buffer.
-
-        Accumulates the token into _streaming for display before the turn
-        completes, and updates session and turn token counters. Records the
-        turn start timestamp on the first token of a new turn.
-
-        Args:
-            token: A string fragment emitted by the inference engine.
-        """
+        """Ingest an incoming token into the live streaming buffer."""
         with self._lock:
             self._streaming += token
             count = len(token)
@@ -1088,20 +941,12 @@ class AikoTUI:
                 self._stats['turn_start'] = time.time()
 
     def stream_commit(self):
-        """
-        Finalise the active streaming turn and commit the buffered response.
-
-        Moves the accumulated _streaming content into the permanent message
-        log, freezes the tok/s metric for the completed turn, and resets
-        turn-scoped counters. No-ops gracefully if the buffer is empty.
-        Thread-safe.
-        """
+        """Finalise the active streaming turn and commit the buffered response."""
         with self._lock:
             if self._streaming:
                 self._messages.append(('aiko', self._streaming))
                 self._streaming = ''
                 self._scroll    = 0
-            # freeze tok/s for this turn
             if self._stats['turn_start'] is not None:
                 elapsed = time.time() - self._stats['turn_start']
                 self._stats['tok_s'] = (
@@ -1110,13 +955,7 @@ class AikoTUI:
             self._stats['turn_start'] = None
 
     def turn_start(self):
-        """
-        Signal the beginning of a new cognitive turn.
-
-        Resets turn-scoped token counters and records the wall-clock start
-        time so tok/s can be computed accurately when stream_commit is called.
-        Should be called immediately before streaming begins for each new turn.
-        """
+        """Signal the beginning of a new cognitive turn."""
         with self._lock:
             self._stats['turn_start'] = time.time()
             self._stats['turn_tok']   = 0
@@ -1129,19 +968,6 @@ class AikoTUI:
         """
         Enter a blocking text input loop, collecting keystrokes until the user
         submits with Enter or interrupts with Ctrl-C / Ctrl-D.
-
-        A background tick thread fires every second to keep the clock alive
-        without blocking key reads. Supports backspace, PgUp/PgDn chat
-        scrolling, and printable character accumulation. The cursor is shown
-        during input and hidden on exit.
-
-        Returns:
-            The stripped input string, or an empty string if the user submitted
-            without typing.
-
-        Raises:
-            KeyboardInterrupt: On Ctrl-C or Ctrl-D, after stopping the tick
-                thread and restoring the cursor.
         """
         buf = []
         self._input_buf = buf
@@ -1206,20 +1032,6 @@ class AikoTUI:
         """
         Capture a voice utterance via the ASR pipeline and return the
         transcribed text.
-
-        Runs the ASR listener on a daemon thread so the clock tick can
-        continue updating via _draw_clock_only. Status tokens emitted by the
-        listener ('__LISTENING__', '__TRANSCRIBING__', '__IDLE__') are
-        translated into human-readable input-bar labels. Blocks until the
-        listener thread signals completion.
-
-        Args:
-            listen:  An AikoListen instance with a .listen() method.
-            wait_fn: Optional callable passed to listen.listen() so the ASR
-                     layer can wait for TTS to finish before listening.
-
-        Returns:
-            The transcribed utterance string, or an empty string on failure.
         """
         self._input_buf = []
         result_holder   = [None]
@@ -1259,17 +1071,7 @@ class AikoTUI:
     # ─────────────────────────────────────────────────────────────────────────
 
     def spin_loop(self, stop_event):
-        """
-        Drive the init-phase animation loop from a dedicated thread.
-
-        Redraws the full frame at ~12 fps, advancing the spinner frame index
-        each tick so loading steps show a live Braille animation. Exits cleanly
-        when stop_event is set, performing one final draw to settle the display
-        before the caller proceeds.
-
-        Args:
-            stop_event: A threading.Event that signals the loop to terminate.
-        """
+        """Drive the init-phase animation loop from a dedicated thread."""
         while not stop_event.is_set():
             self._draw()
             with self._lock:
@@ -1278,22 +1080,12 @@ class AikoTUI:
         self._draw()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════
 # ENTRY
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════
 
 def parse_args():
-    """
-    Parse and return the CLI argument namespace for Aiko-chan's launch options.
-
-    Exposes three flags:
-        --text       Disables ASR and TTS; uses keyboard input only.
-        --debug      Surfaces memory retrieval hits in the chat area each turn.
-        --clear-mem  Wipes all Qdrant-stored memories and exits immediately.
-
-    Returns:
-        An argparse.Namespace with attributes: text, debug, clear_mem.
-    """
+    """Parse and return the CLI argument namespace for Aiko-chan's launch options."""
     p = argparse.ArgumentParser(description="Aiko-chan CLI")
     p.add_argument("--text",      action="store_true",
                    help="keyboard input + no TTS  (default: ASR + TTS)")
@@ -1308,16 +1100,6 @@ def _run(stdscr, args):
     """
     Orchestrate the full session lifecycle from boot to shutdown inside the
     curses wrapper.
-
-    Spawns the TUI, concurrently initialises the inference engine (AikoThink)
-    and memory cortex (AikoMemorize) on daemon threads, then conditionally
-    warms up the voice pipeline. Drives the main interaction loop — routing
-    voice or text input, handling slash commands, and managing streaming turns
-    — until the user exits or a KeyboardInterrupt is raised.
-
-    Args:
-        stdscr: The curses window object provided by curses.wrapper.
-        args:   Parsed argument namespace from parse_args().
     """
     tui   = AikoTUI(stdscr, no_voice=args.text, debug=args.debug)
     speak = AikoSpeak(silent=True) if not args.text else None
@@ -1352,8 +1134,8 @@ def _run(stdscr, args):
         tui.step_loading('mem_ready')
         mem_ready.set()
         tui.step_done('mem_ready')
-        
-        from core.dream import start as start_dream_scheduler
+
+        from core.dream_scheduler import start as start_dream_scheduler
         start_dream_scheduler(memorize[0])
 
     t1 = threading.Thread(target=init_think,    daemon=True)
@@ -1531,16 +1313,10 @@ def _run(stdscr, args):
 
 
 def main():
-    """
-    Primary entry point for the Aiko-chan CLI.
-
-    Handles the --clear-mem fast-exit path before handing control to
-    curses.wrapper, which sets up the terminal and invokes _run with the
-    parsed argument namespace.
-    """
+    """Primary entry point for the Aiko-chan CLI."""
     args = parse_args()
     if args.clear_mem:
-        print('[system] Clearing all memories...')
+        log.info("Clearing all memories...")
         AikoMemorize().clear()
         sys.exit(0)
     curses.wrapper(lambda scr: _run(scr, args))

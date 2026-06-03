@@ -27,9 +27,15 @@ os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 from core.memorize import AikoMemorize
 from core.speak    import AikoSpeak
 from core.log      import get_logger
-#from core.tools    import web_search
 
 log = get_logger(__name__)
+
+# ── boot labels ───────────────────────────────────────────────────────────────
+
+BOOT_LABELS = {
+    'think_start':  'Loading Ollama client + persona...',
+    'think_warmup': 'Warming up language model...',
+}
 
 # ── config ────────────────────────────────────────────────────────────────────
 
@@ -41,7 +47,6 @@ _BASE_PREDICT    = 400   # normal token budget per turn
 _REASONING_SCALE = 3     # multiplier applied to num_predict in reasoning mode
 
 _PERSONA_PATH = Path(__file__).resolve().parent.parent / "persona" / "soul.md"
-#_SEARCH_RE    = re.compile(r"\[SEARCH:\s*(.+?)\]", re.IGNORECASE)
 
 
 def _load_persona() -> str:
@@ -50,14 +55,15 @@ def _load_persona() -> str:
         raise FileNotFoundError(f"soul.md not found at {_PERSONA_PATH}")
     return _PERSONA_PATH.read_text(encoding="utf-8").strip()
 
+
 # ── think ─────────────────────────────────────────────────────────────────────
 
 class AikoThink:
     """
     Aiko's conversational core.
-    speak is injected pre-warmed from UI.
+    speak is injected pre-warmed from wakeup.py.
     LLM warmup starts immediately on init in a background thread.
-    UI calls join_warmup() to block until both are ready before showing prompt.
+    wakeup.py calls join_warmup() to block until the model is hot.
     """
 
     def __init__(self, memorize: AikoMemorize, speak: AikoSpeak | None = None) -> None:
@@ -69,6 +75,8 @@ class AikoThink:
 
         Args:
             memorize: Injected memory backend for retrieval and persistence.
+                      May be None at construction time — wakeup.py injects it
+                      after memorize boot completes via think._memorize = ...
             speak:    Pre-warmed TTS backend; pass None to run silent.
         """
         self._client    = Client(host=OLLAMA_BASE_URL)
@@ -76,7 +84,7 @@ class AikoThink:
         self._speak     = speak
         self._persona   = _load_persona()
         self._history:  list[dict] = []
-        self._reasoning = False   # reasoning mode off by default; toggled by /think command
+        self._reasoning = False        # reasoning mode off by default; toggled by /think
         self._mem_queue  = queue.Queue()
         self._mem_worker = threading.Thread(target=self._mem_write_loop, daemon=True)
         self._mem_worker.start()
@@ -106,7 +114,7 @@ class AikoThink:
             pass
 
     def join_warmup(self) -> None:
-        """Block until LLM warmup completes. Called by UI before showing prompt."""
+        """Block until LLM warmup completes. Called by wakeup.py before boot finishes."""
         if self._warmup_thread and self._warmup_thread.is_alive():
             self._warmup_thread.join()
 
@@ -129,11 +137,12 @@ class AikoThink:
         Returns:
             The complete assistant response as a single string.
         """
-        self._token_callback = token_callback   # store for _stream_response
-      
+        self._token_callback = token_callback
+
+        # interrupt any ongoing speech before processing new input
         if self._speak and self._speak.is_playing():
             self._speak.stop()
-          
+
         # 1. retrieve relevant long-term memories
         memories     = self._memorize.search(user_input)
         memory_block = self._memorize.format_for_context(memories)
@@ -285,22 +294,20 @@ class AikoThink:
 
                 full_response.append(token)
 
-                # Process token streaming and buffering
                 if buffering_active:
                     buffer += token
                     buffer_clean = buffer.lower().replace(" ", "")
 
                     if is_searching:
-                        # Already confirmed a search tag — keep buffering until closing ]
+                        # already confirmed a search tag — keep buffering until closing ]
                         if "]" in buffer:
                             buffering_active = False
-                            # Full [search: query] captured, do NOT stream it
                     elif "[search:".startswith(buffer_clean):
-                        # Still a valid prefix — check if we've crossed the threshold
+                        # still a valid prefix — check if we've crossed the threshold
                         if "[search:" in buffer_clean:
                             is_searching = True
                     else:
-                        # Not a search tag — flush buffer
+                        # not a search tag — flush buffer
                         buffering_active = False
                         if self._token_callback and buffer:
                             self._token_callback(buffer)
@@ -310,7 +317,6 @@ class AikoThink:
                             print(buffer, end="", flush=True)
                 else:
                     if not is_searching:
-                        # Stream normally
                         if self._token_callback:
                             self._token_callback(token)
                         else:
@@ -320,7 +326,7 @@ class AikoThink:
                     self._speak.feed(token)
                     tts_started = True
 
-            # Flush buffer if stream ended without breaking out of buffering
+            # flush buffer if stream ended without breaking out of buffering
             if buffering_active and buffer and not is_searching:
                 if self._token_callback:
                     self._token_callback(buffer)

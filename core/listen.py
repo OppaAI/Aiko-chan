@@ -43,7 +43,7 @@ DEVICE_INDEX        = int(LISTEN_DEVICE) if LISTEN_DEVICE else None
 
 CHUNK_DURATION_MS   = int(os.getenv("LISTEN_CHUNK_MS",         30))  # Silero minimum
 VAD_THRESHOLD       = float(os.getenv("LISTEN_VAD_THRESHOLD", 0.5))  # Silero speech prob cutoff
-SILENCE_CHUNKS      = int(os.getenv("LISTEN_SILENCE_CHUNKS",   40))
+SILENCE_CHUNKS      = int(os.getenv("LISTEN_SILENCE_CHUNKS",   20))
 MIN_SPEECH_CHUNKS   = int(os.getenv("LISTEN_MIN_CHUNKS",       10))
 MAX_RECORD_SECONDS  = int(os.getenv("LISTEN_MAX_SECONDS",      30))
 

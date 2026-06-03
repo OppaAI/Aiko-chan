@@ -1,9 +1,9 @@
 """
-core/dream_scheduler.py
+core/dream.py
 Schedules Aiko's nightly dream() consolidation pass at 00:00 local time.
 
 Usage — call start() once during Aiko startup (e.g. in cli.py or main.py):
-    from core.dream_scheduler import start as start_dream_scheduler
+    from core.dream import start as start_dream_scheduler
     start_dream_scheduler(memorize_instance)
 
 The scheduler runs in a background daemon thread and fires dream() at midnight.
@@ -14,11 +14,14 @@ VRAM safety:
     No Ollama contention. Safe to fire even if a conversation is mid-flight,
     though a _dream_lock flag is checked to avoid overlapping passes.
 """
+
+from datetime import datetime, timedelta
+import os
 import threading
 import time
-from datetime import datetime
 
 from core.log import get_logger
+from core.reflect import generate_and_post
 
 log = get_logger(__name__)
 
@@ -29,12 +32,9 @@ _dream_lock = threading.Lock()
 
 def _seconds_until_midnight() -> float:
     """Seconds from now until the next local 00:00:00."""
-    now   = datetime.now()
-    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    # If it's already past midnight today, target tomorrow's midnight.
-    delta = (today.replace(day=today.day + 1) - now).total_seconds()
-    return max(delta, 0.0)
-
+    now       = datetime.now()
+    tomorrow  = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return max((tomorrow - now).total_seconds(), 0.0)
 
 def _dream_loop(memorize) -> None:
     """
@@ -56,6 +56,8 @@ def _dream_loop(memorize) -> None:
             log.info(f"Firing dream() at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             result = memorize.dream()
             log.info(f"Pass complete: {result}")
+            memories = memorize.get_all()
+            generate_and_post(memories)
         except Exception as e:
             log.error(f"dream() raised: {e}")
         finally:
@@ -64,7 +66,6 @@ def _dream_loop(memorize) -> None:
         # Sleep 90 seconds after firing so we don't re-trigger at 00:00:00
         # on the same second due to scheduler drift.
         time.sleep(90)
-
 
 def start(memorize) -> threading.Thread:
     """

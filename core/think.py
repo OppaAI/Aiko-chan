@@ -6,6 +6,7 @@ Aiko's cognitive loop.
   - Intercepts [SEARCH: query] triggers for web search
   - Streams Ollama response to console + TTS simultaneously
   - Stores the turn into long-term memory after each response (background thread)
+  - Supports single-shot reasoning mode via set_reasoning(True) / /think command
 """
 
 import os
@@ -35,6 +36,9 @@ log = get_logger(__name__)
 OLLAMA_BASE_URL      = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL         = os.getenv("OLLAMA_MODEL",    "ministral-3:3b-instruct-2512-q4_K_M")
 CONTEXT_WINDOW_TURNS = int(os.getenv("CONTEXT_WINDOW_TURNS", 20))
+
+_BASE_PREDICT    = 400   # normal token budget per turn
+_REASONING_SCALE = 3     # multiplier applied to num_predict in reasoning mode
 
 _PERSONA_PATH = Path(__file__).resolve().parent.parent / "persona" / "soul.md"
 #_SEARCH_RE    = re.compile(r"\[SEARCH:\s*(.+?)\]", re.IGNORECASE)
@@ -67,11 +71,12 @@ class AikoThink:
             memorize: Injected memory backend for retrieval and persistence.
             speak:    Pre-warmed TTS backend; pass None to run silent.
         """
-        self._client   = Client(host=OLLAMA_BASE_URL)
-        self._memorize = memorize
-        self._speak    = speak
-        self._persona  = _load_persona()
-        self._history: list[dict] = []
+        self._client    = Client(host=OLLAMA_BASE_URL)
+        self._memorize  = memorize
+        self._speak     = speak
+        self._persona   = _load_persona()
+        self._history:  list[dict] = []
+        self._reasoning = False   # reasoning mode off by default; toggled by /think command
         self._mem_queue  = queue.Queue()
         self._mem_worker = threading.Thread(target=self._mem_write_loop, daemon=True)
         self._mem_worker.start()
@@ -111,9 +116,10 @@ class AikoThink:
         """
         Process one conversational turn and return the full assistant response.
 
-        Retrieves relevant memories, builds the system prompt, streams the LLM
-        response to the console and TTS concurrently, then enqueues the turn
-        for background memory persistence.
+        If reasoning mode is active (set via set_reasoning(True)), the user turn
+        is wrapped with a step-by-step instruction and num_predict is tripled to
+        budget for the <think> scratchpad. Reasoning mode auto-resets to False
+        after each turn — it is single-shot by design.
 
         Args:
             user_input:      Raw text from the user.
@@ -134,21 +140,34 @@ class AikoThink:
         if memory_block:
             system = f"{system}\n\n{memory_block}"
 
-        # 3. append user turn
-        self._history.append({"role": "user", "content": user_input})
+        # 3. wrap user turn with reasoning instruction if active
+        if self._reasoning:
+            prompt = (
+                f"{user_input}\n\n"
+                "Think through this carefully before answering. "
+                "Show your reasoning inside <think> tags, then give your final answer."
+            )
+        else:
+            prompt = user_input
 
-        # 4. trim history to context window
+        # 4. append user turn
+        self._history.append({"role": "user", "content": prompt})
+
+        # 5. trim history to context window
         trimmed  = self._history[-(CONTEXT_WINDOW_TURNS * 2):]
         messages = [{"role": "system", "content": system}] + trimmed
 
-        # 5. stream first response
+        # 6. stream response
         response_text = self._stream_response(messages)
 
-        # 6. append assistant turn to history
+        # 7. append assistant turn to history
         self._history.append({"role": "assistant", "content": response_text})
 
-        # 7. persist to memory (background)
+        # 8. persist to memory (background) — store original input, not wrapped prompt
         self._store_async(user_input, response_text)
+
+        # 9. auto-reset reasoning mode — single-shot per /think invocation
+        self._reasoning = False
 
         return response_text
 
@@ -170,7 +189,7 @@ class AikoThink:
         assistant_text: str | None = None
 
         for message in reversed(self._history):
-            role = message.get("role")
+            role    = message.get("role")
             content = (message.get("content") or "").strip()
             if not content:
                 continue
@@ -185,7 +204,21 @@ class AikoThink:
 
         return None
 
-    def set_speak(self, speak):
+    def set_reasoning(self, enabled: bool) -> None:
+        """
+        Enable or disable reasoning mode for the next turn only.
+
+        When enabled, chat() wraps the user prompt with a step-by-step
+        instruction and triples num_predict to budget for the <think>
+        scratchpad. Auto-resets to False after each chat() call — single-shot
+        by design so a forgotten /think never bleeds into normal conversation.
+
+        Args:
+            enabled: True to activate reasoning for the next turn, False to cancel.
+        """
+        self._reasoning = enabled
+
+    def set_speak(self, speak) -> None:
         """Hot-swap the TTS backend. Pass None to silence, speak instance to restore."""
         self._speak = speak
 
@@ -203,7 +236,8 @@ class AikoThink:
 
         Tokens are buffered at the start of each response to detect a
         [SEARCH: ...] trigger before any output is committed to the console
-        or TTS queue.
+        or TTS queue. num_predict is scaled by _REASONING_SCALE when
+        reasoning mode is active to budget for the <think> scratchpad.
 
         Args:
             messages: Full message list (system prompt + trimmed history).
@@ -217,6 +251,9 @@ class AikoThink:
         is_searching     = False
         buffering_active = True
 
+        # triple token budget in reasoning mode to fit the <think> scratchpad
+        num_predict = _BASE_PREDICT * _REASONING_SCALE if self._reasoning else _BASE_PREDICT
+
         try:
             stream = self._client.chat(
                 model=OLLAMA_MODEL,
@@ -228,7 +265,7 @@ class AikoThink:
                     "temperature":    0.75,   # creative but not unhinged
                     "repeat_penalty": 1.18,   # firm anti-loop
                     "repeat_last_n":  128,    # long lookback for repetition detection
-                    "num_predict":    400,    # hard cap — no infinite loops
+                    "num_predict":    num_predict,
                     "top_p":          0.90,   # nucleus sampling, keeps it natural
                     "top_k":          40,     # standard
                     "tfs_z":          1.0,    # tail-free sampling off (neutral)
@@ -276,7 +313,6 @@ class AikoThink:
                         else:
                             print(token, end="", flush=True)
 
-                assembled = "".join(full_response)
                 if self._speak and token:
                     self._speak.feed(token)
                     tts_started = True

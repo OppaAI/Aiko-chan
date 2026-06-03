@@ -141,7 +141,7 @@ def _build_hugo_post(
     write_time: datetime,
     mem_count:  int,
 ) -> tuple[str, str]:
-     """
+    """
     Assemble Hugo front matter + body.
 
     Returns (slug, markdown_content).

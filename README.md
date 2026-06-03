@@ -1,19 +1,21 @@
 # Aiko-chan 愛子ちゃん
 
-> Aiko is an AI waifu, soulmate, companion and occasional roaster, in which ai (love-愛) and AI mixes together?!
-> 
-> Runs fully local on 8GB VRAM GPU (or Jetson Orin Nano). No cloud. No subscriptions. Just vibes.
+> Aiko is a local-first AI companion with a curses TUI, persistent memory, web search, microphone input, and MioTTS voice output.
+>
+> The current code is optimized for a small local/Jetson-style setup: Ollama for the chat model, Qdrant for memory storage, fastembed for local embeddings, SearXNG for web search, faster-whisper + Silero VAD for speech input, and an external MioTTS HTTP server for speech output.
 
-## Purposes
-This project serves the following purposes:
-- operates an AI companion chatbot with memory, some agentic tool calls, TTS, ASR, vision, etc. in all local environment, except using Internet for websearch or remote access
-- stress tests all the AI inference and functionalities in measely 8GB RAM system. (for those who cannot afford a decent GPU - me)
-- acts as a **precursor and testing sandbox** for my more sophisticated project: [Grace / AuRoRA](https://github.com/OppaAI/AGi).
-- participates in HuggingFace hackathon, if managed to finish on time...
+## Purpose
+
+This project currently serves as:
+
+- a local AI companion chatbot with persistent memory, web search, TTS, ASR, and a terminal UI;
+- a stress test for running a full conversational stack on constrained hardware such as an 8 GB VRAM GPU or Jetson Orin Nano;
+- a precursor and testing sandbox for the larger [Grace / AuRoRA](https://github.com/OppaAI/AGi) project;
+- an experimental playground for memory decay, nightly consolidation, and daily reflection publishing.
 
 ![Aiko-chan](assets/phase-1.5.jpg)
 
-## Architecture
+## Current Architecture
 
 ```mermaid
 flowchart TD
@@ -52,15 +54,18 @@ flowchart TD
 
 ## Stack
 
-| Layer | Tech |
+| Layer | Current implementation |
 |---|---|
-| Brain | Ollama (remote or local LLM) |
-| Long-term memory | mem0 + Qdrant (Docker) |
-| Embeddings | Ollama (`nomic-embed-text-v2-moe`) |
-| Web search | SearXNG (local, self-hosted) |
-| TTS | Kokoro (via RealtimeTTS) |
-| ASR | faster-whisper |
-| Interface | TUI → Voice → Avatar → Mobile |
+| Entry point | `main.py` |
+| Interface | full-screen curses TUI in `tui/` |
+| Chat model | Ollama via `ollama.Client` |
+| Long-term memory | mem0 backed by Qdrant |
+| Embeddings | fastembed with `BAAI/bge-base-en-v1.5` |
+| Memory lifecycle | Ebbinghaus-style decay, pinned memories, nightly `dream()` consolidation |
+| Web search | local SearXNG instance |
+| TTS | external MioTTS HTTP server (`/health`, `/v1/tts`) |
+| ASR | faster-whisper with Silero VAD microphone gating |
+| Reflection publishing | optional GitHub REST API upload of Hugo markdown posts |
 
 ---
 
@@ -68,98 +73,133 @@ flowchart TD
 
 ### 1. Prerequisites
 
-- [Ollama](https://ollama.com) running locally or on a remote server
-- Docker + Docker Compose
-- GPU with **8GB VRAM** (developed on NVIDIA Jetson Orin Nano; any 8GB GPU should work)
-- Python **3.10 exactly** (3.11+ not supported — Jetson AI Lab wheels are 3.10-only)
-- [uv](https://github.com/astral-sh/uv)
+- Python **3.10** (`pyproject.toml` is pinned to `>=3.10,<3.11`).
+- [uv](https://github.com/astral-sh/uv).
+- Docker + Docker Compose for Qdrant and SearXNG.
+- [Ollama](https://ollama.com) running locally or reachable over the network.
+- A chat model configured in `.env` as `OLLAMA_MODEL`.
+- Optional for voice mode:
+  - a working microphone/audio output device;
+  - a reachable MioTTS HTTP server at `MIOTTS_API_URL`.
+
+> Note: this repo is configured for Jetson AI Lab wheels for `torch`, `torchaudio`, `torchvision`, and local wheel paths for `torch` and `ctranslate2`. Make sure the wheel paths in `pyproject.toml` exist on your machine before running `uv sync`.
+
+### 2. Configure environment
 
 ```bash
-ollama pull nomic-embed-text-v2-moe
+cp .env.example .env
+# edit .env for your Ollama URL/model, SearXNG secret, Qdrant host/port,
+# MioTTS URL/preset, Whisper settings, and optional GitHub reflection settings
 ```
 
-### 2. Start Qdrant + SearXNG (Docker containers)
-> **SearXNG config:** The `./searxng/` directory must contain a `settings.yml`
-> before starting. A minimal template is included in the repo.
-> `SEARXNG_BASE_URL` is used internally by the container to generate links.
-> `SEARXNG_URL` in your `.env` is what Aiko uses to call the search API —
-> it must match the host port mapping (`http://localhost:8081`).
+At minimum, verify these values:
+
+```dotenv
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=hf.co/unsloth/Ministral-3-3B-Reasoning-2512-GGUF:UD-Q4_K_XL
+QDRANT_HOST=localhost
+QDRANT_PORT=6333
+SEARXNG_URL=http://localhost:8081
+SEARXNG_SECRET=<secret_code>
+MIOTTS_API_URL=http://localhost:8001
+```
+
+Qdrant dashboard: http://localhost:6333/dashboard
+
+### 3. Start Qdrant + SearXNG
+
+The `searxng/` directory in this repo contains the SearXNG config mounted by Docker Compose. `SEARXNG_URL` is the URL Aiko calls from the host, and `SEARXNG_BASE_URL` is set inside `docker-compose.yml` for the container.
 
 ```bash
 docker compose up -d
 ```
 
-Qdrant dashboard: http://localhost:6333/dashboard
+Qdrant dashboard: <http://localhost:6333/dashboard>
 
-### 3. Install dependencies
+### 4. Install dependencies
 
 ```bash
 uv sync
 ```
 
-### 4. Configure
+### 5. Run Aiko-chan
 
 ```bash
-cp .env.example .env
-# edit .env — set your Ollama URL, model, SearXNG URL, Kokoro voice
-```
+# Full voice mode: ASR input + TTS output
+uv run python main.py
 
-### 5. Talk to Aiko-chan
+# Text mode: keyboard input, no ASR/TTS
+uv run python main.py --text
 
-```bash
-# Full voice mode — ASR input + TTS output
-uv run python cli.py
-
-# Text mode — keyboard input, no TTS
-uv run python cli.py --text
-
-# Show memory debug output each turn
-uv run python cli.py --debug
+# Show retrieved memory hits each turn
+uv run python main.py --debug
 
 # Wipe all stored memories and exit
-uv run python cli.py --clear-mem
+uv run python main.py --clear-mem
 ```
 
----
-
-## CLI Commands
+## In-App Commands
 
 | Command | Action |
 |---|---|
 | `/quit` or `/exit` | End the session |
-| `/reset` | Clear short-term context (long-term memory persists) |
+| `/reset` | Clear short-term chat context; long-term memory persists |
 | `/memory` | Print all stored memories |
-| `/clear` | Wipe all long-term memories from the database |
-| `/web <query>` | Run a web search and ask Aiko about the results |
+| `/clear` | Wipe all long-term memories from Qdrant/mem0 |
+| `/remember` | Pin the last user + assistant exchange so it is decay-proof |
+| `/think <question>` | Run a single higher-token reasoning turn and suppress the raw `<think>` scratchpad from the main stream |
+| `/web <query>` | Run SearXNG search and ask Aiko to answer from the results |
 | `/voice` | Toggle TTS on/off at runtime |
-| `/listen` | Toggle ASR on/off at runtime (falls back to keyboard) |
-| `/help` | Show command list |
-
----
+| `/listen` | Toggle ASR on/off at runtime |
+| `/help` | Show the command list |
 
 ## Project Structure
 
 ```text
-aiko/
+Aiko-chan/
+├── main.py              # curses entry point and session orchestrator
 ├── core/
-│   ├── think.py        # Ollama chat loop, streaming, search intercept, warmup
-│   ├── memorize.py     # mem0 + Qdrant wrapper, async queue worker
-│   ├── speak.py        # Kokoro TTS pipeline, background warmup
-│   ├── listen.py       # faster-whisper ASR, VAD, status callbacks
-│   ├── tools.py        # Web search via SearXNG
-│   └── silence.py      # Stderr suppression utility
+│   ├── think.py         # Ollama chat loop, streaming, web-search trigger, reasoning mode
+│   ├── memorize.py      # mem0 + Qdrant wrapper, pinned memories, access tracking, dream pass
+│   ├── forget.py        # pure memory-decay scoring and cleanup gates
+│   ├── dream.py         # midnight scheduler for consolidation + reflection
+│   ├── reflect.py       # optional Hugo/GitHub daily reflection writer
+│   ├── speak.py         # MioTTS HTTP client and sounddevice playback
+│   ├── listen.py        # microphone capture, Silero VAD, faster-whisper transcription
+│   ├── tools.py         # SearXNG web search helper
+│   ├── health.py        # system/vitals helpers for the TUI
+│   ├── log.py           # rotating log setup
+│   └── silence.py       # stderr suppression utility
+├── tui/
+│   ├── tui.py           # full-screen curses UI
+│   └── identity.py      # persona/identity.md loader
 ├── persona/
-│   ├── soul.md         # Aiko's personality, rules, and voice — edit freely
-│   └── identity.md     # Banner text, ASCII art, and color map for TUI
-├── cli.py              # Curses TUI entry point
-├── docker-compose.yml  # Qdrant
-├── pyproject.toml      # uv dependencies
-├── uv.lock             # uv lockfile
-├── .env.example        # Environment variable reference
-└── README.md           # This file
+│   ├── soul.md          # Aiko's personality, rules, and voice
+│   └── identity.md      # banner text, ASCII art, and color map
+├── searxng/
+│   ├── settings.yml     # SearXNG settings mounted into the container
+│   └── limiter.toml     # SearXNG limiter config
+├── assets/              # README images
+├── docker-compose.yml   # Qdrant + SearXNG services
+├── pyproject.toml       # Python/uv dependency metadata
+├── uv.lock              # uv lockfile
+├── .env.example         # Environment variable reference
+└── README.md            # This file
 ```
 
----
+## Memory Lifecycle
+
+Aiko's memory layer does more than simple storage:
+
+1. Normal conversation queues memory writes through `AikoThink` and stores them in mem0/Qdrant.
+2. Searches update `access_count` and `last_accessed_at` metadata in Qdrant.
+3. `/remember` pins the previous turn so cleanup and dream pruning will not delete it.
+4. Startup cleanup removes memories below the decay threshold after the grace period.
+5. A background scheduler runs at local midnight and calls `dream()`:
+   - boosts salient memories;
+   - merges near-duplicates by vector similarity;
+   - prunes decayed memories;
+   - optionally writes and publishes a Hugo reflection post through GitHub if reflection env vars are configured.
 
 ## Roadmap
 

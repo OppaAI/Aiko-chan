@@ -34,7 +34,7 @@ from typing import Optional
 from mem0 import Memory
 from qdrant_client import QdrantClient
 
-from core.decay import compute_weighted_score, should_cleanup, CLEANUP_THRESHOLD
+from core.forget import compute_weighted_score, should_cleanup, CLEANUP_THRESHOLD
 
 # ── config ────────────────────────────────────────────────────────────────────
 MEM0_CONFIG = {

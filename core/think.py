@@ -55,9 +55,9 @@ def _load_persona() -> str:
 class AikoThink:
     """
     Aiko's conversational core.
-    speak is injected pre-warmed from cli.py.
+    speak is injected pre-warmed from UI.
     LLM warmup starts immediately on init in a background thread.
-    cli.py calls join_warmup() to block until both are ready before showing prompt.
+    UI calls join_warmup() to block until both are ready before showing prompt.
     """
 
     def __init__(self, memorize: AikoMemorize, speak: AikoSpeak | None = None) -> None:
@@ -106,7 +106,7 @@ class AikoThink:
             pass
 
     def join_warmup(self) -> None:
-        """Block until LLM warmup completes. Called by cli.py before showing prompt."""
+        """Block until LLM warmup completes. Called by UI before showing prompt."""
         if self._warmup_thread and self._warmup_thread.is_alive():
             self._warmup_thread.join()
 

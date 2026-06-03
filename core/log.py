@@ -1,0 +1,73 @@
+"""
+core/log.py
+Central logger for Aiko-chan.
+
+All modules import get_logger() and use it instead of print().
+Output goes to logs/aiko.log (file) and stdout (console) simultaneously,
+with log level controllable via LOG_LEVEL in .env.
+
+Usage:
+    from core.log import get_logger
+    log = get_logger(__name__)
+    log.info("Ready.")
+    log.warning("Something looks off.")
+    log.error("Something broke.")
+"""
+import logging
+import os
+from logging.handlers import RotatingFileHandler
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ── config ────────────────────────────────────────────────────────────────────
+LOG_DIR   = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
+LOG_FILE  = os.path.join(LOG_DIR, "aiko.log")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+# Rotate at 5MB, keep 3 backups → aiko.log, aiko.log.1, aiko.log.2
+LOG_MAX_BYTES    = int(os.getenv("LOG_MAX_BYTES",    5 * 1024 * 1024))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", 3))
+
+_FORMAT     = "%(asctime)s  [%(levelname)-8s]  %(name)s — %(message)s"
+_DATE_FMT   = "%Y-%m-%d %H:%M:%S"
+_initialized = False
+
+# ── setup ─────────────────────────────────────────────────────────────────────
+
+def _setup() -> None:
+    """Configure root logger once. Subsequent calls are no-ops."""
+    global _initialized
+    if _initialized:
+        return
+
+    os.makedirs(LOG_DIR, exist_ok=True)
+
+    root = logging.getLogger()
+    root.setLevel(LOG_LEVEL)
+
+    fmt = logging.Formatter(_FORMAT, datefmt=_DATE_FMT)
+
+    # File handler — rotating, never pollutes stdout
+    fh = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    fh.setFormatter(fmt)
+    root.addHandler(fh)
+
+    # Console handler — INFO and above only, so DEBUG stays file-only
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(fmt)
+    root.addHandler(ch)
+
+    _initialized = True
+
+
+def get_logger(name: str) -> logging.Logger:
+    """Return a named logger. Initialises root logger on first call."""
+    _setup()
+    return logging.getLogger(name)

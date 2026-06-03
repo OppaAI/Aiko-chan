@@ -3,7 +3,6 @@ core/dream_scheduler.py
 Schedules Aiko's nightly dream() consolidation pass at 00:00 local time.
 
 Usage — call start() once during Aiko startup (e.g. in cli.py or main.py):
-
     from core.dream_scheduler import start as start_dream_scheduler
     start_dream_scheduler(memorize_instance)
 
@@ -15,10 +14,13 @@ VRAM safety:
     No Ollama contention. Safe to fire even if a conversation is mid-flight,
     though a _dream_lock flag is checked to avoid overlapping passes.
 """
-
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime
+
+from core.log import get_logger
+
+log = get_logger(__name__)
 
 # Prevent overlapping dream passes (e.g. if system clock jumps or scheduler
 # fires twice due to a suspend/resume cycle).
@@ -41,21 +43,21 @@ def _dream_loop(memorize) -> None:
     """
     while True:
         wait = _seconds_until_midnight()
-        print(f"[dream-scheduler] Next consolidation pass in {wait / 3600:.1f}h (at midnight).")
+        log.info(f"Next consolidation pass in {wait / 3600:.1f}h (at midnight).")
         time.sleep(wait)
 
         if not _dream_lock.acquire(blocking=False):
-            print("[dream-scheduler] Pass already running — skipping.")
+            log.warning("Pass already running — skipping.")
             # Sleep a bit to avoid tight loop if something is wrong
             time.sleep(60)
             continue
 
         try:
-            print(f"[dream-scheduler] Firing dream() at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            log.info(f"Firing dream() at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             result = memorize.dream()
-            print(f"[dream-scheduler] Pass complete: {result}")
+            log.info(f"Pass complete: {result}")
         except Exception as e:
-            print(f"[dream-scheduler-error] dream() raised: {e}")
+            log.error(f"dream() raised: {e}")
         finally:
             _dream_lock.release()
 
@@ -73,7 +75,12 @@ def start(memorize) -> threading.Thread:
 
     Returns the Thread (rarely needed, but useful for testing).
     """
-    t = threading.Thread(target=_dream_loop, args=(memorize,), daemon=True, name="dream-scheduler")
+    t = threading.Thread(
+        target=_dream_loop,
+        args=(memorize,),
+        daemon=True,
+        name="dream-scheduler",
+    )
     t.start()
-    print("[dream-scheduler] Started — will consolidate memories nightly at midnight.")
+    log.info("Started — will consolidate memories nightly at midnight.")
     return t

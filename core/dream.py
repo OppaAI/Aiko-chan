@@ -15,8 +15,7 @@ VRAM safety:
     though a _dream_lock flag is checked to avoid overlapping passes.
 """
 
-from datetime import datetime, timedelta
-import os
+from datetime import datetime, timedelta, timezone
 import threading
 import time
 
@@ -57,7 +56,8 @@ def _dream_loop(memorize) -> None:
             result = memorize.dream()
             log.info(f"Pass complete: {result}")
             memories = memorize.get_all()
-            generate_and_post(memories)
+            yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+            generate_and_post(memories, date=yesterday)
         except Exception as e:
             log.error(f"dream() raised: {e}")
         finally:

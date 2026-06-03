@@ -5,7 +5,8 @@ Aiko's speech-to-text input layer.
   - Captures microphone audio with Silero VAD (neural, energy-independent)
   - Transcribes via faster-whisper in a background thread
   - Exposes listen() (blocking) and listen_async() (callback) for UI
-  - Warm-up call on init loads both Whisper and Silero models immediately
+  - Staged init: load_whisper() → load_vad() → join_warmup() for granular
+    boot progress reporting via wakeup.py
 
 Dependencies:
     pip install faster-whisper sounddevice numpy silero-vad scipy
@@ -26,6 +27,16 @@ import warnings
 
 warnings.filterwarnings("ignore")
 logging.getLogger("faster_whisper").setLevel(logging.ERROR)
+
+# ── boot labels ───────────────────────────────────────────────────────────────
+
+BOOT_LABELS = {
+    'listen_whisper': 'Loading Whisper model...',
+    'listen_silero':  'Loading Silero VAD...',
+    'listen_warmup':  'Warming up ASR pipeline...',
+    'listen_ready':   'Microphone ready',
+    'listen_skip':    'ASR skipped (text mode)',
+}
 
 # ── config ────────────────────────────────────────────────────────────────────
 
@@ -81,30 +92,54 @@ class AikoListen:
     Microphone capture + faster-whisper transcription.
     Silero VAD replaces energy thresholding for robust, noise-resilient
     speech detection — critical in environments with fan or ambient noise.
-    Warm-up starts immediately on init (background thread).
-    UI should call join_warmup() before first listen().
+
+    Staged init for granular boot progress reporting:
+        listen = AikoListen()   # resolves device only — no heavy loading
+        listen.load_whisper()   # loads WhisperModel into memory
+        listen.load_vad()       # loads Silero VAD + kicks off warmup thread
+        listen.join_warmup()    # blocks until warmup thread completes
     """
 
     def __init__(self) -> None:
-        device, compute = _resolve_device(WHISPER_DEVICE)
+        self._device, self._compute = _resolve_device(WHISPER_DEVICE)
+        self._model:      WhisperModel | None = None   # populated by load_whisper()
+        self._vad_model:  object | None       = None   # populated by load_vad()
+        self._lock        = threading.Lock()            # one transcription at a time
+        self._warmup_done = threading.Event()
+        self._warmup_thread: threading.Thread | None = None
+
+    # ── staged init ───────────────────────────────────────────────────────────
+
+    def load_whisper(self) -> None:
+        """
+        Load the Whisper model into memory.
+        Blocking — downloads on first run, then loads from cache.
+        Call before load_vad() so warmup thread has both models ready.
+        """
         self._model = WhisperModel(
             WHISPER_MODEL_SIZE,
-            device=device,
-            compute_type=compute,
+            device=self._device,
+            compute_type=self._compute,
         )
+
+    def load_vad(self) -> None:
+        """
+        Load Silero VAD and kick off the background warmup thread.
+        Requires load_whisper() to have been called first.
+        """
         self._vad_model = load_silero_vad()   # ~2 MB ONNX/JIT, MIT license
         self._vad_model.eval()
-
-        self._lock          = threading.Lock()   # one transcription at a time
-        self._warmup_done   = threading.Event()
         self._warmup_thread = threading.Thread(target=self._warmup, daemon=True)
         self._warmup_thread.start()
 
-    # ── public api ────────────────────────────────────────────────────────────
-
     def join_warmup(self) -> None:
-        """Block until both Whisper and Silero are warm. Call from UI before first prompt."""
+        """
+        Block until both Whisper and Silero are warm.
+        Call after load_vad() and before first listen().
+        """
         self._warmup_done.wait()
+
+    # ── public api ────────────────────────────────────────────────────────────
 
     def listen(self, status_callback=None, wait_fn=None) -> str:
         """
@@ -113,6 +148,8 @@ class AikoListen:
         Args:
             status_callback: optional callable(str) for UI status strings
                              e.g. "__LISTENING__", "__TRANSCRIBING__", "__IDLE__"
+            wait_fn:         optional callable() — blocks until TTS finishes
+                             before opening the mic, preventing echo feedback
 
         Returns:
             Transcribed text string, or "" if nothing intelligible was captured.

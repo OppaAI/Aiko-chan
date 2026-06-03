@@ -242,7 +242,7 @@ class AikoThink:
         while True:
             user_input, response_text = self._mem_queue.get()
             try:
-                self._memorize.add([
+                self._memorize.add_async([
                     {"role": "user",      "content": user_input},
                     {"role": "assistant", "content": response_text},
                 ])

@@ -213,7 +213,7 @@ Aiko's memory layer does more than simple storage:
 
 * [x] **Phase 1.5 — Stream**
 
-  * Aiko-chan TUI CLI with cyberpunk ASCII interface.
+  * Aiko-chan curses TUI with cyberpunk ASCII interface.
   * Streaming inference architecture overhaul.
   * Decoupled LLM → TTS pipeline.
   * Callback-based response streaming.
@@ -283,10 +283,16 @@ Aiko's memory layer does more than simple storage:
   * Develops persistent interests and opinions.
   * Optional social media presence and autonomous content posting.
 
----
+## Notes
 
+- `cli.py` is no longer the active entry point; use `main.py`.
+- TTS is currently MioTTS-based. Older Kokoro/RealtimeTTS dependency remnants may still exist in the dependency metadata, but the active runtime code uses `core/speak.py`'s MioTTS HTTP API client.
+- The nightly reflection feature is optional. If `GITHUB_TOKEN`, `GITHUB_REPO`, or `OLLAMA_MODEL` are missing, reflection publishing fails safely and logs the reason.
+  
 ## Support
+
 If you find this project useful, consider buying me a coffee ☕  
+
 It helps keep the phases shipping.
 
 [![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/oppaai)

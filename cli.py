@@ -131,28 +131,24 @@ _SYS = _read_sys_info()
 # ── live vitals (called every tick) ──────────────────────────────────────────
 
 def _ram_used_str() -> str:
-    """
-    Read current memory pressure from the kernel and return a live usage string.
-
-    Parses MemTotal and MemAvailable from /proc/meminfo each call so the
-    vitals bar always reflects the system's actual state.
-
-    Returns a string of the form 'X.X/Y.Y GB', or '? GB' on read failure.
-    """
     try:
         vals = {}
         with open("/proc/meminfo") as f:
             for line in f:
-                if line.startswith(("MemTotal", "MemAvailable")):
+                if line.startswith(("MemTotal", "MemAvailable", "Cached:", "Buffers")):
                     k, v = line.split(":")
-                    vals[k.strip()] = int(v.split()[0])  # KB
-                if len(vals) == 2:
+                    vals[k.strip()] = int(v.split()[0])
+                if len(vals) == 4:
                     break
-        total    = vals.get("MemTotal",     0)
-        avail    = vals.get("MemAvailable", 0)
-        used     = (total - avail) / 1024 / 1024   # GB
-        total_gb = total / 1024 / 1024
-        return f"{used:.1f}/{total_gb:.1f} GB"
+        total     = vals.get("MemTotal",     0)
+        available = vals.get("MemAvailable", 0)
+        cached    = vals.get("Cached",       0)
+        buffers   = vals.get("Buffers",      0)
+        
+        # True process RSS — excludes reclaimable cache
+        real_used = (total - available - cached - buffers) / 1024 / 1024
+        total_gb  = total / 1024 / 1024
+        return f"{real_used:.1f}/{total_gb:.1f} GB"
     except Exception:
         return "? GB"
 

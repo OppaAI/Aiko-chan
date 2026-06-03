@@ -32,7 +32,6 @@ load_dotenv()
 
 from datetime import datetime, timezone
 import os
-import threading
 import time
 from typing import Optional
 
@@ -143,8 +142,9 @@ class AikoMemorize:
         """
         Store a conversation turn (or batch) into long-term memory.
 
-        Runs synchronously — LLM extraction completes before the next chat
-        turn begins, preventing Ollama VRAM context slot conflicts.
+        Runs synchronously — LLM extraction completes before returning.
+        Callers that need non-blocking writes should enqueue via their own
+        worker (e.g. think.py's _mem_write_loop).
 
         Returns True on success, False on failure so callers can log/alert.
         """
@@ -163,14 +163,6 @@ class AikoMemorize:
         except Exception as e:
             log.error(f"Save failed: {e}")
             return False
-
-    def add_async(self, messages, user_id=USER_ID) -> None:
-        """Fire-and-forget add() — doesn't block the chat loop."""
-        threading.Thread(
-            target=self.add,
-            args=(messages, user_id),
-            daemon=True,
-        ).start()
 
     def pin(self, messages: list[dict], user_id: str = USER_ID) -> bool:
         """

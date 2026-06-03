@@ -35,11 +35,19 @@ except ImportError:
 
 from core.silence import silent_stderr
 
+# ── boot labels ───────────────────────────────────────────────────────────────
+
+BOOT_LABELS = {
+    'speak_miotts': 'Connecting to MioTTS server...',
+    'speak_ready':  'TTS ready',
+    'speak_skip':   'TTS skipped (text mode)',
+}
+
 # ── config ────────────────────────────────────────────────────────────────────
 
-MIOTTS_API_URL    = os.getenv("MIOTTS_API_URL",  "http://localhost:8001")
-MIOTTS_PRESET     = os.getenv("MIOTTS_PRESET",   "jp_female")
-MIOTTS_DEVICE     = int(os.getenv("MIOTTS_DEVICE", "-1"))  # reuse existing env key
+MIOTTS_API_URL = os.getenv("MIOTTS_API_URL",  "http://localhost:8001")
+MIOTTS_PRESET  = os.getenv("MIOTTS_PRESET",   "jp_female")
+MIOTTS_DEVICE  = int(os.getenv("MIOTTS_DEVICE", "-1"))
 
 # ── text sanitization ─────────────────────────────────────────────────────────
 
@@ -78,13 +86,13 @@ class AikoSpeak:
         self._playing   = threading.Event()
         self._stop_flag = threading.Event()
         self._silent    = silent
-        self._sd        = None   # sounddevice, lazy-loaded
-        self._token_buf: list[str] = []  # accumulate feed() tokens
+        self._sd        = None                 # sounddevice, lazy-loaded
+        self._token_buf: list[str] = []        # accumulate feed() tokens
         if not silent:
             print(f"[speak] MioTTS ready | url: {MIOTTS_API_URL} | preset: {MIOTTS_PRESET}")
 
     def warmup(self) -> bool:
-        """Health-check the MioTTS server — called from background thread in UI."""
+        """Health-check the MioTTS server — called from wakeup.py during boot."""
         return self._health_check()
 
     def _health_check(self) -> bool:
@@ -105,7 +113,7 @@ class AikoSpeak:
                 self._sd = sd
         return self._sd
 
-    # ── synthesis ──────────────────────────────────────────────────────────────
+    # ── synthesis ─────────────────────────────────────────────────────────────
 
     def _synthesize(self, text: str) -> bytes | None:
         """
@@ -133,7 +141,7 @@ class AikoSpeak:
             print(f"[speak] synthesis error: {e}")
             return None
 
-    # ── playback ───────────────────────────────────────────────────────────────
+    # ── playback ──────────────────────────────────────────────────────────────
 
     def _play_wav_bytes(self, wav_bytes: bytes) -> None:
         """
@@ -155,7 +163,7 @@ class AikoSpeak:
             if MIOTTS_DEVICE >= 0:
                 kwargs["device"] = MIOTTS_DEVICE
             with silent_stderr():
-                stream = sd.play(audio, **kwargs)
+                sd.play(audio, **kwargs)
             while sd.get_stream().active:
                 if self._stop_flag.is_set():
                     sd.stop()
@@ -172,7 +180,7 @@ class AikoSpeak:
         if wav:
             self._play_wav_bytes(wav)
 
-    # ── public api ─────────────────────────────────────────────────────────────
+    # ── public api ────────────────────────────────────────────────────────────
 
     def speak(self, text: str) -> bool:
         """Synthesize a complete string, non-blocking. Caller prints to console."""

@@ -11,7 +11,12 @@ completely TUI-ignorant:
     on_done(key)     — subsystem finished successfully
     on_skip(key)     — subsystem skipped (e.g. text mode)
 
+Each module owns its BOOT_LABELS dict; wakeup collects them and exposes
+ALL_BOOT_LABELS so the TUI can register display text before boot begins.
+
 Usage:
+    tui.register_boot_labels(AikoWakeup.ALL_BOOT_LABELS)
+
     result = AikoWakeup(text_mode=False).boot(
         on_loading = tui.step_loading,
         on_done    = tui.step_done,
@@ -26,6 +31,11 @@ Usage:
 import threading
 from dataclasses import dataclass
 from typing import Callable
+
+from core.think    import BOOT_LABELS as _THINK_LABELS
+from core.memorize import BOOT_LABELS as _MEM_LABELS
+from core.speak    import BOOT_LABELS as _SPEAK_LABELS
+from core.listen   import BOOT_LABELS as _LISTEN_LABELS
 
 # ── result container ──────────────────────────────────────────────────────────
 
@@ -44,14 +54,21 @@ class AikoWakeup:
     """
     Parallel boot orchestrator for all Aiko cognitive subsystems.
 
-    Boots AikoThink and AikoMemorize concurrently, then warms up
-    TTS and ASR sequentially (hardware resources must not race).
-    Progress keys mirror the TUI loading step identifiers so the
-    caller can wire callbacks directly to tui.step_loading/done/skip.
+    Boots AikoThink and AikoMemorize concurrently, then stages TTS and ASR
+    init sequentially with granular progress reporting per step.
+    Each subsystem owns its BOOT_LABELS; ALL_BOOT_LABELS merges them all
+    so the TUI can register display text before boot begins.
 
     Args:
         text_mode: When True, TTS and ASR subsystems are skipped entirely.
     """
+
+    ALL_BOOT_LABELS: dict[str, str] = {
+        **_THINK_LABELS,
+        **_MEM_LABELS,
+        **_SPEAK_LABELS,
+        **_LISTEN_LABELS,
+    }
 
     def __init__(self, text_mode: bool = False) -> None:
         self._text_mode = text_mode
@@ -66,7 +83,7 @@ class AikoWakeup:
         Execute full boot sequence and return live subsystem references.
 
         Parallel phase: AikoThink + AikoMemorize boot concurrently.
-        Sequential phase: TTS warmup → ASR init → ASR warmup (or skip).
+        Sequential phase: TTS warmup → ASR staged init (or skip both).
 
         Args:
             on_loading: Called with a progress key when a subsystem starts.
@@ -97,8 +114,8 @@ class AikoWakeup:
             on_loading('think_warmup')
             think_ref[0].join_warmup()
             on_done('think_warmup')
-            mem_ready.wait()                           # hold until memorize is ready
-            think_ref[0]._memorize = memorize[0]       # inject memory backend
+            mem_ready.wait()                       # hold until memorize is ready
+            think_ref[0]._memorize = memorize[0]   # inject memory backend
 
         def init_memorize():
             on_loading('mem_qdrant')
@@ -126,16 +143,30 @@ class AikoWakeup:
         listen = None
 
         if not self._text_mode:
+            # TTS
             on_loading('speak_miotts')
             speak.warmup()
             on_done('speak_miotts')
             on_loading('speak_ready')
             on_done('speak_ready')
 
-            on_loading('listen_ready')
+            # ASR — staged so each step reports independently
             from core.listen import AikoListen
             listen = AikoListen()
+
+            on_loading('listen_whisper')
+            listen.load_whisper()
+            on_done('listen_whisper')
+
+            on_loading('listen_silero')
+            listen.load_vad()              # also kicks off warmup thread
+            on_done('listen_silero')
+
+            on_loading('listen_warmup')
             listen.join_warmup()
+            on_done('listen_warmup')
+
+            on_loading('listen_ready')
             on_done('listen_ready')
         else:
             on_skip('speak_skip')

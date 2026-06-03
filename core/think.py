@@ -130,7 +130,10 @@ class AikoThink:
             The complete assistant response as a single string.
         """
         self._token_callback = token_callback   # store for _stream_response
-
+      
+        if self._speak and self._speak.is_playing():
+            self._speak.stop()
+          
         # 1. retrieve relevant long-term memories
         memories     = self._memorize.search(user_input)
         memory_block = self._memorize.format_for_context(memories)

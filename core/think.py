@@ -41,6 +41,7 @@ _PERSONA_PATH = Path(__file__).resolve().parent.parent / "persona" / "soul.md"
 
 
 def _load_persona() -> str:
+    """Read and return the persona definition from soul.md."""
     if not _PERSONA_PATH.exists():
         raise FileNotFoundError(f"soul.md not found at {_PERSONA_PATH}")
     return _PERSONA_PATH.read_text(encoding="utf-8").strip()
@@ -56,6 +57,16 @@ class AikoThink:
     """
 
     def __init__(self, memorize: AikoMemorize, speak: AikoSpeak | None = None) -> None:
+        """
+        Initialise the cognitive loop.
+
+        Starts the LLM warmup and memory-write worker threads immediately so
+        both are ready before the first user prompt arrives.
+
+        Args:
+            memorize: Injected memory backend for retrieval and persistence.
+            speak:    Pre-warmed TTS backend; pass None to run silent.
+        """
         self._client   = Client(host=OLLAMA_BASE_URL)
         self._memorize = memorize
         self._speak    = speak
@@ -69,6 +80,12 @@ class AikoThink:
         self._warmup_thread.start()
 
     def _warmup_llm(self) -> None:
+        """
+        Send a minimal request to load the model into VRAM.
+
+        Runs in a background thread at startup; keep_alive=-1 pins the model
+        in memory for the lifetime of the process.
+        """
         try:
             self._client.chat(
                 model=OLLAMA_MODEL,
@@ -91,6 +108,21 @@ class AikoThink:
     # ── public api ────────────────────────────────────────────────────────────
 
     def chat(self, user_input: str, token_callback=None) -> str:
+        """
+        Process one conversational turn and return the full assistant response.
+
+        Retrieves relevant memories, builds the system prompt, streams the LLM
+        response to the console and TTS concurrently, then enqueues the turn
+        for background memory persistence.
+
+        Args:
+            user_input:      Raw text from the user.
+            token_callback:  Optional callable(token: str) invoked for each
+                             streamed token; used by the TUI to render output.
+
+        Returns:
+            The complete assistant response as a single string.
+        """
         self._token_callback = token_callback   # store for _stream_response
 
         # 1. retrieve relevant long-term memories
@@ -121,33 +153,44 @@ class AikoThink:
         return response_text
 
     def reset_context(self) -> None:
+        """Clear the in-memory conversation history for a fresh session."""
         self._history.clear()
-      
+
     def last_turn(self) -> tuple[str, str] | None:
-            """Return the latest complete user/assistant exchange, if one exists."""
-            assistant_text: str | None = None
-    
-            for message in reversed(self._history):
-                role = message.get("role")
-                content = (message.get("content") or "").strip()
-                if not content:
-                    continue
-    
-                if assistant_text is None:
-                    if role == "assistant":
-                        assistant_text = content
-                    continue
-    
-                if role == "user":
-                    return content, assistant_text
-    
-            return None
-  
+        """
+        Return the latest complete user/assistant exchange, if one exists.
+
+        Walks history in reverse to find the most recent assistant reply and
+        its paired user message.
+
+        Returns:
+            (user_text, assistant_text) for the last turn, or None if the
+            history contains no complete exchange yet.
+        """
+        assistant_text: str | None = None
+
+        for message in reversed(self._history):
+            role = message.get("role")
+            content = (message.get("content") or "").strip()
+            if not content:
+                continue
+
+            if assistant_text is None:
+                if role == "assistant":
+                    assistant_text = content
+                continue
+
+            if role == "user":
+                return content, assistant_text
+
+        return None
+
     def set_speak(self, speak):
         """Hot-swap the TTS backend. Pass None to silence, speak instance to restore."""
         self._speak = speak
 
     def wait_for_memory(self) -> None:
+        """Block until all enqueued memory writes have been persisted."""
         self._mem_queue.join()
 
     # ── internal ──────────────────────────────────────────────────────────────
@@ -157,6 +200,16 @@ class AikoThink:
         Stream LLM response to console and TTS simultaneously.
         Console printing is the single source of truth — speak.py is silent.
         TTS skipped if response is a search trigger.
+
+        Tokens are buffered at the start of each response to detect a
+        [SEARCH: ...] trigger before any output is committed to the console
+        or TTS queue.
+
+        Args:
+            messages: Full message list (system prompt + trimmed history).
+
+        Returns:
+            The complete response text assembled from all streamed tokens.
         """
         full_response    = []
         tts_started      = False
@@ -254,11 +307,25 @@ class AikoThink:
         return "".join(full_response)
 
     def _store_async(self, user_input: str, response_text: str) -> None:
-        """Enqueue memory write — never blocks the chat path."""
+        """
+        Enqueue a completed turn for background memory persistence.
+
+        Non-blocking — the chat path returns immediately after this call.
+        The background worker in _mem_write_loop drains the queue serially.
+
+        Args:
+            user_input:    The user's raw message for this turn.
+            response_text: The assistant's full response for this turn.
+        """
         self._mem_queue.put((user_input, response_text))
 
     def _mem_write_loop(self) -> None:
-        """Serial background worker — processes writes in order."""
+        """
+        Serial background worker that drains the memory write queue.
+
+        Runs for the lifetime of the process (daemon thread). Processes writes
+        in order so memory entries are never interleaved or lost.
+        """
         while True:
             user_input, response_text = self._mem_queue.get()
             try:

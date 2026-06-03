@@ -1,5 +1,5 @@
 """
-core/tui.py
+tui/tui.py
 Aiko-chan's full-screen curses TUI visual cortex.
 
 Exports:

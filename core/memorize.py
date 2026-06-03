@@ -193,20 +193,35 @@ class AikoMemorize:
             if not ok:
                 return False
             after   = {str(m["id"]) for m in self.get_all(user_id=user_id)}
-            new_ids = list(after - before)
-            if new_ids:
-                self._qdrant.set_payload(
-                    collection_name=QDRANT_COLLECTION,
-                    payload={"pinned": True},
-                    points=new_ids,
+            pin_ids = list(after - before)
+
+            if not pin_ids:
+                # If the normal background save already stored this turn, mem0
+                # can de-duplicate pin() into an existing memory instead of
+                # creating a new point. In that case, pin the best memories that
+                # match this turn so /remember still makes the interaction
+                # decay-proof rather than silently succeeding with no pinned ID.
+                query = "\n".join(
+                    (m.get("content") or "").strip()
+                    for m in messages
+                    if (m.get("content") or "").strip()
                 )
-                log.info(f"Pinned {len(new_ids)} memories: {new_ids}")
-            else:
-                # mem0 may have de-duplicated and updated an existing memory
-                # rather than inserting a new one — nothing new to pin, but
-                # the add itself succeeded, so treat as success.
-                log.info("pin(): add succeeded but no new memory IDs detected "
-                         "(mem0 may have merged with an existing entry).")
+                pin_ids = [
+                    str(m.get("id"))
+                    for m in self.search(query, user_id=user_id, limit=3)
+                    if m.get("id")
+                ]
+
+            if not pin_ids:
+                log.warning("pin(): add succeeded but no memory IDs were found to pin.")
+                return False
+
+            self._qdrant.set_payload(
+                collection_name=QDRANT_COLLECTION,
+                payload={"pinned": True},
+                points=pin_ids,
+            )
+            log.info(f"Pinned {len(pin_ids)} memories: {pin_ids}")
             return True
         except Exception as e:
             log.error(f"Pin failed: {e}")

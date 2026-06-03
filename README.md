@@ -18,36 +18,15 @@ This project currently serves as:
 ## Current Architecture
 
 ```mermaid
-flowchart TD
-    subgraph P15["Phase 1.5 — current"]
-        YOU[You / TUI] --> THINK[Think\nOllama LLM]
-        THINK <-->|async write| MEM[Memorize\nmem0 + Qdrant]
-        THINK <-->|on demand| SEARCH[Web search\nSearXNG]
-        THINK --> SPEAK[Speak\nKokoro TTS]
-        LISTEN[Listen\nfaster-whisper ASR] --> THINK
-    end
-
-    subgraph P2["Phase 2 — voice"]
-        VAD[VAD\nSilero]
-        IRT[Interactive talk]
-        VCL[Voice Cloning TTS]
-    end
-
-    subgraph P3["Phase 3 — face"]
-        VRM[VRM avatar\nthree-vrm] --> EXP[Expressions]
-        EXP --> LIPS[Lip sync\nTTS-driven]
-    end
-
-    subgraph P4567["Phases 4–7"]
-        PRESENCE[Presence\nemotion + proactive]
-        MOBILE[Mobile\nphone app + WAN]
-        MULTI[Multimodal\nCV + image input]
-        AUTO[Autonomy\nproactive AI]
-        PRESENCE --> MOBILE --> MULTI --> AUTO
-    end
-
-    P15 --> P2 --> P3 --> P4567
-    MEM -.->|findings| GRACE[Grace / AuRoRA]
+   flowchart TD
+    YOU[You] --> TUI[TUI\ncurses]
+    TUI --> THINK[Think\nOllama LLM]
+    THINK <-->|async| MEM[Memory\nmem0 + Qdrant]
+    THINK <-->|on demand| SEARCH[Web search\nSearXNG]
+    THINK --> SPEAK[Speak\nMioTTS]
+    LISTEN[Listen\nfaster-whisper + VAD] --> THINK
+    THINK -.->|nightly| DREAM[Dream\nconsolidation]
+    DREAM -.->|optional| REFLECT[Reflect\nHugo + GitHub]
 ```
 
 ---

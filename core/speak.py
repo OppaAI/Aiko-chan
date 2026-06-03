@@ -39,7 +39,7 @@ from core.silence import silent_stderr
 
 MIOTTS_API_URL    = os.getenv("MIOTTS_API_URL",  "http://localhost:8001")
 MIOTTS_PRESET     = os.getenv("MIOTTS_PRESET",   "jp_female")
-MIOTTS_DEVICE     = int(os.getenv("KOKORO_DEVICE", "-1"))  # reuse existing env key
+MIOTTS_DEVICE     = int(os.getenv("MIOTTS_DEVICE", "-1"))  # reuse existing env key
 
 # ── text sanitization ─────────────────────────────────────────────────────────
 
@@ -84,7 +84,7 @@ class AikoSpeak:
             print(f"[speak] MioTTS ready | url: {MIOTTS_API_URL} | preset: {MIOTTS_PRESET}")
 
     def warmup(self) -> bool:
-        """Health-check the MioTTS server — called from background thread in cli.py."""
+        """Health-check the MioTTS server — called from background thread in UI."""
         return self._health_check()
 
     def _health_check(self) -> bool:

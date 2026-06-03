@@ -8,7 +8,6 @@ Aiko's cognitive loop.
   - Stores the turn into long-term memory after each response (background thread)
 """
 
-import logging
 import os
 import threading
 from ollama import Client
@@ -18,14 +17,18 @@ import re
 import warnings
 
 warnings.filterwarnings("ignore")
+
+import logging
 logging.getLogger("phonemizer").setLevel(logging.ERROR)
 logging.getLogger("torch").setLevel(logging.ERROR)
 os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 
 from core.memorize import AikoMemorize
 from core.speak    import AikoSpeak
+from core.log      import get_logger
 #from core.tools    import web_search
 
+log = get_logger(__name__)
 
 # ── config ────────────────────────────────────────────────────────────────────
 
@@ -41,28 +44,6 @@ def _load_persona() -> str:
     if not _PERSONA_PATH.exists():
         raise FileNotFoundError(f"soul.md not found at {_PERSONA_PATH}")
     return _PERSONA_PATH.read_text(encoding="utf-8").strip()
-
-#def _inject_search_instruction(system: str) -> str:
-#    return system + """
-
-## Web Search
-#You have access to a web search tool. Use it ONLY for real-time or time-sensitive facts you cannot know: current news, live prices, today's weather, recent events.
-
-#NEVER search for:
-#- Anything about yourself, your identity, your creator, or your relationship with the user
-#- Greetings, chit-chat, or conversational questions
-#- General knowledge, history, science, or anything you already know
-#- Questions the user is asking YOU personally
-#
-#To search, output ONLY this on its own line, nothing else before or after:
-#[SEARCH: your query here]
-#
-## Grounding Rule
-#When search results are provided to you, they represent current ground truth.
-#You MUST base your answer on the search results.
-#Do NOT contradict or ignore search results with your own prior knowledge.
-#If the search results conflict with what you think you know, the search results are correct.
-#"""
 
 # ── think ─────────────────────────────────────────────────────────────────────
 
@@ -83,7 +64,7 @@ class AikoThink:
         self._mem_queue  = queue.Queue()
         self._mem_worker = threading.Thread(target=self._mem_write_loop, daemon=True)
         self._mem_worker.start()
-    
+
         self._warmup_thread = threading.Thread(target=self._warmup_llm, daemon=True)
         self._warmup_thread.start()
 
@@ -111,6 +92,7 @@ class AikoThink:
 
     def chat(self, user_input: str, token_callback=None) -> str:
         self._token_callback = token_callback   # store for _stream_response
+
         # 1. retrieve relevant long-term memories
         memories     = self._memorize.search(user_input)
         memory_block = self._memorize.format_for_context(memories)
@@ -130,23 +112,10 @@ class AikoThink:
         # 5. stream first response
         response_text = self._stream_response(messages)
 
-        # 6. handle search trigger if present
-        #search_match = _SEARCH_RE.search(response_text)
-        #if search_match:
-        #    query = search_match.group(1).strip()
-        #    if not self._token_callback:
-        #        print(f"\n[search] {query}", flush=True)
-        #    if self._token_callback:
-        #        self._token_callback(f"__SEARCHING__: {query}")
-        #    results = web_search(query)
-        #    messages.append({"role": "assistant", "content": response_text})
-        #    messages.append({"role": "user",      "content": results})
-        #    response_text = self._stream_response(messages)
-
-        # 7. append assistant turn to history
+        # 6. append assistant turn to history
         self._history.append({"role": "assistant", "content": response_text})
 
-        # 8. persist to memory (background)
+        # 7. persist to memory (background)
         self._store_async(user_input, response_text)
 
         return response_text
@@ -155,12 +124,12 @@ class AikoThink:
         self._history.clear()
 
     def set_speak(self, speak):
-      """Hot-swap the TTS backend. Pass None to silence, speak instance to restore."""
-      self._speak = speak
-    
+        """Hot-swap the TTS backend. Pass None to silence, speak instance to restore."""
+        self._speak = speak
+
     def wait_for_memory(self) -> None:
         self._mem_queue.join()
-      
+
     # ── internal ──────────────────────────────────────────────────────────────
 
     def _stream_response(self, messages: list[dict]) -> str:
@@ -169,12 +138,10 @@ class AikoThink:
         Console printing is the single source of truth — speak.py is silent.
         TTS skipped if response is a search trigger.
         """
-        full_response = []
-        tts_started   = False
-
-        # Buffering mechanism to intercept [SEARCH: query] tags
-        buffer = ""
-        is_searching = False
+        full_response    = []
+        tts_started      = False
+        buffer           = ""
+        is_searching     = False
         buffering_active = True
 
         try:
@@ -209,7 +176,7 @@ class AikoThink:
                 if buffering_active:
                     buffer += token
                     buffer_clean = buffer.lower().replace(" ", "")
-                
+
                     if is_searching:
                         # Already confirmed a search tag — keep buffering until closing ]
                         if "]" in buffer:
@@ -237,11 +204,11 @@ class AikoThink:
                             print(token, end="", flush=True)
 
                 assembled = "".join(full_response)
-                if self._speak and token: # and not _SEARCH_RE.search(assembled):
+                if self._speak and token:
                     self._speak.feed(token)
                     tts_started = True
 
-            # If we completed the stream but never broke out of buffering (e.g. short regular text)
+            # Flush buffer if stream ended without breaking out of buffering
             if buffering_active and buffer and not is_searching:
                 if self._token_callback:
                     self._token_callback(buffer)
@@ -257,18 +224,19 @@ class AikoThink:
                 self._speak.play_async()
 
         except Exception as exc:
-            msg = f"[think] stream failed: {exc}"
+            msg = f"Stream failed: {exc}"
+            log.error(msg)
             if self._token_callback:
-                self._token_callback(msg)
+                self._token_callback(f"[think] {msg}")
             else:
-                print(f"\n{msg}")
+                print(f"\n[think] {msg}")
 
         return "".join(full_response)
 
     def _store_async(self, user_input: str, response_text: str) -> None:
         """Enqueue memory write — never blocks the chat path."""
         self._mem_queue.put((user_input, response_text))
-    
+
     def _mem_write_loop(self) -> None:
         """Serial background worker — processes writes in order."""
         while True:
@@ -279,6 +247,6 @@ class AikoThink:
                     {"role": "assistant", "content": response_text},
                 ])
             except Exception as exc:
-                print(f"[memorize] async write failed: {exc}")
+                log.error(f"Async memory write failed: {exc}")
             finally:
                 self._mem_queue.task_done()

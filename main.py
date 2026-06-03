@@ -218,6 +218,7 @@ def _run(stdscr, args):
                 if not turn:
                     tui.add_message('sys', 'Nothing to remember yet — send a message first.')
                 else:
+                    think.wait_for_memory()
                     user_text, ai_text = turn
                     msgs = [
                         {"role": "user",      "content": user_text},

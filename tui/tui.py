@@ -29,7 +29,7 @@ import textwrap
 import threading
 import time
 
-from core.identity import (
+from tui.identity import (
     BANNER_LINES, BANNER_H,
     ANIME_ART_LINES, ANIME_ART_COLORS,
     ART_W, ART_H,

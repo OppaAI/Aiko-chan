@@ -121,8 +121,6 @@ class AikoWakeup:
             on_loading('mem_qdrant')
             memorize[0] = AikoMemorize(silent=True)
             on_done('mem_qdrant')
-            on_loading('mem_embed')
-            on_done('mem_embed')
             on_loading('mem_cleanup')
             memorize[0].cleanup()
             on_done('mem_cleanup')

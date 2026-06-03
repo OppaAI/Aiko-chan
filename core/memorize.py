@@ -12,7 +12,7 @@ Memory lifecycle:
     memories aren't immediately swept.
   - cleanup() deletes memories below decay threshold, with grace period
     protection for newly created entries.
-  - decay logic lives in core/decay.py (pure math, no I/O).
+  - Decay logic lives in core/forget.py (pure math, no I/O).
 
 Dream pass overview:
   1. Boost  — increment access_count on memories matching salience heuristics
@@ -35,6 +35,9 @@ from mem0 import Memory
 from qdrant_client import QdrantClient
 
 from core.forget import compute_weighted_score, should_cleanup, CLEANUP_THRESHOLD
+from core.log import get_logger
+
+log = get_logger(__name__)
 
 # ── config ────────────────────────────────────────────────────────────────────
 MEM0_CONFIG = {
@@ -61,16 +64,15 @@ MEM0_CONFIG = {
         },
     },
     "embedder": {
-        "provider": "huggingface",
+        "provider": "fastembed",
         "config": {
             "model": "BAAI/bge-base-en-v1.5",
-            "embedding_dims": 768,
         },
     },
 }
 
-USER_ID            = os.getenv("USER_ID", "OppaAI")
-QDRANT_COLLECTION  = "aiko_memory"
+USER_ID           = os.getenv("USER_ID", "OppaAI")
+QDRANT_COLLECTION = "aiko_memory"
 
 # Cosine similarity threshold for near-duplicate detection during dream pass.
 # 0.92 is conservative — only collapses near-identical phrasings.
@@ -110,21 +112,17 @@ class AikoMemorize:
 
     def __init__(self, silent: bool = False) -> None:
         """Initialise mem0 Memory, Qdrant client, and connect."""
-        os.environ.setdefault(
-            "FASTEMBED_CACHE_PATH",
-            os.path.expanduser(os.getenv("FASTEMBED_CACHE_PATH", "~/.cache/fastembed"))
-        )
         qdrant_host = os.getenv("QDRANT_HOST", "localhost")
         qdrant_port = int(os.getenv("QDRANT_PORT", 6333))
 
         if not silent:
-            print("[memorize] Connecting to Qdrant and initialising mem0...")
+            log.info("Connecting to Qdrant and initialising mem0...")
 
         self._mem    = Memory.from_config(MEM0_CONFIG)
         self._qdrant = QdrantClient(host=qdrant_host, port=qdrant_port)
 
         if not silent:
-            print("[memorize] Ready.")
+            log.info("Ready.")
 
     # ── write ──────────────────────────────────────────────────────────────────
 
@@ -140,10 +138,10 @@ class AikoMemorize:
         try:
             t = time.perf_counter()
             self._mem.add(messages, user_id=user_id)
-            print(f"[memorize] Save completed in {time.perf_counter() - t:.2f}s")
+            log.info(f"Save completed in {time.perf_counter() - t:.2f}s")
             return True
         except Exception as e:
-            print(f"[memorize-error] Save failed: {e}")
+            log.error(f"Save failed: {e}")
             return False
 
     # ── read ───────────────────────────────────────────────────────────────────
@@ -180,13 +178,13 @@ class AikoMemorize:
                     self._qdrant.set_payload(
                         collection_name=QDRANT_COLLECTION,
                         payload={
-                            "access_count":    min(current_count + 1, 255),  # cap at 255
+                            "access_count":     min(current_count + 1, 255),  # cap at 255
                             "last_accessed_at": now,
                         },
                         points=[mem_id],
                     )
                 except Exception as e:
-                    print(f"[memorize-warn] Access tracking failed for {mem_id}: {e}")
+                    log.warning(f"Access tracking failed for {mem_id}: {e}")
 
         return results
 
@@ -253,11 +251,11 @@ class AikoMemorize:
         Returns dict: {boosted, merged, pruned, duration_s}
         """
         t_start = time.perf_counter()
-        print(f"[dream] {'(dry-run) ' if dry_run else ''}Starting consolidation pass...")
+        log.info(f"{'(dry-run) ' if dry_run else ''}Starting consolidation pass...")
 
         all_mems = self.get_all(user_id=user_id)
         if not all_mems:
-            print("[dream] No memories found — nothing to do.")
+            log.info("No memories found — nothing to do.")
             return {"boosted": 0, "merged": 0, "pruned": 0, "duration_s": 0.0}
 
         mem_ids     = [str(m.get("id", "")) for m in all_mems if m.get("id")]
@@ -274,8 +272,8 @@ class AikoMemorize:
         pruned       = prune_result.get("deleted", 0)
 
         duration = round(time.perf_counter() - t_start, 2)
-        print(
-            f"[dream] {'(dry-run) ' if dry_run else ''}"
+        log.info(
+            f"{'(dry-run) ' if dry_run else ''}"
             f"Done — boosted={boosted}, merged={merged}, pruned={pruned}, "
             f"duration={duration}s"
         )
@@ -309,7 +307,7 @@ class AikoMemorize:
             ac, _la = payload_map.get(mem_id, (0, "never"))
 
             # Recency check
-            is_recent = False
+            is_recent  = False
             created_at = m.get("created_at", "")
             if created_at:
                 try:
@@ -335,13 +333,13 @@ class AikoMemorize:
                         points=[mem_id],
                     )
                 except Exception as e:
-                    print(f"[dream-warn] Boost failed for {mem_id}: {e}")
+                    log.warning(f"Boost failed for {mem_id}: {e}")
                     continue
 
             boosted += 1
 
         if boosted:
-            print(f"[dream] {'(dry-run) ' if dry_run else ''}Boosted {boosted} memories.")
+            log.info(f"{'(dry-run) ' if dry_run else ''}Boosted {boosted} memories.")
         return boosted
 
     def _dream_merge(
@@ -384,7 +382,7 @@ class AikoMemorize:
                     with_payload=True,
                 )
             except Exception as e:
-                print(f"[dream-warn] Similarity search failed for {mem_id}: {e}")
+                log.warning(f"Similarity search failed for {mem_id}: {e}")
                 continue
 
             for neighbor in neighbors:
@@ -402,7 +400,7 @@ class AikoMemorize:
                     merged += 1
 
         if merged:
-            print(f"[dream] {'(dry-run) ' if dry_run else ''}Merged {merged} duplicate memories.")
+            log.info(f"{'(dry-run) ' if dry_run else ''}Merged {merged} duplicate memories.")
         return merged
 
     def _resolve_duplicate(
@@ -426,21 +424,21 @@ class AikoMemorize:
         loser   = id_b if ac_a >= ac_b else id_a
 
         if dry_run:
-            print(
-                f"[dream] (dry-run) Would merge: score={score:.3f} "
+            log.info(
+                f"(dry-run) Would merge: score={score:.3f} "
                 f"ac_a={ac_a} ac_b={ac_b} → delete {loser}"
             )
             return True
 
         try:
             self._mem.delete(memory_id=loser)
-            print(
-                f"[dream] Merged duplicate (score={score:.3f}, "
+            log.info(
+                f"Merged duplicate (score={score:.3f}, "
                 f"ac_a={ac_a}, ac_b={ac_b}) → deleted {loser}"
             )
             return True
         except Exception as e:
-            print(f"[dream-warn] Merge delete failed for {loser}: {e}")
+            log.warning(f"Merge delete failed for {loser}: {e}")
             return False
 
     # ── lifecycle ──────────────────────────────────────────────────────────────
@@ -502,7 +500,7 @@ class AikoMemorize:
         candidates.sort(key=lambda x: x["weighted_score"])
 
         if dry_run:
-            print(f"[memorize] Dry run: {len(candidates)} candidates for deletion, {kept} kept.")
+            log.info(f"Dry run: {len(candidates)} candidates for deletion, {kept} kept.")
             return {"deleted": 0, "kept": kept, "failed": 0, "candidates": candidates}
 
         deleted = []
@@ -514,7 +512,7 @@ class AikoMemorize:
             except Exception as e:
                 failed.append({"id": c["id"], "error": str(e)})
 
-        print(f"[memorize] Cleanup: deleted={len(deleted)}, kept={kept}, failed={len(failed)}")
+        log.info(f"Cleanup: deleted={len(deleted)}, kept={kept}, failed={len(failed)}")
         return {"deleted": len(deleted), "kept": kept, "failed": len(failed)}
 
     # ── debug ──────────────────────────────────────────────────────────────────
@@ -529,7 +527,7 @@ class AikoMemorize:
     def clear(self, user_id: str = USER_ID) -> None:
         """Wipe all memories for a user. Use carefully."""
         self._mem.delete_all(user_id=user_id)
-        print(f"[memorize] Cleared all memories for user '{user_id}'.")
+        log.info(f"Cleared all memories for user '{user_id}'.")
 
     # ── internal ───────────────────────────────────────────────────────────────
 
@@ -555,7 +553,7 @@ class AikoMemorize:
                 for p in pts
             }
         except Exception as e:
-            print(f"[memorize-warn] Batch payload fetch failed: {e}")
+            log.warning(f"Batch payload fetch failed: {e}")
             return {}
 
     def _get_vector(self, mem_id: str) -> list[float]:
@@ -573,5 +571,5 @@ class AikoMemorize:
             if pts and pts[0].vector:
                 return pts[0].vector
         except Exception as e:
-            print(f"[memorize-warn] Vector fetch failed for {mem_id}: {e}")
+            log.warning(f"Vector fetch failed for {mem_id}: {e}")
         return []

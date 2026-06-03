@@ -14,12 +14,13 @@ This mirrors how biological memory consolidation works:
 Called by memorize.py — no I/O, pure math only.
 """
 from datetime import datetime, timezone
+import os
 
 # ── tunable parameters ────────────────────────────────────────────────────────
-HALF_LIFE_DAYS    = float(7.0)   # Decay half-life — memory halves in strength every 7 days
-CLEANUP_THRESHOLD = float(0.05)  # Memories below this score are deletion candidates
-ACCESS_COUNT_CAP  = int(255)     # Hard cap — prevents unbounded score inflation
-GRACE_PERIOD_DAYS = int(14)      # New memories are protected from deletion for this window
+HALF_LIFE_DAYS    = float(os.getenv("FORGET_HALF_LIFE_DAYS",    7.0))
+CLEANUP_THRESHOLD = float(os.getenv("FORGET_CLEANUP_THRESHOLD", 0.05))
+ACCESS_COUNT_CAP  = int(  os.getenv("FORGET_ACCESS_COUNT_CAP",  255))
+GRACE_PERIOD_DAYS = int(  os.getenv("FORGET_GRACE_PERIOD_DAYS", 14))
 
 # ── scoring ───────────────────────────────────────────────────────────────────
 

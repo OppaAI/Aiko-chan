@@ -4,7 +4,7 @@ core/listen.py
 Aiko's speech-to-text input layer.
   - Captures microphone audio with Silero VAD (neural, energy-independent)
   - Transcribes via faster-whisper in a background thread
-  - Exposes listen() (blocking) and listen_async() (callback) for main.py
+  - Exposes listen() (blocking) and listen_async() (callback) for UI
   - Warm-up call on init loads both Whisper and Silero models immediately
 
 Dependencies:
@@ -82,7 +82,7 @@ class AikoListen:
     Silero VAD replaces energy thresholding for robust, noise-resilient
     speech detection — critical in environments with fan or ambient noise.
     Warm-up starts immediately on init (background thread).
-    cli.py should call join_warmup() before first listen().
+    UI should call join_warmup() before first listen().
     """
 
     def __init__(self) -> None:
@@ -103,7 +103,7 @@ class AikoListen:
     # ── public api ────────────────────────────────────────────────────────────
 
     def join_warmup(self) -> None:
-        """Block until both Whisper and Silero are warm. Call from cli.py before first prompt."""
+        """Block until both Whisper and Silero are warm. Call from UI before first prompt."""
         self._warmup_done.wait()
 
     def listen(self, status_callback=None, wait_fn=None) -> str:

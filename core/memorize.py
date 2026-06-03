@@ -57,10 +57,10 @@ MEM0_CONFIG = {
     "llm": {
         "provider": "ollama",
         "config": {
-            "model": os.getenv("MEM0_MODEL", os.getenv("OLLAMA_MODEL")),
+            "model": os.getenv("MEM0_MODEL") or os.getenv("OLLAMA_MODEL"),
             "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             "temperature": 0,
-            "max_tokens": 200,
+            "max_tokens": 1000,
         },
     },
     "embedder": {
@@ -137,7 +137,14 @@ class AikoMemorize:
         """
         try:
             t = time.perf_counter()
+            # Strip think-tags from any response mem0 receives
+            import re, mem0.memory.main as _m0
+            _orig = _m0.remove_code_blocks
+            _m0.remove_code_blocks = lambda t: re.sub(
+                r"<think>.*?</think>", "", _orig(t), flags=re.DOTALL
+            ).strip()
             self._mem.add(messages, user_id=user_id)
+            _m0.remove_code_blocks = _orig  # restore after
             log.info(f"Save completed in {time.perf_counter() - t:.2f}s")
             return True
         except Exception as e:

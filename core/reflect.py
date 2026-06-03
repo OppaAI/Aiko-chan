@@ -111,7 +111,7 @@ def _generate_reflection(snippets: list[str]) -> str:
     """Ask Ollama to write the nightly prose reflection."""
     bullet_list = "\n".join(f"- {s}" for s in snippets)
     user_prompt = _REFLECTION_USER.format(snippets=bullet_list)
-    return _ollama_chat(_REFLECTION_SYSTEM, user_prompt, max_tokens=350)
+    return _ollama_chat(_REFLECTION_SYSTEM, user_prompt, max_tokens=500)
 
 
 def _generate_ascii(prose: str) -> str:
@@ -138,7 +138,6 @@ def _build_hugo_post(
     prose:      str,
     ascii_art:  str,
     date:       datetime,
-    day_number: int,
     mem_count:  int,
 ) -> tuple[str, str]:
     """
@@ -156,16 +155,18 @@ def _build_hugo_post(
     read_mins  = _estimate_read_minutes(prose)
 
     # Hugo front matter (YAML)
-    front_matter = textwrap.dedent(f"""
-        ---
-        title: "Day {day_number} Reflection"
-        date: {date.strftime("%Y-%m-%dT%H:%M:%S+00:00")}
-        draft: false
-        tags:
-        {tags_yaml}
-        summary: "{prose[:120].replace(chr(34), chr(39))}…"
-        ---
-    """).strip()
+    front_matter = (
+        f'---\n'
+        f'title: "{date_str} Reflection"\n'
+        f'date: {date.strftime("%Y-%m-%dT%H:%M:%S+00:00")}\n'
+        f'draft: false\n'
+        f'tags:\n'
+        f'{tags_yaml}\n'
+        f'summary: "{prose[:120].replace(chr(34), chr(39))}…"\n'
+        f'word_count: {word_count}\n'
+        f'read_time: {read_mins} min\n'
+        f'---'
+    )
 
     # Body — ASCII art in a code block labelled "fallback" (matches your existing style)
     ascii_block = f"```fallback\n{ascii_art}\n```"
@@ -175,7 +176,7 @@ def _build_hugo_post(
 
         {ascii_block}
 
-        *Generated from {mem_count} memories on day {day_number}.*
+        *Generated from {mem_count} memories on {date_str}.*
     """).strip()
 
     content = f"{front_matter}\n\n{body}\n"
@@ -208,7 +209,7 @@ def _push_post(slug: str, content: str, date: datetime) -> bool:
     Create or update a Hugo post file via the GitHub Contents API.
 
     File path: {HUGO_CONTENT_PATH}/{slug}.md
-    Commit message: "feat(reflect): add day reflection YYYY-MM-DD [skip ci]"
+    Commit message: "feat(reflect): add day reflection YYYY-MM-DD"
 
     Returns True on success, False on failure.
     """
@@ -220,7 +221,7 @@ def _push_post(slug: str, content: str, date: datetime) -> bool:
     repo_path  = f"{HUGO_CONTENT_PATH}/{filename}"
     encoded    = base64.b64encode(content.encode()).decode()
     date_str   = date.strftime("%Y-%m-%d")
-    commit_msg = f"feat(reflect): add day reflection {date_str} [skip ci]"
+    commit_msg = f"feat(reflect): add day reflection {date_str}"
 
     payload: dict = {
         "message": commit_msg,
@@ -248,7 +249,6 @@ def _push_post(slug: str, content: str, date: datetime) -> bool:
 
 def generate_and_post(
     memories:   list[dict],
-    day_number: int,
     date:       Optional[datetime] = None,
     dry_run:    bool = False,
 ) -> dict:
@@ -258,7 +258,6 @@ def generate_and_post(
     Args:
         memories:   List of memory dicts from AikoMemorize.get_all() or search().
                     Each dict should have a "memory" or "text" key.
-        day_number: Monotonic day counter (store in state/config and increment nightly).
         date:       UTC datetime for the post (defaults to now).
         dry_run:    Generate content but skip the GitHub push. Prints the post instead.
 
@@ -303,7 +302,7 @@ def generate_and_post(
         ascii_art = "  ~  ( Aiko )  ~\n   `-- * --'"
 
     # Step 3: Build Hugo post
-    slug, content = _build_hugo_post(prose, ascii_art, date, day_number, len(snippets))
+    slug, content = _build_hugo_post(prose, ascii_art, date, len(snippets))
 
     duration = round(time.perf_counter() - t_start, 2)
 

@@ -22,7 +22,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import base64
-import json
 import os
 import re
 import textwrap
@@ -31,6 +30,10 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import requests
+
+from core.log import get_logger
+
+log = get_logger(__name__)
 
 # ── config ────────────────────────────────────────────────────────────────────
 
@@ -90,8 +93,8 @@ def _ollama_chat(system: str, user: str, max_tokens: int = 400) -> str:
         "stream": False,
         "options": {"num_predict": max_tokens, "temperature": 0.75},
         "messages": [
-            {"role": "system",    "content": system},
-            {"role": "user",      "content": user},
+            {"role": "system", "content": system},
+            {"role": "user",   "content": user},
         ],
     }
     resp = requests.post(
@@ -210,14 +213,14 @@ def _push_post(slug: str, content: str, date: datetime) -> bool:
     Returns True on success, False on failure.
     """
     if not GITHUB_TOKEN or not GITHUB_REPO:
-        print("[reflect-error] GITHUB_TOKEN or GITHUB_REPO not set — skipping push.")
+        log.error("GITHUB_TOKEN or GITHUB_REPO not set — skipping push.")
         return False
 
-    filename    = f"{slug}.md"
-    repo_path   = f"{HUGO_CONTENT_PATH}/{filename}"
-    encoded     = base64.b64encode(content.encode()).decode()
-    date_str    = date.strftime("%Y-%m-%d")
-    commit_msg  = f"feat(reflect): add day reflection {date_str} [skip ci]"
+    filename   = f"{slug}.md"
+    repo_path  = f"{HUGO_CONTENT_PATH}/{filename}"
+    encoded    = base64.b64encode(content.encode()).decode()
+    date_str   = date.strftime("%Y-%m-%d")
+    commit_msg = f"feat(reflect): add day reflection {date_str} [skip ci]"
 
     payload: dict = {
         "message": commit_msg,
@@ -235,10 +238,10 @@ def _push_post(slug: str, content: str, date: datetime) -> bool:
 
     if resp.status_code in (200, 201):
         action = "Updated" if existing_sha else "Created"
-        print(f"[reflect] {action} post: {repo_path}")
+        log.info(f"{action} post: {repo_path}")
         return True
     else:
-        print(f"[reflect-error] GitHub push failed {resp.status_code}: {resp.text[:300]}")
+        log.error(f"GitHub push failed {resp.status_code}: {resp.text[:300]}")
         return False
 
 # ── public API ────────────────────────────────────────────────────────────────
@@ -265,7 +268,7 @@ def generate_and_post(
     date    = date or datetime.now(timezone.utc)
 
     if not OLLAMA_MODEL:
-        print("[reflect-error] OLLAMA_MODEL not set.")
+        log.error("OLLAMA_MODEL not set.")
         return {"success": False, "error": "OLLAMA_MODEL not set"}
 
     # Extract text snippets — deduplicate, cap at REFLECT_MAX_MEMS
@@ -280,23 +283,23 @@ def generate_and_post(
             break
 
     if not snippets:
-        print("[reflect] No memories to reflect on — skipping post.")
+        log.info("No memories to reflect on — skipping post.")
         return {"success": False, "error": "no memories"}
 
-    print(f"[reflect] Generating reflection from {len(snippets)} memory snippets...")
+    log.info(f"Generating reflection from {len(snippets)} memory snippets...")
 
     # Step 1: prose reflection
     try:
         prose = _generate_reflection(snippets)
     except Exception as e:
-        print(f"[reflect-error] Reflection generation failed: {e}")
+        log.error(f"Reflection generation failed: {e}")
         return {"success": False, "error": str(e)}
 
     # Step 2: ASCII art
     try:
         ascii_art = _generate_ascii(prose)
     except Exception as e:
-        print(f"[reflect-warn] ASCII art generation failed ({e}) — using fallback.")
+        log.warning(f"ASCII art generation failed ({e}) — using fallback.")
         ascii_art = "  ~  ( Aiko )  ~\n   `-- * --'"
 
     # Step 3: Build Hugo post
@@ -305,9 +308,7 @@ def generate_and_post(
     duration = round(time.perf_counter() - t_start, 2)
 
     if dry_run:
-        print(f"\n{'='*60}")
-        print(f"[reflect] DRY RUN — would post: {slug}.md")
-        print(f"{'='*60}\n{content}\n{'='*60}\n")
+        log.info(f"Dry run — would post: {slug}.md\n{'='*60}\n{content}\n{'='*60}")
         return {
             "success":    True,
             "dry_run":    True,
@@ -322,8 +323,8 @@ def generate_and_post(
     # Step 4: Push to GitHub
     success = _push_post(slug, content, date)
 
-    print(
-        f"[reflect] {'Done' if success else 'Failed'} — "
+    log.info(
+        f"{'Done' if success else 'Failed'} — "
         f"slug={slug}, words={_count_words(prose)}, mems={len(snippets)}, "
         f"duration={duration}s"
     )

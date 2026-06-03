@@ -150,7 +150,15 @@ class AikoMemorize:
         except Exception as e:
             log.error(f"Save failed: {e}")
             return False
-
+          
+    def add_async(self, messages, user_id=USER_ID) -> None:
+        """Fire-and-forget add() — doesn't block the chat loop."""
+        threading.Thread(
+            target=self.add,
+            args=(messages, user_id),
+            daemon=True,
+        ).start()
+  
     # ── read ───────────────────────────────────────────────────────────────────
 
     def search(self, query: str, user_id: str = USER_ID, limit: int = 5) -> list[dict]:

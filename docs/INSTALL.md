@@ -11,16 +11,15 @@ This guide walks through installing every component of the Aiko-chan stack from 
 2. [Python 3.10 via pyenv](#2-python-310-via-pyenv)
 3. [uv Package Manager](#3-uv-package-manager)
 4. [Docker & Docker Compose](#4-docker--docker-compose)
-5. [Qdrant (via Docker)](#5-qdrant-via-docker)
-6. [SearXNG (via Docker)](#6-searxng-via-docker)
-7. [Ollama](#7-ollama)
-8. [Pull a Chat Model](#8-pull-a-chat-model)
-9. [MioTTS Server](#9-miotts-server)
-10. [Clone the Repo & Configure Environment](#10-clone-the-repo--configure-environment)
-11. [Install Python Dependencies](#11-install-python-dependencies)
-12. [Jetson Orin Nano — Extra Steps](#12-jetson-orin-nano--extra-steps)
-13. [Verify the Full Stack](#13-verify-the-full-stack)
-14. [Run Aiko-chan](#14-run-aiko-chan)
+5. [SearXNG (via Docker)](#5-searxng-via-docker)
+6. [Ollama](#6-ollama)
+7. [Pull a Chat Model](#7-pull-a-chat-model)
+8. [MioTTS Server](#8-miotts-server)
+9. [Clone the Repo & Configure Environment](#9-clone-the-repo--configure-environment)
+10. [Install Python Dependencies](#10-install-python-dependencies)
+11. [Jetson Orin Nano — Extra Steps](#11-jetson-orin-nano--extra-steps)
+12. [Verify the Full Stack](#12-verify-the-full-stack)
+13. [Run Aiko-chan](#13-run-aiko-chan)
 
 ---
 
@@ -33,9 +32,9 @@ This guide walks through installing every component of the Aiko-chan stack from 
 | RAM | 8 GB | 16 GB recommended for comfort |
 | GPU VRAM | 4 GB | 8 GB for smooth local LLM inference |
 | Storage | 20 GB free | Models are large |
-| Docker | 24.x+ | Required for Qdrant + SearXNG |
+| Docker | 24.x+ | Required for SearXNG |
 
-> **Jetson Orin Nano:** See [Section 12](#12-jetson-orin-nano--extra-steps) for board-specific wheel overrides before running `uv sync`.
+> **Jetson Orin Nano:** See [Section 11](#11-jetson-orin-nano--extra-steps) for board-specific wheel overrides before running `uv sync`.
 
 ---
 
@@ -89,7 +88,7 @@ uv --version
 
 ## 4. Docker & Docker Compose
 
-Qdrant and SearXNG run as Docker containers.
+SearXNG run as Docker containers.
 
 ```bash
 # Remove any old Docker installs
@@ -111,29 +110,14 @@ docker compose version
 
 ---
 
-## 5. Qdrant (via Docker)
-
-Qdrant is started automatically by `docker compose up` in [Section 6](#6-searxng-via-docker). No separate install is needed — Docker pulls the image on first run. The dashboard will be available at **http://localhost:6333/dashboard** once the stack is up.
-
-If you want to run Qdrant standalone (without the project's `docker-compose.yml`):
-
-```bash
-docker run -d --name qdrant \
-  -p 6333:6333 -p 6334:6334 \
-  -v $(pwd)/qdrant_storage:/qdrant/storage \
-  qdrant/qdrant
-```
-
----
-
-## 6. SearXNG (via Docker)
+## 5. SearXNG (via Docker)
 
 SearXNG is also managed by the project's `docker-compose.yml`. The `searxng/` directory inside the repo holds its configuration, so **clone the repo first** (Section 10) before starting the stack.
 
 Once the repo is cloned, from the project root:
 
 ```bash
-# Start Qdrant + SearXNG together
+# Start SearXNG together
 docker compose up -d
 
 # Confirm both containers are running
@@ -144,7 +128,6 @@ Expected output:
 
 ```
 NAME        STATUS
-qdrant      running
 searxng     running
 ```
 
@@ -152,7 +135,7 @@ SearXNG is available at the URL you set in `SEARXNG_URL` (default **http://local
 
 ---
 
-## 7. Ollama
+## 6. Ollama
 
 Ollama serves the local LLM used by Aiko's `think.py` core.
 
@@ -171,7 +154,7 @@ ollama serve
 
 ---
 
-## 8. Pull a Chat Model
+## 7. Pull a Chat Model
 
 Pull the model referenced in your `.env` as `OLLAMA_MODEL`. The default in `.env.example` is a Ministral 3B reasoning GGUF:
 
@@ -195,7 +178,7 @@ ollama run mistral:7b-instruct "Say hello."
 
 ---
 
-## 9. MioTTS Server
+## 8. MioTTS Server
 
 MioTTS is an external HTTP TTS server. Aiko calls it at `MIOTTS_API_URL` (default **http://localhost:8001**).
 
@@ -221,7 +204,7 @@ curl http://localhost:8001/health
 
 ---
 
-## 10. Clone the Repo & Configure Environment
+## 9. Clone the Repo & Configure Environment
 
 ```bash
 # Clone
@@ -239,10 +222,6 @@ Open `.env` in your editor and set at minimum:
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=hf.co/unsloth/Ministral-3-3B-Reasoning-2512-GGUF:UD-Q4_K_XL
 
-# Qdrant
-QDRANT_HOST=localhost
-QDRANT_PORT=6333
-
 # SearXNG
 SEARXNG_URL=http://localhost:8081
 SEARXNG_SECRET=<your_secret_from_searxng_settings.yml>
@@ -255,7 +234,7 @@ The `SEARXNG_SECRET` must match the `secret_key` value inside `searxng/settings.
 
 ---
 
-## 11. Install Python Dependencies
+## 10. Install Python Dependencies
 
 ```bash
 # From the project root with Python 3.10 active
@@ -268,11 +247,11 @@ uv sync
 
 ---
 
-## 12. Jetson Orin Nano — Extra Steps
+## 11. Jetson Orin Nano — Extra Steps
 
 The Jetson requires board-specific wheels for PyTorch that are not on PyPI.
 
-### 12a. Download Jetson AI Lab wheels
+### 11a. Download Jetson AI Lab wheels
 
 Visit [https://forums.developer.nvidia.com/t/pytorch-for-jetson](https://forums.developer.nvidia.com/t/pytorch-for-jetson) and download the `.whl` files for:
 
@@ -283,7 +262,7 @@ Visit [https://forums.developer.nvidia.com/t/pytorch-for-jetson](https://forums.
 
 Place the wheels in a local directory, e.g. `~/wheels/`.
 
-### 12b. Update pyproject.toml wheel paths
+### 11b. Update pyproject.toml wheel paths
 
 In `pyproject.toml`, confirm the path overrides for `torch` and `ctranslate2` point to your downloaded `.whl` files:
 
@@ -293,19 +272,19 @@ torch = { path = "/home/oppa-ai/wheels/torch-<version>-cp310-linux_aarch64.whl" 
 ctranslate2 = { path = "/home/oppa-ai/wheels/ctranslate2-<version>-cp310-linux_aarch64.whl" }
 ```
 
-### 12c. Install JetPack dev libraries (if not already present)
+### 11c. Install JetPack dev libraries (if not already present)
 
 ```bash
 sudo apt install -y libopenblas-dev libopenmpi-dev
 ```
 
-### 12d. Run uv sync
+### 11d. Run uv sync
 
 ```bash
 uv sync
 ```
 
-### 12e. PulseAudio default sink (for TTS audio output)
+### 11e. PulseAudio default sink (for TTS audio output)
 
 If audio output is silent after install, fix the PulseAudio default sink:
 
@@ -322,36 +301,32 @@ echo "set-default-sink <sink_name>" | sudo tee -a /etc/pulse/default.pa
 
 ---
 
-## 13. Verify the Full Stack
+## 12. Verify the Full Stack
 
 Run this checklist before launching Aiko for the first time:
 
 ```bash
-# 1. Qdrant
-curl http://localhost:6333/healthz
-# Expected: {"result":"ok","status":"ok","time":...}
-
-# 2. SearXNG
+# 1. SearXNG
 curl "http://localhost:8081/search?q=test&format=json" \
   -H "X-Forwarded-For: 127.0.0.1"
 # Expected: JSON search results
 
-# 3. Ollama
+# 2. Ollama
 curl http://localhost:11434/api/tags
 # Expected: JSON list of pulled models
 
-# 4. MioTTS (if using voice)
+# 3. MioTTS (if using voice)
 curl http://localhost:8001/health
 # Expected: {"status":"ok"} or similar
 
-# 5. Python environment
-uv run python -c "import mem0; import qdrant_client; print('deps OK')"
+# 4. Python environment
+uv run python -c "import sqlite-vec; print('deps OK')"
 # Expected: deps OK
 ```
 
 ---
 
-## 14. Run Aiko-chan
+## 13. Run Aiko-chan
 
 ```bash
 # Full voice mode (ASR input + TTS output)
@@ -368,7 +343,7 @@ uv run python main.py --clear-mem
 ```
 
 On first launch Aiko will:
-1. Connect to Qdrant and initialise the memory collection if it does not exist.
+1. Connect to SQLite-vec and initialise the memory collection if it does not exist.
 2. Warm up the Ollama model in the background.
 3. Warm up MioTTS in the background (voice mode only).
 4. Open the curses TUI.
@@ -380,7 +355,6 @@ On first launch Aiko will:
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `uv sync` fails — wheel not found | Jetson wheel path wrong | Update path in `pyproject.toml` → Section 12b |
-| Qdrant connection refused | Container not running | `docker compose up -d` |
 | SearXNG returns 403 | Wrong `SEARXNG_SECRET` | Match secret in `.env` and `searxng/settings.yml` |
 | Ollama model not found | Model not pulled | `ollama pull <model>` → Section 8 |
 | No TTS audio on Jetson | Wrong PulseAudio sink | `pactl set-default-sink` → Section 12e |

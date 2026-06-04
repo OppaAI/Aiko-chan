@@ -93,25 +93,19 @@ class AikoThink:
         self._warmup_thread.start()
 
     def _warmup_llm(self) -> None:
-        """
-        Send a minimal request to load the model into VRAM.
-
-        Runs in a background thread at startup; keep_alive=-1 pins the model
-        in memory for the lifetime of the process.
-        """
-        try:
-            self._client.chat(
-                model=OLLAMA_MODEL,
-                messages=[{"role": "user", "content": "hi"}],
-                stream=False,
-                keep_alive=-1,
-                options={
-                    "num_predict": 1,
-                    "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", 4096)),
-                },
-            )
-        except Exception:
-            pass
+            try:
+                self._client.chat(
+                    model=OLLAMA_MODEL,
+                    messages=[{"role": "user", "content": "hi"}],
+                    stream=False,
+                    keep_alive=-1,
+                    options={
+                        "num_predict": 1,
+                        "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", 4096)),
+                    },
+                )
+            except Exception as e:
+                log.warning("LLM warmup failed — Ollama may not be running: %s", e)
 
     def join_warmup(self) -> None:
         """Block until LLM warmup completes. Called by wakeup.py before boot finishes."""
@@ -375,8 +369,8 @@ class AikoThink:
             user_input, response_text = self._mem_queue.get()
             try:
                 self._memorize.add([
-                    {"role": "user",      "content": user_input},
-                    {"role": "assistant", "content": response_text},
+                    {"role": "user",      "content": user_input[:500]},
+                    {"role": "assistant", "content": response_text[:800]},
                 ])
             except Exception as exc:
                 log.error(f"Async memory write failed: {exc}")

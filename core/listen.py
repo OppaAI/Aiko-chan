@@ -7,6 +7,9 @@ Aiko's speech-to-text input layer.
   - Exposes listen() (blocking) and listen_async() (callback) for UI
   - Staged init: load_whisper() → load_vad() → join_warmup() for granular
     boot progress reporting via wakeup.py
+  - Always-on barge-in VAD monitor: start_barge_in_monitor() runs a
+    lightweight Silero-only daemon that sets _barge_in_event when speech is
+    detected during TTS playback, enabling speak.wait_or_barge_in()
 
 Dependencies:
     pip install faster-whisper sounddevice numpy silero-vad scipy
@@ -58,6 +61,13 @@ SILENCE_CHUNKS      = int(os.getenv("LISTEN_SILENCE_CHUNKS",   20))
 MIN_SPEECH_CHUNKS   = int(os.getenv("LISTEN_MIN_CHUNKS",       10))
 MAX_RECORD_SECONDS  = int(os.getenv("LISTEN_MAX_SECONDS",      30))
 
+# Barge-in VAD config — separate threshold from main VAD so you can tune them
+# independently. Higher threshold = less sensitive to background noise while
+# Aiko is speaking. Two consecutive chunks required to avoid single-spike misfires.
+BARGE_IN_THRESHOLD     = float(os.getenv("BARGE_IN_THRESHOLD",     "0.65"))
+BARGE_IN_CONFIRM       = int(os.getenv("BARGE_IN_CONFIRM_CHUNKS",  "2"))
+BARGE_IN_COOLDOWN_MS   = int(os.getenv("BARGE_IN_COOLDOWN_MS",     "800"))
+
 # Silero requires exactly 512 samples at 16 kHz (32 ms) or 256 at 8 kHz
 # We capture at CAPTURE_RATE, downsample per-chunk before VAD scoring
 _CHUNK_SAMPLES_CAP = int(CAPTURE_RATE * CHUNK_DURATION_MS / 1000)  # at capture rate
@@ -98,6 +108,16 @@ class AikoListen:
         listen.load_whisper()   # loads WhisperModel into memory
         listen.load_vad()       # loads Silero VAD + kicks off warmup thread
         listen.join_warmup()    # blocks until warmup thread completes
+
+    Barge-in monitor (call after join_warmup from wakeup.py):
+        listen.start_barge_in_monitor()
+
+        This launches a lightweight always-on Silero-only daemon that sets
+        _barge_in_event when speech is detected. No Whisper is involved —
+        VAD alone costs ~0 CPU on the Jetson while TTS plays.
+
+        Pass speak= to listen() so it calls speak.wait_or_barge_in() instead
+        of the blocking speak.wait(), enabling the user to interrupt mid-sentence.
     """
 
     def __init__(self) -> None:
@@ -107,6 +127,11 @@ class AikoListen:
         self._lock        = threading.Lock()            # one transcription at a time
         self._warmup_done = threading.Event()
         self._warmup_thread: threading.Thread | None = None
+
+        # barge-in state — set externally by wakeup.py after join_warmup()
+        self._barge_in_event:  threading.Event = threading.Event()
+        self._barge_in_active: bool             = False
+        self._barge_in_thread: threading.Thread | None = None
 
     # ── staged init ───────────────────────────────────────────────────────────
 
@@ -139,23 +164,125 @@ class AikoListen:
         """
         self._warmup_done.wait()
 
+    # ── barge-in monitor ──────────────────────────────────────────────────────
+
+    def start_barge_in_monitor(self) -> None:
+        """
+        Launch the always-on VAD daemon that sets _barge_in_event when speech
+        is detected while Aiko is speaking.
+
+        Uses Silero only — no Whisper — so CPU cost on the Jetson Orin Nano is
+        negligible. The event is consumed by speak.wait_or_barge_in(), which
+        stops playback and returns True so listen() opens the mic immediately.
+
+        Call once from wakeup.py after join_warmup() completes. Safe to call
+        more than once — second call is a no-op if already running.
+        """
+        if self._barge_in_active:
+            return
+        self._barge_in_active = True
+        self._barge_in_thread = threading.Thread(
+            target=self._barge_in_loop, daemon=True,
+        )
+        self._barge_in_thread.start()
+
+    def stop_barge_in_monitor(self) -> None:
+        """
+        Graceful shutdown — sets _barge_in_active to False so the daemon loop
+        exits on its next iteration. Call on process exit if needed.
+        """
+        self._barge_in_active = False
+
+    def _barge_in_loop(self) -> None:
+        """
+        Continuously scores mic chunks through Silero VAD.
+
+        Fires _barge_in_event when BARGE_IN_CONFIRM consecutive chunks exceed
+        BARGE_IN_THRESHOLD. Auto-clears the event after BARGE_IN_COOLDOWN_MS
+        so it is always ready for the next utterance — no manual reset needed
+        by callers.
+
+        Runs as a daemon so it dies cleanly with the process. If PortAudio
+        throws, logs a warning and exits rather than crashing the session.
+        """
+        try:
+            with sd.InputStream(
+                samplerate=CAPTURE_RATE,
+                channels=1,
+                dtype="float32",
+                blocksize=_CHUNK_SAMPLES_CAP,
+                device=DEVICE_INDEX,
+            ) as stream:
+                consecutive = 0
+                while self._barge_in_active:
+                    chunk, _ = stream.read(_CHUNK_SAMPLES_CAP)
+
+                    # event is set and cooling down — drain but don't re-trigger
+                    if self._barge_in_event.is_set():
+                        continue
+
+                    score = self._score_chunk(chunk)
+                    if score >= BARGE_IN_THRESHOLD:
+                        consecutive += 1
+                        if consecutive >= BARGE_IN_CONFIRM:
+                            self._barge_in_event.set()
+                            consecutive = 0
+                            # auto-clear after cooldown so next turn starts fresh
+                            threading.Timer(
+                                BARGE_IN_COOLDOWN_MS / 1000.0,
+                                self._barge_in_event.clear,
+                            ).start()
+                    else:
+                        consecutive = 0
+
+        except Exception as exc:
+            import logging as _log
+            _log.getLogger(__name__).warning(f"Barge-in monitor died: {exc}")
+
     # ── public api ────────────────────────────────────────────────────────────
 
-    def listen(self, status_callback=None, wait_fn=None) -> str:
+    def listen(
+        self,
+        status_callback=None,
+        wait_fn=None,
+        speak=None,
+    ) -> str:
         """
         Block until one complete speech utterance is captured and transcribed.
 
+        Wait behaviour (mutually exclusive, speak= takes priority):
+          - speak provided: calls speak.wait_or_barge_in(_barge_in_event) so
+            the user can interrupt mid-sentence. Clears the barge-in event
+            before opening the mic so _record() never sees a stale trigger.
+          - wait_fn provided (no speak): legacy blocking wait, used in text
+            mode or when TTS is toggled off at runtime.
+          - neither: opens the mic immediately (Aiko is silent).
+
         Args:
             status_callback: optional callable(str) for UI status strings
-                             e.g. "__LISTENING__", "__TRANSCRIBING__", "__IDLE__"
-            wait_fn:         optional callable() — blocks until TTS finishes
-                             before opening the mic, preventing echo feedback
+                             e.g. "__LISTENING__", "__TRANSCRIBING__",
+                             "__WAITING__", "__IDLE__"
+            wait_fn:         optional callable() — legacy blocking wait kept
+                             for text-mode compat; ignored when speak= is given
+            speak:           optional AikoSpeak instance; when provided and
+                             is_playing() is True, uses wait_or_barge_in()
+                             for interruptible waiting
 
         Returns:
             Transcribed text string, or "" if nothing intelligible was captured.
         """
-        if wait_fn:
-            wait_fn()
+        # ── wait phase: block until it's our turn to capture ──────────────────
+        if speak is not None and speak.is_playing():
+            _cb(status_callback, "__WAITING__")
+            interrupted = speak.wait_or_barge_in(self._barge_in_event)
+            if interrupted:
+                # clear the event now — _record() must not see it as stale speech
+                self._barge_in_event.clear()
+        elif wait_fn is not None:
+            wait_fn()                          # legacy: plain blocking wait
+
+        # ── capture + transcribe ──────────────────────────────────────────────
+        _cb(status_callback, "__LISTENING__")
         audio = self._record(status_callback)
         if audio is None:
             _cb(status_callback, "__IDLE__")

@@ -1,158 +1,239 @@
-# Aiko-chan — Phase Testing Checklist
+# Aiko-chan 愛子ちゃん — Test Checklist
 
-> Track test status per phase. Mark `[x]` when confirmed working on target hardware.
-> Hardware targets: dev machine (x86 GPU) and Jetson Orin Nano Super (8 GB).
+Manual smoke-test checklist for each phase. Run the relevant section after installing or after making changes to that phase's components. Check off each item before marking a phase stable.
+
+---
+
+## Pre-flight — Stack Health
+
+Run before any phase tests. All items must pass.
+
+- [ ] `curl http://localhost:6333/healthz` returns `{"status":"ok",...}`
+- [ ] `curl "http://localhost:8081/search?q=test&format=json"` returns JSON results
+- [ ] `curl http://localhost:11434/api/tags` returns a JSON list containing your configured model
+- [ ] `curl http://localhost:8001/health` returns `{"status":"ok"}` (voice mode only)
+- [ ] `uv run python -c "import mem0; import qdrant_client; print('OK')"` prints `OK`
+- [ ] `docker compose ps` shows both `qdrant` and `searxng` as `running`
 
 ---
 
 ## Phase 1 — Soul
 
-Core pipeline: Ollama inference + mem0/Qdrant memory + SearXNG search.
+*CLI chatbot, Ollama inference, mem0 + Qdrant memory, web search.*
 
-### Startup & environment
+### Ollama / LLM
 
-- [ ] `.env` loads correctly; missing keys fail with a clear error message
-- [ ] Qdrant starts and is reachable at configured host/port
-- [ ] SearXNG starts and returns results for a test query
-- [ ] Ollama is reachable and the configured model responds
-- [ ] `uv sync` installs cleanly with no dependency conflicts
+- [ ] Aiko launches without errors in `--text` mode
+- [ ] First message receives a streamed response (tokens appear progressively, not all at once)
+- [ ] Response is coherent and matches the persona defined in `persona/soul.md`
+- [ ] `/reset` clears short-term context; next reply has no memory of the previous exchange
+- [ ] `/think <question>` returns a higher-quality reasoning response and suppresses raw `<think>` tags from output
 
-### Memory — write path
+### Memory (mem0 + Qdrant)
 
-- [ ] Conversation turn queues a memory write without blocking the chat loop
-- [ ] Memory write completes and is visible in the Qdrant dashboard
-- [ ] Async write worker does not crash on Ollama extraction failure
-- [ ] Write latency is acceptable under continuous conversation (no queue buildup)
+- [ ] After a few exchanges, `/memory` prints stored memories (not empty)
+- [ ] Restarting Aiko and asking about a previously discussed topic surfaces a relevant memory
+- [ ] `/remember` pins the last exchange; restarting and running `/memory` shows it is still present
+- [ ] `/clear` wipes all memories; `/memory` returns empty afterward
+- [ ] `--clear-mem` flag wipes memories and exits cleanly without launching the TUI
 
-### Memory — read path
+### Web Search
 
-- [ ] Retrieved memories are relevant to the query (not just most recent)
-- [ ] `access_count` and `last_accessed_at` metadata update on each retrieval hit
-- [ ] Memory context is correctly injected into the next prompt
-- [ ] `/memory` command lists all stored memories accurately
-
-### Memory — lifecycle
-
-- [ ] `/clear` wipes all memories from Qdrant
-- [ ] `/remember` pins the previous exchange (pin survives cleanup pass)
-- [ ] Startup decay cleanup removes memories below threshold after the grace period
-- [ ] Pinned memories are NOT removed by cleanup or dream pruning
-
-### Memory quality
-
-- [ ] Memory feels coherent across cold-start sessions
-- [ ] Extraction quality is stable across at least two different Ollama models
-- [ ] Model does not confabulate memories from empty or sparse context
-- [ ] Ebbinghaus decay scoring produces sensible eviction ordering
-
-### Dream / consolidation
-
-- [ ] `dream()` scheduler fires at local midnight
-- [ ] Near-duplicate memories are merged by vector similarity
-- [ ] Salient memories receive a boost; decayed memories are pruned
-- [ ] Dream pass completes without crashing on an empty memory store
-
-### Web search
-
-- [ ] `/web <query>` returns results and Aiko answers from them
-- [ ] Search trigger fires automatically during conversation when appropriate
-- [ ] SearXNG secret auth passes correctly
-
-### Session commands
-
-- [ ] `/reset` clears short-term context; long-term memory persists
-- [ ] `/quit` and `/exit` exit cleanly
-
-### Jetson-specific
-
-- [ ] Qdrant stable under continuous writes during a 30-minute session
-- [ ] No OOM errors with Ollama model loaded alongside Qdrant
-- [ ] Write queue does not grow unbounded over a long session
+- [ ] `/web what is the current version of Python` returns a grounded answer citing search results
+- [ ] A question that naturally triggers search (e.g. "what happened in the news today") receives a search-grounded reply rather than a hallucinated one
+- [ ] Search results are filtered — Aiko does not dump raw SearXNG JSON into the reply
 
 ---
 
 ## Phase 1.5 — Stream
 
-Streaming inference, curses TUI, decoupled TTS pipeline.
+*Curses TUI, streaming architecture, Kokoro/MioTTS TTS, persona system.*
 
 ### TUI
 
-- [ ] Full-screen curses TUI renders correctly at standard terminal sizes
-- [ ] Cyberpunk ASCII identity banner displays on startup
-- [ ] Streaming tokens appear in real time in the response pane
-- [ ] No rendering artifacts or flicker during streaming
-- [ ] TUI recovers cleanly from a terminal resize
+- [ ] Full-screen curses UI launches and fills the terminal without layout errors
+- [ ] Chat panel, architecture panel, and status areas render in the correct positions
+- [ ] Typing input appears in the input field; submitting with Enter sends the message
+- [ ] Streamed LLM tokens appear in the chat panel incrementally as they arrive
+- [ ] TUI resizes gracefully when the terminal window is resized (no crash, no garbled output)
+- [ ] `/help` renders the command list inside the TUI without breaking layout
+- [ ] Exiting with `/quit` or `/exit` restores the terminal cleanly (no leftover curses artifacts)
 
-### Streaming inference
+### Persona & Identity
 
-- [ ] LLM response streams token-by-token without buffering the full response
-- [ ] Background LLM warmup eliminates cold-start latency on first message
-- [ ] `/think <question>` runs a reasoning turn and suppresses raw `<think>` scratchpad output
+- [ ] `persona/soul.md` loads without error on startup (check logs)
+- [ ] `persona/identity.md` banner and ASCII art render correctly in the identity panel
+- [ ] Aiko's tone and personality match `soul.md` across multiple turns
 
-### TTS pipeline
+### Streaming Pipeline
 
-- [ ] MioTTS `/health` endpoint is reachable at configured URL
-- [ ] TTS begins playing before the LLM response finishes streaming
-- [ ] Background TTS warmup eliminates first-utterance latency
-- [ ] `/voice` toggle turns TTS on and off at runtime without crash
-- [ ] Audio plays correctly on both dev machine and Jetson
+- [ ] LLM response streaming begins within ~1 second of submitting a message (warm model)
+- [ ] Background LLM warmup on startup eliminates cold-start delay on the first real message
+- [ ] Memory writes do not block the streaming response (non-blocking queue worker)
 
-### Persona
+### TTS — MioTTS
 
-- [ ] `persona/soul.md` loads and is injected into the system prompt
-- [ ] `persona/identity.md` banner and color map render correctly in TUI
-- [ ] Aiko's personality and voice are consistent across a multi-turn session
-
-### Non-blocking memory
-
-- [ ] Memory queue worker is non-blocking; chat loop does not stall on write
-- [ ] No synchronous memory write bottlenecks visible in response latency
-
-### Reflection (optional)
-
-- [ ] If `GITHUB_TOKEN` / `GITHUB_REPO` are missing, reflection publishing fails safely and logs the reason
-- [ ] If configured, Hugo markdown post is generated and uploaded correctly after dream pass
+- [ ] `/voice` toggle enables TTS; spoken audio plays for the next assistant response
+- [ ] `/voice` toggle again disables TTS; no audio plays for subsequent responses
+- [ ] Background TTS warmup on startup eliminates cold-start audio delay
+- [ ] Audio plays through the correct output device (check PulseAudio default sink on Jetson)
+- [ ] Long responses play completely without cutting off mid-sentence
 
 ---
 
 ## Phase 2 — Voice
 
-Microphone input, VAD, faster-whisper ASR, Interactive Talk mode.
+*faster-whisper ASR, Silero VAD, hands-free talk mode.*
 
 ### ASR — faster-whisper
 
-- [ ] faster-whisper loads the configured model on startup
-- [ ] Transcription is accurate for typical conversational speech
-- [ ] Transcription latency is acceptable on Jetson (target: < 2 s for short utterances)
-- [ ] ASR handles silence / background noise without spurious transcriptions
-- [ ] `/listen` toggle enables and disables ASR at runtime
+- [ ] Aiko launches in full voice mode (no `--text` flag) without errors
+- [ ] Speaking clearly into the microphone produces a transcription in the chat panel
+- [ ] Transcription accuracy is acceptable for normal conversational speech
+- [ ] Non-speech background noise does not trigger spurious transcriptions (VAD is active)
 
-### Silero VAD
+### VAD — Silero
 
-- [ ] VAD gates the microphone correctly; only speech segments are passed to ASR
-- [ ] VAD does not cut off the end of utterances (tuned `min_silence_duration`)
-- [ ] VAD does not false-trigger on keyboard noise or ambient sound
-- [ ] VAD + ASR pipeline runs in real time without blocking the chat loop
+- [ ] Speaking starts recording; silence stops recording without manual key press
+- [ ] Short pauses mid-sentence do not prematurely cut off the utterance
+- [ ] `/listen` toggle disables ASR; microphone input is ignored
+- [ ] `/listen` toggle again re-enables ASR; microphone input resumes
 
-### Interactive Talk mode
+### End-to-End Voice Loop
 
-- [ ] Full hands-free conversation loop works: speak → transcribe → LLM → TTS
-- [ ] Turn-taking is natural; Aiko does not interrupt mid-utterance
-- [ ] System handles overlapping TTS playback + new VAD activity gracefully
-- [ ] No audio feedback loop between speaker output and microphone input
-
-### Voice + TTS integration
-
-- [ ] TTS voice output is not captured by the microphone and re-transcribed
-- [ ] `/voice` and `/listen` toggles work independently and in combination
-- [ ] Voice mode works on Jetson with all other services (Ollama, Qdrant, SearXNG) running concurrently
-
-### Jetson-specific
-
-- [ ] faster-whisper runs on Jetson with Jetson AI Lab wheels
-- [ ] Total RAM + VRAM headroom is sufficient with Ollama + Qdrant + ASR loaded simultaneously
-- [ ] No thermal throttling causes ASR latency spikes during sustained use
+- [ ] Full loop works: speak → transcribe → LLM response streams → TTS speaks the reply
+- [ ] Loop completes in an acceptable latency (target: < 3 s on Jetson for short replies)
+- [ ] Interrupting a TTS response and speaking again does not deadlock the pipeline
 
 ---
 
-*See the main [README](README.md) for architecture and setup.*
+## Phase 3 — Face
+
+*VRM/VRoid avatar, three-vrm browser rendering, expressions, lip-sync, WebSocket bridge.*
+
+### Avatar Rendering
+
+- [ ] Browser frontend loads and displays the VRM avatar in idle pose
+- [ ] Idle animation plays continuously without freezing
+- [ ] Avatar renders correctly on both desktop browser and target display
+
+### Expression System
+
+- [ ] `happy` expression triggers and blends correctly from idle
+- [ ] `annoyed`, `flustered`, and `thinking` expressions each trigger on the appropriate cue
+- [ ] Expressions return to idle after the trigger condition clears
+
+### Lip-sync
+
+- [ ] Lip-sync visemes animate in sync with TTS audio playback
+- [ ] Lip movement stops when audio ends (mouth does not stay open)
+
+### WebSocket Bridge
+
+- [ ] Python backend connects to the browser WebSocket on startup without errors
+- [ ] Expression commands sent from Python appear in the browser within ~100 ms
+- [ ] Reconnection works if the browser tab is refreshed while Python is running
+
+---
+
+## Phase 4 — Presence
+
+*Emotional state machine, mood tracking, relationship progression, episodic memory.*
+
+### Emotional State
+
+- [ ] Aiko's mood state initialises on startup (check logs or state dump)
+- [ ] Positive interactions shift mood toward a positive state over time
+- [ ] Negative or neutral interactions shift mood accordingly
+- [ ] Mood state persists across restarts (stored, not reset to default each launch)
+
+### Relationship & Memory
+
+- [ ] Shared references from previous sessions are recalled and referenced naturally
+- [ ] Long-term relationship score increments after extended positive interactions
+- [ ] Episodic memory recall surfaces specific past events, not just semantic facts
+
+### Proactive Messaging
+
+- [ ] Aiko sends a proactive message after the configured inactivity timeout
+- [ ] Proactive message content is contextually relevant (references recent topics)
+- [ ] Proactive messaging does not trigger if the user is actively chatting
+
+---
+
+## Phase 5 — Mobile
+
+*React Native / Flutter app, WAN access, push notifications, voice-first UX.*
+
+### Connectivity
+
+- [ ] Mobile app connects to the Aiko backend over WAN (not just LAN)
+- [ ] Auth/token check prevents unauthorised access from the open internet
+- [ ] Connection survives a network switch (Wi-Fi → cellular) without crashing
+
+### Core Features
+
+- [ ] Text chat works end-to-end from the mobile app
+- [ ] Voice input and TTS playback work on device
+- [ ] Avatar renders correctly on mobile screen dimensions
+
+### Push Notifications
+
+- [ ] Proactive message from Aiko triggers a push notification when the app is backgrounded
+- [ ] Tapping the notification opens the app and scrolls to the new message
+
+---
+
+## Phase 6 — Multimodal
+
+*Camera input, image understanding, webcam expression awareness.*
+
+### Image Input
+
+- [ ] Sharing an image in chat sends it to the vision model without errors
+- [ ] Aiko's reply references specific visual details from the image
+- [ ] Unsupported file types are rejected gracefully with a user-facing message
+
+### Webcam
+
+- [ ] Webcam feed initialises on startup (or on toggle) without errors
+- [ ] Expression awareness updates Aiko's emotional state based on detected user expression
+- [ ] Webcam can be toggled off; disabling it stops all camera processing
+
+---
+
+## Phase 7 — Autonomy
+
+*Scheduled operation, background information gathering, self-directed conversation initiation.*
+
+### Scheduler
+
+- [ ] Background scheduler starts on launch and logs its next scheduled task
+- [ ] Scheduled task runs at the configured time (verify in logs)
+- [ ] Missed tasks (e.g. system was off) are handled gracefully — no crash on resume
+
+### Self-directed Behaviour
+
+- [ ] Aiko discovers and logs a new topic of interest during an autonomous run
+- [ ] Autonomously gathered information is stored in long-term memory and surfaced in conversation
+- [ ] Aiko initiates a conversation (proactive message or notification) based on gathered information
+
+### Dream / Nightly Consolidation
+
+- [ ] `dream()` runs at midnight and logs a summary of actions taken
+- [ ] Near-duplicate memories are merged (verify via `/memory` before and after)
+- [ ] Decayed memories below the threshold are pruned (count decreases)
+- [ ] Optional Hugo/GitHub reflection post is published if env vars are configured
+
+---
+
+## Regression — Cross-Phase
+
+Run after any significant change to confirm nothing regressed.
+
+- [ ] Phase 1 memory round-trip still works (store → restart → recall)
+- [ ] Phase 1.5 TUI launches and streams without errors
+- [ ] `/reset`, `/memory`, `/clear`, `/remember` all behave correctly
+- [ ] `--text` and `--debug` flags still work
+- [ ] `docker compose down && docker compose up -d` → full stack recovers cleanly
+- [ ] `uv sync` completes without dependency conflicts after any `pyproject.toml` change

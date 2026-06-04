@@ -23,7 +23,7 @@
 flowchart TD
     YOU[You] --> TUI[TUI\ncurses]
     TUI --> THINK[Think\nOllama LLM]
-    THINK <-->|async| MEM[Memory\nmem0 + Qdrant]
+    THINK <-->|async| MEM[Memory\nsqlite-vec + fastembed]
     THINK <-->|on demand| SEARCH[Web search\nSearXNG]
     THINK --> SPEAK[Speak\nMioTTS]
     LISTEN[Listen\nfaster-whisper + VAD] --> THINK
@@ -40,7 +40,7 @@ flowchart TD
 | Entry point | `main.py` |
 | Interface | full-screen curses TUI in `tui/` |
 | Chat model | Ollama via `ollama.Client` |
-| Long-term memory | mem0 backed by Qdrant |
+| Long-term memory | custom sqlite-vec backend (no server required) |
 | Embeddings | fastembed `BAAI/bge-base-en-v1.5` |
 | Memory lifecycle | Ebbinghaus-style decay, pinned memories, nightly `dream()` consolidation |
 | Web search | local SearXNG instance |
@@ -59,7 +59,7 @@ flowchart TD
 ```bash
 git clone https://github.com/OppaAI/Aiko-chan.git
 cd Aiko-chan
-cp .env.example .env        # edit: OLLAMA_MODEL, QDRANT_HOST, SEARXNG_URL, MIOTTS_API_URL
+cp .env.example .env        # edit: OLLAMA_MODEL, SQLITE_MEMORY_PATH, SEARXNG_URL, MIOTTS_API_URL
 docker compose up -d
 uv sync
 uv run python main.py
@@ -97,7 +97,7 @@ Aiko-chan/
 ├── main.py
 ├── core/
 │   ├── think.py         # Ollama chat loop, streaming, web-search trigger
-│   ├── memorize.py      # mem0 + Qdrant wrapper, pinned memories, decay
+│   ├── memorize.py      # sqlite-vec backend, pinned memories, decay
 │   ├── forget.py        # decay scoring and cleanup gates
 │   ├── dream.py         # midnight consolidation scheduler
 │   ├── reflect.py       # Hugo/GitHub reflection publisher
@@ -150,6 +150,7 @@ Full details → **[docs/ROADMAP.md](docs/ROADMAP.md)**
 ## Notes
 
 - Entry point is `main.py`, not `cli.py`.
+- Memory uses a custom sqlite-vec backend — no Qdrant server or mem0 required. Qdrant + mem0 were dropped in Phase 2 due to OOM issues on the Jetson Orin Nano.
 - TTS runtime is MioTTS. Older Kokoro/RealtimeTTS remnants may exist in `pyproject.toml` but are inactive.
 - Reflection publishing fails safely if `GITHUB_TOKEN` or `GITHUB_REPO` are missing.
 

@@ -226,8 +226,29 @@ class AikoSpeak:
         return self._playing.is_set()
 
     def wait(self) -> None:
+        """Block until playback finishes naturally."""
         while self.is_playing():
             time.sleep(0.05)
+
+    def wait_or_barge_in(self, barge_in_event: threading.Event) -> bool:
+        """
+        Block until TTS finishes naturally OR barge_in_event is set by the
+        always-on VAD monitor in listen.py.
+
+        Calls stop() internally if interrupted so the caller never needs to.
+        Returns True if the user barging in interrupted playback, False if TTS
+        finished on its own.
+
+        Args:
+            barge_in_event: threading.Event set by AikoListen._barge_in_loop
+                            when speech is detected during playback.
+        """
+        while self.is_playing():
+            if barge_in_event.is_set():
+                self.stop()                    # halt audio immediately
+                return True                    # interrupted
+            time.sleep(0.02)
+        return False                           # finished naturally
 
     def stop(self) -> None:
         if self.is_playing():

@@ -19,6 +19,8 @@ Responsibilities:
     - Fuzzy-match spoken voice commands to slash equivalents in ASR mode
     - Clean shutdown on Ctrl-C / Ctrl-D
 """
+from dotenv import load_dotenv
+load_dotenv()
 
 import argparse
 import difflib
@@ -34,9 +36,6 @@ warnings.filterwarnings("ignore")
 import curses
 import logging
 logging.disable(logging.WARNING)
-
-from dotenv import load_dotenv
-load_dotenv()
 
 from core.silence import silent_stderr
 from core.log     import get_logger

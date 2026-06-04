@@ -70,11 +70,11 @@ MEM0_CONFIG = {
     "llm": {
         "provider": "ollama",
         "config": {
-            "model": os.getenv("MEM0_MODEL") or os.getenv("OLLAMA_MODEL"),
-            "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-            "temperature": 0,
-            "max_tokens": 1000,
-        },
+            "model": os.getenv("MEM0_MODEL"),
+            "ollama_base_url": "http://localhost:11434",
+            "temperature": 0.1,
+            "max_tokens": 2000,
+        }
     },
     "embedder": {
         "provider": "fastembed",

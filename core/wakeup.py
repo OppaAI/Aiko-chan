@@ -31,6 +31,8 @@ Usage:
 import threading
 from dataclasses import dataclass
 from typing import Callable
+from core.log import get_logger
+log = get_logger(__name__)
 
 from core.think    import BOOT_LABELS as _THINK_LABELS
 from core.memorize import BOOT_LABELS as _MEM_LABELS
@@ -120,18 +122,23 @@ class AikoWakeup:
             think_ref[0]._memorize = memorize[0]   # inject memory backend
 
         def init_memorize():
-            on_loading('mem_qdrant')
-            memorize[0] = AikoMemorize(silent=True)
-            on_done('mem_qdrant')
-            on_loading('mem_embed')
-            on_done('mem_embed')
-            on_loading('mem_cleanup')
-            memorize[0].cleanup()
-            on_done('mem_cleanup')
-            on_loading('mem_ready')
-            mem_ready.set()
-            on_done('mem_ready')
-
+            try:
+                on_loading('mem_qdrant')
+                memorize[0] = AikoMemorize(silent=True)
+                on_done('mem_qdrant')
+                on_loading('mem_embed')
+                on_done('mem_embed')
+                on_loading('mem_cleanup')
+                memorize[0].cleanup()
+                on_done('mem_cleanup')
+                on_loading('mem_ready')
+                on_done('mem_ready')
+            except Exception as e:
+                log.error("Memory boot failed: %s", e)
+            finally:
+                mem_ready.set()  # always unblock init_think, even on failure
+            if memorize[0] is None:
+                return
             from core.dream import start as start_dream_scheduler
             start_dream_scheduler(memorize[0])
 

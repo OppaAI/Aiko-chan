@@ -404,6 +404,7 @@ def _run(stdscr, args):
                     think.chat(f"Based on the search results, answer: {query}",
                                token_callback=_web_token_cb)
                     tui.stream_commit()
+                    tui._draw()
 
             else:
                 tui.add_message('sys', f'Unknown command: {user_input}')

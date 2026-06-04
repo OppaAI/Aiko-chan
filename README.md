@@ -7,6 +7,16 @@
 
 ---
 
+## Purpose
+This project currently serves as:
+
+- a local AI companion chatbot with persistent memory, web search, TTS, ASR, and a terminal UI;
+- a stress test for running a full conversational stack on constrained hardware such as an 8 GB VRAM GPU or Jetson Orin Nano;
+- a precursor and testing sandbox for the larger Grace / AuRoRA project;
+- an experimental playground for memory decay, nightly consolidation, and daily reflection publishing.
+
+---
+
 ## Documentation
 
 | Document | Description |
@@ -149,9 +159,9 @@ Full details → **[docs/ROADMAP.md](docs/ROADMAP.md)**
 
 ## Notes
 
-- Entry point is `main.py`, not `cli.py`.
 - Memory uses a custom sqlite-vec backend — no Qdrant server or mem0 required. Qdrant + mem0 were dropped in Phase 2 due to OOM issues on the Jetson Orin Nano.
-- TTS runtime is MioTTS. Older Kokoro/RealtimeTTS remnants may exist in `pyproject.toml` but are inactive.
+- Entry point is `main.py`, not `cli.py` anymore.
+- TTS runtime is using MioTTS server. Kokoro/RealtimeTTS remnants is dropped due to OOM and quality issues.
 - Reflection publishing fails safely if `GITHUB_TOKEN` or `GITHUB_REPO` are missing.
 
 ---

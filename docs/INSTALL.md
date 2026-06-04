@@ -320,7 +320,7 @@ curl http://localhost:8001/health
 # Expected: {"status":"ok"} or similar
 
 # 4. Python environment
-uv run python -c "import sqlite-vec; print('deps OK')"
+uv run python -c "import sqlite_vec; print('deps OK')"
 # Expected: deps OK
 ```
 

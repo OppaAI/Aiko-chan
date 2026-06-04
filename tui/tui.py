@@ -734,14 +734,38 @@ class AikoTUI:
 
     # ── voice input ───────────────────────────────────────────────────────────
 
-    def get_voice_input(self, listen, wait_fn=None):
-        """Capture a voice utterance via the ASR pipeline and return the transcribed text."""
+    def get_voice_input(self, listen, speak=None, wait_fn=None):
+        """
+        Capture a voice utterance via the ASR pipeline and return the transcribed text.
+
+        Passes speak= through to listen.listen() so it can call
+        speak.wait_or_barge_in() for interruptible playback. Falls back to
+        wait_fn for text-mode / TTS-toggled-off sessions.
+
+        Status tokens handled:
+            __WAITING__      — Aiko is speaking; waiting for her to finish or
+                               for the user to barge in
+            __LISTENING__    — mic is open, capturing audio
+            __TRANSCRIBING__ — Whisper is processing the recorded audio
+            __IDLE__         — pipeline idle, nothing captured
+
+        Args:
+            listen:  AikoListen instance.
+            speak:   AikoSpeak instance, or None. When provided and is_playing()
+                     is True, listen.listen() waits interruptibly via
+                     speak.wait_or_barge_in(_barge_in_event).
+            wait_fn: Legacy blocking callable; used when speak is None and TTS
+                     is disabled at runtime. Ignored when speak is provided.
+        """
         self._input_buf = []
         result_holder   = [None]
         done_event      = threading.Event()
 
         def _status_cb(token):
-            if token == '__LISTENING__':
+            if token == '__WAITING__':
+                with self._lock:
+                    self._input_buf = list("⏸  Waiting …")
+            elif token == '__LISTENING__':
                 with self._lock:
                     self._input_buf = list("🎤  Listening …")
             elif token == '__TRANSCRIBING__':
@@ -755,6 +779,7 @@ class AikoTUI:
         def _run():
             result_holder[0] = listen.listen(
                 status_callback=_status_cb,
+                speak=speak,
                 wait_fn=wait_fn,
             )
             done_event.set()

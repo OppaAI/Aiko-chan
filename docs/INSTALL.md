@@ -1,3 +1,4 @@
+[← Back to README](../README.md)
 # Aiko-chan 愛子ちゃん — Installation Guide
 
 This guide walks through installing every component of the Aiko-chan stack from scratch. Follow the sections in order; each one is a prerequisite for the next.

@@ -9,12 +9,12 @@ Manual smoke-test checklist for each phase. Run the relevant section after insta
 
 Run before any phase tests. All items must pass.
 
-- [ ] `curl http://localhost:6333/healthz` returns `{"status":"ok",...}`
 - [ ] `curl "http://localhost:8081/search?q=test&format=json"` returns JSON results
 - [ ] `curl http://localhost:11434/api/tags` returns a JSON list containing your configured model
 - [ ] `curl http://localhost:8001/health` returns `{"status":"ok"}` (voice mode only)
-- [ ] `uv run python -c "import mem0; import qdrant_client; print('OK')"` prints `OK`
-- [ ] `docker compose ps` shows both `qdrant` and `searxng` as `running`
+- [ ] `uv run python -c "import sqlite_vec; import fastembed; print('OK')"` prints `OK`
+- [ ] `docker compose ps` shows `searxng` as `running`
+- [ ] SQLite memory DB path exists and is on persistent storage (not `/tmp`): `ls -lh $SQLITE_MEMORY_PATH`
 
 ---
 
@@ -30,13 +30,18 @@ Run before any phase tests. All items must pass.
 - [ ] `/reset` clears short-term context; next reply has no memory of the previous exchange
 - [ ] `/think <question>` returns a higher-quality reasoning response and suppresses raw `<think>` tags from output
 
-### Memory (mem0 + Qdrant)
+### Memory (sqlite-vec + fastembed)
+
+> Memory backend was rewritten in Phase 2 — these tests verify the current sqlite-vec implementation,
+> not the original mem0 + Qdrant stack.
 
 - [ ] After a few exchanges, `/memory` prints stored memories (not empty)
 - [ ] Restarting Aiko and asking about a previously discussed topic surfaces a relevant memory
 - [ ] `/remember` pins the last exchange; restarting and running `/memory` shows it is still present
 - [ ] `/clear` wipes all memories; `/memory` returns empty afterward
 - [ ] `--clear-mem` flag wipes memories and exits cleanly without launching the TUI
+- [ ] DB file exists at `SQLITE_MEMORY_PATH` after first memory write: `ls -lh ~/.aiko/memory.db`
+- [ ] `dream()` dry-run completes without error: `uv run python -c "from core.memorize import AikoMemorize; m = AikoMemorize(); print(m.dream(dry_run=True))"`
 
 ### Web Search
 
@@ -85,6 +90,13 @@ Run before any phase tests. All items must pass.
 ## Phase 2 — Voice
 
 *faster-whisper ASR, Silero VAD, hands-free talk mode.*
+
+### Memory Backend Migration (sqlite-vec)
+
+- [ ] No Qdrant container is required — `docker compose ps` shows only `searxng`
+- [ ] Memory writes complete without OOM errors under concurrent ASR + LLM load (`jtop` VRAM stays stable)
+- [ ] KNN + FTS5 RRF recall returns relevant results: run `--debug` and confirm memory hits appear each turn
+- [ ] `cleanup()` runs on startup and logs `deleted=N, kept=N` without error
 
 ### ASR — faster-whisper
 
@@ -236,5 +248,5 @@ Run after any significant change to confirm nothing regressed.
 - [ ] Phase 1.5 TUI launches and streams without errors
 - [ ] `/reset`, `/memory`, `/clear`, `/remember` all behave correctly
 - [ ] `--text` and `--debug` flags still work
-- [ ] `docker compose down && docker compose up -d` → full stack recovers cleanly
+- [ ] `docker compose down && docker compose up -d` → SearXNG recovers cleanly (Qdrant no longer required)
 - [ ] `uv sync` completes without dependency conflicts after any `pyproject.toml` change

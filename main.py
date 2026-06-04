@@ -16,10 +16,12 @@ Responsibilities:
     - Run the main input → inference → render loop
     - Handle commands (/quit, /reset, /memory, /clear, /remember, /think,
                        /voice, /listen, /web, /help)
+    - Fuzzy-match spoken voice commands to slash equivalents in ASR mode
     - Clean shutdown on Ctrl-C / Ctrl-D
 """
 
 import argparse
+import difflib
 import os
 import re
 import sys
@@ -53,6 +55,85 @@ AI_NAME = os.getenv("AI_NAME", "Aiko")
 USER_ID = os.getenv("USER_ID", "")
 
 
+# ── voice command map ─────────────────────────────────────────────────────────
+#
+# Maps spoken phrases to their slash-command equivalents.
+# Whisper often prepends filler words ("uh", "um", "okay", "hey aiko") — the
+# matcher strips these before comparison. Fuzzy matching handles minor
+# transcription drift (e.g. "reset context" → /reset).
+#
+# Keep phrases short and phonetically distinct so Whisper nails them reliably.
+
+_VOICE_COMMANDS: dict[str, str] = {
+    # session control
+    "stop":              "/quit",
+    "hey stop":          "/quit",
+    "quit":              "/quit",
+    "exit":              "/quit",
+    "goodbye":           "/quit",
+    # context
+    "reset":             "/reset",
+    "forget that":       "/reset",
+    "clear context":     "/reset",
+    "start over":        "/reset",
+    # memory
+    "remember this":     "/remember",
+    "pin this":          "/remember",
+    "save this":         "/remember",
+    "show memory":       "/memory",
+    "show memories":     "/memory",
+    "what do you remember": "/memory",
+    "clear memory":      "/clear",
+    "wipe memory":       "/clear",
+    "delete memories":   "/clear",
+    # voice toggles
+    "mute":              "/voice",
+    "unmute":            "/voice",
+    "toggle voice":      "/voice",
+    "stop talking":      "/voice",
+    "toggle listen":     "/listen",
+    "stop listening":    "/listen",
+    # meta
+    "help":              "/help",
+    "what can you do":   "/help",
+}
+
+# Filler words Whisper prepends that we should strip before matching
+_FILLER_RE = re.compile(
+    r"^\s*(uh+|um+|ah+|okay|hey\s+aiko|aiko)[,.]?\s*",
+    flags=re.IGNORECASE,
+)
+
+
+def _match_voice_command(text: str) -> str | None:
+    """
+    Fuzzy-match transcribed text against known voice commands.
+
+    Strips leading filler words before comparing, then tries exact match
+    first and falls back to difflib fuzzy matching with a 0.75 cutoff.
+    Returns the slash command string if confident, None otherwise.
+
+    Args:
+        text: Raw ASR transcript for the current turn.
+
+    Returns:
+        Slash command string (e.g. "/reset") or None if no match.
+    """
+    clean = _FILLER_RE.sub("", text.strip()).lower().rstrip(".,!?")
+    if not clean:
+        return None
+    # exact match
+    if clean in _VOICE_COMMANDS:
+        return _VOICE_COMMANDS[clean]
+    # fuzzy — conservative cutoff to avoid false positives mid-conversation
+    matches = difflib.get_close_matches(
+        clean, _VOICE_COMMANDS.keys(), n=1, cutoff=0.75,
+    )
+    if matches:
+        return _VOICE_COMMANDS[matches[0]]
+    return None
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # ARGUMENT PARSING
 # ═════════════════════════════════════════════════════════════════════════════
@@ -83,7 +164,8 @@ def _run(stdscr, args):
         2. Delegate all subsystem boot to AikoWakeup, passing TUI callbacks.
         3. Transition the TUI to the active chat phase.
         4. Enter the main input → inference → render loop.
-        5. On exit, wait for any background memory writes to complete.
+        5. On exit, stop the barge-in monitor and wait for background memory
+           writes to complete.
     """
     tui = AikoTUI(stdscr, no_voice=args.text, debug=args.debug)
 
@@ -116,6 +198,14 @@ def _run(stdscr, args):
     tts_enabled = not args.text
     asr_enabled = not args.text
 
+    # ── shutdown helper ───────────────────────────────────────────────────────
+
+    def _shutdown():
+        """Stop background daemons and flush memory writes before exit."""
+        if listen is not None:
+            listen.stop_barge_in_monitor()
+        think.wait_for_memory()
+
     # ── main loop ─────────────────────────────────────────────────────────────
 
     while True:
@@ -123,19 +213,31 @@ def _run(stdscr, args):
             if listen and asr_enabled:
                 user_input = tui.get_voice_input(
                     listen,
-                    wait_fn=speak.wait if speak else None,
+                    speak   = speak if tts_enabled else None,
+                    wait_fn = None,
                 )
             else:
                 user_input = tui.get_input()
         except KeyboardInterrupt:
             tui.add_message('sys', "Fine... I'll be here when you come back.")
             tui._draw()
-            think.wait_for_memory()
+            _shutdown()
             time.sleep(0.8)
             return
 
         if not user_input:
             continue
+
+        # ── voice command check (ASR mode only) ───────────────────────────────
+        #
+        # Run before the /cmd block so spoken commands like "forget that"
+        # are rewritten to "/reset" and fall through into the normal handler.
+        # Only active in ASR mode — text-mode users type slash commands directly.
+
+        if listen and asr_enabled and not user_input.startswith('/'):
+            matched = _match_voice_command(user_input)
+            if matched:
+                user_input = matched
 
         # ── commands ──────────────────────────────────────────────────────────
 
@@ -145,7 +247,7 @@ def _run(stdscr, args):
             if cmd in ('/quit', '/exit'):
                 tui.add_message('sys', 'Already leaving? ...Be safe out there.')
                 tui._draw()
-                think.wait_for_memory()
+                _shutdown()
                 time.sleep(0.8)
                 return
 
@@ -253,16 +355,25 @@ def _run(stdscr, args):
 
             elif cmd == '/help':
                 for line in [
-                    '/quit /exit        — end session',
-                    '/reset             — clear short-term context',
-                    '/clear             — wipe long-term memories',
-                    '/remember          — pin last turn forever (decay-proof)',
-                    '/memory            — show stored memories',
-                    '/think <question>  — reason step-by-step (single-shot, 3× token budget)',
-                    '/web <query>       — web search',
-                    '/voice             — toggle TTS on/off',
-                    '/listen            — toggle ASR on/off',
-                    '/help              — show this list',
+                    '/quit /exit              — end session',
+                    '/reset                   — clear short-term context',
+                    '/clear                   — wipe long-term memories',
+                    '/remember                — pin last turn forever (decay-proof)',
+                    '/memory                  — show stored memories',
+                    '/think <question>        — reason step-by-step (single-shot, 3× token budget)',
+                    '/web <query>             — web search',
+                    '/voice                   — toggle TTS on/off',
+                    '/listen                  — toggle ASR on/off',
+                    '/help                    — show this list',
+                    '',
+                    'Voice commands (say aloud in ASR mode):',
+                    '  "forget that"          → /reset',
+                    '  "remember this"        → /remember',
+                    '  "show memory"          → /memory',
+                    '  "clear memory"         → /clear',
+                    '  "mute" / "unmute"      → /voice',
+                    '  "stop" / "goodbye"     → /quit',
+                    '  "help"                 → /help',
                 ]:
                     tui.add_message('sys', line)
 

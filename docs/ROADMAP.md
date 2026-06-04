@@ -51,8 +51,14 @@ Aiko-chan is built in phases. Each phase is a self-contained capability layer th
 
 **Goal:** A complete voice loop — speak, transcribe, respond, synthesise — running in real time on the Jetson.
 
+> **Memory backend migration:** mem0 + Qdrant were replaced in this phase with a custom
+> sqlite-vec backend (Ollama extraction + fastembed embeddings + RRF dual-path retrieval).
+> Qdrant caused OOM crashes on the Jetson Orin Nano under concurrent ASR + LLM + memory load.
+> The new backend is fully serverless — no Docker containers required for memory.
+
 | Feature | Status |
 |---|---|
+| **Memory backend rewrite — sqlite-vec + fastembed (custom, no server)** | ✅ Done |
 | Microphone capture with faster-whisper | 🔲 Planned |
 | Voice Activity Detection via Silero VAD | 🔲 Planned |
 | Interactive Talk mode (hands-free conversation) | 🔲 Planned |

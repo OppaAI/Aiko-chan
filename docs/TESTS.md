@@ -1,3 +1,4 @@
+[← Back to README](../README.md)
 # Aiko-chan 愛子ちゃん — Test Checklist
 
 Manual smoke-test checklist for each phase. Run the relevant section after installing or after making changes to that phase's components. Check off each item before marking a phase stable.

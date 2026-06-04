@@ -84,6 +84,8 @@ class AikoWakeup:
 
         Parallel phase: AikoThink + AikoMemorize boot concurrently.
         Sequential phase: TTS warmup → ASR staged init (or skip both).
+        Barge-in monitor started as the final ASR step so Silero is already
+        warm and the VAD thread costs nothing before the first turn.
 
         Args:
             on_loading: Called with a progress key when a subsystem starts.
@@ -121,6 +123,8 @@ class AikoWakeup:
             on_loading('mem_qdrant')
             memorize[0] = AikoMemorize(silent=True)
             on_done('mem_qdrant')
+            on_loading('mem_embed')
+            on_done('mem_embed')
             on_loading('mem_cleanup')
             memorize[0].cleanup()
             on_done('mem_cleanup')
@@ -165,6 +169,7 @@ class AikoWakeup:
             on_done('listen_warmup')
 
             on_loading('listen_ready')
+            listen.start_barge_in_monitor()   # VAD daemon — costs ~0 CPU at idle
             on_done('listen_ready')
         else:
             on_skip('speak_skip')

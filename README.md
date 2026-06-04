@@ -61,7 +61,7 @@ This project currently serves as:
   - a working microphone/audio output device;
   - a reachable MioTTS HTTP server at `MIOTTS_API_URL`.
 
-> Note: this repo is configured for Jetson AI Lab wheels for `torch`, `torchaudio`, `torchvision`, and local wheel paths for `torch` and `ctranslate2`. Make sure the wheel paths in `pyproject.toml` exist on your machine before running `uv sync`.
+> Note: this repo is configured for Jetson AI Lab wheels for `torch`, `torchaudio`, `torchvision`, and local wheel paths for `torch` and `ctranslate2`. Make sure the wheel paths in `pyproject.toml` exist on your machine before running `uv sync`, if you are also running it on a Jetson Orin Nano.
 
 ### 2. Configure environment
 

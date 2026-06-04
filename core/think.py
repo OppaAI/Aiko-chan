@@ -107,7 +107,7 @@ class AikoThink:
                 keep_alive=-1,
                 options={
                     "num_predict": 1,
-                    "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", 2048)),
+                    "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", 4096)),
                 },
             )
         except Exception:
@@ -273,7 +273,7 @@ class AikoThink:
                 stream=True,
                 keep_alive=-1,
                 options={
-                    "num_ctx":        int(os.getenv("OLLAMA_NUM_CTX", 2048)),
+                    "num_ctx":        int(os.getenv("OLLAMA_NUM_CTX", 4096)),
                     "temperature":    0.75,   # creative but not unhinged
                     "repeat_penalty": 1.18,   # firm anti-loop
                     "repeat_last_n":  128,    # long lookback for repetition detection

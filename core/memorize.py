@@ -1,11 +1,11 @@
 """
 core/memorize.py
-Aiko's persistent memory — custom backend via Qdrant + fastembed + Ollama.
+Aiko's persistent memory — custom backend via sqlite-vec + fastembed + Ollama.
 Abstracts all memory calls so think.py stays clean.
 
 Memory lifecycle:
   - Every search() call increments access_count and updates last_accessed_at
-    in Qdrant payload, enabling Ebbinghaus-style exponential decay scoring.
+    in the memories table, enabling Ebbinghaus-style exponential decay scoring.
   - dream() runs nightly (00:00) as a consolidation pass — no new vectors
     are written. It boosts salient memories, merges near-duplicates, then
     prunes decayed entries. Order matters: boost before prune so boosted
@@ -14,7 +14,7 @@ Memory lifecycle:
     protection for newly created entries.
   - Decay logic lives in core/forget.py (pure math, no I/O).
   - Pinned memories (created via pin()) are permanently immune to decay
-    cleanup and dream pruning. The pinned flag lives in Qdrant payload.
+    cleanup and dream pruning. The pinned flag lives in the memories table.
 
 Dream pass overview:
   1. Boost  — increment access_count on memories matching salience heuristics
@@ -27,36 +27,47 @@ Dream pass overview:
               memories aren't caught in the sweep.
               Pinned memories are skipped entirely.
 
-Custom backend (replaces mem0):
+Storage layout (single .db file):
+  memories        — canonical record: id, user_id, memory, metadata
+  memories_fts    — FTS5 virtual table for lexical search (BM25)
+  memories_vec    — vec0 virtual table for KNN cosine search
+
+Recall strategy — Reciprocal Rank Fusion (RRF):
+  score = 1/(k + rank_knn) + 1/(k + rank_fts)
+  k=60 (standard RRF constant — dampens outlier ranks)
+
+  KNN catches semantic similarity ("I love cats" ↔ "I adore cats")
+  FTS5 catches exact token matches ("Max", "birthday", proper nouns)
+  RRF fuses both without weighting either arbitrarily.
+
+Custom backend (replaces Qdrant + mem0):
   - _MemoryBackend handles LLM-based fact extraction, fastembed embeddings,
-    and direct Qdrant upsert/search/delete/scroll.
+    and direct sqlite-vec upsert/search/delete/scroll.
   - Extraction prompt is tuned for small models: asks for a JSON array of
     atomic facts, strips <think> blocks for CoT models, skips trivial turns.
-  - All Qdrant schema fields (memory, user_id, created_at, access_count,
-    last_accessed_at, pinned) are owned by this module — no hidden mem0 schema.
+  - All schema fields (memory, user_id, created_at, access_count,
+    last_accessed_at, pinned) are owned by this module — no hidden schema.
+
+Dependencies:
+  pip install sqlite-vec fastembed
 """
 from dotenv import load_dotenv
 load_dotenv()
 
-from datetime import datetime, timezone
 import json
 import os
 import re
+import sqlite3
+import struct
 import time
 import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import httpx
+import sqlite_vec
 from fastembed import TextEmbedding
-from qdrant_client import QdrantClient
-from qdrant_client.models import (
-    Distance,
-    Filter,
-    FieldCondition,
-    MatchValue,
-    PointStruct,
-    VectorParams,
-)
 
 from core.forget import compute_weighted_score, should_cleanup, CLEANUP_THRESHOLD
 from core.log import get_logger
@@ -66,17 +77,20 @@ log = get_logger(__name__)
 # ── boot labels ───────────────────────────────────────────────────────────────
 
 BOOT_LABELS = {
-    'mem_qdrant':   'Connecting to Qdrant...',
-    'mem_cleanup':  'Running memory cleanup...',
-    'mem_ready':    'Memory backend ready',
+    'mem_sqlite':  'Opening sqlite-vec memory store...',
+    'mem_cleanup': 'Running memory cleanup...',
+    'mem_ready':   'Memory backend ready',
 }
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
-QDRANT_COLLECTION  = "aiko_memory"
-EMBED_MODEL        = "BAAI/bge-base-en-v1.5"
-EMBED_DIMS         = 768
-USER_ID            = os.getenv("USER_ID", "OppaAI")
+EMBED_MODEL = "BAAI/bge-base-en-v1.5"
+EMBED_DIMS  = 768
+RRF_K       = 60          # standard RRF constant — dampens outlier ranks
+KNN_LIMIT   = 20          # candidates fetched before RRF re-rank
+FTS_LIMIT   = 20          # candidates fetched before RRF re-rank
+
+USER_ID = os.getenv("USER_ID", "OppaAI")
 
 # Cosine similarity threshold for near-duplicate detection during dream pass.
 # 0.92 is conservative — only collapses near-identical phrasings.
@@ -109,51 +123,239 @@ Do NOT include assistant statements. Do NOT explain. No markdown.
 Conversation:
 {conversation}"""
 
-# ── custom memory backend ─────────────────────────────────────────────────────
+
+# ── schema ────────────────────────────────────────────────────────────────────
+
+_DDL = """
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+
+-- canonical memory records
+CREATE TABLE IF NOT EXISTS memories (
+    id               TEXT PRIMARY KEY,
+    user_id          TEXT NOT NULL,
+    memory           TEXT NOT NULL,
+    created_at       TEXT NOT NULL,
+    access_count     INTEGER NOT NULL DEFAULT 0,
+    last_accessed_at TEXT NOT NULL DEFAULT 'never',
+    pinned           INTEGER NOT NULL DEFAULT 0   -- 0=false 1=true
+);
+
+CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id);
+
+-- FTS5 for lexical BM25 search — mirrors memories.memory column
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    memory,
+    id UNINDEXED,
+    content='memories',
+    content_rowid='rowid'
+);
+
+-- vec0 for KNN cosine search — one embedding per memory
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_vec USING vec0(
+    id TEXT PRIMARY KEY,
+    embedding FLOAT[{dims}]
+);
+
+-- keep FTS5 in sync with memories via triggers
+CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, memory, id)
+    VALUES (new.rowid, new.memory, new.id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, memory, id)
+    VALUES ('delete', old.rowid, old.memory, old.id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF memory ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, memory, id)
+    VALUES ('delete', old.rowid, old.memory, old.id);
+    INSERT INTO memories_fts(rowid, memory, id)
+    VALUES (new.rowid, new.memory, new.id);
+END;
+""".format(dims=EMBED_DIMS)
+
+
+# ── sqlite payload helpers ────────────────────────────────────────────────────
+# These replace the self._qdrant.retrieve / set_payload / scroll calls
+# that AikoMemorize used to make directly against Qdrant.
+
+def _sqlite_get_payload(conn: sqlite3.Connection, mem_id: str) -> dict:
+    """
+    Fetch the full memories row for a single id.
+    Equivalent to qdrant.retrieve(ids=[mem_id], with_payload=True).
+    Returns {} if not found.
+    """
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM memories WHERE id = ?", (mem_id,)
+    ).fetchone()
+    return dict(row) if row else {}
+
+
+def _sqlite_set_payload(
+    conn: sqlite3.Connection,
+    mem_id: str,
+    payload: dict,
+) -> None:
+    """
+    Update arbitrary column subset for a single memory row.
+    Equivalent to qdrant.set_payload(payload=..., points=[mem_id]).
+    Only valid memories column names should be passed as keys.
+    """
+    if not payload:
+        return
+    cols = ", ".join(f"{k} = ?" for k in payload)
+    vals = list(payload.values()) + [mem_id]
+    conn.execute(f"UPDATE memories SET {cols} WHERE id = ?", vals)
+    conn.commit()
+
+
+def _sqlite_batch_get_payloads(
+    conn: sqlite3.Connection,
+    mem_ids: list[str],
+) -> dict:
+    """
+    Batch-fetch access_count + last_accessed_at in a single query.
+    Equivalent to the Qdrant _batch_get_payloads() round-trip.
+    Returns {mem_id: (access_count, last_accessed_at)}.
+    """
+    if not mem_ids:
+        return {}
+    conn.row_factory = sqlite3.Row
+    placeholders = ",".join("?" * len(mem_ids))
+    rows = conn.execute(
+        f"SELECT id, access_count, last_accessed_at FROM memories WHERE id IN ({placeholders})",
+        mem_ids,
+    ).fetchall()
+    return {
+        r["id"]: (r["access_count"] or 0, r["last_accessed_at"] or "never")
+        for r in rows
+    }
+
+
+def _sqlite_get_vector(conn: sqlite3.Connection, mem_id: str) -> list[float]:
+    """
+    Retrieve the raw embedding for one memory from the vec0 table.
+    Equivalent to qdrant.retrieve(ids=[mem_id], with_vectors=True).
+    Returns [] on miss or error — callers should skip on empty.
+    """
+    row = conn.execute(
+        "SELECT embedding FROM memories_vec WHERE id = ?", (mem_id,)
+    ).fetchone()
+    if row and row[0]:
+        raw = row[0]
+        n   = len(raw) // 4
+        return list(struct.unpack(f"{n}f", raw))   # deserialise float32 blob
+    return []
+
+
+def _sqlite_is_pinned(conn: sqlite3.Connection, mem_id: str) -> bool:
+    """
+    Return True if memories.pinned == 1 for this id.
+    Equivalent to checking qdrant payload pinned=True.
+    Defaults to False on any error — safe: a miss leaves memory subject to
+    normal decay rather than silently deleting it.
+    """
+    row = conn.execute(
+        "SELECT pinned FROM memories WHERE id = ?", (mem_id,)
+    ).fetchone()
+    return bool(row and row[0])
+
+
+def _sqlite_knn_search(
+    conn: sqlite3.Connection,
+    vector: list[float],
+    user_id: str,
+    limit: int,
+    threshold: Optional[float] = None,
+) -> list[sqlite3.Row]:
+    """
+    KNN cosine search against memories_vec, filtered by user_id.
+    Used by both _MemoryBackend.search() and _dream_merge() similarity lookup.
+    When threshold is supplied, only rows with dist <= (1 - threshold) are
+    returned (cosine distance = 1 - cosine similarity).
+    """
+    vec_blob = sqlite_vec.serialize_float32(vector)
+    if threshold is not None:
+        # convert similarity threshold to distance ceiling
+        dist_ceil = 1.0 - threshold
+        rows = conn.execute(
+            """
+            SELECT v.id, vec_distance_cosine(v.embedding, ?) AS dist
+            FROM memories_vec v
+            JOIN memories m ON m.id = v.id
+            WHERE m.user_id = ?
+              AND vec_distance_cosine(v.embedding, ?) <= ?
+            ORDER BY dist ASC
+            LIMIT ?
+            """,
+            (vec_blob, user_id, vec_blob, dist_ceil, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT v.id, vec_distance_cosine(v.embedding, ?) AS dist
+            FROM memories_vec v
+            JOIN memories m ON m.id = v.id
+            WHERE m.user_id = ?
+            ORDER BY dist ASC
+            LIMIT ?
+            """,
+            (vec_blob, user_id, limit),
+        ).fetchall()
+    return rows
+
+
+# ── memory backend ────────────────────────────────────────────────────────────
 
 class _MemoryBackend:
     """
-    Lightweight replacement for mem0.Memory.
+    sqlite-vec + FTS5 + RRF replacement for the Qdrant _MemoryBackend.
 
-    Responsibilities:
-      - LLM-based fact extraction via Ollama /api/chat
-      - Embedding via fastembed (ONNX, CPU-friendly)
-      - Qdrant upsert / vector search / payload scroll / delete
+    Public API is identical to the Qdrant version:
+        add(), search(), get_all(), delete(), delete_all()
 
-    Public API is intentionally minimal — only what AikoMemorize needs:
-      add(), search(), get_all(), delete(), delete_all()
+    AikoMemorize calls these and nothing else — all Qdrant-specific helpers
+    (_batch_get_payloads, _get_vector, _is_pinned, set_payload equivalents)
+    are re-implemented as module-level sqlite helper functions above.
 
-    Collection is created automatically on first use if it doesn't exist.
+    The .db file path is read from env var SQLITE_MEMORY_PATH,
+    defaulting to ~/.aiko/memory.db.
     """
 
     def __init__(
         self,
-        qdrant_host:     str,
-        qdrant_port:     int,
+        db_path:         str,
         ollama_base_url: str,
         model:           str,
         fastembed_cache: Optional[str] = None,
     ) -> None:
-        self._qdrant   = QdrantClient(host=qdrant_host, port=qdrant_port)
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._db_path  = db_path
         self._ollama   = ollama_base_url.rstrip("/")
         self._model    = model
         self._embedder = TextEmbedding(
             model_name=EMBED_MODEL,
             cache_dir=fastembed_cache,
         )
-        self._ensure_collection()
+        self._conn = self._connect()
+        self._apply_schema()
 
-    # ── collection setup ──────────────────────────────────────────────────────
+    # ── connection ────────────────────────────────────────────────────────────
 
-    def _ensure_collection(self) -> None:
-        """Create Qdrant collection if it doesn't already exist."""
-        existing = {c.name for c in self._qdrant.get_collections().collections}
-        if QDRANT_COLLECTION not in existing:
-            self._qdrant.create_collection(
-                collection_name=QDRANT_COLLECTION,
-                vectors_config=VectorParams(size=EMBED_DIMS, distance=Distance.COSINE),
-            )
-            log.info(f"Created Qdrant collection '{QDRANT_COLLECTION}'.")
+    def _connect(self) -> sqlite3.Connection:
+        """Open WAL-mode connection and load sqlite-vec extension."""
+        conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        sqlite_vec.load(conn)   # registers vec0 + vec_distance etc.
+        return conn
+
+    def _apply_schema(self) -> None:
+        """Create tables/triggers if they don't exist yet."""
+        self._conn.executescript(_DDL)
+        self._conn.commit()
 
     # ── embedding ─────────────────────────────────────────────────────────────
 
@@ -194,10 +396,10 @@ class _MemoryBackend:
             resp = httpx.post(
                 f"{self._ollama}/api/chat",
                 json={
-                    "model":  self._model,
+                    "model":    self._model,
                     "messages": [{"role": "user", "content": prompt}],
-                    "stream": False,
-                    "options": {"temperature": 0.1, "num_predict": 512},
+                    "stream":   False,
+                    "options":  {"temperature": 0.1, "num_predict": 512},
                 },
                 timeout=45,
             )
@@ -207,10 +409,10 @@ class _MemoryBackend:
             log.warning(f"Extraction LLM call failed: {e}")
             return []
 
-        # Strip CoT think blocks before JSON parsing
+        # strip CoT think blocks before JSON parsing
         raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
 
-        # Strip accidental markdown fences
+        # strip accidental markdown fences
         raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.MULTILINE).strip()
 
         try:
@@ -226,7 +428,8 @@ class _MemoryBackend:
 
     def add(self, messages: list[dict], user_id: str) -> list[str]:
         """
-        Extract facts from messages and upsert each as a Qdrant point.
+        Extract facts and persist each as a row in memories + memories_vec.
+        FTS5 triggers handle memories_fts automatically.
 
         Returns list of new memory IDs (UUIDs). Empty list if nothing extracted
         or extraction fails — callers treat this as a no-op, not an error.
@@ -235,31 +438,35 @@ class _MemoryBackend:
         if not facts:
             return []
 
-        now  = datetime.now(timezone.utc).isoformat()
-        ids  = []
+        now = datetime.now(timezone.utc).isoformat()
+        ids = []
 
         for fact in facts:
             mem_id = str(uuid.uuid4())
             try:
                 vector = self._embed(fact)
-                self._qdrant.upsert(
-                    collection_name=QDRANT_COLLECTION,
-                    points=[PointStruct(
-                        id=mem_id,
-                        vector=vector,
-                        payload={
-                            "memory":           fact,
-                            "user_id":          user_id,
-                            "created_at":       now,
-                            "access_count":     0,
-                            "last_accessed_at": "never",
-                            "pinned":           False,
-                        },
-                    )],
+
+                # insert canonical record — FTS5 trigger fires automatically
+                self._conn.execute(
+                    """
+                    INSERT INTO memories
+                        (id, user_id, memory, created_at, access_count, last_accessed_at, pinned)
+                    VALUES (?, ?, ?, ?, 0, 'never', 0)
+                    """,
+                    (mem_id, user_id, fact, now),
                 )
+
+                # insert embedding into vec0 table
+                self._conn.execute(
+                    "INSERT INTO memories_vec(id, embedding) VALUES (?, ?)",
+                    (mem_id, sqlite_vec.serialize_float32(vector)),
+                )
+
+                self._conn.commit()
                 ids.append(mem_id)
             except Exception as e:
                 log.warning(f"Failed to upsert fact {mem_id!r}: {e}")
+                self._conn.rollback()
 
         return ids
 
@@ -267,66 +474,110 @@ class _MemoryBackend:
 
     def search(self, query: str, user_id: str, limit: int = 5) -> list[dict]:
         """
-        Embed query and return top-k memories from Qdrant filtered by user_id.
-        Does NOT update access_count — AikoMemorize.search() handles that.
+        KNN + FTS5 → RRF fusion search.
+
+        1. KNN: top-KNN_LIMIT by cosine distance from memories_vec
+           (user_id filter applied in JOIN — vec0 doesn't support standalone WHERE)
+        2. FTS5: top-FTS_LIMIT by BM25 from memories_fts
+           (user_id filter in JOIN)
+        3. RRF: score = 1/(k+rank_knn) + 1/(k+rank_fts)
+           ids appearing in only one source get 0 for the missing rank
+        4. Return top `limit` by RRF score as payload dicts
+
+        Access tracking (access_count, last_accessed_at) is handled by
+        AikoMemorize.search() — not here, matching original contract.
         """
-        try:
-            vector  = self._embed(query)
-            results = self._qdrant.search(
-                collection_name=QDRANT_COLLECTION,
-                query_vector=vector,
-                limit=limit,
-                query_filter=Filter(must=[
-                    FieldCondition(key="user_id", match=MatchValue(value=user_id))
-                ]),
-                with_payload=True,
-            )
-            return [
-                {"id": str(r.id), **r.payload}
-                for r in results
-            ]
-        except Exception as e:
-            log.warning(f"Search failed: {e}")
+        vector = self._embed(query)
+
+        # ── KNN candidates ────────────────────────────────────────────────────
+        knn_rows = _sqlite_knn_search(self._conn, vector, user_id, KNN_LIMIT)
+
+        # rank_knn: {id: 1-based rank}
+        rank_knn = {row["id"]: i + 1 for i, row in enumerate(knn_rows)}
+
+        # ── FTS5 candidates ───────────────────────────────────────────────────
+        fts_rows = self._conn.execute(
+            """
+            SELECT f.id
+            FROM memories_fts f
+            JOIN memories m ON m.id = f.id
+            WHERE memories_fts MATCH ?
+              AND m.user_id = ?
+            ORDER BY rank          -- FTS5 internal BM25 rank (lower = better)
+            LIMIT ?
+            """,
+            (query, user_id, FTS_LIMIT),
+        ).fetchall()
+
+        rank_fts = {row["id"]: i + 1 for i, row in enumerate(fts_rows)}
+
+        # ── RRF fusion ────────────────────────────────────────────────────────
+        all_ids = set(rank_knn) | set(rank_fts)
+        if not all_ids:
             return []
 
+        def rrf(mem_id: str) -> float:
+            knn = rank_knn.get(mem_id, 0)
+            fts = rank_fts.get(mem_id, 0)
+            score = 0.0
+            if knn:
+                score += 1.0 / (RRF_K + knn)
+            if fts:
+                score += 1.0 / (RRF_K + fts)
+            return score
+
+        ranked = sorted(all_ids, key=rrf, reverse=True)[:limit]
+
+        # ── fetch full payloads ───────────────────────────────────────────────
+        placeholders = ",".join("?" * len(ranked))
+        rows = self._conn.execute(
+            f"SELECT * FROM memories WHERE id IN ({placeholders})",
+            ranked,
+        ).fetchall()
+
+        # preserve RRF order
+        order       = {mid: i for i, mid in enumerate(ranked)}
+        rows_sorted = sorted(rows, key=lambda r: order.get(r["id"], 999))
+
+        return [dict(r) for r in rows_sorted]
+
     def get_all(self, user_id: str) -> list[dict]:
-        """Scroll all memories for a user. Returns full payload list."""
-        results, offset = [], None
-        try:
-            while True:
-                batch, offset = self._qdrant.scroll(
-                    collection_name=QDRANT_COLLECTION,
-                    scroll_filter=Filter(must=[
-                        FieldCondition(key="user_id", match=MatchValue(value=user_id))
-                    ]),
-                    limit=100,
-                    offset=offset,
-                    with_payload=True,
-                )
-                results.extend({"id": str(p.id), **p.payload} for p in batch)
-                if offset is None:
-                    break
-        except Exception as e:
-            log.warning(f"get_all scroll failed: {e}")
-        return results
+        """Return all memory records for a user."""
+        rows = self._conn.execute(
+            "SELECT * FROM memories WHERE user_id = ?",
+            (user_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # ── delete ────────────────────────────────────────────────────────────────
 
     def delete(self, memory_id: str) -> None:
-        """Delete a single memory point from Qdrant by ID."""
-        self._qdrant.delete(
-            collection_name=QDRANT_COLLECTION,
-            points_selector=[memory_id],
-        )
+        """
+        Delete a memory from all three tables.
+        FTS5 trigger on memories handles memories_fts automatically.
+        memories_vec must be deleted explicitly (no FK cascade on virtual tables).
+        """
+        self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+        self._conn.execute("DELETE FROM memories_vec WHERE id = ?", (memory_id,))
+        self._conn.commit()
 
     def delete_all(self, user_id: str) -> None:
-        """Delete all memories for a user."""
-        self._qdrant.delete(
-            collection_name=QDRANT_COLLECTION,
-            points_selector=Filter(must=[
-                FieldCondition(key="user_id", match=MatchValue(value=user_id))
-            ]),
+        """Delete every memory for a user from all three tables."""
+        ids = [
+            r["id"] for r in self._conn.execute(
+                "SELECT id FROM memories WHERE user_id = ?", (user_id,)
+            ).fetchall()
+        ]
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
+        self._conn.execute(
+            f"DELETE FROM memories WHERE id IN ({placeholders})", ids
         )
+        self._conn.execute(
+            f"DELETE FROM memories_vec WHERE id IN ({placeholders})", ids
+        )
+        self._conn.commit()
 
 
 # ── memorize ──────────────────────────────────────────────────────────────────
@@ -335,19 +586,19 @@ class AikoMemorize:
     """
     Persistent memory with Ebbinghaus decay lifecycle and nightly dream() pass.
 
-    Uses a custom _MemoryBackend (Ollama extraction + fastembed + Qdrant)
-    instead of mem0. Public API and all lifecycle behaviour are unchanged.
+    Uses a custom _MemoryBackend (Ollama extraction + fastembed + sqlite-vec)
+    instead of Qdrant + mem0. Public API and all lifecycle behaviour are unchanged.
 
     Boot sequence (called by wakeup.py in order):
-        memorize = AikoMemorize()   # connects Qdrant + loads fastembed
+        memorize = AikoMemorize()   # opens sqlite-vec store + loads fastembed
         memorize.cleanup()          # prune decayed memories on startup
 
     Access tracking:
-        Every search() call updates Qdrant payload fields (access_count,
+        Every search() call updates the memories table (access_count,
         last_accessed_at) so the decay formula has fresh data.
 
     Pinned memories:
-        Created via pin() — the pinned=True Qdrant payload flag makes them
+        Created via pin() — the pinned=1 column flag makes them
         immune to cleanup(), dream prune, and dream merge (as the loser).
 
     Dream pass (call nightly at 00:00):
@@ -364,22 +615,23 @@ class AikoMemorize:
     """
 
     def __init__(self, silent: bool = False) -> None:
-        qdrant_host = os.getenv("QDRANT_HOST", "localhost")
-        qdrant_port = int(os.getenv("QDRANT_PORT", 6333))
+        db_path = os.getenv(
+            "SQLITE_MEMORY_PATH",
+            str(Path.home() / ".aiko" / "memory.db"),
+        )
 
         if not silent:
-            log.info("Connecting to Qdrant and loading memory backend...")
+            log.info("Opening sqlite-vec memory store...")
 
         self._mem = _MemoryBackend(
-            qdrant_host=qdrant_host,
-            qdrant_port=qdrant_port,
+            db_path=db_path,
             ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             model=os.getenv("MEM0_MODEL") or os.getenv("OLLAMA_MODEL"),
             fastembed_cache=os.getenv("FASTEMBED_CACHE_PATH"),
         )
-        # Keep a direct Qdrant handle for payload operations (access tracking,
-        # pinning, vector retrieval) that bypass the backend abstraction.
-        self._qdrant = self._mem._qdrant
+        # direct connection handle for payload operations (access tracking,
+        # pinning, vector retrieval) that bypass the backend abstraction
+        self._conn = self._mem._conn
 
         if not silent:
             log.info("Ready.")
@@ -397,8 +649,8 @@ class AikoMemorize:
         Returns True on success, False on failure so callers can log/alert.
         """
         try:
-            t    = time.perf_counter()
-            ids  = self._mem.add(messages, user_id=user_id)
+            t       = time.perf_counter()
+            ids     = self._mem.add(messages, user_id=user_id)
             elapsed = time.perf_counter() - t
             if ids:
                 log.info(f"Saved {len(ids)} memories in {elapsed:.2f}s")
@@ -419,7 +671,7 @@ class AikoMemorize:
           - dream merging (never chosen as the loser in a duplicate collapse)
 
         Uses before/after snapshot of get_all() to identify new memory IDs,
-        then sets pinned=True in their Qdrant payload.
+        then sets pinned=1 in their memories row.
 
         Returns True on success, False on any failure (check logs).
         """
@@ -432,6 +684,7 @@ class AikoMemorize:
             pin_ids = list(after - before)
 
             if not pin_ids:
+                # fallback: search for the closest matching memories
                 query = "\n".join(
                     (m.get("content") or "").strip()
                     for m in messages
@@ -447,11 +700,10 @@ class AikoMemorize:
                 log.warning("pin(): add succeeded but no memory IDs were found to pin.")
                 return False
 
-            self._qdrant.set_payload(
-                collection_name=QDRANT_COLLECTION,
-                payload={"pinned": True},
-                points=pin_ids,
-            )
+            # mark each new memory as pinned in the memories table
+            for mem_id in pin_ids:
+                _sqlite_set_payload(self._conn, mem_id, {"pinned": 1})
+
             log.info(f"Pinned {len(pin_ids)} memories: {pin_ids}")
             return True
         except Exception as e:
@@ -465,7 +717,7 @@ class AikoMemorize:
         Retrieve top-k memories relevant to the current query.
 
         Side-effect: increments access_count and updates last_accessed_at
-        in Qdrant payload for each returned memory, feeding decay scoring.
+        in the memories table for each returned memory, feeding decay scoring.
         """
         results = self._mem.search(query, user_id=user_id, limit=limit)
 
@@ -476,23 +728,15 @@ class AikoMemorize:
                 if not mem_id:
                     continue
                 try:
-                    pts = self._qdrant.retrieve(
-                        collection_name=QDRANT_COLLECTION,
-                        ids=[mem_id],
-                        with_payload=True,
-                    )
-                    current_count = 0
-                    if pts:
-                        current_count = pts[0].payload.get("access_count", 0) or 0
+                    # fetch current access_count before incrementing
+                    payload      = _sqlite_get_payload(self._conn, mem_id)
+                    current_count = payload.get("access_count", 0) or 0
 
-                    self._qdrant.set_payload(
-                        collection_name=QDRANT_COLLECTION,
-                        payload={
-                            "access_count":     min(current_count + 1, 255),
-                            "last_accessed_at": now,
-                        },
-                        points=[mem_id],
-                    )
+                    # update access tracking — cap at 255 to bound the column
+                    _sqlite_set_payload(self._conn, mem_id, {
+                        "access_count":     min(current_count + 1, 255),
+                        "last_accessed_at": now,
+                    })
                 except Exception as e:
                     log.warning(f"Access tracking failed for {mem_id}: {e}")
 
@@ -574,7 +818,7 @@ class AikoMemorize:
         payload_map = self._batch_get_payloads(mem_ids)
 
         boosted      = self._dream_boost(all_mems, payload_map, dry_run=dry_run)
-        merged       = self._dream_merge(mem_ids, threshold=threshold, dry_run=dry_run)
+        merged       = self._dream_merge(mem_ids, user_id=user_id, threshold=threshold, dry_run=dry_run)
         prune_result = self.cleanup(user_id=user_id, dry_run=dry_run)
         pruned       = prune_result.get("deleted", 0)
 
@@ -612,12 +856,13 @@ class AikoMemorize:
             if not mem_id:
                 continue
 
-            if self._is_pinned(mem_id):
+            if _sqlite_is_pinned(self._conn, mem_id):
                 continue
 
-            text = (m.get("memory") or "").lower()
-            ac, _la = payload_map.get(mem_id, (0, "never"))
+            text     = (m.get("memory") or "").lower()
+            ac, _la  = payload_map.get(mem_id, (0, "never"))
 
+            # check recency — grace boost for memories within 7 days
             is_recent  = False
             created_at = m.get("created_at", "")
             if created_at:
@@ -638,11 +883,10 @@ class AikoMemorize:
 
             if not dry_run:
                 try:
-                    self._qdrant.set_payload(
-                        collection_name=QDRANT_COLLECTION,
-                        payload={"access_count": min(ac + DREAM_BOOST_AMOUNT, 255)},
-                        points=[mem_id],
-                    )
+                    # increment access_count, capped at 255
+                    _sqlite_set_payload(self._conn, mem_id, {
+                        "access_count": min(ac + DREAM_BOOST_AMOUNT, 255)
+                    })
                 except Exception as e:
                     log.warning(f"Boost failed for {mem_id}: {e}")
                     continue
@@ -656,16 +900,17 @@ class AikoMemorize:
     def _dream_merge(
         self,
         mem_ids:   list[str],
+        user_id:   str,
         threshold: float = DREAM_MERGE_THRESHOLD,
         dry_run:   bool  = False,
     ) -> int:
         """
         Detect and collapse near-duplicate memory vectors.
 
-        For each memory, searches Qdrant for neighbors above the cosine
-        threshold. When a duplicate pair is found, the lower access_count
-        copy is deleted. Tracks already-deleted IDs to avoid double-deletes
-        in the same pass.
+        For each memory, performs a KNN cosine search filtered by user_id and
+        threshold. When a duplicate pair is found, the lower access_count copy
+        is deleted. Tracks already-deleted IDs to avoid double-deletes in the
+        same pass.
 
         Pinned memories are skipped as query origins and are never chosen as
         the loser in _resolve_duplicate() — a pinned memory always survives.
@@ -679,34 +924,35 @@ class AikoMemorize:
             if mem_id in deleted_ids:
                 continue
 
-            if self._is_pinned(mem_id):
+            if _sqlite_is_pinned(self._conn, mem_id):
                 continue
 
-            vector = self._get_vector(mem_id)
+            # retrieve the embedding for this memory to use as query vector
+            vector = _sqlite_get_vector(self._conn, mem_id)
             if not vector:
                 continue
 
             try:
-                neighbors = self._qdrant.search(
-                    collection_name=QDRANT_COLLECTION,
-                    query_vector=vector,
-                    limit=4,
-                    score_threshold=threshold,
-                    with_payload=True,
+                # search for neighbors above the similarity threshold
+                neighbor_rows = _sqlite_knn_search(
+                    self._conn, vector, user_id, limit=4, threshold=threshold
                 )
             except Exception as e:
                 log.warning(f"Similarity search failed for {mem_id}: {e}")
                 continue
 
-            for neighbor in neighbors:
-                neighbor_id = str(neighbor.id)
+            for row in neighbor_rows:
+                neighbor_id = row["id"]
                 if neighbor_id == mem_id:
                     continue
                 if neighbor_id in deleted_ids:
                     continue
 
+                # cosine distance → similarity score for logging
+                similarity = 1.0 - row["dist"]
+
                 n_merged = self._resolve_duplicate(
-                    mem_id, neighbor_id, neighbor.score, dry_run=dry_run
+                    mem_id, neighbor_id, similarity, dry_run=dry_run
                 )
                 if n_merged:
                     deleted_ids.add(neighbor_id)
@@ -734,14 +980,14 @@ class AikoMemorize:
 
         Returns True if a deletion occurred (or would occur in dry_run).
         """
-        if self._is_pinned(id_a) or self._is_pinned(id_b):
+        if _sqlite_is_pinned(self._conn, id_a) or _sqlite_is_pinned(self._conn, id_b):
             log.info(f"Skipping merge: one or both of ({id_a}, {id_b}) is pinned.")
             return False
 
         payload_map = self._batch_get_payloads([id_a, id_b])
-        ac_a, _ = payload_map.get(id_a, (0, "never"))
-        ac_b, _ = payload_map.get(id_b, (0, "never"))
-        loser   = id_b if ac_a >= ac_b else id_a
+        ac_a, _     = payload_map.get(id_a, (0, "never"))
+        ac_b, _     = payload_map.get(id_b, (0, "never"))
+        loser       = id_b if ac_a >= ac_b else id_a   # tie goes to id_a (query origin)
 
         if dry_run:
             log.info(
@@ -772,9 +1018,9 @@ class AikoMemorize:
         """
         Prune decayed memories below threshold score.
 
-        Fetches all memories, batch-retrieves Qdrant payloads (single round-trip),
-        evaluates decay score via should_cleanup(), and deletes candidates directly
-        via Qdrant to keep vector store in sync.
+        Fetches all memories, batch-retrieves payloads (single round-trip),
+        evaluates decay score via should_cleanup(), and deletes candidates
+        directly to keep the vector store in sync.
 
         Grace period (14 days) protects newly created memories from deletion
         even if they score below threshold.
@@ -803,7 +1049,8 @@ class AikoMemorize:
             ac, la     = payload_map.get(mem_id, (0, "never"))
             created_at = m.get("created_at", "")
 
-            if self._is_pinned(mem_id):
+            # pinned memories are immune to all decay paths
+            if _sqlite_is_pinned(self._conn, mem_id):
                 kept += 1
                 continue
 
@@ -819,6 +1066,7 @@ class AikoMemorize:
             else:
                 kept += 1
 
+        # sort by weakest score first so logs are most-pruneable-first
         candidates.sort(key=lambda x: x["weighted_score"])
 
         if dry_run:
@@ -852,62 +1100,27 @@ class AikoMemorize:
 
     def _batch_get_payloads(self, mem_ids: list[str]) -> dict:
         """
-        Batch retrieve access_count + last_accessed_at from Qdrant.
+        Batch retrieve access_count + last_accessed_at in a single query.
         Single round-trip — eliminates N+1 query problem for cleanup/stats.
         Returns dict: {mem_id: (access_count, last_accessed_at)}
         """
-        if not mem_ids:
-            return {}
-        try:
-            pts = self._qdrant.retrieve(
-                collection_name=QDRANT_COLLECTION,
-                ids=mem_ids,
-                with_payload=True,
-            )
-            return {
-                str(p.id): (
-                    p.payload.get("access_count", 0) or 0,
-                    p.payload.get("last_accessed_at", "never"),
-                )
-                for p in pts
-            }
-        except Exception as e:
-            log.warning(f"Batch payload fetch failed: {e}")
-            return {}
+        return _sqlite_batch_get_payloads(self._conn, mem_ids)
 
     def _get_vector(self, mem_id: str) -> list[float]:
         """
-        Retrieve the raw embedding vector for a single memory from Qdrant.
+        Retrieve the raw embedding vector for a single memory.
         Used by _dream_merge() to run similarity searches.
         Returns empty list on failure — callers should skip on empty.
         """
-        try:
-            pts = self._qdrant.retrieve(
-                collection_name=QDRANT_COLLECTION,
-                ids=[mem_id],
-                with_vectors=True,
-            )
-            if pts and pts[0].vector:
-                return pts[0].vector
-        except Exception as e:
-            log.warning(f"Vector fetch failed for {mem_id}: {e}")
-        return []
+        return _sqlite_get_vector(self._conn, mem_id)
 
     def _is_pinned(self, mem_id: str) -> bool:
         """
-        Return True if the Qdrant payload has pinned=True for this memory.
+        Return True if memories.pinned == 1 for this id.
 
         Used as a guard in cleanup(), _dream_merge(), and _resolve_duplicate()
         to make pinned memories permanently immune to all deletion paths.
         Defaults to False on any error — safe because a False miss at worst
         leaves a memory subject to normal decay, not silently deletes it.
         """
-        try:
-            pts = self._qdrant.retrieve(
-                collection_name=QDRANT_COLLECTION,
-                ids=[mem_id],
-                with_payload=True,
-            )
-            return bool(pts and pts[0].payload.get("pinned", False))
-        except Exception:
-            return False
+        return _sqlite_is_pinned(self._conn, mem_id)

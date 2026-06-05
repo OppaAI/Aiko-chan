@@ -10,6 +10,8 @@ Provides:
 """
 
 import json
+import os
+from pathlib import Path
 import platform
 import re
 import subprocess
@@ -118,22 +120,21 @@ def _ram_used_str() -> str:
 
 def _db_size_str() -> str:
     """
-    Probe the Qdrant memory store and return the number of living engrams.
-
-    Queries the local Qdrant REST API for the aiko_memory collection's
-    points_count, providing a real-time measure of long-term memory depth.
-
-    Returns a string of the form 'N entries', or '? mem' if Qdrant is
-    unreachable or the response is malformed.
+    Probe the sqlite-vec memory store and return the number of living engrams.
+    Queries the memories table directly for the current row count,
+    providing a real-time measure of long-term memory depth.
+    Returns a string of the form 'N entries', or '? mem' on any error.
     """
     try:
-        url = "http://localhost:6333/collections/aiko_memory"
-        with urllib.request.urlopen(url, timeout=1) as r:
-            data = json.loads(r.read())
-        points = data["result"]["points_count"]
-        return f"{points} entries"
-    except Exception:
-        return "? mem"
+        import sqlite3, sqlite_vec
+        db_path = os.getenv("SQLITE_MEMORY_PATH", str(Path.home() / ".aiko" / "memory.db"))
+        conn = sqlite3.connect(db_path)
+        sqlite_vec.load(conn)
+        count = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+        conn.close()
+        return f"{count} entries"
+    except Exception as e:
+        return f"? mem)"
 
 
 def _fmt_uptime(seconds: float) -> str:

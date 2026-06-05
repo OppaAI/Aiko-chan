@@ -25,6 +25,7 @@ Layout:
 
 import curses
 import os
+from pathlib import Path
 import textwrap
 import threading
 import time
@@ -111,7 +112,7 @@ def _art_attr(palette_idx: int) -> int:
 
 ARCH_SECTIONS = [
     ("MEMORY SYSTEMS", [
-        ("Long-term store", "mem0  →  Qdrant vector DB"),
+        ("Long-term store", "SQLite-vec DB"),
         ("Embedding model", "BGE-base-en-v1.5  (768d)"),
         ("Short-term ctx",  f"Rolling {os.getenv('CONTEXT_WINDOW_TURNS', '20')}-turn window"),
     ]),
@@ -128,14 +129,15 @@ ARCH_SECTIONS = [
 ]
 
 ARCH_ROWS = sum(1 + len(items) for _, items in ARCH_SECTIONS) + 2
+db_path = os.getenv("SQLITE_MEMORY_PATH", str(Path.home() / ".aiko" / "memory.db"))
 
 INIT_STEPS = {
     'think_start':  ('Inference Engine', f'Spawning Ollama worker  ·  {OLLAMA_MODEL}'),
     'think_warmup': ('Model Warm-up',    'Loading weights, running prefill pass …'),
-    'mem_qdrant':   ('Vector Database',  'Connecting to Qdrant  ·  localhost:6333'),
+    'mem_sqlite_vec':   ('Vector Database',  'Connecting to SQLite-vec  ·  {db_path}'),
     'mem_embed':    ('Embedding Model',  'Loading BGE-base-en-v1.5  ·  768-dim vectors'),
     'mem_cleanup':  ('Memory Lifecycle', 'Pruning decayed memories …'),
-    'mem_ready':    ('Memory Cortex',    'mem0 ready  ·  long-term recall online'),
+    'mem_ready':    ('Memory Cortex',    'OppaAI custom-build  ·  long-term recall online'),
     'speak_miotts': ('TTS Engine', f'Initializing MioTTS  ·  {os.getenv("MIOTTS_PRESET", "jp_female")}'),
     'speak_ready':  ('Voice Output',     'Audio pipeline ready  ·  24 kHz'),
     'speak_skip':   ('Voice Output',     'TTS disabled  (--text mode)'),

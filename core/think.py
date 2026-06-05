@@ -9,20 +9,21 @@ Aiko's cognitive loop.
   - Supports single-shot reasoning mode via set_reasoning(True) / /think command
 """
 
+import logging
 import os
-import threading
+import warnings
+
+warnings.filterwarnings("ignore")
+logging.getLogger("phonemizer").setLevel(logging.ERROR)
+logging.getLogger("torch").setLevel(logging.ERROR)
+os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
+
+from datetime import datetime
 from ollama import Client
 from pathlib import Path
 import queue
 import re
-import warnings
-
-warnings.filterwarnings("ignore")
-
-import logging
-logging.getLogger("phonemizer").setLevel(logging.ERROR)
-logging.getLogger("torch").setLevel(logging.ERROR)
-os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
+import threading
 
 from core.memorize import AikoMemorize
 from core.speak    import AikoSpeak
@@ -53,7 +54,10 @@ def _load_persona() -> str:
     """Read and return the persona definition from soul.md."""
     if not _PERSONA_PATH.exists():
         raise FileNotFoundError(f"soul.md not found at {_PERSONA_PATH}")
-    return _PERSONA_PATH.read_text(encoding="utf-8").strip()
+    persona = _PERSONA_PATH.read_text(encoding="utf-8").strip()
+    user_id = os.getenv("USER_ID", "OppaAI")
+    today   = datetime.now().strftime("%B %d, %Y")
+    return persona.format(user_id=user_id, today=today)
 
 
 # ── think ─────────────────────────────────────────────────────────────────────
@@ -138,7 +142,7 @@ class AikoThink:
             self._speak.stop()
 
         # 1. retrieve relevant long-term memories
-        memories     = self._memorize.search(user_input)
+        memories     = self._memorize.search(user_input, limit=int(os.getenv("MEMORY_RECALL_LIMIT", 5)))
         memory_block = self._memorize.format_for_context(memories)
 
         # 2. build system prompt
@@ -267,14 +271,14 @@ class AikoThink:
                 stream=True,
                 keep_alive=-1,
                 options={
-                    "num_ctx":        int(os.getenv("OLLAMA_NUM_CTX", 4096)),
-                    "temperature":    0.75,   # creative but not unhinged
-                    "repeat_penalty": 1.18,   # firm anti-loop
-                    "repeat_last_n":  128,    # long lookback for repetition detection
+                    "num_ctx":        int(os.getenv("OLLAMA_NUM_CTX", 3072)),   # was 4096 — save RAM
+                    "temperature":    float(os.getenv("OLLAMA_TEMPERATURE", 0.75)),
+                    "repeat_penalty": float(os.getenv("OLLAMA_REPEAT_PENALTY", 1.18)),
+                    "repeat_last_n":  int(os.getenv("OLLAMA_REPEAT_LAST_N", 64)),    # was 128 — 3B doesn't need that far back
                     "num_predict":    num_predict,
-                    "top_p":          0.90,   # nucleus sampling, keeps it natural
-                    "top_k":          40,     # standard
-                    "tfs_z":          1.0,    # tail-free sampling off (neutral)
+                    "top_p":          float(os.getenv("OLLAMA_TOP_P", 0.90)),
+                    "top_k":          int(os.getenv("OLLAMA_TOP_K", 40)),
+                    "tfs_z":          1.0,
                     "stop":           ["<|im_end|>", "</s>", "[INST]"],
                 }
             )

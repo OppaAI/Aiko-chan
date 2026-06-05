@@ -132,17 +132,17 @@ ARCH_ROWS = sum(1 + len(items) for _, items in ARCH_SECTIONS) + 2
 db_path = os.getenv("SQLITE_MEMORY_PATH", str(Path.home() / ".aiko" / "memory.db"))
 
 INIT_STEPS = {
-    'think_start':  ('Inference Engine', f'Spawning Ollama worker  ·  {OLLAMA_MODEL}'),
-    'think_warmup': ('Model Warm-up',    'Loading weights, running prefill pass …'),
-    'mem_sqlite_vec':   ('Vector Database',  'Connecting to SQLite-vec  ·  {db_path}'),
-    'mem_embed':    ('Embedding Model',  'Loading BGE-base-en-v1.5  ·  768-dim vectors'),
-    'mem_cleanup':  ('Memory Lifecycle', 'Pruning decayed memories …'),
-    'mem_ready':    ('Memory Cortex',    'OppaAI custom-build  ·  long-term recall online'),
-    'speak_miotts': ('TTS Engine', f'Initializing MioTTS  ·  {os.getenv("MIOTTS_PRESET", "jp_female")}'),
-    'speak_ready':  ('Voice Output',     'Audio pipeline ready  ·  24 kHz'),
-    'speak_skip':   ('Voice Output',     'TTS disabled  (--text mode)'),
-    'listen_ready': ('Speech Input',     f'faster-whisper ready  ·  {WHISPER_MODEL}'),
-    'listen_skip':  ('Speech Input',     'ASR disabled  (--text mode)'),
+    'think_start':      ('Inference Engine', f'Spawning Ollama worker  ·  {OLLAMA_MODEL}'),
+    'think_warmup':     ('Model Warm-up',    'Loading weights, running prefill pass …'),
+    'mem_sqlite_vec':   ('Vector Database',  f'Connecting to SQLite-vec  ·  {db_path}'),
+    'mem_embed':        ('Embedding Model',  'Loading BGE-base-en-v1.5  ·  768-dim vectors'),
+    'mem_cleanup':      ('Memory Lifecycle', 'Pruning decayed memories …'),
+    'mem_ready':        ('Memory Cortex',    'OppaAI custom-build  ·  long-term recall online'),
+    'speak_miotts':     ('TTS Engine', f'Initializing MioTTS  ·  {os.getenv("MIOTTS_PRESET", "jp_female")}'),
+    'speak_ready':      ('Voice Output',     'Audio pipeline ready  ·  24 kHz'),
+    'speak_skip':       ('Voice Output',     'TTS disabled  (--text mode)'),
+    'listen_ready':     ('Speech Input',     f'faster-whisper ready  ·  {WHISPER_MODEL}'),
+    'listen_skip':      ('Speech Input',     'ASR disabled  (--text mode)'),
 }
 
 SPINNER = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
@@ -275,7 +275,7 @@ class AikoTUI:
         clock_str = f" {time.strftime('%B %d, %Y  %I:%M:%S %p')} "
         self._wr(1, w - 1 - len(clock_str), clock_str, wh)
 
-        ver_str = f" {AI_NAME} v0.1.5 "
+        ver_str = f" {AI_NAME} v0.1.99 "
         self._wr(2, w - 1 - len(ver_str), ver_str, cy)
 
         self._wr(BANNER_H + 1, 0,

@@ -385,29 +385,58 @@ class _MemoryBackend:
 
     def _should_extract(self, messages: list[dict]) -> bool:
         """
-        Return False for trivial turns not worth extracting.
-        Skips LLM call entirely for greetings, one-word replies, etc.
+        Return False for trivial turns. Only counts user/assistant content
+        to avoid passing threshold on system/tool noise.
         """
-        total = sum(len(m.get("content") or "") for m in messages)
+        total = sum(
+            len(m.get("content") or "")
+            for m in messages
+            if m.get("role") in ("user", "assistant")
+            and (m.get("content") or "").strip()
+        )
         return total >= _EXTRACT_MIN_CHARS
 
     def _extract_facts(self, messages: list[dict]) -> list[str]:
         """
         Send conversation to Ollama LLM and parse the returned JSON fact array.
-
-        Strips <think>…</think> blocks before parsing (CoT models like
-        Ministral/Qwen emit these and break JSON parsing otherwise).
-
-        Returns a list of fact strings, or [] on any failure.
+        Only user/assistant turns are included. Orphaned roles (system, tool,
+        empty content) are stripped before formatting to prevent LLM confusion.
         """
         if not self._should_extract(messages):
             return []
 
+        # filter to only user/assistant turns with real content
+        clean_messages = [
+            m for m in messages
+            if m.get("role") in ("user", "assistant")
+            and (m.get("content") or "").strip()
+        ]
+
+        # guard: must start with a user turn and alternate properly
+        # strip leading assistant turns (orphans from tool responses, etc.)
+        while clean_messages and clean_messages[0].get("role") != "user":
+            clean_messages.pop(0)
+
+        # strip trailing assistant-only tail if it has no user context
+        while clean_messages and clean_messages[-1].get("role") == "assistant":
+            # keep if there's at least one user message before it
+            if any(m.get("role") == "user" for m in clean_messages[:-1]):
+                break
+            clean_messages.pop()
+
+        if not clean_messages:
+            return []
+
+        # re-check min chars after filtering
+        total = sum(len(m.get("content") or "") for m in clean_messages)
+        if total < _EXTRACT_MIN_CHARS:
+            return []
+
         convo = "\n".join(
-            f"{m['role'].upper()}: {m['content']}"
-            for m in messages
-            if (m.get("content") or "").strip()
+            f"{m['role'].upper()}: {m['content'].strip()}"
+            for m in clean_messages
         )
+
         prompt = _EXTRACT_PROMPT.format(conversation=convo)
 
         try:

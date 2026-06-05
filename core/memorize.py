@@ -116,6 +116,8 @@ _EXTRACT_MIN_CHARS = int(os.getenv("MEMORY_EXTRACT_MIN_CHARS", 80))
 _EXTRACT_PROMPT = """\
 Extract memorable facts about the USER from this conversation.
 The USER is OppaAI (he/him). The ASSISTANT is Aiko.
+Oppa built you recently" not "User created Aiko
+Oppa's birthday is June 3" not "User's birthday is June 3
 Write every fact from Aiko's perspective, using second-person for the user.
 Example format: "Oppa's birthday is June 3, 2026"  "Oppa created you (Aiko) recently"
 Return ONLY a JSON array of short strings. Each string is one atomic fact.
@@ -415,7 +417,11 @@ class _MemoryBackend:
                     "model":    self._model,
                     "messages": [{"role": "user", "content": prompt}],
                     "stream":   False,
-                    "options":  {"temperature": 0.1, "num_predict": 512},
+                    "options": {
+                        "temperature": 0.1,
+                        "num_predict": 512,
+                        "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", 3072)),
+                    },
                 },
                 timeout=45,
             )
@@ -642,7 +648,7 @@ class AikoMemorize:
         self._mem = _MemoryBackend(
             db_path=db_path,
             ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-            model=os.getenv("MEM0_MODEL") or os.getenv("OLLAMA_MODEL"),
+            model=os.getenv("EXTRACT_MODEL") or os.getenv("OLLAMA_MODEL"),
             fastembed_cache=os.getenv("FASTEMBED_CACHE_PATH"),
         )
         # direct connection handle for payload operations (access tracking,

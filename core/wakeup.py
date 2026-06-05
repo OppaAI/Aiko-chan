@@ -123,9 +123,9 @@ class AikoWakeup:
 
         def init_memorize():
             try:
-                on_loading('mem_qdrant')
+                on_loading('mem_sqlite_vec')
                 memorize[0] = AikoMemorize(silent=True)
-                on_done('mem_qdrant')
+                on_done('mem_sqlite_vec')
                 on_loading('mem_embed')
                 on_done('mem_embed')
                 on_loading('mem_cleanup')

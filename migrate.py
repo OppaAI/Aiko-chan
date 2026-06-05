@@ -20,7 +20,6 @@ load_dotenv()
 
 import argparse
 import os
-import struct
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -29,7 +28,6 @@ from pathlib import Path
 import sqlite_vec
 from fastembed import TextEmbedding
 from qdrant_client import QdrantClient
-from qdrant_client.http.models import ScrollRequest
 
 # ── config ────────────────────────────────────────────────────────────────────
 
@@ -114,6 +112,24 @@ def already_exists(conn: sqlite3.Connection, memory_text: str, user_id: str) -> 
     return row is not None
 
 
+def extract_memory_text(payload: dict) -> str:
+    """
+    Extract the memory text from a Qdrant payload.
+
+    mem0 stores the actual text under the 'data' key in Qdrant.
+    The 'memory' key appears in mem0's Python API response but not
+    necessarily in the raw Qdrant payload — so we check 'data' first.
+    Falls back through common alternatives for safety.
+    """
+    return (
+        payload.get("data")       # mem0's actual Qdrant payload key
+        or payload.get("memory")  # mem0 API response key (may appear in older versions)
+        or payload.get("text")    # generic fallback
+        or payload.get("content") # generic fallback
+        or ""
+    ).strip()
+
+
 def scroll_all_qdrant(client: QdrantClient) -> list[dict]:
     """
     Page through the entire Qdrant collection and return all points
@@ -131,7 +147,7 @@ def scroll_all_qdrant(client: QdrantClient) -> list[dict]:
             limit=SCROLL_BATCH,
             offset=offset,
             with_payload=True,
-            with_vectors=False,   # we re-embed from scratch for clean vectors
+            with_vectors=False,   # re-embed from scratch for clean vectors
         )
 
         if not result:
@@ -140,24 +156,28 @@ def scroll_all_qdrant(client: QdrantClient) -> list[dict]:
         for p in result:
             payload = p.payload or {}
 
-            # Qdrant payload field names may vary — normalise
-            memory_text = (
-                payload.get("memory")
-                or payload.get("text")
-                or payload.get("content")
-                or ""
-            ).strip()
+            memory_text = extract_memory_text(payload)
 
             if not memory_text:
-                print(f"  [skip] Point {p.id} has no memory text — skipping.")
+                # dump payload keys to help diagnose unexpected schemas
+                keys = list(payload.keys()) if payload else []
+                print(f"  [skip] Point {p.id} has no memory text — payload keys: {keys}")
                 continue
+
+            # created_at: mem0 stores it in the payload under 'created_at'
+            # fall back to hash or now if missing
+            created_at = (
+                payload.get("created_at")
+                or payload.get("timestamp")
+                or datetime.now(timezone.utc).isoformat()
+            )
 
             points.append({
                 "id":               str(p.id),
                 "memory":           memory_text,
                 "access_count":     int(payload.get("access_count", 0)),
                 "last_accessed_at": payload.get("last_accessed_at", "never") or "never",
-                "created_at":       payload.get("created_at", datetime.now(timezone.utc).isoformat()),
+                "created_at":       created_at,
                 "pinned":           int(bool(payload.get("pinned", False))),
             })
 
@@ -171,12 +191,13 @@ def scroll_all_qdrant(client: QdrantClient) -> list[dict]:
     return points
 
 
-def migrate(dry_run: bool = False) -> None:
+def migrate(dry_run: bool = False, debug: bool = False) -> None:
     print(f"\n{'='*60}")
     print(f"  Aiko Memory Migration: Qdrant → sqlite-vec")
     print(f"  Collection : {COLLECTION_NAME}")
     print(f"  Target DB  : {DB_PATH}")
     print(f"  Dry run    : {dry_run}")
+    print(f"  Debug      : {debug}")
     print(f"{'='*60}\n")
 
     # ── connect to Qdrant ─────────────────────────────────────────────────────
@@ -191,19 +212,36 @@ def migrate(dry_run: bool = False) -> None:
         print("  Is Qdrant running? Try: docker start <qdrant_container>")
         return
 
+    # ── debug: inspect raw payload of first 3 points ──────────────────────────
+    if debug:
+        print("DEBUG — raw Qdrant payloads (first 3 points):")
+        sample, _ = client.scroll(
+            collection_name=COLLECTION_NAME,
+            limit=3,
+            with_payload=True,
+            with_vectors=False,
+        )
+        for p in sample:
+            print(f"\n  --- Point {p.id} ---")
+            print(f"  Payload keys : {list(p.payload.keys()) if p.payload else 'EMPTY'}")
+            print(f"  Payload      : {p.payload}")
+        print()
+
     # ── scroll all points ─────────────────────────────────────────────────────
     print("Scrolling all points from Qdrant...")
     points = scroll_all_qdrant(client)
     print(f"\n  Fetched {len(points)} valid points.\n")
 
     if not points:
-        print("Nothing to migrate. Exiting.")
+        print("Nothing to migrate.")
+        print("Tip: run with --debug to inspect raw Qdrant payloads and find the right key.")
         return
 
     if dry_run:
         print("DRY RUN — no writes. Sample of what would be migrated:\n")
         for p in points[:5]:
-            print(f"  [{p['access_count']} hits] {p['memory'][:80]}")
+            pinned_tag = " [PINNED]" if p["pinned"] else ""
+            print(f"  [{p['access_count']:>3} hits]{pinned_tag} {p['memory'][:80]}")
         if len(points) > 5:
             print(f"  ... and {len(points) - 5} more.")
         print("\nRe-run without --dry-run to perform migration.")
@@ -238,8 +276,8 @@ def migrate(dry_run: bool = False) -> None:
 
         try:
             # re-embed from scratch — clean float32 vectors
-            vector  = list(embedder.embed([memory_text]))[0].tolist()
-            mem_id  = str(uuid.uuid4())
+            vector = list(embedder.embed([memory_text]))[0].tolist()
+            mem_id = str(uuid.uuid4())
 
             conn.execute(
                 """
@@ -294,5 +332,6 @@ def migrate(dry_run: bool = False) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Migrate Aiko memories from Qdrant to sqlite-vec")
     parser.add_argument("--dry-run", action="store_true", help="Preview without writing")
+    parser.add_argument("--debug",   action="store_true", help="Dump raw Qdrant payloads before migrating")
     args = parser.parse_args()
-    migrate(dry_run=args.dry_run)
+    migrate(dry_run=args.dry_run, debug=args.debug)

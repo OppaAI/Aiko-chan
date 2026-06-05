@@ -242,7 +242,7 @@ class AikoThink:
 
     # ── internal ──────────────────────────────────────────────────────────────
 
-    def _stream_response(self, messages: list[dict]) -> str:
+    def _stream_response(self, messages: list[dict], system: str = "") -> str:
         """
         Stream LLM response to console and TTS simultaneously.
         Console printing is the single source of truth — speak.py is silent.

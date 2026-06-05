@@ -138,7 +138,7 @@ INIT_STEPS = {
     'mem_embed':        ('Embedding Model',  'Loading BGE-base-en-v1.5  ·  768-dim vectors'),
     'mem_cleanup':      ('Memory Lifecycle', 'Pruning decayed memories …'),
     'mem_ready':        ('Memory Cortex',    'OppaAI custom-build  ·  long-term recall online'),
-    'speak_miotts':     ('TTS Engine', f'Initializing MioTTS  ·  {os.getenv("MIOTTS_PRESET", "jp_female")}'),
+    'speak_miotts':     ('TTS Engine',       f'Initializing MioTTS  ·  {os.getenv("MIOTTS_PRESET", "jp_female")}'),
     'speak_ready':      ('Voice Output',     'Audio pipeline ready  ·  24 kHz'),
     'speak_skip':       ('Voice Output',     'TTS disabled  (--text mode)'),
     'listen_ready':     ('Speech Input',     f'faster-whisper ready  ·  {WHISPER_MODEL}'),

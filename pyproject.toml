@@ -25,6 +25,7 @@ dependencies = [
     "sounddevice>=0.5.5",
     "soundfile>=0.13.1",
     "spacy>=3.8.14",
+    "sqlite-vec>=0.1.9",
     "torch",
     "torchaudio>=2.10.0",
     "torchvision>=0.26.0",

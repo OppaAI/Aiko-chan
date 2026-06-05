@@ -123,6 +123,15 @@ Do NOT include assistant statements. Do NOT explain. No markdown.
 Conversation:
 {conversation}"""
 
+def _sanitize_fts_query(query: str) -> str:
+    """
+    Strip characters that break FTS5 query parsing.
+    FTS5 treats , " ( ) * ^ : - as syntax tokens — remove them.
+    Returns '*' if query becomes empty after stripping (match-all fallback).
+    """
+    cleaned = re.sub(r'[^\w\s\']', ' ', query)   # keep word chars, spaces, apostrophes
+    cleaned = ' '.join(cleaned.split())            # collapse whitespace
+    return cleaned or "*"
 
 # ── schema ────────────────────────────────────────────────────────────────────
 
@@ -502,11 +511,11 @@ class _MemoryBackend:
             FROM memories_fts f
             JOIN memories m ON m.id = f.id
             WHERE memories_fts MATCH ?
-              AND m.user_id = ?
-            ORDER BY rank          -- FTS5 internal BM25 rank (lower = better)
+            AND m.user_id = ?
+            ORDER BY rank
             LIMIT ?
             """,
-            (query, user_id, FTS_LIMIT),
+            (_sanitize_fts_query(query), user_id, FTS_LIMIT),
         ).fetchall()
 
         rank_fts = {row["id"]: i + 1 for i, row in enumerate(fts_rows)}

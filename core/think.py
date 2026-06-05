@@ -166,10 +166,10 @@ class AikoThink:
         # 5. trim history to context window
         trimmed  = self._history[-(CONTEXT_WINDOW_TURNS * 2):]
         trimmed  = self._sanitize_history(trimmed)
-        messages = [{"role": "system", "content": system}] + trimmed
+        messages = trimmed  
 
         # 6. stream response
-        response_text = self._stream_response(messages)
+        response_text = self._stream_response(messages, system=system)
         if not response_text:
             if self._history and self._history[-1]["role"] == "user":
                 self._history.pop()   # remove orphaned user turn on failure
@@ -272,6 +272,7 @@ class AikoThink:
             stream = self._client.chat(
                 model=OLLAMA_MODEL,
                 messages=messages,
+                system=system,
                 stream=True,
                 keep_alive=-1,
                 options={
@@ -356,17 +357,24 @@ class AikoThink:
 
     def _sanitize_history(self, messages: list[dict]) -> list[dict]:
         """
-        Ensure roles strictly alternate user/assistant.
-        Removes consecutive duplicate roles — keeps the last one.
+        Enforce strict user/assistant alternation.
+        Merges consecutive same-role messages (keeps last).
+        Strips leading assistant turns — history must start with user.
         """
         if not messages:
-            return messages
+            return []
+
         sanitized = [messages[0]]
         for msg in messages[1:]:
             if msg["role"] == sanitized[-1]["role"]:
-                sanitized[-1] = msg   # replace with the later one
+                sanitized[-1] = msg   # keep the later one
             else:
                 sanitized.append(msg)
+
+        # must start with user — strip any leading assistant orphans
+        while sanitized and sanitized[0]["role"] != "user":
+            sanitized.pop(0)
+
         return sanitized
 
     def _store_async(self, user_input: str, response_text: str) -> None:

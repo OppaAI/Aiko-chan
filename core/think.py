@@ -57,7 +57,7 @@ def _load_persona() -> str:
     persona = _PERSONA_PATH.read_text(encoding="utf-8").strip()
     user_id = os.getenv("USER_ID", "OppaAI")
     today   = datetime.now().strftime("%B %d, %Y")
-    return persona.format(user_id=user_id, today=today)
+    return persona.replace("USER_ID_HERE", user_id).replace("TODAY_HERE", today)
 
 
 # ── think ─────────────────────────────────────────────────────────────────────
@@ -165,10 +165,14 @@ class AikoThink:
 
         # 5. trim history to context window
         trimmed  = self._history[-(CONTEXT_WINDOW_TURNS * 2):]
+        trimmed  = self._sanitize_history(trimmed)
         messages = [{"role": "system", "content": system}] + trimmed
 
         # 6. stream response
         response_text = self._stream_response(messages)
+        if not response_text:
+            if self._history and self._history[-1]["role"] == "user":
+                self._history.pop()   # remove orphaned user turn on failure
 
         # 7. append assistant turn to history
         self._history.append({"role": "assistant", "content": response_text})
@@ -346,8 +350,24 @@ class AikoThink:
                 self._token_callback(f"[think] {msg}")
             else:
                 print(f"\n[think] {msg}")
+            return ""
 
         return "".join(full_response)
+
+    def _sanitize_history(self, messages: list[dict]) -> list[dict]:
+        """
+        Ensure roles strictly alternate user/assistant.
+        Removes consecutive duplicate roles — keeps the last one.
+        """
+        if not messages:
+            return messages
+        sanitized = [messages[0]]
+        for msg in messages[1:]:
+            if msg["role"] == sanitized[-1]["role"]:
+                sanitized[-1] = msg   # replace with the later one
+            else:
+                sanitized.append(msg)
+        return sanitized
 
     def _store_async(self, user_input: str, response_text: str) -> None:
         """

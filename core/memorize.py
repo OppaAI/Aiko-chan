@@ -126,11 +126,14 @@ Conversation:
 def _sanitize_fts_query(query: str) -> str:
     """
     Strip characters that break FTS5 query parsing.
-    FTS5 treats , " ( ) * ^ : - as syntax tokens — remove them.
-    Returns '*' if query becomes empty after stripping (match-all fallback).
+    FTS5 treats , " ( ) * ^ : - ' as syntax tokens — remove them all.
+    Args:
+        query (str): The query string to sanitize.
+    Returns:
+        str: The sanitized query string.
     """
-    cleaned = re.sub(r'[^\w\s\']', ' ', query)   # keep word chars, spaces, apostrophes
-    cleaned = ' '.join(cleaned.split())            # collapse whitespace
+    cleaned = re.sub(r'[^\w\s]', ' ', query)   # keep only word chars and spaces
+    cleaned = ' '.join(cleaned.split())          # collapse whitespace
     return cleaned or "*"
 
 # ── schema ────────────────────────────────────────────────────────────────────

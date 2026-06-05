@@ -114,11 +114,15 @@ _EXTRACT_MIN_CHARS = int(os.getenv("MEMORY_EXTRACT_MIN_CHARS", 80))
 # Extraction prompt — tuned for small models.
 # Asks for a flat JSON array of atomic fact strings. Nothing else.
 _EXTRACT_PROMPT = """\
-Extract memorable facts about the user from this conversation.
+Extract memorable facts about the USER from this conversation.
+The USER is OppaAI (he/him). The ASSISTANT is Aiko.
+Write every fact from Aiko's perspective, using second-person for the user.
+Example format: "Oppa's birthday is June 3, 2026"  "Oppa created you (Aiko) recently"
 Return ONLY a JSON array of short strings. Each string is one atomic fact.
-Facts should be about the user's preferences, identity, life, or goals.
-If nothing is worth remembering, return an empty array: []
-Do NOT include assistant statements. Do NOT explain. No markdown.
+Facts should be about Oppa's preferences, identity, life, or goals.
+If nothing is worth remembering, return: []
+Do NOT include facts about Aiko's own behavior or feelings.
+Do NOT explain. No markdown.
 
 Conversation:
 {conversation}"""

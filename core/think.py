@@ -182,6 +182,16 @@ class AikoThink:
         if search_match:
             query = search_match.group(1).strip()
 
+            # Intent gate: confirm this is actually a factual/data request
+            if not self._is_data_intent(user_input):
+                # Social/conversational — strip the tag, respond normally
+                display_text = _SEARCH_RE.sub("", raw_response).strip()
+                self._emit(display_text)
+                self._history.append({"role": "assistant", "content": raw_response})
+                self._store_async(user_input, display_text)
+                self._reasoning = False
+                return display_text
+
             # notify UI that search is happening
             if self._token_callback:
                 self._token_callback(f"__SEARCHING__:{query}")

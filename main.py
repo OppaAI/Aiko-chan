@@ -383,7 +383,7 @@ def _run(stdscr, args):
                 else:
                     tui.add_message('sys', f'Searching: "{query}"')
                     tui._draw()
-                    think.web_search(query)
+                    think.web_search(query, _token_cb)
 
             else:
                 tui.add_message('sys', f'Unknown command: {user_input}')

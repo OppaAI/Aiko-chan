@@ -152,16 +152,6 @@ def parse_args():
 # ═════════════════════════════════════════════════════════════════════════════
 # SESSION ORCHESTRATOR
 # ═════════════════════════════════════════════════════════════════════════════
-
-def token_cb(token):
-    if token.startswith("__SEARCHING__:"):
-        query = token.split(":", 1)[1].strip()
-        tui.stream_commit()
-        tui.add_message('sys', f'Searching the web for: "{query}"...')
-        tui._draw(buf=[])
-    else:
-        tui.stream_token(token)
-        tui._draw(buf=[])
         
 def _run(stdscr, args):
     """
@@ -177,6 +167,16 @@ def _run(stdscr, args):
            writes to complete.
     """
     tui = AikoTUI(stdscr, no_voice=args.text, debug=args.debug)
+
+    def token_cb(token):
+        if token.startswith("__SEARCHING__:"):
+            query = token.split(":", 1)[1].strip()
+            tui.stream_commit()
+            tui.add_message('sys', f'Searching the web for: "{query}"...')
+            tui._draw(buf=[])
+        else:
+            tui.stream_token(token)
+            tui._draw(buf=[])
 
     # ── init spin ─────────────────────────────────────────────────────────────
 

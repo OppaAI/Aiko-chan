@@ -170,10 +170,29 @@ class AikoThink:
 
         # 6. stream response
         response_text = self._stream_response(messages, system=system)
-        if not response_text:
-            if self._history and self._history[-1]["role"] == "user":
-                self._history.pop()   # remove orphaned user turn on failure
 
+        # 6b. intercept search trigger
+        search_match = re.search(r'\[SEARCH:\s*(.+?)\]', response_text, re.IGNORECASE)
+        if search_match:
+            query = search_match.group(1).strip()
+            if self._token_callback:
+                self._token_callback(f"__SEARCHING__:{query}")
+            from core.tools import web_search_context
+            context = web_search_context(query)
+            if context:
+                # inject results and get real response
+                self._history.append({"role": "assistant", "content": response_text})
+                self._history.append({"role": "user", "content": context})
+                trimmed  = self._history[-(CONTEXT_WINDOW_TURNS * 2):]
+                trimmed  = self._sanitize_history(trimmed)
+                response_text = self._stream_response(trimmed, system=system)
+                # clean up the injected search turns from history
+                self._history = self._history[:-2]
+            else:
+                response_text = "[no results found]"
+                if self._token_callback:
+                    self._token_callback(response_text)
+        
         # 7. append assistant turn to history
         self._history.append({"role": "assistant", "content": response_text})
 

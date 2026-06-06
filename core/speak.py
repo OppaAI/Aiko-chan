@@ -82,6 +82,7 @@ class AikoSpeak:
     """
 
     def __init__(self, silent: bool = False) -> None:
+        self._proc = None
         self._lock      = threading.Lock()
         self._playing   = threading.Event()
         self._stop_flag = threading.Event()
@@ -122,6 +123,7 @@ class AikoSpeak:
         """
         import json
         import urllib.request
+        text = text[:300]  # MioTTS hard limit
         payload = json.dumps({
             "text": text,
             "reference": {"type": "preset", "preset_id": MIOTTS_PRESET},
@@ -144,35 +146,30 @@ class AikoSpeak:
     # ── playback ──────────────────────────────────────────────────────────────
 
     def _play_wav_bytes(self, wav_bytes: bytes) -> None:
-        """
-        Decode WAV and play via sounddevice on a daemon thread.
-        Sets _playing for the duration; honours _stop_flag.
-        """
-        import wave
-        sd = self._load_sd()
+        """Play WAV bytes via paplay (PulseAudio) on a daemon thread."""
+        import subprocess
+        import tempfile
         self._playing.set()
         self._stop_flag.clear()
         try:
-            with wave.open(io.BytesIO(wav_bytes)) as wf:
-                samplerate = wf.getframerate()
-                channels   = wf.getnchannels()
-                frames     = wf.readframes(wf.getnframes())
-                import numpy as np
-                audio = np.frombuffer(frames, dtype=np.int16).reshape(-1, channels)
-            kwargs = {"samplerate": samplerate, "blocking": False}
-            if MIOTTS_DEVICE >= 0:
-                kwargs["device"] = MIOTTS_DEVICE
-            with silent_stderr():
-                sd.play(audio, **kwargs)
-            while sd.get_stream().active:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                f.write(wav_bytes)
+                tmp_path = f.name
+            self._proc = subprocess.Popen(["paplay", tmp_path])
+            while self._proc.poll() is None:
                 if self._stop_flag.is_set():
-                    sd.stop()
+                    self._proc.terminate()
                     break
                 time.sleep(0.05)
         except Exception as e:
             print(f"[speak] playback error: {e}")
         finally:
             self._playing.clear()
+            import os
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
     def _speak_thread(self, text: str) -> None:
         """Synthesis + playback on a background thread."""

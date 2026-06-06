@@ -408,6 +408,57 @@ class AikoThink:
 
         return sanitized
 
+    def _is_data_intent(self, user_input: str) -> bool:
+        """
+        Lightweight check: is this message requesting external data,
+        or is it a social/conversational gesture?
+        Returns True if a web search is warranted.
+        """
+        social_signals = frozenset([
+            "wanna", "want to", "would you", "do you", "shall we",
+            "let's", "lets", "together", "with me", "join me",
+            "how are you", "what do you think", "do you like",
+            "are you", "can you", "will you",
+        ])
+        lowered = user_input.lower()
+        
+        # Fast path: obvious social phrasing
+        if any(sig in lowered for sig in social_signals):
+            return False
+        
+        # Fast path: explicit question words about facts
+        factual_signals = frozenset([
+            "who", "what", "when", "where", "how many", "how much",
+            "score", "result", "latest", "news", "current", "today",
+            "price", "weather",
+        ])
+        if any(sig in lowered for sig in factual_signals):
+            return True
+        
+        # Ambiguous — ask the LLM (cheap, 1-token answer)
+        try:
+            resp = self._client.chat(
+                model=OLLAMA_MODEL,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f'Is this message asking for factual external data '
+                        f'(news, scores, prices, current events), or is it '
+                        f'conversational/social?\n\n'
+                        f'Message: "{user_input}"\n\n'
+                        f'Reply with exactly one word: data OR social'
+                    )
+                }],
+                stream=False,
+                keep_alive=-1,
+                options={"num_predict": 4, "temperature": 0.0},
+            )
+            answer = resp.message.content.strip().lower()
+            return "data" in answer
+        except Exception as e:
+            log.warning(f"Intent gate failed, defaulting to allow search: {e}")
+            return True
+
     def _store_async(self, user_input: str, response_text: str) -> None:
         """
         Enqueue a completed turn for background memory persistence.

@@ -170,11 +170,10 @@ def _run(stdscr, args):
 
     def token_cb(token):
         if token.startswith("__SEARCHING__:"):
-            tui.stream_commit()
-            tui._input_buf = list("🌐  Searching the web...")
-            tui._draw(buf=list(tui._input_buf))
+            query = token.split(":", 1)[1]
+            tui.add_message('sys', f'🌐 Searching: {query}...')
+            tui._draw()
         else:
-            tui._input_buf = []
             tui.stream_token(token)
             tui._draw(buf=[])
 

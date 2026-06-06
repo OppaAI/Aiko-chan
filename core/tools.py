@@ -7,7 +7,8 @@ All tools are plain functions that return strings ready for context injection.
 
 import os
 import requests
-
+from core.log import get_logger
+log = get_logger(__name__)
 
 # ── config ────────────────────────────────────────────────────────────────────
 
@@ -76,7 +77,9 @@ def web_search_context(query: str, max_results: int = MAX_RESULTS) -> str | None
     Returns:
         str | None: A context-ready prompt string or None if search failed.
     """
+    log.debug(f"[tools] searching: {query!r} at {SEARXNG_URL}")
     results = web_search(query, max_results)
+    log.debug(f"[tools] result: {results[:200]!r}")
     if results.startswith("[search failed") or results.startswith("[no results"):
         return None
     return f"[Web search results for: {query}]\n\n{results}\n\nUser asked: {query}"

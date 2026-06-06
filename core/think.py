@@ -175,6 +175,20 @@ class AikoThink:
         trimmed  = self._sanitize_history(trimmed)
 
         # 7. stream response (collected silently — display handled below)
+        # Pre-check: if input looks like a data query, inject search results upfront
+        if self._is_data_intent(user_input):
+            from core.tools import web_search_context
+            search_query = self._build_search_query(user_input)
+            context = web_search_context(search_query)
+            if context:
+                system = (
+                    f"{system}\n\n"
+                    f"<search_results query='{search_query}'>\n"
+                    f"Answer using ONLY the information in these results.\n\n"
+                    f"{context}\n"
+                    f"</search_results>"
+                )
+        
         raw_response = self._stream_response(trimmed, system=system, silent=True)
 
         # 8. detect search trigger in full response
@@ -386,6 +400,41 @@ class AikoThink:
             return ""
 
         return "".join(full_response)
+
+    def _build_search_query(self, user_input: str) -> str:
+        """
+        Resolve pronouns/references using recent history context.
+        'How about Game 2?' -> 'NBA Finals 2026 Game 2 score'
+        """
+        # Check if input is a short follow-up (likely referential)
+        if len(user_input.split()) <= 6 and self._history:
+            # Pull last user message for context
+            last_user = next(
+                (m["content"] for m in reversed(self._history)
+                if m["role"] == "user"),
+                ""
+            )
+            if last_user and last_user != user_input:
+                try:
+                    resp = self._client.chat(
+                        model=OLLAMA_MODEL,
+                        messages=[{
+                            "role": "user",
+                            "content": (
+                                f'Previous question: "{last_user}"\n'
+                                f'Follow-up question: "{user_input}"\n\n'
+                                f'Write a single complete search query that resolves '
+                                f'any references. Return only the query, nothing else.'
+                            )
+                        }],
+                        stream=False,
+                        keep_alive=-1,
+                        options={"num_predict": 20, "temperature": 0.0},
+                    )
+                    return resp.message.content.strip()
+                except Exception:
+                    pass
+        return user_input
 
     def _sanitize_history(self, messages: list[dict]) -> list[dict]:
         """

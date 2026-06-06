@@ -153,6 +153,16 @@ def parse_args():
 # SESSION ORCHESTRATOR
 # ═════════════════════════════════════════════════════════════════════════════
 
+def token_cb(token):
+    if token.startswith("__SEARCHING__:"):
+        query = token.split(":", 1)[1].strip()
+        tui.stream_commit()
+        tui.add_message('sys', f'Searching the web for: "{query}"...')
+        tui._draw(buf=[])
+    else:
+        tui.stream_token(token)
+        tui._draw(buf=[])
+        
 def _run(stdscr, args):
     """
     Orchestrate the full session lifecycle from boot to shutdown inside the
@@ -383,7 +393,10 @@ def _run(stdscr, args):
                 else:
                     tui.add_message('sys', f'Searching: "{query}"')
                     tui._draw()
+                    tui.turn_start()
                     think.web_search(query, token_cb)
+                    tui.stream_commit()
+                tui._draw()
 
             else:
                 tui.add_message('sys', f'Unknown command: {user_input}')
@@ -404,16 +417,6 @@ def _run(stdscr, args):
         tui.add_message('you', user_input)
         tui.turn_start()
         tui._draw()
-
-        def token_cb(token):
-            if token.startswith("__SEARCHING__:"):
-                query = token.split(":", 1)[1].strip()
-                tui.stream_commit()
-                tui.add_message('sys', f'Searching the web for: "{query}"...')
-                tui._draw(buf=[])
-            else:
-                tui.stream_token(token)
-                tui._draw(buf=[])
 
         think.chat(user_input, token_callback=token_cb)
         tui.stream_commit()

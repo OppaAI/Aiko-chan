@@ -185,6 +185,20 @@ class AikoThink:
 
         return response_text
 
+    def web_search(self, query: str, token_callback=None) -> str:
+        """
+        Run a web search and feed results into a normal chat turn.
+        CLI just calls this — no search logic leaks out.
+        """
+        from core.tools import web_search_context
+        context = web_search_context(query)
+        if context is None:
+            msg = f"[no results for: {query}]"
+            if token_callback:
+                token_callback(msg)
+            return msg
+        return self.chat(context, token_callback=token_callback)
+
     def reset_context(self) -> None:
         """Clear the in-memory conversation history for a fresh session."""
         self._history.clear()

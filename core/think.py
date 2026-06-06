@@ -2,9 +2,11 @@
 core/think.py
 
 Aiko's cognitive loop.
+  - Drains memory write queue before each recall (prevents write-lag misses)
   - Retrieves relevant memories before each turn
-  - Intercepts [SEARCH: query] triggers for web search
+  - Intercepts [SEARCH: query] triggers for web search (post-stream via regex)
   - Streams Ollama response to console + TTS simultaneously
+  - Strips [SEARCH:...] tag from display/TTS output
   - Stores the turn into long-term memory after each response (background thread)
   - Supports single-shot reasoning mode via set_reasoning(True) / /think command
 """
@@ -42,12 +44,15 @@ BOOT_LABELS = {
 
 OLLAMA_BASE_URL      = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL         = os.getenv("OLLAMA_MODEL",    "ministral-3:3b-instruct-2512-q4_K_M")
-CONTEXT_WINDOW_TURNS = int(os.getenv("CONTEXT_WINDOW_TURNS", 20))
+CONTEXT_WINDOW_TURNS = int(os.getenv("CONTEXT_WINDOW_TURNS", 8))
 
-_BASE_PREDICT    = 400   # normal token budget per turn
+_BASE_PREDICT    = 280   # normal token budget — soul.md says 2–3 sentences default
 _REASONING_SCALE = 3     # multiplier applied to num_predict in reasoning mode
 
 _PERSONA_PATH = Path(__file__).resolve().parent.parent / "persona" / "soul.md"
+
+# Regex to detect and strip [SEARCH: ...] tags from response text
+_SEARCH_RE = re.compile(r'\[SEARCH:\s*(.+?)\]', re.IGNORECASE)
 
 
 def _load_persona() -> str:
@@ -71,24 +76,12 @@ class AikoThink:
     """
 
     def __init__(self, memorize: AikoMemorize, speak: AikoSpeak | None = None) -> None:
-        """
-        Initialise the cognitive loop.
-
-        Starts the LLM warmup and memory-write worker threads immediately so
-        both are ready before the first user prompt arrives.
-
-        Args:
-            memorize: Injected memory backend for retrieval and persistence.
-                      May be None at construction time — wakeup.py injects it
-                      after memorize boot completes via think._memorize = ...
-            speak:    Pre-warmed TTS backend; pass None to run silent.
-        """
         self._client    = Client(host=OLLAMA_BASE_URL)
         self._memorize  = memorize
         self._speak     = speak
         self._persona   = _load_persona()
         self._history:  list[dict] = []
-        self._reasoning = False        # reasoning mode off by default; toggled by /think
+        self._reasoning = False
         self._mem_queue  = queue.Queue()
         self._mem_worker = threading.Thread(target=self._mem_write_loop, daemon=True)
         self._mem_worker.start()
@@ -97,19 +90,19 @@ class AikoThink:
         self._warmup_thread.start()
 
     def _warmup_llm(self) -> None:
-            try:
-                self._client.chat(
-                    model=OLLAMA_MODEL,
-                    messages=[{"role": "user", "content": "hi"}],
-                    stream=False,
-                    keep_alive=-1,
-                    options={
-                        "num_predict": 1,
-                        "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", 4096)),
-                    },
-                )
-            except Exception as e:
-                log.warning("LLM warmup failed — Ollama may not be running: %s", e)
+        try:
+            self._client.chat(
+                model=OLLAMA_MODEL,
+                messages=[{"role": "user", "content": "hi"}],
+                stream=False,
+                keep_alive=-1,
+                options={
+                    "num_predict": 1,
+                    "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", 4096)),
+                },
+            )
+        except Exception as e:
+            log.warning("LLM warmup failed — Ollama may not be running: %s", e)
 
     def join_warmup(self) -> None:
         """Block until LLM warmup completes. Called by wakeup.py before boot finishes."""
@@ -122,18 +115,20 @@ class AikoThink:
         """
         Process one conversational turn and return the full assistant response.
 
-        If reasoning mode is active (set via set_reasoning(True)), the user turn
-        is wrapped with a step-by-step instruction and num_predict is tripled to
-        budget for the <think> scratchpad. Reasoning mode auto-resets to False
-        after each turn — it is single-shot by design.
+        Flow:
+          1. Drain pending memory writes so recall sees the latest facts.
+          2. Search long-term memory; inject explicit no-memory signal if empty.
+          3. Build system prompt (persona + memory block).
+          4. Stream LLM response silently (full text collected).
+          5. Strip any [SEARCH:...] tag from display text before sending to
+             token_callback and TTS — tag is never shown to the user raw.
+          6. If a search trigger was found, fetch results, re-stream grounded
+             response, clean display again.
+          7. Append to history and enqueue async memory write.
 
-        Args:
-            user_input:      Raw text from the user.
-            token_callback:  Optional callable(token: str) invoked for each
-                             streamed token; used by the TUI to render output.
-
-        Returns:
-            The complete assistant response as a single string.
+        Reasoning mode (set via set_reasoning(True) / /think command) wraps the
+        user prompt with a step-by-step instruction and triples num_predict.
+        Auto-resets to False after each turn — single-shot by design.
         """
         self._token_callback = token_callback
 
@@ -141,16 +136,28 @@ class AikoThink:
         if self._speak and self._speak.is_playing():
             self._speak.stop()
 
-        # 1. retrieve relevant long-term memories
-        memories     = self._memorize.search(user_input, limit=int(os.getenv("MEMORY_RECALL_LIMIT", 5)))
+        # 1. flush pending memory writes so this turn's recall is up to date
+        self.wait_for_memory()
+
+        # 2. retrieve relevant long-term memories
+        memories     = self._memorize.search(user_input, limit=int(os.getenv("MEMORY_RECALL_LIMIT", 3)))
         memory_block = self._memorize.format_for_context(memories)
 
-        # 2. build system prompt
+        # 3. build system prompt — inject explicit no-memory signal on miss
         system = self._persona
         if memory_block:
             system = f"{system}\n\n{memory_block}"
+        else:
+            system = (
+                f"{system}\n\n"
+                "<memory_context>\n"
+                "No relevant memories found for this query. "
+                "If Oppa asks about something personal or specific to him, "
+                "tell him you don't have it stored rather than guessing.\n"
+                "</memory_context>"
+            )
 
-        # 3. wrap user turn with reasoning instruction if active
+        # 4. wrap user turn with reasoning instruction if active
         if self._reasoning:
             prompt = (
                 f"{user_input}\n\n"
@@ -160,54 +167,67 @@ class AikoThink:
         else:
             prompt = user_input
 
-        # 4. append user turn
+        # 5. append user turn
         self._history.append({"role": "user", "content": prompt})
 
-        # 5. trim history to context window
+        # 6. trim history to context window
         trimmed  = self._history[-(CONTEXT_WINDOW_TURNS * 2):]
         trimmed  = self._sanitize_history(trimmed)
-        messages = trimmed  
 
-        # 6. stream response
-        response_text = self._stream_response(messages, system=system)
+        # 7. stream response (collected silently — display handled below)
+        raw_response = self._stream_response(trimmed, system=system, silent=True)
 
-        # 6b. intercept search trigger
-        search_match = re.search(r'\[SEARCH:\s*(.+?)\]', response_text, re.IGNORECASE)
+        # 8. detect search trigger in full response
+        search_match = _SEARCH_RE.search(raw_response)
         if search_match:
             query = search_match.group(1).strip()
+
+            # notify UI that search is happening
             if self._token_callback:
                 self._token_callback(f"__SEARCHING__:{query}")
+
             from core.tools import web_search_context
             context = web_search_context(query)
+
             if context:
-                # inject results and get real response
-                self._history.append({"role": "assistant", "content": response_text})
-                self._history.append({"role": "user", "content": context})
-                trimmed  = self._history[-(CONTEXT_WINDOW_TURNS * 2):]
-                trimmed  = self._sanitize_history(trimmed)
-                response_text = self._stream_response(trimmed, system=system)
-                # clean up the injected search turns from history
+                # inject grounded search results — LLM must not add training data
+                grounded_context = (
+                    f"<search_results query='{query}'>\n"
+                    f"Answer using ONLY the information in these results. "
+                    f"Do not add anything from your training data. "
+                    f"If the results don't contain the answer, say so.\n\n"
+                    f"{context}\n"
+                    f"</search_results>"
+                )
+                self._history.append({"role": "assistant", "content": raw_response})
+                self._history.append({"role": "user",      "content": grounded_context})
+                trimmed      = self._history[-(CONTEXT_WINDOW_TURNS * 2):]
+                trimmed      = self._sanitize_history(trimmed)
+                raw_response = self._stream_response(trimmed, system=system, silent=True)
+                # clean up injected search turns from persistent history
                 self._history = self._history[:-2]
             else:
-                response_text = "[no results found]"
-                if self._token_callback:
-                    self._token_callback(response_text)
-        
-        # 7. append assistant turn to history
-        self._history.append({"role": "assistant", "content": response_text})
+                raw_response = "[no results found]"
 
-        # 8. persist to memory (background) — store original input, not wrapped prompt
-        self._store_async(user_input, response_text)
+        # 9. strip [SEARCH:...] tag from display text, then emit to callback + TTS
+        display_text = _SEARCH_RE.sub("", raw_response).strip()
+        self._emit(display_text)
 
-        # 9. auto-reset reasoning mode — single-shot per /think invocation
+        # 10. append assistant turn (raw, including any search tag, for history fidelity)
+        self._history.append({"role": "assistant", "content": raw_response})
+
+        # 11. persist to memory (background) — store original input, not wrapped prompt
+        self._store_async(user_input, display_text)
+
+        # 12. auto-reset reasoning mode
         self._reasoning = False
 
-        return response_text
+        return display_text
 
     def web_search(self, query: str, token_callback=None) -> str:
         """
         Run a web search and feed results into a normal chat turn.
-        CLI just calls this — no search logic leaks out.
+        Called by the /web command — no search logic leaks out.
         """
         from core.tools import web_search_context
         context = web_search_context(query)
@@ -225,13 +245,9 @@ class AikoThink:
     def last_turn(self) -> tuple[str, str] | None:
         """
         Return the latest complete user/assistant exchange, if one exists.
-
-        Walks history in reverse to find the most recent assistant reply and
-        its paired user message.
-
-        Returns:
-            (user_text, assistant_text) for the last turn, or None if the
-            history contains no complete exchange yet.
+        Walks history in reverse to find the most recent assistant reply
+        and its paired user message.
+        Returns (user_text, assistant_text) or None.
         """
         assistant_text: str | None = None
 
@@ -240,12 +256,10 @@ class AikoThink:
             content = (message.get("content") or "").strip()
             if not content:
                 continue
-
             if assistant_text is None:
                 if role == "assistant":
                     assistant_text = content
                 continue
-
             if role == "user":
                 return content, assistant_text
 
@@ -254,14 +268,7 @@ class AikoThink:
     def set_reasoning(self, enabled: bool) -> None:
         """
         Enable or disable reasoning mode for the next turn only.
-
-        When enabled, chat() wraps the user prompt with a step-by-step
-        instruction and triples num_predict to budget for the <think>
-        scratchpad. Auto-resets to False after each chat() call — single-shot
-        by design so a forgotten /think never bleeds into normal conversation.
-
-        Args:
-            enabled: True to activate reasoning for the next turn, False to cancel.
+        Auto-resets to False after each chat() call.
         """
         self._reasoning = enabled
 
@@ -275,31 +282,43 @@ class AikoThink:
 
     # ── internal ──────────────────────────────────────────────────────────────
 
-    def _stream_response(self, messages: list[dict], system: str = "") -> str:
+    def _emit(self, text: str) -> None:
         """
-        Stream LLM response to console and TTS simultaneously.
-        Console printing is the single source of truth — speak.py is silent.
-        TTS skipped if response is a search trigger.
-
-        Tokens are buffered at the start of each response to detect a
-        [SEARCH: ...] trigger before any output is committed to the console
-        or TTS queue. num_predict is scaled by _REASONING_SCALE when
-        reasoning mode is active to budget for the <think> scratchpad.
-
-        Args:
-            messages: Full message list (system prompt + trimmed history).
-            system:   Optional system prompt to inject.
-
-        Returns:
-            The complete response text assembled from all streamed tokens.
+        Send display text to token_callback (TUI) or stdout, and feed TTS.
+        Called once with the full cleaned response after search handling.
         """
-        full_response    = []
-        tts_started      = False
-        buffer           = ""
-        is_searching     = False
-        buffering_active = True
+        if not text:
+            return
 
-        # triple token budget in reasoning mode to fit the <think> scratchpad
+        if self._token_callback:
+            self._token_callback(text)
+        else:
+            print(f"\nAiko-chan: {text}", flush=True)
+
+        if self._speak:
+            self._speak.feed(text)
+            self._speak.play_async()
+
+    def _stream_response(
+        self,
+        messages: list[dict],
+        system:   str  = "",
+        silent:   bool = False,
+    ) -> str:
+        """
+        Stream LLM response and return the full assembled text.
+
+        When silent=True, no output is sent to token_callback or stdout during
+        streaming — the caller handles display after search detection and tag
+        stripping. This prevents raw [SEARCH:...] tags from reaching the user.
+
+        When silent=False (legacy path, not currently used by chat()), tokens
+        stream live to callback/stdout as before.
+
+        num_predict is scaled by _REASONING_SCALE when reasoning mode is active.
+        """
+        full_response = []
+
         num_predict = _BASE_PREDICT * _REASONING_SCALE if self._reasoning else _BASE_PREDICT
 
         all_messages = (
@@ -314,10 +333,10 @@ class AikoThink:
                 stream=True,
                 keep_alive=-1,
                 options={
-                    "num_ctx":        int(os.getenv("OLLAMA_NUM_CTX", 3072)),   # was 4096 — save RAM
-                    "temperature":    float(os.getenv("OLLAMA_TEMPERATURE", 0.75)),
-                    "repeat_penalty": float(os.getenv("OLLAMA_REPEAT_PENALTY", 1.18)),
-                    "repeat_last_n":  int(os.getenv("OLLAMA_REPEAT_LAST_N", 64)),    # was 128 — 3B doesn't need that far back
+                    "num_ctx":        int(os.getenv("OLLAMA_NUM_CTX", 4096)),
+                    "temperature":    float(os.getenv("OLLAMA_TEMPERATURE", 0.72)),
+                    "repeat_penalty": float(os.getenv("OLLAMA_REPEAT_PENALTY", 1.15)),
+                    "repeat_last_n":  int(os.getenv("OLLAMA_REPEAT_LAST_N", 64)),
                     "num_predict":    num_predict,
                     "top_p":          float(os.getenv("OLLAMA_TOP_P", 0.90)),
                     "top_k":          int(os.getenv("OLLAMA_TOP_K", 40)),
@@ -335,52 +354,17 @@ class AikoThink:
 
                 full_response.append(token)
 
-                if buffering_active:
-                    buffer += token
-                    buffer_clean = buffer.lower().replace(" ", "")
-
-                    if is_searching:
-                        # already confirmed a search tag — keep buffering until closing ]
-                        if "]" in buffer:
-                            buffering_active = False
-                    elif "[search:".startswith(buffer_clean):
-                        # still a valid prefix — check if we've crossed the threshold
-                        if "[search:" in buffer_clean:
-                            is_searching = True
+                # live streaming only when silent=False
+                if not silent:
+                    if self._token_callback:
+                        self._token_callback(token)
                     else:
-                        # not a search tag — flush buffer
-                        buffering_active = False
-                        if self._token_callback and buffer:
-                            self._token_callback(buffer)
-                        elif not self._token_callback:
-                            if not "".join(full_response[:-1]):
-                                print("\nAiko-chan: ", end="", flush=True)
-                            print(buffer, end="", flush=True)
-                else:
-                    if not is_searching:
-                        if self._token_callback:
-                            self._token_callback(token)
-                        else:
-                            print(token, end="", flush=True)
+                        if len(full_response) == 1:
+                            print("\nAiko-chan: ", end="", flush=True)
+                        print(token, end="", flush=True)
 
-                if self._speak and token:
-                    self._speak.feed(token)
-                    tts_started = True
-
-            # flush buffer if stream ended without breaking out of buffering
-            if buffering_active and buffer and not is_searching:
-                if self._token_callback:
-                    self._token_callback(buffer)
-                else:
-                    if not "".join(full_response[:-len(buffer)]):
-                        print("\nAiko-chan: ", end="", flush=True)
-                    print(buffer, end="", flush=True)
-
-            if not self._token_callback and not is_searching:
+            if not silent and not self._token_callback:
                 print(flush=True)
-
-            if self._speak and tts_started:
-                self._speak.play_async()
 
         except Exception as exc:
             msg = f"Stream failed: {exc}"
@@ -405,11 +389,10 @@ class AikoThink:
         sanitized = [messages[0]]
         for msg in messages[1:]:
             if msg["role"] == sanitized[-1]["role"]:
-                sanitized[-1] = msg   # keep the later one
+                sanitized[-1] = msg
             else:
                 sanitized.append(msg)
 
-        # must start with user — strip any leading assistant orphans
         while sanitized and sanitized[0]["role"] != "user":
             sanitized.pop(0)
 
@@ -418,22 +401,15 @@ class AikoThink:
     def _store_async(self, user_input: str, response_text: str) -> None:
         """
         Enqueue a completed turn for background memory persistence.
-
-        Non-blocking — the chat path returns immediately after this call.
+        Non-blocking — chat() returns immediately after this call.
         The background worker in _mem_write_loop drains the queue serially.
-
-        Args:
-            user_input:    The user's raw message for this turn.
-            response_text: The assistant's full response for this turn.
         """
         self._mem_queue.put((user_input, response_text))
 
     def _mem_write_loop(self) -> None:
         """
         Serial background worker that drains the memory write queue.
-
-        Runs for the lifetime of the process (daemon thread). Processes writes
-        in order so memory entries are never interleaved or lost.
+        Runs for the lifetime of the process (daemon thread).
         """
         while True:
             user_input, response_text = self._mem_queue.get()

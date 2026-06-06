@@ -4,9 +4,8 @@ core/think.py
 Aiko's cognitive loop.
   - Drains memory write queue before each recall (prevents write-lag misses)
   - Retrieves relevant memories before each turn
-  - Intercepts [SEARCH: query] triggers for web search (post-stream via regex)
+  - Proactively searches the web for data-intent queries before LLM speaks
   - Streams Ollama response to console + TTS simultaneously
-  - Strips [SEARCH:...] tag from display/TTS output
   - Stores the turn into long-term memory after each response (background thread)
   - Supports single-shot reasoning mode via set_reasoning(True) / /think command
 """
@@ -26,6 +25,7 @@ from pathlib import Path
 import queue
 import re
 import threading
+import time
 
 from core.memorize import AikoMemorize
 from core.speak    import AikoSpeak
@@ -51,9 +51,6 @@ _REASONING_SCALE = 3     # multiplier applied to num_predict in reasoning mode
 
 _PERSONA_PATH = Path(__file__).resolve().parent.parent / "persona" / "soul.md"
 
-# Regex to detect and strip [SEARCH: ...] tags from response text
-_SEARCH_RE = re.compile(r'\[SEARCH:\s*(.+?)\]', re.IGNORECASE)
-
 
 def _load_persona() -> str:
     """Read and return the persona definition from soul.md."""
@@ -63,6 +60,27 @@ def _load_persona() -> str:
     user_id = os.getenv("USER_ID", "OppaAI")
     today   = datetime.now().strftime("%B %d, %Y")
     return persona.replace("USER_ID_HERE", user_id).replace("TODAY_HERE", today)
+
+
+# ── intent signals ────────────────────────────────────────────────────────────
+
+# Inputs matching ANY of these are immediately classified as social — no search.
+_SOCIAL_SIGNALS = frozenset([
+    "wanna", "want to", "would you", "do you", "shall we",
+    "let's", "lets", "together", "with me", "join me",
+    "how are you", "what do you think", "do you like",
+    "are you", "can you", "will you",
+])
+
+# Inputs matching ANY of these are immediately classified as data — search fires.
+_FACTUAL_SIGNALS = frozenset([
+    "who", "what", "when", "where", "how many", "how much",
+    "score", "result", "latest", "news", "current", "today",
+    "price", "weather", "won", "win", "lost", "beat",
+    "game", "final", "finals", "points", "scored",
+    "standing", "ranking", "bitcoin", "crypto", "stock",
+    "temperature", "forecast", "match", "series",
+])
 
 
 # ── think ─────────────────────────────────────────────────────────────────────
@@ -119,11 +137,10 @@ class AikoThink:
           1. Drain pending memory writes so recall sees the latest facts.
           2. Search long-term memory; inject explicit no-memory signal if empty.
           3. Build system prompt (persona + memory block).
-          4. Stream LLM response silently (full text collected).
-          5. Strip any [SEARCH:...] tag from display text before sending to
-             token_callback and TTS — tag is never shown to the user raw.
-          6. If a search trigger was found, fetch results, re-stream grounded
-             response, clean display again.
+          4. If data intent detected, search web and inject results into system
+             prompt before the LLM speaks — LLM never guesses live data.
+          5. Stream LLM response silently (full text collected).
+          6. Emit display text to token_callback + TTS (word-by-word for feel).
           7. Append to history and enqueue async memory write.
 
         Reasoning mode (set via set_reasoning(True) / /think command) wraps the
@@ -157,7 +174,32 @@ class AikoThink:
                 "</memory_context>"
             )
 
-        # 4. wrap user turn with reasoning instruction if active
+        # 4. proactive web search — fires before LLM speaks so no guessing
+        if self._is_data_intent(user_input):
+            from core.tools import web_search_context
+            search_query = self._build_search_query(user_input)
+
+            log.debug(f"[intent] DATA — searching: {search_query!r}")
+
+            # notify UI before the blocking search call
+            if token_callback:
+                token_callback(f"__SEARCHING__:{search_query}")
+
+            context = web_search_context(search_query)
+            log.debug(f"[intent] context={'found' if context else 'NONE'}")
+
+            if context:
+                system = (
+                    f"{system}\n\n"
+                    f"<search_results query='{search_query}'>\n"
+                    f"Answer using ONLY the information in these search results. "
+                    f"Do not add anything from your training data. "
+                    f"If the results don't contain the answer, say so plainly.\n\n"
+                    f"{context}\n"
+                    f"</search_results>"
+                )
+
+        # 5. wrap user turn with reasoning instruction if active
         if self._reasoning:
             prompt = (
                 f"{user_input}\n\n"
@@ -167,86 +209,29 @@ class AikoThink:
         else:
             prompt = user_input
 
-        # 5. append user turn
+        # 6. append user turn
         self._history.append({"role": "user", "content": prompt})
 
-        # 6. trim history to context window
-        trimmed  = self._history[-(CONTEXT_WINDOW_TURNS * 2):]
-        trimmed  = self._sanitize_history(trimmed)
+        # 7. trim history to context window
+        trimmed = self._history[-(CONTEXT_WINDOW_TURNS * 2):]
+        trimmed = self._sanitize_history(trimmed)
 
-        # 7. stream response (collected silently — display handled below)
-        # Pre-check: if input looks like a data query, inject search results upfront
-        if self._is_data_intent(user_input):
-            from core.tools import web_search_context
-            search_query = self._build_search_query(user_input)
-            context = web_search_context(search_query)
-            if context:
-                system = (
-                    f"{system}\n\n"
-                    f"<search_results query='{search_query}'>\n"
-                    f"Answer using ONLY the information in these results.\n\n"
-                    f"{context}\n"
-                    f"</search_results>"
-                )
-        
+        # 8. stream LLM response (silent — display handled in _emit)
         raw_response = self._stream_response(trimmed, system=system, silent=True)
 
-        # 8. detect search trigger in full response
-        search_match = _SEARCH_RE.search(raw_response)
-        if search_match:
-            query = search_match.group(1).strip()
+        # 9. emit to callback + TTS
+        self._emit(raw_response)
 
-            # Intent gate: confirm this is actually a factual/data request
-            if not self._is_data_intent(user_input):
-                # Social/conversational — strip the tag, respond normally
-                display_text = _SEARCH_RE.sub("", raw_response).strip()
-                self._emit(display_text)
-                self._history.append({"role": "assistant", "content": raw_response})
-                self._store_async(user_input, display_text)
-                self._reasoning = False
-                return display_text
-
-            # notify UI that search is happening
-            if self._token_callback:
-                self._token_callback(f"__SEARCHING__:{query}")
-
-            from core.tools import web_search_context
-            context = web_search_context(query)
-
-            if context:
-                # inject grounded search results — LLM must not add training data
-                grounded_context = (
-                    f"<search_results query='{query}'>\n"
-                    f"Answer using ONLY the information in these results. "
-                    f"Do not add anything from your training data. "
-                    f"If the results don't contain the answer, say so.\n\n"
-                    f"{context}\n"
-                    f"</search_results>"
-                )
-                self._history.append({"role": "assistant", "content": raw_response})
-                self._history.append({"role": "user",      "content": grounded_context})
-                trimmed      = self._history[-(CONTEXT_WINDOW_TURNS * 2):]
-                trimmed      = self._sanitize_history(trimmed)
-                raw_response = self._stream_response(trimmed, system=system, silent=True)
-                # clean up injected search turns from persistent history
-                self._history = self._history[:-2]
-            else:
-                raw_response = "[no results found]"
-
-        # 9. strip [SEARCH:...] tag from display text, then emit to callback + TTS
-        display_text = _SEARCH_RE.sub("", raw_response).strip()
-        self._emit(display_text)
-
-        # 10. append assistant turn (raw, including any search tag, for history fidelity)
+        # 10. append assistant turn to history
         self._history.append({"role": "assistant", "content": raw_response})
 
         # 11. persist to memory (background) — store original input, not wrapped prompt
-        self._store_async(user_input, display_text)
+        self._store_async(user_input, raw_response)
 
         # 12. auto-reset reasoning mode
         self._reasoning = False
 
-        return display_text
+        return raw_response
 
     def web_search(self, query: str, token_callback=None) -> str:
         """
@@ -309,13 +294,19 @@ class AikoThink:
     def _emit(self, text: str) -> None:
         """
         Send display text to token_callback (TUI) or stdout, and feed TTS.
-        Called once with the full cleaned response after search handling.
+        Streams word-by-word to token_callback for a natural typing feel,
+        even though the LLM has already finished (silent mode).
+        TTS receives the full text at once for uninterrupted audio.
         """
         if not text:
             return
 
         if self._token_callback:
-            self._token_callback(text)
+            words = text.split(" ")
+            for i, word in enumerate(words):
+                chunk = word if i == 0 else " " + word
+                self._token_callback(chunk)
+                time.sleep(0.012)  # ~80 wpm feel
         else:
             print(f"\nAiko-chan: {text}", flush=True)
 
@@ -332,12 +323,10 @@ class AikoThink:
         """
         Stream LLM response and return the full assembled text.
 
-        When silent=True, no output is sent to token_callback or stdout during
-        streaming — the caller handles display after search detection and tag
-        stripping. This prevents raw [SEARCH:...] tags from reaching the user.
+        When silent=True (default for chat()), no output is sent during streaming —
+        the caller handles display via _emit after the full response is ready.
 
-        When silent=False (legacy path, not currently used by chat()), tokens
-        stream live to callback/stdout as before.
+        When silent=False (used by /think), tokens stream live to callback/stdout.
 
         num_predict is scaled by _REASONING_SCALE when reasoning mode is active.
         """
@@ -401,17 +390,69 @@ class AikoThink:
 
         return "".join(full_response)
 
+    def _is_data_intent(self, user_input: str) -> bool:
+        """
+        Classify whether user_input warrants a live web search.
+
+        Priority order:
+          1. Social signal fast-path  → False  (no search)
+          2. Factual signal fast-path → True   (search)
+          3. LLM classifier fallback  → True/False (ambiguous inputs only)
+
+        The LLM fallback is cheap: 1-token answer, temperature=0.0.
+        """
+        lowered = user_input.lower()
+
+        # fast path: social phrasing — never search
+        if any(sig in lowered for sig in _SOCIAL_SIGNALS):
+            log.debug(f"[intent] SOCIAL (fast-path): {user_input!r}")
+            return False
+
+        # fast path: factual signals — always search
+        if any(sig in lowered for sig in _FACTUAL_SIGNALS):
+            log.debug(f"[intent] DATA (fast-path): {user_input!r}")
+            return True
+
+        # ambiguous — ask the LLM for a 1-token classification
+        try:
+            resp = self._client.chat(
+                model=OLLAMA_MODEL,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f'Is this message asking for factual external data '
+                        f'(news, scores, prices, current events), or is it '
+                        f'conversational/social?\n\n'
+                        f'Message: "{user_input}"\n\n'
+                        f'Reply with exactly one word: data OR social'
+                    )
+                }],
+                stream=False,
+                keep_alive=-1,
+                options={"num_predict": 4, "temperature": 0.0},
+            )
+            answer = resp.message.content.strip().lower()
+            result = "data" in answer
+            log.debug(f"[intent] LLM classified {'DATA' if result else 'SOCIAL'}: {user_input!r}")
+            return result
+        except Exception as e:
+            log.warning(f"Intent gate failed, defaulting to search: {e}")
+            return True
+
     def _build_search_query(self, user_input: str) -> str:
         """
-        Resolve pronouns/references using recent history context.
-        'How about Game 2?' -> 'NBA Finals 2026 Game 2 score'
+        Build a self-contained search query from user_input.
+
+        For short follow-up messages (≤6 words), resolves pronouns and
+        references using the previous user turn as context.
+        Example: "How about Game 2?" → "NBA Finals 2026 Game 2 score"
+
+        Falls back to raw user_input on any error or if no prior context exists.
         """
-        # Check if input is a short follow-up (likely referential)
         if len(user_input.split()) <= 6 and self._history:
-            # Pull last user message for context
             last_user = next(
                 (m["content"] for m in reversed(self._history)
-                if m["role"] == "user"),
+                 if m["role"] == "user"),
                 ""
             )
             if last_user and last_user != user_input:
@@ -431,9 +472,12 @@ class AikoThink:
                         keep_alive=-1,
                         options={"num_predict": 20, "temperature": 0.0},
                     )
-                    return resp.message.content.strip()
-                except Exception:
-                    pass
+                    resolved = resp.message.content.strip()
+                    log.debug(f"[search_query] {user_input!r} → {resolved!r}")
+                    return resolved
+                except Exception as e:
+                    log.warning(f"Query resolution failed: {e}")
+
         return user_input
 
     def _sanitize_history(self, messages: list[dict]) -> list[dict]:
@@ -456,57 +500,6 @@ class AikoThink:
             sanitized.pop(0)
 
         return sanitized
-
-    def _is_data_intent(self, user_input: str) -> bool:
-        """
-        Lightweight check: is this message requesting external data,
-        or is it a social/conversational gesture?
-        Returns True if a web search is warranted.
-        """
-        social_signals = frozenset([
-            "wanna", "want to", "would you", "do you", "shall we",
-            "let's", "lets", "together", "with me", "join me",
-            "how are you", "what do you think", "do you like",
-            "are you", "can you", "will you",
-        ])
-        lowered = user_input.lower()
-        
-        # Fast path: obvious social phrasing
-        if any(sig in lowered for sig in social_signals):
-            return False
-        
-        # Fast path: explicit question words about facts
-        factual_signals = frozenset([
-            "who", "what", "when", "where", "how many", "how much",
-            "score", "result", "latest", "news", "current", "today",
-            "price", "weather",
-        ])
-        if any(sig in lowered for sig in factual_signals):
-            return True
-        
-        # Ambiguous — ask the LLM (cheap, 1-token answer)
-        try:
-            resp = self._client.chat(
-                model=OLLAMA_MODEL,
-                messages=[{
-                    "role": "user",
-                    "content": (
-                        f'Is this message asking for factual external data '
-                        f'(news, scores, prices, current events), or is it '
-                        f'conversational/social?\n\n'
-                        f'Message: "{user_input}"\n\n'
-                        f'Reply with exactly one word: data OR social'
-                    )
-                }],
-                stream=False,
-                keep_alive=-1,
-                options={"num_predict": 4, "temperature": 0.0},
-            )
-            answer = resp.message.content.strip().lower()
-            return "data" in answer
-        except Exception as e:
-            log.warning(f"Intent gate failed, defaulting to allow search: {e}")
-            return True
 
     def _store_async(self, user_input: str, response_text: str) -> None:
         """

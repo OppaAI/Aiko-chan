@@ -46,7 +46,7 @@ HUGO_CONTENT_PATH = os.getenv("HUGO_CONTENT_PATH", "content/posts")
 OLLAMA_MODEL      = os.getenv("OLLAMA_MODEL", "")
 OLLAMA_BASE_URL   = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
-SOUL_PATH         = os.getenv("SOUL_PATH", "config/soul.md")
+SOUL_PATH         = os.getenv("SOUL_PATH", "persona/soul.md")
 
 REFLECT_MAX_MEMS  = int(os.getenv("REFLECT_MAX_MEMS", 20))
 REFLECT_TAGS      = os.getenv("REFLECT_TAGS", "daily-reflection,ai-journal,aiko")

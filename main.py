@@ -142,6 +142,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="Aiko-chan CLI")
     p.add_argument("--text",      action="store_true",
                    help="keyboard input + no TTS  (default: ASR + TTS)")
+    p.add_argument("--no-asr",    action="store_true",
+                   help="keyboard input but keep TTS")
     p.add_argument("--debug",     action="store_true",
                    help="show memory hits each turn")
     p.add_argument("--clear-mem", action="store_true",
@@ -204,7 +206,7 @@ def _run(stdscr, args):
     tui._draw()
 
     tts_enabled = not args.text
-    asr_enabled = not args.text
+    asr_enabled = not args.text and not args.no_asr
 
     # ── shutdown helper ───────────────────────────────────────────────────────
 

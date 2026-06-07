@@ -52,7 +52,7 @@ MIOTTS_DEVICE  = int(os.getenv("MIOTTS_DEVICE", "-1"))
 # ── text sanitization ─────────────────────────────────────────────────────────
 
 _REPLACEMENTS = [
-    (r'\*',    ''),
+    (r'\*+',   ''),
     (r'—',     ', '),
     (r'–',     ', '),
     (r'`',     ''),

@@ -30,13 +30,5 @@ dependencies = [
     "unidic>=1.1.0",
 ]
 
-[[tool.uv.index]]
-name = "jetson"
-url = "https://pypi.jetson-ai-lab.io/jp6/cu126"
-explicit = true
 
 [tool.uv.sources]
-torchaudio = [{ index = "jetson" }]
-torchvision = [{ index = "jetson" }]
-torch = { path = "../wheels/torch-2.11.0-cp310-cp310-linux_aarch64.whl" }
-ctranslate2 = { path = "../wheels/ctranslate2-4.7.2-cp310-cp310-linux_aarch64.whl" }

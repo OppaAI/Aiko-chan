@@ -58,6 +58,7 @@ _REPLACEMENTS = [
     (r'`',     ''),
     (r'#+ ',   ''),
     (r'\[|\]', ''),
+    (r'\(|\)', ''), 
 ]
 
 _RE_REPLACEMENTS = [(re.compile(p), r) for p, r in _REPLACEMENTS]

@@ -48,7 +48,7 @@ BOOT_LABELS = {
 WHISPER_MODEL_SIZE  = os.getenv("WHISPER_MODEL",      "turbo")
 WHISPER_DEVICE      = os.getenv("WHISPER_DEVICE",     "auto")
 WHISPER_COMPUTE     = os.getenv("WHISPER_COMPUTE",    "float16")
-WHISPER_LANG        = os.getenv("WHISPER_LANG",       "en") or None
+WHISPER_LANG        = os.getenv("WHISPER_LANG",       "") or None
 VAD_SILENCE_MS      = int(os.getenv("LISTEN_VAD_SILENCE_MS", 300))
 VAD_PAD_MS          = int(os.getenv("LISTEN_VAD_PAD_MS",     100))
 

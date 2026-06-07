@@ -10,24 +10,23 @@ Usage:
     uv run tts_test.py --no-stt     # keyboard input only
 
     # Override mic at runtime:
-    MIC_DEVICE=1 MIC_CHANNELS=2 uv run tts_test.py
+    MIC_DEVICE=29 MIC_CHANNELS=1 SAMPLE_RATE=16000 uv run tts_test.py
     # List available input devices:
     python3 -c "import sounddevice as sd; [print(i, d['name'], 'in:', d['max_input_channels']) for i, d in enumerate(sd.query_devices())]"
 """
 
 import argparse
 import base64
+import io
 import json
+import math
 import os
 import re
-import subprocess
-import tempfile
 import urllib.request
-
-import math
 
 import numpy as np
 import sounddevice as sd
+import scipy.io.wavfile as wav_io
 from faster_whisper import WhisperModel
 from scipy.signal import resample_poly
 
@@ -39,19 +38,17 @@ MIOTTS_URL    = os.getenv("MIOTTS_URL",    "http://localhost:8001/v1/tts")
 MIOTTS_PRESET = os.getenv("MIOTTS_PRESET", "jp_female")
 MAX_TTS_CHARS = int(os.getenv("MAX_TTS_CHARS", "250"))
 
-# sounddevice input device index (not ALSA card number).
-# USB PnP Audio Device is device 1, requires stereo (channels=2).
-MIC_DEVICE   = int(os.getenv("MIC_DEVICE",   "1"))
-MIC_CHANNELS = int(os.getenv("MIC_CHANNELS", "2"))
+MIC_DEVICE    = int(os.getenv("MIC_DEVICE",   "29"))
+MIC_CHANNELS  = int(os.getenv("MIC_CHANNELS", "1"))
+SAMPLE_RATE   = int(os.getenv("SAMPLE_RATE",  "16000"))
 
 WHISPER_MODEL    = "turbo"
 WHISPER_DEVICE   = "cuda"
-WHISPER_LANG     = None        # None = auto-detect (en + ja)
-SAMPLE_RATE      = 48000       # hardware capture rate (USB PnP only supports 48000)
-WHISPER_RATE     = 16000       # Whisper expects 16000; we resample after capture
-RECORD_SECONDS   = 5           # max recording duration per turn
-SILENCE_THRESH   = 0.01        # RMS below this = silence
-SILENCE_DURATION = 1.2         # seconds of silence to stop early
+WHISPER_LANG     = None
+WHISPER_RATE     = 16000
+RECORD_SECONDS   = 5
+SILENCE_THRESH   = 0.01
+SILENCE_DURATION = 1.2
 
 SYSTEM_PROMPT = (
     "You are Aiko, a quiet and deadpan AI companion. "
@@ -87,7 +84,7 @@ def load_whisper() -> WhisperModel:
 def record_until_silence() -> np.ndarray:
     """Record audio until silence is detected or max duration reached."""
     print("[STT] Listening... (speak now)")
-    chunk = int(SAMPLE_RATE * 0.1)   # 100ms chunks
+    chunk = int(SAMPLE_RATE * 0.1)
     max_chunks = int(RECORD_SECONDS / 0.1)
     silent_chunks_needed = int(SILENCE_DURATION / 0.1)
 
@@ -103,7 +100,6 @@ def record_until_silence() -> np.ndarray:
     ) as stream:
         for _ in range(max_chunks):
             data, _ = stream.read(chunk)
-            # collapse stereo → mono for RMS and Whisper
             mono = data.mean(axis=1) if MIC_CHANNELS > 1 else data.flatten()
             frames.append(mono)
             rms = float(np.sqrt(np.mean(mono ** 2)))
@@ -117,9 +113,10 @@ def record_until_silence() -> np.ndarray:
 
     audio = np.concatenate(frames)
 
-    # resample 48000 → 16000 for Whisper
-    g = math.gcd(WHISPER_RATE, SAMPLE_RATE)
-    audio = resample_poly(audio, WHISPER_RATE // g, SAMPLE_RATE // g)
+    # resample to 16kHz for Whisper if needed
+    if SAMPLE_RATE != WHISPER_RATE:
+        g = math.gcd(WHISPER_RATE, SAMPLE_RATE)
+        audio = resample_poly(audio, WHISPER_RATE // g, SAMPLE_RATE // g)
     return audio
 
 
@@ -174,12 +171,10 @@ def speak(text: str) -> None:
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             body = json.loads(r.read())
-        wav = base64.b64decode(body["audio"])
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            f.write(wav)
-            tmp = f.name
-        subprocess.run(["paplay", tmp], check=True)
-        os.unlink(tmp)
+        wav_bytes = base64.b64decode(body["audio"])
+        rate, data = wav_io.read(io.BytesIO(wav_bytes))
+        sd.play(data, rate)
+        sd.wait()
     except Exception as e:
         print(f"[TTS error] {e}")
 
@@ -201,7 +196,7 @@ def main():
     print(f"Model  : {OLLAMA_MODEL}")
     print(f"STT    : {'disabled (keyboard)' if args.no_stt else f'whisper-{WHISPER_MODEL}'}")
     print(f"TTS    : {'disabled' if args.no_tts else MIOTTS_PRESET}")
-    print(f"Mic    : sounddevice device {MIC_DEVICE} ({MIC_CHANNELS}ch @ {SAMPLE_RATE}Hz → {WHISPER_RATE}Hz)")
+    print(f"Mic    : sounddevice device {MIC_DEVICE} ({MIC_CHANNELS}ch @ {SAMPLE_RATE}Hz)")
     print("Ctrl+C to exit.\n")
 
     while True:

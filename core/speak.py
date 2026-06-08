@@ -58,14 +58,29 @@ _REPLACEMENTS = [
     (r'`',     ''),
     (r'#+ ',   ''),
     (r'\[|\]', ''),
-    (r'\(|\)', ''), 
+    (r'\(|\)', ''),
+    (r'~',     ''),
+    (r'_',     ' '),
+    (r'/',     ' '),
+    (r'\\',    ''),
+    (r'[<>{}|@#$%^&+=]', ''),
 ]
 
 _RE_REPLACEMENTS = [(re.compile(p), r) for p, r in _REPLACEMENTS]
 
-
 def sanitize_for_tts(text: str) -> str:
     """Strip/replace symbols the MioTTS phonemizer cannot handle."""
+    # Strip emoji and non-BMP unicode (emoticons, symbols, pictographs)
+    text = re.sub(
+        r'[\U00010000-\U0010ffff'       # non-BMP (most emoji)
+        r'\U0001F000-\U0001FFFF'        # extra emoji blocks
+        r'\u2600-\u27BF'               # misc symbols, dingbats
+        r'\u2300-\u23FF'               # misc technical
+        r'\u25A0-\u25FF'               # geometric shapes
+        r'\u2700-\u27BF'               # dingbats
+        r']',
+        '', text, flags=re.UNICODE
+    )
     for pattern, replacement in _RE_REPLACEMENTS:
         text = pattern.sub(replacement, text)
     text = re.sub(r',\s*,', ',', text)

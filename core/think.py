@@ -10,6 +10,7 @@ Aiko's cognitive loop.
   - Supports single-shot reasoning mode via set_reasoning(True) / /think command
 """
 
+from email import message
 import logging
 import os
 import warnings
@@ -379,9 +380,13 @@ class AikoThink:
             if not silent and not self._token_callback:
                 print(flush=True)
 
-        except Exception as exc:
-            msg = f"Stream failed: {exc}"
+        except Exception as e:
+            msg = f"Stream failed: {e}"
             log.error(msg)
+            
+            # remove the dangling user turn so next call doesn't create a consecutive pair
+            if self._history and self._history[-1]["role"] == "user":
+                self._history.pop()
             if self._token_callback:
                 self._token_callback(f"[think] {msg}")
             else:
@@ -521,7 +526,7 @@ class AikoThink:
                     {"role": "user",      "content": user_input[:500]},
                     {"role": "assistant", "content": response_text[:800]},
                 ])
-            except Exception as exc:
-                log.error(f"Async memory write failed: {exc}")
+            except Exception as e:
+                log.error(f"Async memory write failed: {e}")
             finally:
                 self._mem_queue.task_done()

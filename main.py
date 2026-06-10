@@ -395,14 +395,15 @@ def _run(stdscr, args):
                         tui.add_message('sys', f'Search failed: {e}')
                         tui._draw()
                         continue
-                    think._history.append({"role": "user", "content": results})
-                    tui.turn_start()
-                    def _web_token_cb(token):
-                        tui.stream_token(token)
-                        tui._draw(buf=[])
-                    think.chat(f"Based on the search results, answer: {query}",
-                               token_callback=_web_token_cb)
-                    tui.stream_commit()
+                        tui.turn_start()
+                        def _web_token_cb(token):
+                            tui.stream_token(token)
+                            tui._draw(buf=[])
+                        think.chat(
+                            f"Use these web search results to answer the question: {query}\n\n{results}",
+                            token_callback=_web_token_cb,
+                        )
+                        tui.stream_commit()
                     tui._draw()
 
             else:

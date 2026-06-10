@@ -242,7 +242,7 @@ class AikoThink:
 
     # ── internal ──────────────────────────────────────────────────────────────
 
-    def _stream_response(self, messages: list[dict]) -> str:
+    def _stream_response(self, messages: list[dict], system: str = "") -> str:
         """
         Stream LLM response to console and TTS simultaneously.
         Console printing is the single source of truth — speak.py is silent.
@@ -255,6 +255,7 @@ class AikoThink:
 
         Args:
             messages: Full message list (system prompt + trimmed history).
+            system:   Optional system prompt to inject.
 
         Returns:
             The complete response text assembled from all streamed tokens.
@@ -268,11 +269,15 @@ class AikoThink:
         # triple token budget in reasoning mode to fit the <think> scratchpad
         num_predict = _BASE_PREDICT * _REASONING_SCALE if self._reasoning else _BASE_PREDICT
 
+        all_messages = (
+            [{"role": "system", "content": system}] + messages
+            if system else messages
+        )
+
         try:
             stream = self._client.chat(
                 model=OLLAMA_MODEL,
-                messages=messages,
-                system=system,
+                messages=all_messages,
                 stream=True,
                 keep_alive=-1,
                 options={

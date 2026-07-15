@@ -1,0 +1,952 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video → VRM Mocap Exporter · aiko-vrm</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0d0d0f;
+      --surface: #16161a;
+      --border: #2a2a30;
+      --accent: #7c6bff;
+      --accent2: #ff6b9d;
+      --text: #e8e8ee;
+      --muted: #6b6b7a;
+      --track: #22222a;
+      --ok: #6bffb8;
+      --warn: #ffd166;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'SF Mono', 'JetBrains Mono', 'Fira Code', monospace;
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    #sidebar {
+      width: 300px;
+      flex-shrink: 0;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+    }
+
+    #sidebar header { padding: 20px 20px 12px; border-bottom: 1px solid var(--border); }
+    #sidebar header .tag { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); margin-bottom: 4px; }
+    #sidebar header h1 { font-size: 15px; font-weight: 600; color: var(--text); }
+
+    .section { padding: 16px 20px; border-bottom: 1px solid var(--border); }
+    .section-label { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin-bottom: 12px; }
+
+    #banner { display: none; margin: 0 20px 0; padding: 8px 10px; border-radius: 6px; font-size: 10px; line-height: 1.5; border: 1px solid transparent; white-space: pre-wrap; }
+    #banner.error { background: #2a1020; border-color: var(--accent2); color: var(--accent2); display: block; }
+    #banner.info { background: #16202a; border-color: var(--accent); color: var(--accent); display: block; }
+    #banner.ok { background: #102a20; border-color: var(--ok); color: var(--ok); display: block; }
+
+    .toggle-row { display: flex; gap: 8px; }
+    .toggle-btn {
+      flex: 1; padding: 8px; background: var(--track); border: 1px solid var(--border); border-radius: 6px;
+      color: var(--muted); font-family: inherit; font-size: 12px; cursor: pointer; transition: all 0.15s;
+    }
+    .toggle-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .toggle-btn.recording { background: #4a1226; border-color: var(--accent2); color: #fff; }
+    .toggle-btn:disabled, .action-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    .param-row { margin-bottom: 14px; }
+    .param-row:last-child { margin-bottom: 0; }
+    .param-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 5px; }
+    .param-name { font-size: 11px; color: var(--muted); }
+    .param-value { font-size: 11px; color: var(--accent); min-width: 44px; text-align: right; }
+
+    input[type="range"] {
+      -webkit-appearance: none; width: 100%; height: 3px; background: var(--track); border-radius: 2px; outline: none;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); cursor: pointer; border: 2px solid var(--bg);
+    }
+
+    .action-btn {
+      margin: 0 20px 12px; padding: 9px; background: transparent; border: 1px solid var(--border); border-radius: 6px;
+      color: var(--muted); font-family: inherit; font-size: 11px; cursor: pointer; transition: all 0.15s;
+      letter-spacing: 0.05em; width: calc(100% - 40px); text-align: center;
+    }
+    .action-btn:hover { border-color: var(--accent2); color: var(--accent2); }
+    .action-btn.primary { border-color: var(--accent); color: var(--accent); }
+    .action-btn.primary:hover { background: var(--accent); color: #fff; }
+
+    #viewport { flex: 1; position: relative; background: var(--bg); }
+    canvas { display: block; width: 100% !important; height: 100% !important; }
+
+    #hud {
+      position: absolute; top: 16px; right: 16px; font-size: 10px; color: var(--muted);
+      text-align: right; pointer-events: none; line-height: 1.8;
+    }
+    #hud span { color: var(--text); }
+
+    #infobar {
+      position: absolute; bottom: 0; left: 0; right: 0; padding: 10px 20px;
+      background: rgba(13, 13, 15, 0.85); border-top: 1px solid var(--border); font-size: 10px;
+      color: var(--muted); display: flex; gap: 20px; backdrop-filter: blur(6px);
+    }
+    .hint { display: flex; align-items: center; gap: 5px; }
+    .key { display: inline-block; padding: 1px 5px; background: var(--surface); border: 1px solid var(--border); border-radius: 3px; font-size: 9px; color: var(--text); }
+
+    .mini-note { font-size: 10px; color: var(--muted); line-height: 1.45; margin-top: 8px; }
+
+    .status-pill { display: inline-block; padding: 2px 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: 10px; }
+    .status-pill.live { color: var(--ok); border-color: var(--ok); }
+    .status-pill.rec { color: var(--accent2); border-color: var(--accent2); }
+
+    .field {
+      width: 100%; padding: 8px 10px; background: var(--track); border: 1px solid var(--border); border-radius: 6px;
+      color: var(--text); font-family: inherit; font-size: 12px; outline: none;
+    }
+    .field:focus { border-color: var(--accent); }
+
+    #cameraPreview {
+      position: absolute; left: 16px; bottom: 48px; width: 220px; max-width: 30vw;
+      border: 1px solid var(--border); border-radius: 8px; background: #000; opacity: 0.9; display: none;
+    }
+
+    .bone-grid { display: grid; gap: 6px; }
+    .bone-card { background: var(--track); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+    .bone-name { font-size: 9px; letter-spacing: 0.08em; color: var(--muted); text-transform: uppercase; margin-bottom: 4px; }
+    .bone-vals { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; }
+    .bone-val { font-size: 10px; color: var(--text); }
+    .axis-x { color: #ff6b6b; } .axis-y { color: #6bffb8; } .axis-z { color: #6bb5ff; }
+  </style>
+</head>
+
+<body>
+
+  <div id="sidebar">
+    <header>
+      <div class="tag">aiko-vrm · video → vrm mocap</div>
+      <h1 id="activeLabel">no avatar loaded</h1>
+    </header>
+
+    <div id="banner"></div>
+
+    <!-- VRM loader -->
+    <div class="section">
+      <div class="section-label">Avatar (.vrm)</div>
+      <div style="margin-bottom:10px"><span id="vrmStatus" class="status-pill">no avatar loaded</span></div>
+      <input class="field" id="vrmFile" type="file" accept=".vrm" aria-label="VRM avatar file">
+      <div class="mini-note">Browsers can't read your local filesystem by path, so pick <code>~/Aiko-chan/assets/Aiko.vrm</code> here once per session. Nothing is uploaded anywhere — it loads straight into this page.</div>
+    </div>
+
+    <!-- Video mocap importer -->
+    <div class="section">
+      <div class="section-label">Source video</div>
+      <div style="margin-bottom:10px"><span id="mocapStatus" class="status-pill">choose a video</span></div>
+      <input class="field" id="videoFile" type="file" accept="video/*" aria-label="source video">
+      <input class="field" id="videoUrl" type="url" placeholder="direct video URL (CORS-enabled .mp4/.webm)" aria-label="source video URL" style="margin-top:8px">
+      <button class="action-btn" style="margin:8px 0 0; width:100%" id="btnLoadUrl">load URL</button>
+      <div class="toggle-row" style="margin-top:8px">
+        <button class="toggle-btn" id="btnProcessVideo" disabled>track video</button>
+        <button class="toggle-btn" id="btnCancelVideo" disabled>cancel</button>
+      </div>
+      <div class="toggle-row" style="margin-top:8px">
+        <button class="toggle-btn" id="btnPlayback" disabled>play take</button>
+        <button class="toggle-btn" id="btnMirror">mirror L/R</button>
+      </div>
+      <div class="mini-note">Runs MediaPipe Tasks Vision (pose + face landmarker) frame-by-frame on the video, feeds the landmarks into Kalidokit, and drives Aiko's actual VRM skeleton and face blendshapes directly. URL loading needs a direct CORS-enabled media file; YouTube/Vimeo/watch pages can't be read by browser mocap code.</div>
+    </div>
+
+    <!-- Trim / export -->
+    <div class="section">
+      <div class="section-label">Crop take</div>
+      <div class="param-row">
+        <div class="param-header"><span class="param-name">start <span id="trimStartLabel">0.00s</span></span><span class="param-value" id="takeDurationLabel">0 frames</span></div>
+        <input type="range" id="slTrimStart" min="0" max="0" step="0.01" value="0">
+      </div>
+      <div class="param-row">
+        <div class="param-header"><span class="param-name">end <span id="trimEndLabel">0.00s</span></span><span class="param-value" id="trimDurationLabel">0.00s</span></div>
+        <input type="range" id="slTrimEnd" min="0" max="0" step="0.01" value="0">
+      </div>
+      <input class="field" id="gestureFileName" value="myVideoMocap" aria-label="export filename">
+      <button class="action-btn primary" style="margin:10px 0 0; width:100%" id="btnSaveGesture" disabled>save .js mocap clip</button>
+    </div>
+
+    <!-- Live debug readout -->
+    <div class="section">
+      <div class="section-label">Live tracking confidence</div>
+      <div class="bone-grid">
+        <div class="bone-card">
+          <div class="bone-name">Pose / Face</div>
+          <div class="bone-vals">
+            <div class="bone-val">pose <span id="dbgPose">—</span></div>
+            <div class="bone-val">face <span id="dbgFace">—</span></div>
+            <div class="bone-val">fps <span id="dbgFps">—</span></div>
+          </div>
+        </div>
+        <div class="bone-card">
+          <div class="bone-name">Mouth viseme weights</div>
+          <div class="bone-vals">
+            <div class="bone-val axis-x">A <span id="dbgA">0.00</span></div>
+            <div class="bone-val axis-y">I <span id="dbgI">0.00</span></div>
+            <div class="bone-val axis-z">U <span id="dbgU">0.00</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <button class="action-btn" id="btnResetPose">↺ reset to T-pose</button>
+  </div>
+
+  <div id="viewport">
+    <canvas id="c"></canvas>
+    <video id="cameraPreview" muted playsinline></video>
+
+    <div id="hud">
+      avatar: <span id="hudAvatar">—</span><br>
+      mode: <span id="hudMode">idle</span><br>
+      t: <span id="hudT">0.00</span>
+    </div>
+
+    <div id="infobar">
+      <div class="hint"><span class="key">drag</span> orbit</div>
+      <div class="hint"><span class="key">scroll</span> zoom</div>
+      <div class="hint"><span class="key">R</span> reset view</div>
+    </div>
+  </div>
+
+  <!-- Kalidokit ships as a UMD bundle; loading it as a classic script keeps `Kalidokit` on window for the module below -->
+  <script src="https://cdn.jsdelivr.net/npm/kalidokit@1.1.4/dist/kalidokit.umd.js"></script>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+      "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@2.1.1/lib/three-vrm.module.js"
+    }
+  }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+    import {
+      FilesetResolver,
+      PoseLandmarker,
+      FaceLandmarker,
+    } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
+
+    // ── Banner / status helpers ────────────────────────────────────
+    function showBanner(msg, type = 'error') {
+      const b = document.getElementById('banner');
+      b.className = type;
+      b.textContent = msg;
+      if (type === 'error') console.error(msg);
+    }
+    function hideBanner() {
+      const b = document.getElementById('banner');
+      b.className = '';
+      b.textContent = '';
+    }
+    function setMocapStatus(text, mode = '') {
+      const el = document.getElementById('mocapStatus');
+      el.textContent = text;
+      el.className = `status-pill ${mode}`.trim();
+    }
+    function setVrmStatus(text, mode = '') {
+      const el = document.getElementById('vrmStatus');
+      el.textContent = text;
+      el.className = `status-pill ${mode}`.trim();
+    }
+
+    // ── Three.js scene ──────────────────────────────────────────────
+    const canvas = document.getElementById('c');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0d0d0f);
+    scene.fog = new THREE.Fog(0x0d0d0f, 8, 22);
+
+    const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 100);
+    camera.position.set(0, 1.3, 3.2);
+
+    scene.add(new THREE.AmbientLight(0x8888cc, 0.7));
+    const key = new THREE.DirectionalLight(0xffffff, 1.0);
+    key.position.set(2, 4, 3);
+    scene.add(key);
+    const rim = new THREE.DirectionalLight(0x6655ff, 0.35);
+    rim.position.set(-3, 2, -2);
+    scene.add(rim);
+
+    scene.add(new THREE.GridHelper(10, 20, 0x2a2a30, 0x1a1a20));
+
+    // ── Orbit camera (unchanged from previous tool) ─────────────────
+    const orbit = { dragging: false, lastX: 0, lastY: 0, theta: 0, phi: 0.15, radius: 3.2, target: new THREE.Vector3(0, 1.0, 0) };
+    canvas.addEventListener('mousedown', e => { orbit.dragging = true; orbit.lastX = e.clientX; orbit.lastY = e.clientY; });
+    window.addEventListener('mouseup', () => { orbit.dragging = false; });
+    window.addEventListener('mousemove', e => {
+      if (!orbit.dragging) return;
+      orbit.theta -= (e.clientX - orbit.lastX) * 0.006;
+      orbit.phi = Math.max(0.05, Math.min(Math.PI / 2, orbit.phi + (e.clientY - orbit.lastY) * 0.006));
+      orbit.lastX = e.clientX; orbit.lastY = e.clientY;
+    });
+    canvas.addEventListener('wheel', e => {
+      orbit.radius = Math.max(0.8, Math.min(8, orbit.radius + e.deltaY * 0.005));
+    }, { passive: true });
+    window.addEventListener('keydown', e => {
+      if (e.key === 'r' || e.key === 'R') { orbit.theta = 0; orbit.phi = 0.15; orbit.radius = 3.2; }
+    });
+    function applyOrbit() {
+      const x = orbit.radius * Math.sin(orbit.theta) * Math.cos(orbit.phi);
+      const y = orbit.radius * Math.sin(orbit.phi) + orbit.target.y;
+      const z = orbit.radius * Math.cos(orbit.theta) * Math.cos(orbit.phi);
+      camera.position.set(x, y, z);
+      camera.lookAt(orbit.target);
+    }
+
+    function resize() {
+      const vp = document.getElementById('viewport');
+      renderer.setSize(vp.clientWidth, vp.clientHeight, false);
+      camera.aspect = vp.clientWidth / vp.clientHeight;
+      camera.updateProjectionMatrix();
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // ── VRM loading ──────────────────────────────────────────────────
+    const gltfLoader = new GLTFLoader();
+    gltfLoader.register(parser => new VRMLoaderPlugin(parser));
+
+    let currentVRM = null;
+    const restHipPosition = new THREE.Vector3(0, 0, 0);
+
+    document.getElementById('vrmFile').addEventListener('change', async (event) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      setVrmStatus(`loading ${file.name}…`, 'rec');
+      try {
+        const url = URL.createObjectURL(file);
+        const gltf = await gltfLoader.loadAsync(url);
+        URL.revokeObjectURL(url);
+        const vrm = gltf.userData.vrm;
+        if (!vrm) throw new Error('No VRM extension found in this glTF — is this really a .vrm file?');
+
+        VRMUtils.removeUnnecessaryVertices(gltf.scene);
+        VRMUtils.removeUnnecessaryJoints(gltf.scene);
+        // VRM0.x models face -Z by spec; three-vrm needs them turned to face +Z like VRM1.
+        if (vrm.meta?.metaVersion === '0') VRMUtils.rotateVRM0(vrm);
+
+        if (currentVRM) scene.remove(currentVRM.scene);
+        currentVRM = vrm;
+        scene.add(vrm.scene);
+        vrm.scene.traverse(o => { o.frustumCulled = false; });
+        cacheAvatarRestPose(vrm);
+
+        // Frame the camera roughly at chest height of whatever scale this model is.
+        const head = vrm.humanoid?.getNormalizedBoneNode('head');
+        const headY = head ? head.getWorldPosition(new THREE.Vector3()).y : 1.4;
+        orbit.target.set(0, headY * 0.62, 0);
+
+        document.getElementById('activeLabel').textContent = file.name;
+        document.getElementById('hudAvatar').textContent = file.name;
+        setVrmStatus(`${file.name} loaded`, 'live');
+        document.getElementById('btnProcessVideo').disabled = !selectedVideoUrl;
+        hideBanner();
+      } catch (err) {
+        setVrmStatus('load failed', '');
+        showBanner(`VRM load failed: ${err.message}`);
+      }
+    });
+
+    // ── MediaPipe Tasks Vision setup ─────────────────────────────────
+    let poseLandmarker = null;
+    let faceLandmarker = null;
+    let visionReady = false;
+
+    async function ensureVision() {
+      if (visionReady) return;
+      const fileset = await FilesetResolver.forVisionTasks(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+      );
+      poseLandmarker = await PoseLandmarker.createFromOptions(fileset, {
+        baseOptions: {
+          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task',
+        },
+        runningMode: 'VIDEO',
+        numPoses: 1,
+        minPoseDetectionConfidence: 0.55,
+        minPosePresenceConfidence: 0.55,
+        minTrackingConfidence: 0.55,
+      });
+      faceLandmarker = await FaceLandmarker.createFromOptions(fileset, {
+        baseOptions: {
+          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+        },
+        runningMode: 'VIDEO',
+        numFaces: 1,
+        outputFaceBlendshapes: false, // Kalidokit solves blendshapes itself from raw landmarks
+      });
+      visionReady = true;
+    }
+
+    // ── Kalidokit → VRM rigging ────────────────────────────────────
+    // Kalidokit returns PascalCase bone names; VRMHumanBoneName values are lowerCamelCase.
+    // Thumb segment names don't line up 1:1 with the VRM spec, so they get an explicit override.
+    const THUMB_OVERRIDE = {
+      LeftThumbProximal: 'leftThumbMetacarpal',
+      LeftThumbIntermediate: 'leftThumbProximal',
+      LeftThumbDistal: 'leftThumbDistal',
+      RightThumbProximal: 'rightThumbMetacarpal',
+      RightThumbIntermediate: 'rightThumbProximal',
+      RightThumbDistal: 'rightThumbDistal',
+    };
+    function vrmBoneName(kName) {
+      if (THUMB_OVERRIDE[kName]) return THUMB_OVERRIDE[kName];
+      return kName.charAt(0).toLowerCase() + kName.slice(1);
+    }
+
+    const tmpEuler = new THREE.Euler();
+    const tmpQuat = new THREE.Quaternion();
+    const tmpVec = new THREE.Vector3();
+
+    function cacheAvatarRestPose(vrm) {
+      const hips = vrm.humanoid?.getNormalizedBoneNode('hips');
+      restHipPosition.copy(hips?.position ?? tmpVec.set(0, 0, 0));
+    }
+
+    function resetRigState(vrm) {
+      if (!vrm?.humanoid) return;
+      for (const name of THREE_VRM_HUMAN_BONE_NAMES) {
+        const bone = vrm.humanoid.getNormalizedBoneNode(name);
+        if (bone) bone.quaternion.identity();
+      }
+      const hips = vrm.humanoid.getNormalizedBoneNode('hips');
+      if (hips) hips.position.copy(restHipPosition);
+      if (vrm.expressionManager) {
+        for (const name of ['blinkLeft', 'blinkRight', 'aa', 'ih', 'ou', 'ee', 'oh']) {
+          vrm.expressionManager.setValue(name, 0);
+        }
+      }
+      vrm.update(0);
+    }
+
+    function rigRotation(vrm, kName, rotation, dampener = 1, lerpAmount = 0.3) {
+      if (!rotation) return;
+      const bone = vrm.humanoid?.getNormalizedBoneNode(vrmBoneName(kName));
+      if (!bone) return;
+      tmpEuler.set((rotation.x || 0) * dampener, (rotation.y || 0) * dampener, (rotation.z || 0) * dampener);
+      tmpQuat.setFromEuler(tmpEuler);
+      bone.quaternion.slerp(tmpQuat, lerpAmount);
+    }
+
+    function rigPosition(vrm, kName, position, dampener = 1, lerpAmount = 0.3) {
+      if (!position) return;
+      const bone = vrm.humanoid?.getNormalizedBoneNode(vrmBoneName(kName));
+      if (!bone) return;
+      tmpVec.set((position.x || 0) * dampener, (position.y || 0) * dampener, (position.z || 0) * dampener);
+      bone.position.lerp(tmpVec, lerpAmount);
+    }
+
+    // Monocular root translation is very noisy in ordinary video. Keep it as a small expressive
+    // torso shift around the avatar's rest hips instead of letting MediaPipe depth become drift.
+    const HIP_DRIFT_CLAMP = 0.035; // normalized VRM local units
+    const HIP_DEADZONE = 0.018;
+    function clamp(v, lim) { return Math.max(-lim, Math.min(lim, v)); }
+    function deadzone(v, zone = HIP_DEADZONE) { return Math.abs(v) < zone ? 0 : v - Math.sign(v) * zone; }
+
+    // Legs (and arms, to a lesser extent) get noisy when their landmarks are partially occluded
+    // or just less confidently tracked than the torso/face. Below this visibility we hold the
+    // last pose instead of applying the noisy sample.
+    const VISIBILITY_GATE = 0.6;
+    function landmarksVisible(poseLm, indices) {
+      if (!poseLm) return false;
+      return indices.every(i => i < poseLm.length && (poseLm[i]?.visibility ?? 0) >= VISIBILITY_GATE);
+    }
+
+    function rigPose(vrm, riggedPose, poseLm) {
+      if (!riggedPose || !poseLm) return;
+      rigRotation(vrm, 'Hips', riggedPose.Hips.rotation, 0.7, 0.3);
+      const hips = vrm.humanoid?.getNormalizedBoneNode('hips');
+      if (hips && riggedPose.Hips?.position) {
+        tmpVec.set(
+          restHipPosition.x + clamp(deadzone(-riggedPose.Hips.position.x) * 0.25, HIP_DRIFT_CLAMP),
+          restHipPosition.y + clamp(deadzone(riggedPose.Hips.position.y) * 0.12, HIP_DRIFT_CLAMP),
+          restHipPosition.z + clamp(deadzone(-riggedPose.Hips.position.z) * 0.08, HIP_DRIFT_CLAMP * 0.6),
+        );
+        hips.position.lerp(tmpVec, 0.16);
+      }
+
+      rigRotation(vrm, 'Chest', riggedPose.Spine, 0.25, 0.3);
+      rigRotation(vrm, 'Spine', riggedPose.Spine, 0.45, 0.3);
+
+      // MediaPipe pose landmark indices: 11/12 shoulders, 13/14 elbows, 15/16 wrists,
+      // 23/24 hips, 25/26 knees, 27/28 ankles.
+      if (landmarksVisible(poseLm, [11, 13, 15])) {
+        rigRotation(vrm, 'LeftUpperArm', riggedPose.LeftUpperArm, 0.65, 0.3);
+        rigRotation(vrm, 'LeftLowerArm', riggedPose.LeftLowerArm, 0.65, 0.3);
+      }
+      if (landmarksVisible(poseLm, [12, 14, 16])) {
+        rigRotation(vrm, 'RightUpperArm', riggedPose.RightUpperArm, 1, 0.3);
+        rigRotation(vrm, 'RightLowerArm', riggedPose.RightLowerArm, 1, 0.3);
+      }
+      if (landmarksVisible(poseLm, [23, 25, 27])) {
+        rigRotation(vrm, 'LeftUpperLeg', riggedPose.LeftUpperLeg, 1, 0.2);
+        rigRotation(vrm, 'LeftLowerLeg', riggedPose.LeftLowerLeg, 1, 0.2);
+      }
+      if (landmarksVisible(poseLm, [24, 26, 28])) {
+        rigRotation(vrm, 'RightUpperLeg', riggedPose.RightUpperLeg, 1, 0.2);
+        rigRotation(vrm, 'RightLowerLeg', riggedPose.RightLowerLeg, 1, 0.2);
+      }
+    }
+
+    // True mirroring has to happen on the raw landmarks before Kalidokit solves them.
+    function mirrorNormalized(landmarks) {
+      return landmarks.map(p => ({ ...p, x: 1 - p.x }));
+    }
+    function mirrorWorld(landmarks) {
+      return landmarks.map(p => ({ ...p, x: -p.x }));
+    }
+
+    function rigFace(vrm, riggedFace) {
+      if (!riggedFace || !vrm.expressionManager) return;
+      const em = vrm.expressionManager;
+
+      // Head/neck follow the face solve's head pose (this is what actually reads as
+      // "looking at the camera" / nodding / tilting in sync with the source footage).
+      rigRotation(vrm, 'Neck', riggedFace.head, 0.55, 0.3);
+      rigRotation(vrm, 'Head', riggedFace.head, 0.7, 0.3);
+
+      const blend = (name, value) => {
+        const prev = em.getValue(name) ?? 0;
+        em.setValue(name, prev + (value - prev) * 0.5);
+      };
+
+      blend('blinkLeft', 1 - riggedFace.eye.l);
+      blend('blinkRight', 1 - riggedFace.eye.r);
+
+      const mouth = riggedFace.mouth.shape;
+      blend('aa', mouth.A);
+      blend('ih', mouth.I);
+      blend('ou', mouth.U);
+      blend('ee', mouth.E);
+      blend('oh', mouth.O);
+
+      document.getElementById('dbgA').textContent = mouth.A.toFixed(2);
+      document.getElementById('dbgI').textContent = mouth.I.toFixed(2);
+      document.getElementById('dbgU').textContent = mouth.U.toFixed(2);
+    }
+
+    function captureFrame(vrm, time) {
+      const bones = {};
+      if (vrm.humanoid) {
+        for (const name of Object.values(THREE_VRM_HUMAN_BONE_NAMES)) {
+          const bone = vrm.humanoid.getNormalizedBoneNode(name);
+          if (!bone) continue;
+          bones[name] = [
+            +bone.quaternion.x.toFixed(5), +bone.quaternion.y.toFixed(5),
+            +bone.quaternion.z.toFixed(5), +bone.quaternion.w.toFixed(5),
+          ];
+        }
+      }
+      const hips = vrm.humanoid?.getNormalizedBoneNode('hips');
+      const expressions = {};
+      if (vrm.expressionManager) {
+        for (const name of ['blinkLeft', 'blinkRight', 'aa', 'ih', 'ou', 'ee', 'oh']) {
+          expressions[name] = +(vrm.expressionManager.getValue(name) ?? 0).toFixed(4);
+        }
+      }
+      return {
+        time: +time.toFixed(4),
+        hipsPos: hips ? [+hips.position.x.toFixed(5), +hips.position.y.toFixed(5), +hips.position.z.toFixed(5)] : [0, 0, 0],
+        bones,
+        expressions,
+      };
+    }
+
+    // Minimal humanoid bone list we actually rig/record (body + a few face-relevant ones).
+    // Hands/fingers are intentionally left out of this pass — Kalidokit + a HandLandmarker
+    // pass can be added later if you want fingers too.
+    const THREE_VRM_HUMAN_BONE_NAMES = [
+      'hips', 'spine', 'chest', 'neck', 'head',
+      'leftUpperArm', 'leftLowerArm', 'leftHand',
+      'rightUpperArm', 'rightLowerArm', 'rightHand',
+      'leftUpperLeg', 'leftLowerLeg', 'leftFoot',
+      'rightUpperLeg', 'rightLowerLeg', 'rightFoot',
+    ];
+
+    // ── Video element / state ────────────────────────────────────────
+    const cameraPreview = document.getElementById('cameraPreview');
+    let selectedVideoUrl = null;
+    let selectedVideoIsObjectUrl = false;
+    let processingVideo = false;
+    let recordedFrames = [];
+    let mirrorLR = false;
+
+    function setVideoSource(src, label, isObjectUrl = false) {
+      if (selectedVideoIsObjectUrl && selectedVideoUrl) URL.revokeObjectURL(selectedVideoUrl);
+      selectedVideoUrl = src;
+      selectedVideoIsObjectUrl = isObjectUrl;
+      recordedFrames = [];
+      cameraPreview.pause();
+      cameraPreview.removeAttribute('src');
+      cameraPreview.load();
+      if (isObjectUrl) cameraPreview.removeAttribute('crossorigin');
+      else cameraPreview.crossOrigin = 'anonymous';
+      cameraPreview.src = selectedVideoUrl;
+      cameraPreview.loop = false;
+      cameraPreview.muted = true;
+      cameraPreview.playsInline = true;
+      cameraPreview.style.display = 'block';
+      document.getElementById('btnProcessVideo').disabled = !currentVRM;
+      updateTakeUi();
+      setMocapStatus(`loaded ${label}${currentVRM ? '' : ' - load a VRM avatar first'}`, currentVRM ? 'live' : '');
+    }
+
+    document.getElementById('videoFile').addEventListener('change', (event) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      setVideoSource(URL.createObjectURL(file), file.name, true);
+    });
+
+    document.getElementById('btnLoadUrl').addEventListener('click', () => {
+      const raw = document.getElementById('videoUrl').value.trim();
+      if (!raw) return showBanner('Paste a direct .mp4/.webm URL first.', 'info');
+      let url;
+      try {
+        url = new URL(raw, window.location.href);
+      } catch {
+        return showBanner('That video URL is not valid.');
+      }
+      if (/youtube\.com|youtu\.be|vimeo\.com/i.test(url.hostname)) {
+        showBanner('YouTube/Vimeo pages do not expose readable video frames to this page. Use an uploaded file or a direct CORS-enabled .mp4/.webm URL instead.', 'info');
+      }
+      setVideoSource(url.href, url.hostname, false);
+    });
+
+    document.getElementById('btnMirror').addEventListener('click', (e) => {
+      mirrorLR = !mirrorLR;
+      e.target.classList.toggle('active', mirrorLR);
+    });
+
+    document.getElementById('btnCancelVideo').addEventListener('click', () => {
+      processingVideo = false;
+      cameraPreview.pause();
+      const btn = document.getElementById('btnProcessVideo');
+      btn.classList.remove('recording');
+      btn.textContent = 'track video';
+      document.getElementById('btnCancelVideo').disabled = true;
+      btn.disabled = !selectedVideoUrl || !currentVRM;
+      setMocapStatus(recordedFrames.length > 1 ? `tracked ${recordedFrames.length} frames` : 'tracking canceled', recordedFrames.length > 1 ? 'live' : '');
+    });
+
+    document.getElementById('btnProcessVideo').addEventListener('click', async () => {
+      if (!selectedVideoUrl || !currentVRM || processingVideo) return;
+      try {
+        await ensureVision();
+        processingVideo = true;
+        recordedFrames = [];
+        resetRigState(currentVRM);
+
+        const processBtn = document.getElementById('btnProcessVideo');
+        processBtn.disabled = true;
+        processBtn.classList.add('recording');
+        processBtn.textContent = 'tracking…';
+        document.getElementById('btnCancelVideo').disabled = false;
+        document.getElementById('hudMode').textContent = 'tracking video';
+
+        cameraPreview.currentTime = 0;
+        cameraPreview.playbackRate = 1;
+        await cameraPreview.play();
+        setMocapStatus('tracking 0.0s', 'rec');
+        hideBanner();
+
+        let frameCount = 0;
+        let lastFpsCheck = performance.now();
+
+        const step = async () => {
+          if (!processingVideo) return;
+          if (cameraPreview.ended || cameraPreview.paused) {
+            processingVideo = false;
+            processBtn.classList.remove('recording');
+            processBtn.textContent = 'track video';
+            processBtn.disabled = false;
+            document.getElementById('btnCancelVideo').disabled = true;
+            document.getElementById('hudMode').textContent = 'idle';
+            setMocapStatus(`tracked ${recordedFrames.length} frames`, 'live');
+            updateTakeUi();
+            return;
+          }
+          try {
+            const t = cameraPreview.currentTime * 1000;
+            const poseResult = poseLandmarker.detectForVideo(cameraPreview, t);
+            const faceResult = faceLandmarker.detectForVideo(cameraPreview, t);
+
+            const rawPoseLm = poseResult.landmarks?.[0];
+            const rawPoseWorldLm = poseResult.worldLandmarks?.[0];
+            const rawFaceLm = faceResult.faceLandmarks?.[0];
+            const poseLm = rawPoseLm && mirrorLR ? mirrorNormalized(rawPoseLm) : rawPoseLm;
+            const poseWorldLm = rawPoseWorldLm && mirrorLR ? mirrorWorld(rawPoseWorldLm) : rawPoseWorldLm;
+            const faceLm = rawFaceLm && mirrorLR ? mirrorNormalized(rawFaceLm) : rawFaceLm;
+
+            document.getElementById('dbgPose').textContent = poseLm ? 'tracked' : 'lost';
+            document.getElementById('dbgFace').textContent = faceLm ? 'tracked' : 'lost';
+
+            if (poseLm && poseWorldLm) {
+              const riggedPose = Kalidokit.Pose.solve(poseWorldLm, poseLm, { runtime: 'mediapipe', video: cameraPreview, enableLegs: true });
+              rigPose(currentVRM, riggedPose, poseLm);
+            }
+            if (faceLm) {
+              const riggedFace = Kalidokit.Face.solve(faceLm, { runtime: 'mediapipe', video: cameraPreview, imageSize: { width: cameraPreview.videoWidth, height: cameraPreview.videoHeight } });
+              rigFace(currentVRM, riggedFace);
+            }
+
+            currentVRM.update(1 / 60);
+            recordedFrames.push(captureFrame(currentVRM, cameraPreview.currentTime));
+
+            frameCount++;
+            const now = performance.now();
+            if (now - lastFpsCheck > 500) {
+              document.getElementById('dbgFps').textContent = (frameCount / ((now - lastFpsCheck) / 1000)).toFixed(0);
+              frameCount = 0;
+              lastFpsCheck = now;
+            }
+
+            setMocapStatus(`tracking ${cameraPreview.currentTime.toFixed(1)}s / ${(cameraPreview.duration || 0).toFixed(1)}s`, 'rec');
+            requestAnimationFrame(step);
+          } catch (err) {
+            processingVideo = false;
+            processBtn.classList.remove('recording');
+            processBtn.textContent = 'track video';
+            processBtn.disabled = !selectedVideoUrl || !currentVRM;
+            document.getElementById('btnCancelVideo').disabled = true;
+            document.getElementById('hudMode').textContent = 'idle';
+            showBanner(`Tracking step failed: ${err.message}\n${err.stack ?? ''}`);
+          }
+        };
+        requestAnimationFrame(step);
+      } catch (err) {
+        processingVideo = false;
+        document.getElementById('btnProcessVideo').disabled = !selectedVideoUrl || !currentVRM;
+        document.getElementById('btnCancelVideo').disabled = true;
+        showBanner(`Couldn't start tracking: ${err.message}`);
+      }
+    });
+
+    // ── Trim ──────────────────────────────────────────────────────
+    function updateTakeUi() {
+      const duration = recordedFrames.at(-1)?.time ?? 0;
+      for (const id of ['slTrimStart', 'slTrimEnd']) {
+        const el = document.getElementById(id);
+        el.max = duration.toFixed(2);
+        el.disabled = recordedFrames.length < 2;
+      }
+      document.getElementById('slTrimStart').value = 0;
+      document.getElementById('slTrimEnd').value = duration.toFixed(2);
+      document.getElementById('takeDurationLabel').textContent = `${recordedFrames.length} frames`;
+      updateTrim();
+      const hasTake = recordedFrames.length > 1;
+      document.getElementById('btnPlayback').disabled = !hasTake;
+      document.getElementById('btnSaveGesture').disabled = !hasTake;
+    }
+    function updateTrim() {
+      const a = document.getElementById('slTrimStart');
+      const b = document.getElementById('slTrimEnd');
+      if (+a.value > +b.value) a.value = b.value;
+      document.getElementById('trimStartLabel').textContent = `${(+a.value).toFixed(2)}s`;
+      document.getElementById('trimEndLabel').textContent = `${(+b.value).toFixed(2)}s`;
+      document.getElementById('trimDurationLabel').textContent = `${Math.max(0, +b.value - +a.value).toFixed(2)}s`;
+    }
+    document.getElementById('slTrimStart').addEventListener('input', updateTrim);
+    document.getElementById('slTrimEnd').addEventListener('input', updateTrim);
+
+    function trimmedFrames() {
+      const start = +document.getElementById('slTrimStart').value;
+      const end = +document.getElementById('slTrimEnd').value;
+      return recordedFrames.filter(f => f.time >= start && f.time <= end)
+        .map(f => ({ time: +(f.time - start).toFixed(4), hipsPos: f.hipsPos, bones: f.bones, expressions: f.expressions }));
+    }
+
+    // ── Playback preview ────────────────────────────────────────────
+    let mocapPlayback = false;
+    let mocapPlaybackStartedAt = 0;
+    let activeMocapFrames = [];
+
+    document.getElementById('btnPlayback').addEventListener('click', (e) => {
+      const frames = trimmedFrames();
+      if (frames.length < 2) return;
+      mocapPlayback = !mocapPlayback;
+      if (mocapPlayback) { activeMocapFrames = frames; mocapPlaybackStartedAt = performance.now(); }
+      e.target.classList.toggle('active', mocapPlayback);
+      document.getElementById('hudMode').textContent = mocapPlayback ? 'previewing take' : 'idle';
+    });
+
+    function lerp(a, b, t) { return a + (b - a) * t; }
+    const playbackQuat = new THREE.Quaternion();
+
+    function sampleAndApply(frames, t) {
+      if (!currentVRM || frames.length < 2) return;
+      const duration = frames.at(-1).time || 0.001;
+      const time = ((t % duration) + duration) % duration;
+      let i = 0;
+      while (i < frames.length - 2 && frames[i + 1].time < time) i++;
+      const a = frames[i], b = frames[Math.min(i + 1, frames.length - 1)];
+      const f = Math.max(0, Math.min(1, (time - a.time) / Math.max(0.001, b.time - a.time)));
+
+      for (const name of THREE_VRM_HUMAN_BONE_NAMES) {
+        const bone = currentVRM.humanoid?.getNormalizedBoneNode(name);
+        const qa = a.bones[name], qb = b.bones[name];
+        if (!bone || !qa || !qb) continue;
+        playbackQuat.set(
+          lerp(qa[0], qb[0], f), lerp(qa[1], qb[1], f),
+          lerp(qa[2], qb[2], f), lerp(qa[3], qb[3], f),
+        ).normalize();
+        bone.quaternion.copy(playbackQuat);
+      }
+      const hips = currentVRM.humanoid?.getNormalizedBoneNode('hips');
+      if (hips) {
+        hips.position.set(
+          lerp(a.hipsPos[0], b.hipsPos[0], f),
+          lerp(a.hipsPos[1], b.hipsPos[1], f),
+          lerp(a.hipsPos[2], b.hipsPos[2], f),
+        );
+      }
+      if (currentVRM.expressionManager && a.expressions) {
+        for (const name of Object.keys(a.expressions)) {
+          currentVRM.expressionManager.setValue(name, lerp(a.expressions[name], b.expressions[name] ?? 0, f));
+        }
+      }
+      currentVRM.update(1 / 60);
+    }
+
+    // ── Export ────────────────────────────────────────────────────
+    function buildExportModule(frames, exportName) {
+      return `// ${exportName}.js
+// Mocap clip exported from video-vrm-mocap.html.
+// Tracked with MediaPipe Tasks Vision + Kalidokit, retargeted onto Aiko's VRM humanoid skeleton.
+// Replay on any loaded @pixiv/three-vrm VRM instance with the same bone naming.
+
+const BONES = ${JSON.stringify(THREE_VRM_HUMAN_BONE_NAMES)};
+const FRAMES = ${JSON.stringify(frames)};
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function sample(frames, t) {
+  if (!frames.length) return null;
+  const duration = frames[frames.length - 1].time || 0.001;
+  const time = ((t % duration) + duration) % duration;
+  let i = 0;
+  while (i < frames.length - 2 && frames[i + 1].time < time) i++;
+  const a = frames[i], b = frames[Math.min(i + 1, frames.length - 1)];
+  const f = Math.max(0, Math.min(1, (time - a.time) / Math.max(0.001, b.time - a.time)));
+  return { a, b, f };
+}
+
+// vrm: a loaded @pixiv/three-vrm VRM instance. t: seconds, looping.
+export function ${exportName}(vrm, t) {
+  const s = sample(FRAMES, t);
+  if (!s || !vrm.humanoid) return;
+  const { a, b, f } = s;
+  for (const name of BONES) {
+    const bone = vrm.humanoid.getNormalizedBoneNode(name);
+    const qa = a.bones[name], qb = b.bones[name];
+    if (!bone || !qa || !qb) continue;
+    bone.quaternion.set(
+      lerp(qa[0], qb[0], f), lerp(qa[1], qb[1], f),
+      lerp(qa[2], qb[2], f), lerp(qa[3], qb[3], f),
+    ).normalize();
+  }
+  const hips = vrm.humanoid.getNormalizedBoneNode('hips');
+  if (hips) {
+    hips.position.set(
+      lerp(a.hipsPos[0], b.hipsPos[0], f),
+      lerp(a.hipsPos[1], b.hipsPos[1], f),
+      lerp(a.hipsPos[2], b.hipsPos[2], f),
+    );
+  }
+  if (vrm.expressionManager && a.expressions) {
+    for (const name of Object.keys(a.expressions)) {
+      vrm.expressionManager.setValue(name, lerp(a.expressions[name], b.expressions[name] ?? 0, f));
+    }
+  }
+}
+`;
+    }
+
+    document.getElementById('btnSaveGesture').addEventListener('click', async () => {
+      const frames = trimmedFrames();
+      if (frames.length < 2) return showBanner('Track a video and crop at least two frames first.', 'info');
+      const rawName = document.getElementById('gestureFileName').value.replace(/\.js$/i, '') || 'myVideoMocap';
+      const exportName = rawName.replace(/[^a-zA-Z0-9_$]/g, '_').replace(/^[^a-zA-Z_$]/, '_$&');
+      const source = buildExportModule(frames, exportName);
+      try {
+        if ('showSaveFilePicker' in window) {
+          const handle = await showSaveFilePicker({ suggestedName: `${rawName}.js`, types: [{ description: 'JavaScript module', accept: { 'text/javascript': ['.js'] } }] });
+          const writable = await handle.createWritable();
+          await writable.write(source);
+          await writable.close();
+          setMocapStatus(`saved ${rawName}.js`, 'live');
+        } else {
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
+          a.download = `${rawName}.js`;
+          a.click();
+          URL.revokeObjectURL(a.href);
+          setMocapStatus(`downloaded ${rawName}.js`, 'live');
+        }
+      } catch (err) {
+        if (err.name !== 'AbortError') showBanner(`Save failed: ${err.message}`);
+      }
+    });
+
+    // ── Reset ────────────────────────────────────────────────────
+    document.getElementById('btnResetPose').addEventListener('click', () => {
+      mocapPlayback = false;
+      document.getElementById('btnPlayback').classList.remove('active');
+      if (currentVRM?.humanoid) {
+        for (const name of THREE_VRM_HUMAN_BONE_NAMES) {
+          const bone = currentVRM.humanoid.getNormalizedBoneNode(name);
+          if (bone) bone.quaternion.identity();
+        }
+        const hips = currentVRM.humanoid.getNormalizedBoneNode('hips');
+        if (hips) hips.position.copy(restHipPosition);
+        if (currentVRM.expressionManager) {
+          for (const name of ['blinkLeft', 'blinkRight', 'aa', 'ih', 'ou', 'ee', 'oh']) {
+            currentVRM.expressionManager.setValue(name, 0);
+          }
+        }
+      }
+      document.getElementById('hudMode').textContent = 'idle';
+    });
+
+    // ── Render loop ───────────────────────────────────────────────
+    let last = performance.now();
+    let animTime = 0;
+    (function loop(now) {
+      requestAnimationFrame(loop);
+      const dt = Math.min((now - last) / 1000, 0.05);
+      last = now;
+      animTime += dt;
+      document.getElementById('hudT').textContent = animTime.toFixed(2);
+
+      if (mocapPlayback && activeMocapFrames.length > 1) {
+        sampleAndApply(activeMocapFrames, (now - mocapPlaybackStartedAt) / 1000);
+      } else if (currentVRM) {
+        currentVRM.update(dt);
+      }
+
+      applyOrbit();
+      renderer.render(scene, camera);
+    })(performance.now());
+  </script>
+</body>
+
+</html>

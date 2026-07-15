@@ -1,257 +1,327 @@
-# Aiko-chan 愛子ちゃん
+# Aiko-chan アイコちゃん
 
-> AI companion, soulmate, and occasional roaster.
-> A vibe-coded AI waifu built for real conversation, persistent memory, and eventually — a face and a voice.
+> A local-first AI companion with a browser WebUI + VRM avatar, optional simple CLI, persistent memory, web search, microphone input, and MioTTS voice output.
+> Optimised for constrained hardware — runs on a Jetson Orin Nano with 8GB unified RAM.
 
-This project is a **precursor and testing sandbox** for [Grace / AuRoRA](https://github.com/OppaAI/AGi).  
-Core tech (mem0 + Qdrant memory, Ollama inference, async pipelines) is battle-tested here before graduating to Grace.
+**Author:** [OppaAI](https://github.com/OppaAI) · Beautiful British Columbia, Canada
 
-![Aiko-chan](assets/phase-1.5.jpg)
+[![Repo](https://img.shields.io/badge/Repo-OppaAI%2FAiko--chan-967BB6?logo=github&logoColor=white)](https://github.com/OppaAI/Aiko-chan)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+![Status](https://img.shields.io/badge/Status-experimental-orange.svg)
+
+![LLM](https://img.shields.io/badge/Runtime-llama.cpp-967BB6?logo=ai&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python&logoColor=white)
+![Ubuntu](https://img.shields.io/badge/Ubuntu-24.04_LTS-orange?logo=ubuntu&logoColor=white)
+![CUDA](https://img.shields.io/badge/CUDA-12.6-76B900?logo=nvidia)
+
+---
+
+## Status
+
+Phase 2 voice is implemented, and Phase 2.5 agentic workflows are now active. The default launch path is the browser WebUI/VRM frontend, including a WebSocket bridge for chat, vitals, voice status, expression, viseme, and browser microphone events. `--cli` remains available for simple local testing.
+
+ASR and TTS run through the local machine by default. WebUI microphone streaming exists in the frontend/backend bridge, but full remote voice-device polish is still experimental.
+
+> **Known Issues:**
+> - TTS via MioTTS sometimes cannot inference proper voice output due to memory constraint (MioTTS and embedding models are still tuned for Jetson memory pressure; Harrier replaced BGE for better semantic separation at 640d)
+> - Time latency between ASR voice input ends to beginning of TTS voice output are still over 5 sec for normal chats. Need to figure out how to do proper synchronized text and speech streaming to save a couple seconds.
+> - ASR may have transcribing errors that output wrong text or even wrong language, especially when accent is present in speaker's voice or when using low quality microphone.
+> - Barge-in haven't been fully tested and may cause some runtime issues that needed to conduct more testing and debugging.
+
+---
+
+## Demo
+
+> Click the following image to watch on YouTube ▶
+
+[![Watch the demo](https://img.youtube.com/vi/9ZkuYCL6vP0/maxresdefault.jpg)](https://youtu.be/SKvZQcFN6vo)
+
+---
+
+## Purpose
+
+This project currently serves as:
+
+- a local AI companion chatbot with persistent memory, web search, TTS, ASR, a terminal UI, and an optional browser WebUI/VRM avatar;
+- a stress test for running a full conversational stack on constrained hardware such as an 8 GB VRAM GPU or Jetson Orin Nano;
+- a precursor and testing sandbox for the larger Grace / AuRoRA project;
+- an experimental playground for memory decay, nightly consolidation, daily reflection publishing, agentic tools, scheduled reminders, and workflow skills.
+
+---
+
+## Features
+
+### 💬 Conversational Core
+- **Local-first LLM** — OpenAI-compatible endpoint (llama.cpp `llama-server` recommended), runs entirely on your hardware
+- **Curses TUI** — Full-screen cyberpunk terminal interface with streaming tokens, status panels, and command palette
+- **Browser WebUI (optional)** — Modern web interface with VRM avatar, WebSocket bridge, browser microphone streaming
+- **Persona system** — Rich personality defined in `persona/soul.md` with identity, skills, and user profile
+
+### 🧠 Persistent Memory
+- **sqlite-vec + custom Harrier ONNX embedder** — Serverless vector store, no Qdrant/mem0 required
+- **Hybrid retrieval** — KNN vector + FTS5 lexical + Reciprocal Rank Fusion
+- **Ebbinghaus-style decay** — Memories fade naturally unless pinned
+- **Pinned memories** — `/remember` command makes memories decay-proof
+- **Nightly dream consolidation** — Midnight `dream()` merges near-duplicates, prunes decayed memories, pins daily summaries
+- **Monthly consolidation** — Older full months summarized into durable pinned memories
+- **Encrypted storage option** — SQLCipher via `AIKO_SQLITE_ENCRYPTION=1` for per-user encrypted databases
+
+### 🔍 Web Search & Research
+- **Local SearXNG** — Private web search instance via Docker
+- **`/web <query>` command** — Grounded answers with source citations
+- **Deep research tool** — Multi-step search, fetch, and synthesis for agentic tasks
+
+### 🎤 Voice
+- **ASR** — SenseVoice via sherpa-onnx (int8 ONNX, multilingual JP/EN)
+- **VAD** — Dual energy VAD and Silero VAD for voice activity detection
+- **Microphone** — PulseAudio `parec` capture (local) + browser WebAudio Worklet (WebUI)
+- **Barge-in** — Speak over Aiko mid-response to interrupt
+- **Speaker verification** — Optional ERes2Net via sherpa-onnx speaker embeddings for owner-only voice activation
+- **TTS** — MioTTS via llama.cpp + synthesizer server (0.4B Q4KM), bilingual JP/EN, karaoke-style text sanitization
+- **Staged warmup** — ASR, VAD, TTS, and microphone warmed during boot
+
+### 🤖 Agentic Skills
+- **ReAct task loop** — LLM plans, calls tools, observes, repeats until done
+- **Toolkit modules** — Web search, fetch, planning, scheduling, workspace notes, photo ingestion, repo inspection
+- **Skill registry** — Markdown workflow definitions in `skills/skillsets/*.md`
+- **Skill context injection** — Relevant skill instructions automatically retrieved in agentic mode
+- **Dual-path routing** — Fast semantic exemplar routing (default) + optional LLM router fallback
+- **Final-answer verification** — Self-critique and repair loop for tool outputs
+- **Scheduling & reminders** — Per-user `schedule.json` with cron-like recurrence, due announcements
+- **Workspace tools** — Safe note-taking, file reads, photo scanning under `WORKSPACE_ROOT`
+
+### 🌙 Nightly Dream Pipeline
+- **Midnight scheduler** — Runs automatically at configurable hour
+- **Salient memory boost** — Important memories reinforced
+- **Near-duplicate merging** — Vector similarity deduplication
+- **Decay pruning** — Low-score memories removed
+- **Daily reflection** — Optional Hugo + GitHub Pages blog publishing
+- **Cross-session coherence** — Ongoing improvements to memory continuity
+
+### 👥 Multi-User Support (Experimental)
+- **OAuth identity** — Provider-scoped user IDs (`github_123`, `patreon_456`)
+- **Per-user isolation** — `~/.aiko/<user_id>/{memory.db, schedule.json, workspace/, user}`
+- **SQLCipher encryption** — Per-user encrypted databases with server-secret derived keys
+- **Workspace isolation** — Per-user workspaces, future Google Drive mount support
+
+### 🎭 WebUI / VRM Frontend (Experimental)
+- **three.js + @pixiv/three-vrm** — Browser-rendered VRM avatar
+- **WebSocket bridge** — Real-time chat, vitals, voice state, expressions, visemes
+- **Browser microphone** — AudioWorklet PCM capture → dual energy VAD + Silero VAD → backend ASR
+- **Expression system** — Idle, happy, annoyed, flustered, thinking (planned)
+- **Lip-sync** — Viseme-driven from TTS audio (planned)
+
+---
+
+## Documentation
+
+| Document | Description |
+|---|---|
+| [docs/INSTALL.md](docs/INSTALL.md) | Step-by-step installation for every component |
+| [docs/HISTORY.md](docs/HISTORY.md) | How Aiko evolved from a chatbot into a companion |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | Detailed phase-by-phase feature roadmap |
+| [docs/TESTS.md](docs/TESTS.md) | Manual smoke-test checklist for each phase |
+| [docs/MULTI_USER.md](docs/MULTI_USER.md) | Multi-user isolation, encryption, and deployment notes |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Runtime architecture, module boundaries, and data flows |
+
+---
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    subgraph P15["Phase 1.5 — current"]
-        YOU[You / TUI] --> THINK[Think\nOllama LLM]
-        THINK <-->|async write| MEM[Memorize\nmem0 + Qdrant]
-        THINK <-->|on demand| SEARCH[Web search\nSearXNG]
-        THINK --> SPEAK[Speak\nKokoro TTS]
-        LISTEN[Listen\nfaster-whisper ASR] --> THINK
-    end
-
-    subgraph P2["Phase 2 — voice"]
-        VAD[VAD\nSilero]
-        PTT[Push-to-talk]
-    end
-
-    subgraph P3["Phase 3 — face"]
-        VRM[VRM avatar\nthree-vrm] --> EXP[Expressions]
-        EXP --> LIPS[Lip sync\nTTS-driven]
-    end
-
-    subgraph P4567["Phases 4–7"]
-        PRESENCE[Presence\nemotion + proactive]
-        MOBILE[Mobile\nphone app + WAN]
-        MULTI[Multimodal\nCV + image input]
-        AUTO[Autonomy\nproactive AI]
-        PRESENCE --> MOBILE --> MULTI --> AUTO
-    end
-
-    P15 --> P2 --> P3 --> P4567
-    MEM -.->|findings| GRACE[Grace / AuRoRA]
+    YOU[You] --> UI[UI\nWebUI or CLI]
+    UI --> THINK[Think\nllama.cpp/OpenAI-compatible LLM]
+    THINK <-->|async| MEM[Memory\nsqlite-vec + Harrier llama.cpp server]
+    THINK <-->|on demand| SEARCH[Web search\nSearXNG]
+    THINK --> SPEAK[Speak\nMioTTS]
+    LISTEN["Listen\nSenseVoice (sherpa-onnx) + dual energy VAD + Silero VAD"] --> THINK
+    THINK -.->|nightly| DREAM[Dream\nconsolidation]
+    DREAM -.->|optional| REFLECT[Reflect\nHugo + GitHub]
 ```
 
 ---
 
 ## Stack
 
-| Layer | Tech |
+| Layer | Implementation |
 |---|---|
-| Brain | Ollama (remote or local LLM) |
-| Long-term memory | mem0 + Qdrant (Docker) |
-| Embeddings | Ollama (`nomic-embed-text-v2-moe`) |
-| Web search | SearXNG (local, self-hosted) |
-| TTS | Kokoro (via RealtimeTTS) |
-| ASR | faster-whisper |
-| Interface | TUI → Voice → Avatar → Mobile |
+| Entry point | `main.py` (browser WebUI default, `--cli` optional simple CLI) |
+| Interface | browser WebUI in `interface/webui/` by default; simple local CLI via `--cli` |
+| Chat model | llama.cpp or any OpenAI-compatible local server via `openai.OpenAI` |
+| Long-term memory | custom sqlite-vec backend (no server required) |
+| Embeddings | Harrier llama.cpp, `harrier-oss-v1-270m via llama.cpp server` |
+| Memory lifecycle | Ebbinghaus-style decay, pinned memories, nightly `dream()` consolidation |
+| Web search | local SearXNG instance through `toolkit/research.py` |
+| TTS | MioTTS 0.4B via llama.cpp server, external MioCodec synthesizer server |
+| ASR | SenseVoice via sherpa-onnx with Silero VAD and ERes2Net Speaker verification |
+| Reflection publishing | optional GitHub REST API + Hugo markdown |
+| Agentic task mode | `skills/agentic.py` ReAct loop + `toolkit/tools.py` facade + `toolkit/` modules |
+| Skills | `skills/skillsets/*.md` workflow registry loaded by `skills/skills.py` |
+| Scheduling | local schedule/reminder runner using `~/.aiko/<user_id>/schedule.json` |
+| Multi-user | OAuth provider-scoped IDs, per-user `~/.aiko/<user_id>/` isolation |
+| Encryption | optional SQLCipher via `AIKO_SQLITE_ENCRYPTION=1` |
 
 ---
 
 ## Quickstart
 
-### 1. Prerequisites
+**Prerequisites:** Python 3.12, [uv](https://astral.sh/uv), CUDA 12.6, Docker + Compose, a llama.cpp/OpenAI-compatible local LLM server, and a pulled/served chat model (3B+ recommended).
 
-- [Ollama](https://ollama.com) running locally or on a remote server
-- Docker + Docker Compose
-- Python **3.10 exactly** (3.11+ not supported — Jetson AI Lab wheels are 3.10-only)
-- [uv](https://github.com/astral-sh/uv)
+> Full installation walkthrough → **[docs/INSTALL.md](docs/INSTALL.md)**
 
 ```bash
-ollama pull nomic-embed-text-v2-moe
-```
-
-### 2. Start Qdrant + SearXNG (Docker containers)
-> **SearXNG config:** The `./searxng/` directory must contain a `settings.yml`
-> before starting. A minimal template is included in the repo.
-> `SEARXNG_BASE_URL` is used internally by the container to generate links.
-> `SEARXNG_URL` in your `.env` is what Aiko uses to call the search API —
-> it must match the host port mapping (`http://localhost:8081`).
-
-```bash
+git clone https://github.com/OppaAI/Aiko-chan.git
+cd Aiko-chan
+cp .env.example .env        # fill secrets only; edit config/*.yaml for settings
 docker compose up -d
-```
-
-Qdrant dashboard: http://localhost:6333/dashboard
-
-### 3. Install dependencies
-
-```bash
 uv sync
+uv run python main.py            # browser WebUI, full voice if services are available
 ```
 
-### 4. Configure
-
 ```bash
-cp .env.example .env
-# edit .env — set your Ollama URL, model, SearXNG URL, Kokoro voice
-```
-
-### 5. Talk to Aiko-chan
-
-```bash
-# Full voice mode — ASR input + TTS output
-uv run python cli.py
-
-# Text mode — keyboard input, no TTS
-uv run python cli.py --text
-
-# Show memory debug output each turn
-uv run python cli.py --debug
-
-# Wipe all stored memories and exit
-uv run python cli.py --clear-mem
+uv run python main.py --text      # WebUI keyboard input, ASR/TTS toggled off but loaded
+uv run python main.py --cli       # simple authenticated local CLI
+uv run python main.py --debug     # show memory hits each turn
+uv run python main.py --clear-mem # wipe all memories and exit
 ```
 
 ---
 
-## CLI Commands
+## In-App Commands
 
 | Command | Action |
 |---|---|
 | `/quit` or `/exit` | End the session |
-| `/reset` | Clear short-term context (long-term memory persists) |
+| `/reset` | Clear short-term context; long-term memory persists |
 | `/memory` | Print all stored memories |
-| `/clear` | Wipe all long-term memories from the database |
-| `/web <query>` | Run a web search and ask Aiko about the results |
-| `/voice` | Toggle TTS on/off at runtime |
-| `/listen` | Toggle ASR on/off at runtime (falls back to keyboard) |
-| `/help` | Show command list |
+| `/clear` | Wipe all long-term memories |
+| `/remember` | Pin the last exchange — decay-proof |
+| `/think <question>` | Higher-token reasoning turn; suppresses `🤔` scratchpad |
+| `/web <query>` | SearXNG search → grounded answer |
+| `/voice` | Toggle TTS on/off |
+| `/listen` | Toggle ASR on/off |
+| `/proactive` | Toggle proactive idle check-ins on/off; timing, quiet/focus windows, and prompt hints configured in `config/proactive.yaml` |
+| `/help` | Show the command list |
 
 ---
 
 ## Project Structure
 
 ```text
-aiko/
-├── core/
-│   ├── think.py        # Ollama chat loop, streaming, search intercept, warmup
-│   ├── memorize.py     # mem0 + Qdrant wrapper, async queue worker
-│   ├── speak.py        # Kokoro TTS pipeline, background warmup
-│   ├── listen.py       # faster-whisper ASR, VAD, status callbacks
-│   ├── tools.py        # Web search via SearXNG
-│   └── silence.py      # Stderr suppression utility
-├── persona/
-│   ├── soul.md         # Aiko's personality, rules, and voice — edit freely
-│   └── identity.md     # Banner text, ASCII art, and color map for TUI
-├── cli.py              # Curses TUI entry point
-├── docker-compose.yml  # Qdrant
-├── pyproject.toml      # uv dependencies
-├── uv.lock             # uv lockfile
-├── .env.example        # Environment variable reference
-└── README.md           # This file
+Aiko-chan/
+├── main.py                 # entry point; WebUI default, --cli for simple local testing
+├── config/                 # category YAML settings; secrets stay in .env
+├── cognition/
+│   ├── think.py            # chat facade, routing, history, scheduled-job callbacks
+│   └── reason.py           # shared embedding/ranking helpers
+├── memory/
+│   ├── memorize.py         # sqlite-vec memory, recall, pinned memories
+│   ├── vecstore.py         # SQLite/sqlite-vec helpers
+│   ├── forget.py           # decay scoring and cleanup gates
+│   ├── consolidate.py      # periodic memory consolidation
+│   ├── journal.py          # encrypted journal blob store
+│   └── reflect.py          # Hugo/GitHub reflection publisher
+├── sensory/
+│   ├── speak.py            # MioTTS HTTP client
+│   └── listen.py           # SenseVoice (sherpa-onnx) + Silero VAD
+├── skills/
+│   ├── agentic.py          # ReAct task loop, tool schemas, tool dispatch
+│   ├── schema.py           # graph-first master-plan DAG executor
+│   ├── capability.py       # capability matching for task-mode tool filtering
+│   ├── experience.py       # procedural task-run experience store
+│   ├── skills.py           # skill registry and workflow retrieval
+│   ├── wiki.py             # wiki-card retrieval for task mode
+│   └── skillsets/          # human-readable workflow documents
+├── toolkit/                # executable tools: research, planning, schedule, photo, repo, jobs
+├── system/                 # config, wakeup, schedule runner, logging, userspace
+├── interface/
+│   ├── webui/              # browser WebUI backend + static frontend/VRM bridge
+│   └── cli/                # auth and simple CLI helpers
+├── persona/                # soul/personality and prompt policy files
+├── wiki/                   # trusted local knowledge cards
+├── docs/                   # install, architecture, roadmap, tests, history
+├── assets/                 # images and VRM assets
+├── docker-compose.yml
+├── pyproject.toml
+├── uv.lock
+├── .env.example
+└── README.md
 ```
 
 ---
 
 ## Roadmap
 
-* [x] **Phase 1 — Soul**
+| Phase | Name | Status |
+|---|---|---|
+| 1 | Soul — CLI, Ollama, mem0 + Qdrant, SearXNG | ✅ Done |
+| 1.5 | Stream — streaming pipeline, persona, first UI, test TTS models | ✅ Done |
+| 2 | Voice — SenseVoice ASR, Silero VAD, MioTTS, hands-free talk | ✅ Done |
+| 2.1 | Social — X, Threads, IG, Discord, Reddit, social media | 🔲 Planned |
+| 2.2 | Message — Email, Telegram, Discord, Slack, messaging services | 🔲 Planned |
+| 2.5 | Agent — tool registry, skill workflows, scheduled local tasks | ⏳ Active |
+| 3 | Face — VRM avatar, three-vrm, expressions, lip-sync | 🔲 Planned |
+| 4 | Presence — emotional state, mood, relationship progression | 🔲 Planned |
+| 5 | Mobile — React Native / Flutter, WAN, push notifications | 🔲 Planned |
+| 6 | Multimodal — camera, vision input, webcam expression awareness | 🔲 Planned |
+| 7 | Autonomy — scheduled operation, self-directed exploration | 🔲 Planned |
 
-  * CLI chatbot architecture.
-  * Local inference via Ollama.
-  * Persistent memory using mem0 + Qdrant.
-  * Async memory writes.
-  * Web search integration via SearXNG.
-
-* [x] **Phase 1.5 — Stream**
-
-  * Aiko-chan TUI CLI with cyberpunk ASCII interface.
-  * Streaming inference architecture overhaul.
-  * Decoupled LLM → TTS pipeline.
-  * Callback-based response streaming.
-  * Realtime speech synthesis via Kokoro.
-  * Background LLM warmup to eliminate cold-start latency.
-  * Background TTS warmup to eliminate cold-start latency.
-  * Soul persona system (`persona/soul.md`).
-  * Identity metadata and character framework (`persona/identity.md`).
-  * Architectural renaming (`brain → think`, `memory → memorize`).
-  * Non-blocking memory queue worker.
-  * Removal of synchronous memory write bottlenecks.
-  * CLI execution flow refactor.
-  * Command-line argument parser redesign.
-  * Audio streaming stability improvements.
-  * Search output filtering and instruction refinement.
-  * Jetson AI Lab dependency migration.
-
-* [ ] **Phase 2 — Voice**
-
-  * Microphone input via faster-whisper.
-  * Push-to-talk mode.
-  * Voice Activity Detection (VAD).
-  * Fully hands-free voice conversations on Jetson.
-
-* [ ] **Phase 3 — Face**
-
-  * VRM/VRoid avatar support.
-  * Browser-based rendering via `@pixiv/three-vrm`.
-  * Expression system (idle, happy, annoyed, flustered, thinking).
-  * Lip-sync driven by generated speech audio.
-  * WebSocket bridge between Python backend and browser frontend.
-  * Real-time avatar interaction.
-
-* [ ] **Phase 4 — Presence**
-
-  * Persistent emotional state machine.
-  * Mood tracking across conversations.
-  * Long-term relationship progression.
-  * Shared references and inside jokes.
-  * Episodic memory recall.
-  * Context-aware personality evolution.
-  * Proactive messaging when inactive for extended periods.
-
-* [ ] **Phase 5 — Mobile**
-
-  * Mobile application (React Native or Flutter).
-  * WAN access from anywhere.
-  * Push notifications.
-  * Voice-first user experience.
-  * Avatar integration on mobile.
-
-* [ ] **Phase 6 — Multimodal**
-
-  * Camera and computer vision input.
-  * Image understanding and discussion.
-  * Visual context integration into conversations.
-  * Webcam-based expression awareness.
-  * User-shared image analysis.
-
-* [ ] **Phase 7 — Autonomy**
-
-  * Scheduled independent operation.
-  * Background information gathering.
-  * Topic discovery and self-directed exploration.
-  * Initiates conversations instead of only responding.
-  * Develops persistent interests and opinions.
-  * Optional social media presence and autonomous content posting.
+Full details → **[docs/ROADMAP.md](docs/ROADMAP.md)**
 
 ---
 
-## Memory Evaluation Criteria
+## Configuration
 
-Findings from Phase 1 testing (for Grace / AuRoRA adoption):
+All non-secret runtime settings live in `config/*.yaml`. Environment variables in `.env` override YAML at runtime.
 
-- [ ] Does memory feel coherent across sessions?
-- [ ] Does retrieval surface the right memories (not just recency)?
-- [ ] Is extraction quality stable across different LLMs?
-- [ ] Does mem0 hallucinate memories from model confabulation?
-- [ ] Is write latency acceptable with async threading?
-- [ ] Is Qdrant stable under continuous writes on Jetson?
+| Config file | Purpose |
+|---|---|
+| `config/index.yaml` | Ordered list of YAML files loaded at startup |
+| `config/system.yaml` | Identity, logging, userspace, schedule, reflection/social settings |
+| `config/cognition.yaml` | LLM endpoints, routing, token limits, vector-cache settings |
+| `config/memory.yaml` | Memory, embedding, decay, experience, consolidation settings |
+| `config/skills.yaml` | Agentic routing thresholds, tool configs, graph executor settings |
+| `config/sensory.yaml` | MioTTS, ASR, VAD, speaker verification, and barge-in settings |
+| `config/interface.yaml` | WebUI ports, avatar path, streaming behavior |
+
+---
+
+## Architecture Changes from Previous Phases
+
+| Phase | Before | After |
+|---|---|---|
+| 1 → 1.5 | CLI + Ollama + mem0/Qdrant | Browser WebUI + llama.cpp + streaming |
+| 1.5 → 2 | Text-only | Voice loop: SenseVoice + Silero VAD + MioTTS |
+| 2 | mem0 + Qdrant (server, OOM on Jetson) | **sqlite-vec + custom Harrier ONNX (serverless, local)** |
+| 2 | fastembed (BGE v1.5) | **Harrier OSS v1 270M Q8 GGUF embedder (640d, last-token pooling)** |
+| 2 → 2.5 | Chat only | **Agentic ReAct loop + skills + scheduling + toolkit** |
+| 2.5 | Keyword-only routing | **Dual-path: semantic exemplar + optional LLM router** |
+
+Key architectural decisions:
+- **No external memory server** — sqlite-vec runs in-process, zero Docker deps for memory
+- **Harrier over BGE** — Newer 640-dim decoder-only embedder with query instructions, better semantic separation
+- **Custom ONNX embedder** — Harrier needs last-token pooling; fastembed only exposed MEAN/CLS
+- **Tools ≠ Skills** — Tools are executable Python functions; skills are human-readable Markdown workflows
+- **Single agentic loop** — Semantic routing + optional LLM routing + ReAct + skills = one coherent task layer
+
+---
+
+## Notes
+
+- Memory uses a custom sqlite-vec backend — no Qdrant server or mem0 required. Qdrant + mem0 were dropped in Phase 2 due to OOM issues on the Jetson Orin Nano.
+- Entry point is `main.py`, not `cli.py` anymore.
+- LLM runtime is now an OpenAI-compatible endpoint (`LLM_BASE_URL`/`LLM_MODEL`), usually llama.cpp `llama-server`; older Ollama-specific settings are archived/outdated.
+- TTS runtime is MioTTS server with 0.4B Q4KM model (Tried XTTS with CoquiTTS, Kokoro and RealtimeTTS, PocketTTS but removed due to Jetson OOM/latency/quality tradeoffs).
+- ASR runtime is SenseVoice via sherpa-onnx + dual energy VAD + Silero VAD. (Tried ReazonSpeech K2 and faster-whisper but removed due to English capability and RAM usage tradeoffs respectively)
+- Reflection publishing fails safely if `GITHUB_TOKEN` or `GITHUB_REPO` are missing.
+- Multi-user isolation uses per-user directories under `~/.aiko/<user_id>/` with optional SQLCipher encryption.
+- WebUI VRM frontend is experimental; remote voice device polish is ongoing.
 
 ---
 
 ## Support
-If you find this project useful, consider buying me a coffee ☕  
-It helps keep the phases shipping.
+
+If you find this project useful, consider buying me a coffee ☕
 
 [![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/oppaai)

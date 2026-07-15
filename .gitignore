@@ -25,6 +25,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+*.whl
 
 # PyInstaller
 #   Usually these files are written by a python script from a template
@@ -218,7 +219,24 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Aiko specific
-Aiko.mp3
-Aiko.mp4
-Aiko.wav
+*.mp3
+*.mp4
+*.wav
+logs/
 models/
+node_modules/onnxruntime_gpu-*.whl
+node_modules/
+# Local WebUI development TLS certs
+archive/
+training/
+interface/webui/.cert/
+certs/
+needle_onnx_artifacts/
+*.pem
+*-key.pem
+interface/webui/static/ort.min.js
+interface/webui/static/ort-wasm-simd-threaded.wasm
+interface/webui/static/ort-wasm-simd-threaded.jsep.wasm
+interface/webui/static/ort-wasm-simd-threaded.jsep.mjs
+interface/webui/static/silero_vad.onnx
+interface/webui/static/silero_vad_op18_ifless.onnx

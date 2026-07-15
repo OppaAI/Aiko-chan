@@ -40,6 +40,7 @@ let _silTimer = null;
 let _preBuf = [];     // circular pre-speech context
 let _energyHits = 0;
 let _vadEpoch = 0;
+let _lastBargeSent = 0;   // timestamp of last barge_in sent, for throttling
 
 // -- init ---------------------------------------------------------------------
 
@@ -61,6 +62,7 @@ function _resetState() {
     _preBuf = [];
     _speaking = false;
     _energyHits = 0;
+    _lastBargeSent = 0;
     if (_silTimer) { clearTimeout(_silTimer); _silTimer = null; }
 }
 
@@ -93,6 +95,8 @@ function processEnergyVADFrame(frame, ws, epoch = _vadEpoch, gate = true) {
     }
     const rms = _rms(frame);
 
+    const { startThresh } = _calcThresholds();
+
     // Adaptive noise floor: track the minimum RMS when not speaking
     if (!_speaking) {
         if (rms < _noiseFloor) {
@@ -103,7 +107,7 @@ function processEnergyVADFrame(frame, ws, epoch = _vadEpoch, gate = true) {
         }
     }
 
-    const { startThresh, endThresh } = _calcThresholds();
+    const { endThresh } = _calcThresholds();
 
     if (!_speaking && rms >= startThresh) {
         _energyHits++;
@@ -122,8 +126,12 @@ function processEnergyVADFrame(frame, ws, epoch = _vadEpoch, gate = true) {
         // instead of continuing to stream chunks that would just refill the
         // queue we already cleared.
         if (window.aikoIsSpeaking) {
-            if (window.stopTtsPlayback) window.stopTtsPlayback();
-            ws.send(JSON.stringify({ type: 'barge_in' }));
+            const now = performance.now();
+            if (now - _lastBargeSent > 300) {
+                _lastBargeSent = now;
+                if (window.stopTtsPlayback) window.stopTtsPlayback();
+                ws.send(JSON.stringify({ type: 'barge_in' }));
+            }
         }
     
         // Edge-triggered log: one line when speech is detected, not one per frame.
@@ -145,6 +153,20 @@ function processEnergyVADFrame(frame, ws, epoch = _vadEpoch, gate = true) {
         if (gate) {
             if (!_canSend(ws, epoch)) return;
             ws.send(frame.buffer.slice(0));
+        }
+
+        // Barge-in during active speech: user may have been speaking from a
+        // previous segment (VAD state didn't reset) or started speaking while
+        // TTS was already playing. The speech-onset barge-in at line 151 only
+        // fires when _speaking transitions false→true, so we need an
+        // additional check here.
+        if (window.aikoIsSpeaking && rms >= startThresh) {
+            const now = performance.now();
+            if (now - _lastBargeSent > 300) {
+                _lastBargeSent = now;
+                if (window.stopTtsPlayback) window.stopTtsPlayback();
+                ws.send(JSON.stringify({ type: 'barge_in' }));
+            }
         }
 
         if (rms > endThresh) {

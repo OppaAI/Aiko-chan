@@ -2,33 +2,34 @@
 cognition/think.py
 
 Aiko's chat facade.
-  - Routes between single-shot chat and the agentic task loop in skills.agentic.
+  - Routes between single-shot chat and the agentic task loop in agentic.agentic.
   - Streams llama.cpp response to console + TTS simultaneously.
-  - Queues long-term memory writes (delegated to memory.memorize's async write queue).
+  - Queues long-term memory writes (delegated to cognition.memory.memorize's async write queue).
   - Owns scheduled-job callbacks and idle learner handoff (delegated to memory.learn).
   - Owns the proactive idle check-in state machine (config/proactive.yaml),
     which is also the "is Aiko resting" signal memory.learn's idle_learner_loop
     waits on before starting autonomous quick-study top-ups.
 
 Memory + knowledge-base fetch:
-  route() kicks off _fetch_memory_and_knowledge() on cognition's
-  shared CONTEXT_POOL BEFORE intent is resolved, since every path
-  (localchat/webchat/agentic) needs memory + KB regardless of which one
-  intent routing picks. The resulting future is handed to whichever
-  handler ends up running, so the fetch overlaps intent classification
-  itself instead of waiting for it to finish first. Wiki/policy/skill/
-  experience context is agentic-only and fetched separately, inside
-  skills.agentic.run_agentic_chat, only once intent has actually resolved
-  to "agentic".
+  route() runs a bounded self-assessment gate (should_attempt, mode=route)
+  *before* quaternary intent routing, so soft outcomes (defer/clarify/
+  degrade_chat) apply even when the turn would have been localchat.
+  Then route() resolves quaternary intent (greeting/localchat/webchat/agentic).
+  Greeting-only turns short-circuit directly to the LLM without memory/KB
+  recall or memory writeback. All other paths start memory + KB recall only
+  after intent is known, then hand the resulting future to the selected
+  handler. Wiki/policy/skill/experience context is agentic-only and fetched
+  separately, inside agentic.agentic.run_agentic_chat, only once intent has
+  actually resolved to "agentic".
 """
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import os
 import json
 import warnings
-import hashlib
 
 import numpy as np
 
@@ -38,7 +39,6 @@ logging.getLogger("torch").setLevel(logging.ERROR)
 os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 
 from datetime import datetime
-from datetime import time as dt_time
 from openai import OpenAI
 from pathlib import Path
 import re
@@ -46,30 +46,58 @@ import threading
 import time
 import unicodedata
 
-from memory.memorize import AikoMemorize
-from sensory.speak    import AikoSpeak
-from toolkit.tools    import web_search_context
-from skills.agentic  import run_agentic_chat
-from skills.wiki import wiki_knowledge_context_for
-from memory.knowledge import knowledge_context_for
+from agentic.tools    import web_search_context
+import json as _json
+from agentic.agentic  import run_agentic_chat
+from agentic.wiki import wiki_knowledge_context_for
+from cognition.knowledge import knowledge_context_for
 from cognition import CONTEXT_POOL
 from system.log      import get_logger
-from skills.social import run_scheduled_weekly_social
-from system.schedule import DueJob, register_system_handler
-from system.userspace import current_user_id, current_display_name, user_profile_path, user_state_dir
+from system.schedule import DueJob, register_system_handler, schedule_job_record, list_schedule_records, cancel_schedule_record
+from system.userspace import current_user_id, current_display_name, user_profile_path
 from system import bioclock
+from agentic.toolkit.social import run_scheduled_weekly_social
 from cognition import reason
-from memory import learn
+from cognition.memory import learn
 
 log = get_logger(__name__)
 register_system_handler("weekly_social", run_scheduled_weekly_social)
 
+_GOAL_REVIEW_TITLE = "[Aiko] Goal review"
+
+def _sync_goal_review_schedule(state) -> None:
+    """Keep one gentle recurring review reminder in sync with cognitive state."""
+    try:
+        uid = current_user_id()
+        snap = state.snapshot()
+        active = bool(snap.get("goals") or snap.get("open_loops"))
+        jobs = list_schedule_records(include_disabled=True, user_id=uid)
+        existing = [job for job in jobs if job.get("title") == _GOAL_REVIEW_TITLE]
+        if active and not any(job.get("enabled", True) for job in existing):
+            now = bioclock.local_now()
+            schedule_job_record(
+                _GOAL_REVIEW_TITLE,
+                "Review Aiko\x27s active goals and unresolved threads; ask the user before taking consequential action.",
+                now.strftime("%H:%M"),
+                frequency="interval",
+                interval_seconds=21600,
+                action="announce",
+                user_id=uid,
+            )
+        elif not active:
+            for job in existing:
+                if job.get("enabled", True):
+                    cancel_schedule_record(str(job.get("id")), user_id=uid)
+    except Exception as exc:
+        log.debug("Goal review schedule sync skipped: %s", exc)
+
 # ── boot labels ───────────────────────────────────────────────────────────────
 
 BOOT_LABELS = {
-    'think_start':  'Loading llama.cpp client + persona...',
-    'think_warmup': 'Warming up language model...',
-    'think_reminders': 'Starting reminder scheduler...',
+    'think_start':    'Loading llama.cpp client + persona...',
+    'think_warmup':   'Warming up language model...',
+    'think_mem_wait': 'Waiting on memory system...',
+    'think_prewarm':  'Warming semantic caches...',
 }
 
 # ── config ────────────────────────────────────────────────────────────────────
@@ -90,6 +118,9 @@ CONTEXT_WINDOW_TURNS = int(os.getenv("CONTEXT_WINDOW_TURNS", 8))
 # (localchat/webchat/agentic) — see _fetch_memory_and_knowledge below.
 MEMORY_RECALL_LIMIT = int(os.getenv("MEMORY_RECALL_LIMIT", 3))
 KNOWLEDGE_RECALL_LIMIT = int(os.getenv("KNOWLEDGE_RECALL_LIMIT", 3))
+# Recall hard-timeout — a slow local embed (llama.cpp) must not block the turn.
+# On expiry the memory/KB recall is skipped (empty) rather than stalling.
+MEMORY_RECALL_TIMEOUT = float(os.getenv("MEMORY_RECALL_TIMEOUT", 5.0))
 # Minimum recall score (see _MemoryBackend._rank_and_score's final_score in
 # memory/memorize.py for the formula) a memory must clear to be included in
 # context. Same numeric scale as memorize.py's MEMORY_RECALL_SCORE_THRESHOLD
@@ -99,7 +130,6 @@ KNOWLEDGE_RECALL_LIMIT = int(os.getenv("KNOWLEDGE_RECALL_LIMIT", 3))
 MEMORY_MIN_SCORE = float(os.getenv("MEMORY_MIN_SCORE", "0.0"))
 
 _BASE_PREDICT    = int(os.getenv("LLM_MAX_TOKENS", os.getenv("BASE_PREDICT", 280)))
-_AGENT_MAX_TOKENS = int(os.getenv("AGENT_MAX_TOKENS", _BASE_PREDICT * 4))
 _REASONING_SCALE = int(os.getenv("REASONING_SCALE", 3))
 _ROUTE_ENABLED = os.getenv("ROUTE_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
 
@@ -118,58 +148,142 @@ if _ROUTE_MODE not in _ROUTE_VALID_MODES:
 _AGENTIC_MODE_ON = os.getenv("AGENTIC_MODE_ON", "1").lower() in {"1", "true", "yes", "on"}
 
 # Three separate instruct strings, one per embedding context
-_ROUTE_INSTRUCT_BINARY = "Does this message ask someone to perform a task or action, or is it just conversation?"
-_ROUTE_INSTRUCT_TOOL   = "This is an autonomous task request. Which work steps are likely needed?"
-_ROUTE_INSTRUCT_SEARCH = "Does answering this require looking up current or external data?"
-_ROUTE_INSTRUCT_TERNARY = "What kind of task or question is this?"  # used by route() for ternary intent routing
+_ROUTE_INSTRUCT_QUATERNARY = "What kind of task or question is this?"  # used by route() for quaternary intent routing
+_ROUTE_INSTRUCT_TERNARY = _ROUTE_INSTRUCT_QUATERNARY  # backwards-compatible alias for wakeup/tests
 
 _SEMANTIC_ROUTE_MIN_GAP = float(os.getenv("ROUTE_MIN_GAP", "0.10"))
 _SEMANTIC_LABEL_TOP_K = int(os.getenv("ROUTE_LABEL_TOP_K", "3"))
-_ROUTE_VECTOR_CACHE_ENABLED = os.getenv("ROUTE_VECTOR_CACHE_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
 _ROUTE_VECTOR_CACHE_DIR = os.getenv("ROUTE_VECTOR_CACHE_DIR", "route_vectors")
 
-_PERSONA_PATH = Path(__file__).resolve().parent.parent / "persona" / "soul.md"
+_PERSONA_PATH = Path(__file__).resolve().parent.parent / "persona" / "SOUL.md"
 _LOCAL_KNOWLEDGE_RE = re.compile(
     r"\b("
     r"aiko|your architecture|your hardware|your features?|your functions?|"
     r"what can you do|how do you work|how are you built|"
     r"knowledge base|wiki|docs?|readme|roadmap|install|config|"
-    r"soul\.md|user\.md|skills?\.md|schedule\.md|"
+    r"SOUL\.md|USER\.md|SKILLS?\.md|SCHEDULE\.md|"
     r"repo|repository|codebase|local files|your files"
     r")\b",
     re.IGNORECASE,
 )
 
+# ── conditional persona overrides ────────────────────────────────────────────
+# SOUL.md is the always-loaded steady-state
+# persona; the two override files below are only appended on turns that
+# actually need them (mirrors _LOCAL_KNOWLEDGE_RE / _should_use_local_knowledge
+# just below — same "gate the tokens, don't pay for them every turn" pattern).
+_PERSONA_DIR = _PERSONA_PATH.parent
+_PERSONA_CORE_PATH = _PERSONA_DIR / "SOUL.md"
+_PERSONA_JP_PATH = _PERSONA_DIR / "JAPANESE_CHAT.md"
+_PERSONA_CODE_PATH = _PERSONA_DIR / "CODING_CHAT.md"
+
+_JAPANESE_TRIGGER_RE = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
+_CODE_TRIGGER_RE = re.compile(
+    r"\b(debug|traceback|stack trace|error:|exception|refactor|"
+    r"write (a|the) (function|script|class)|fix (this|my) code|"
+    r"walk me through|\.py\b|\.js\b)\b",
+    re.IGNORECASE,
+)
+
 
 def _load_static_persona() -> str:
-    """Read the lightweight normal-chat persona (soul.md only — no per-user data).
+    """Read the always-loaded persona core (SOUL.md — no per-user data,
+    no conditional overrides).
 
     Task/tool policy lives in the agentic prompt so casual chat does not pay
-    for skills/schedule tokens on every turn.
+    for agentic/schedule tokens on every turn. Japanese/coding overrides live
+    in separate files and are appended per-turn by _conditional_persona_blocks
+    only when triggered — see _current_system_prompt.
     """
-    if not _PERSONA_PATH.exists():
-        raise FileNotFoundError(f"soul.md not found at {_PERSONA_PATH}")
-    return _PERSONA_PATH.read_text(encoding="utf-8").strip()
+    if not _PERSONA_CORE_PATH.exists():
+        raise FileNotFoundError(f"SOUL.md not found at {_PERSONA_CORE_PATH}")
+    return _PERSONA_CORE_PATH.read_text(encoding="utf-8").strip()
+
+
+_persona_jp_cache: str | None = None
+_persona_code_cache: str | None = None
+
+
+def _conditional_persona_blocks(user_input: str) -> str:
+    """Trigger-loaded persona overrides. Only paid for on turns that need them."""
+    global _persona_jp_cache, _persona_code_cache
+    blocks = []
+    if _JAPANESE_TRIGGER_RE.search(user_input):
+        if _persona_jp_cache is None:
+            _persona_jp_cache = _PERSONA_JP_PATH.read_text(encoding="utf-8").strip()
+        blocks.append(_persona_jp_cache)
+    if _CODE_TRIGGER_RE.search(user_input):
+        if _persona_code_cache is None:
+            _persona_code_cache = _PERSONA_CODE_PATH.read_text(encoding="utf-8").strip()
+        blocks.append(_persona_code_cache)
+    return ("\n\n" + "\n\n".join(blocks)) if blocks else ""
+
+
+_user_context_cache: dict[str, tuple[float, str]] = {}  # user_id -> (mtime, block)
 
 
 def _load_user_context() -> tuple[str, str]:
     """Read the current turn's display name + profile block fresh, every call.
 
     Must be called from the turn/request context where current_user_id()
-    already resolves to the real logged-in user — never cached, since
-    AikoThink is a process-wide singleton shared across all users' turns.
+    already resolves to the real logged-in user — cached by (user_id, mtime)
+    so repeated turns for the same user don't re-read an unchanged file.
 
     Returns (display_name, user_block) where user_block is either "" or a
     "\n\n"-prefixed profile chunk ready to append to the static persona.
     """
     display_name = current_display_name()
     user_path = user_profile_path()
+    uid = current_user_id()
+    if uid in _user_context_cache:
+        cached_mtime, cached_block = _user_context_cache[uid]
+        try:
+            current_mtime = user_path.stat().st_mtime
+        except OSError:
+            current_mtime = 0.0
+        if current_mtime == cached_mtime:
+            return display_name, cached_block
     context_blocks = []
     if user_path.exists():
-        context_blocks.append(user_path.read_text(encoding="utf-8").strip())
+        raw = user_path.read_text(encoding="utf-8").strip()
+        if raw:
+            context_blocks.append(
+                "<user_profile>\n"
+                "Who you are speaking with — authoritative for identity. "
+                "Never claim ignorance of this.\n\n"
+                f"{raw}\n"
+                "</user_profile>"
+            )
     user_block = "\n\n" + "\n\n".join(context_blocks) if context_blocks else ""
+    try:
+        _user_context_cache[uid] = (user_path.stat().st_mtime, user_block)
+    except OSError:
+        log.debug("think: user context cache write failed")
     return display_name, user_block
 
+
+_DEBUG_PROMPT_DUMP_PATH = os.getenv("AIKO_DEBUG_PROMPT_DUMP", "/tmp/aiko_last_prompt.txt")
+
+def _dump_full_prompt(debug: dict) -> None:
+    if os.getenv("AIKO_DEBUG_FULL_PROMPT", "1").lower() not in {"1", "true", "yes", "on"}:
+        return
+    try:
+        with open(_DEBUG_PROMPT_DUMP_PATH, "w", encoding="utf-8") as f:
+            f.write(f"=== mode={debug.get('mode')} @ {datetime.now().isoformat()} ===\n\n")
+            f.write("----- SYSTEM PROMPT (full, untruncated) -----\n")
+            f.write(debug.get("system_prompt", "") + "\n\n")
+            f.write("----- MEMORY -----\n")
+            f.write(debug.get("memory_prompt", "") + "\n\n")
+            f.write("----- KNOWLEDGE -----\n")
+            f.write(debug.get("knowledge_prompt", "") + "\n\n")
+            f.write("----- WEB -----\n")
+            f.write(debug.get("web_prompt", "") + "\n\n")
+            f.write("----- PREVIOUS CHAT MESSAGES -----\n")
+            for m in debug.get("previous_chat_messages", []):
+                f.write(f"[{m.get('role')}] {m.get('content')}\n")
+    except Exception:
+        log.exception("Failed to dump full prompt debug")
+        
 
 def _should_use_local_knowledge(user_input: str) -> bool:
     """Return True for normal-chat questions about Aiko's local docs/files.
@@ -197,17 +311,19 @@ def _play_beep() -> None:
             log.warning("Beep playback failed: %s", e)
     threading.Thread(target=_run, daemon=True).start()
 
-# load route examples
-_EXAMPLES_PATH = Path(__file__).resolve().parent / "router_prompts.json"
+# load route examples (quaternary intent only - tools/capability moved to agentic/router)
+_EXAMPLES_PATH = Path(__file__).resolve().parent.parent / "agentic" / "router" / "intent_prompts.json"
 
-def _load_route_examples() -> tuple[dict, dict]:
+def _load_route_examples(*, include_greeting: bool = True) -> dict:
     with open(_EXAMPLES_PATH, encoding="utf-8") as f:
         data = json.load(f)
-    ternary = {k: tuple(v) for k, v in data["ternary"].items()}  # 3 labels
-    tools   = {k: tuple(v) for k, v in data["tools"].items()}
-    return ternary, tools
+    raw = dict(data.get("quaternary") or data.get("ternary") or {})
+    if not include_greeting:
+        raw.pop("greeting", None)
+    return {k: tuple(v) for k, v in raw.items()}
 
-_ROUTE_TERNARY_EXAMPLES, _ROUTE_TOOL_EXAMPLES = _load_route_examples()
+_ROUTE_QUATERNARY_EXAMPLES = _load_route_examples()
+_ROUTE_TERNARY_EXAMPLES = _load_route_examples(include_greeting=False)
 
 _AGENTIC_ROUTE_RE = re.compile(
     r"\b("
@@ -219,6 +335,22 @@ _AGENTIC_ROUTE_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+_GREETING_ONLY_RE = re.compile(
+    r"^\s*(?:"
+    r"hi+|hello+|hey+|hiya+|yo+|sup|"
+    r"good\s+(?:morning|afternoon|evening)|morning|evening|"
+    r"(?:hi|hello|hey)\s+(?:there|aiko)|"
+    r"how(?:'|’)s\s+it\s+going|how\s+are\s+you(?:\s+doing)?|"
+    r"what(?:'|’)s\s+up|nice\s+to\s+see\s+you|good\s+to\s+see\s+you|"
+    r"just\s+saying\s+hi|thanks?|thank\s+you|okay\s+thanks|cool\s+thanks"
+    r")(?:[\s!?.~、。！]*|\s+(?:lol|haha|hehe)[\s!?.~、。！]*)$",
+    re.IGNORECASE,
+)
+
+
+def _is_greeting_only(user_input: str) -> bool:
+    return bool(_GREETING_ONLY_RE.match(user_input or ""))
 
 
 def _extract_search_results_block(system_prompt: str) -> str:
@@ -242,17 +374,19 @@ def _extract_search_results_block(system_prompt: str) -> str:
 # ── think ─────────────────────────────────────────────────────────────────────
 
 class AikoThink:
-    def __init__(self, memorize: AikoMemorize, speak: AikoSpeak | None = None) -> None:
+    def __init__(self) -> None:
         self._client    = OpenAI(base_url=LLM_BASE_URL, api_key="not-needed")
         self._llm_model = LLM_MODEL
         self._router_model = ROUTER_MODEL
-        self._memorize  = memorize
-        self._speak     = speak
+        self._memorize  = None    # injected later via set_memorize() — see system/wakeup.py
+        self._speak     = None    # injected later via set_speak()    — see system/wakeup.py
         # Guards self._speak against the toggle-vs-background-thread race.
         # set_speak() is called from the main thread (main.py's /voice
         # toggle). Readers snapshot self._speak under the lock so a toggle
-        # landing mid-read can't produce a stale ref or a None mismatch.
+        # landing mid-read can't produce a stale ref or a None mismatch.      
         self._speak_lock = threading.Lock()
+        self._memorize_lock = threading.Lock()
+
         self._persona   = _load_static_persona()
         self._history:  list[dict] = []
         self._history_lock = threading.Lock()
@@ -267,13 +401,11 @@ class AikoThink:
         self._reasoning = False
         self.last_usage: dict = {}
         self.last_prompt_debug: dict = {}
-
         self._last_chat_time = time.time()
-        self._idle_learner_thread = threading.Thread(
-            target=learn.idle_learner_loop, args=(self,), daemon=True
-        )
-        self._idle_learner_thread.start()
-
+      
+        self._idle_learner_thread: threading.Thread | None = None
+        self._warmup_thread: threading.Thread | None = None
+      
         # ── rest-signal state for learn.idle_learner_loop ───────────────────
         # The proactive idle check-in state machine lives in main.py's
         # ProactiveIdleRunner. That runner sets this flag via
@@ -282,9 +414,6 @@ class AikoThink:
         # by _note_user_activity() on every normal turn.
         self._proactive_lock = threading.Lock()
         self._proactive_resting = False
-
-        self._warmup_thread = threading.Thread(target=self._warmup_llm, daemon=True)
-        self._warmup_thread.start()
       
     def _warmup_llm(self) -> None:
         try:
@@ -300,25 +429,94 @@ class AikoThink:
         if self._warmup_thread and self._warmup_thread.is_alive():
             self._warmup_thread.join()
 
-    def _current_system_prompt(self) -> str:
-        """Assemble this turn's system prompt: static persona + fresh per-user context.
+    def start_warmup(self) -> None:
+        """Kick off the LLM warmup call. Call once, right after construction."""
+        if self._warmup_thread is not None:
+            return
+        self._warmup_thread = threading.Thread(target=self._warmup_llm, daemon=True)
+        self._warmup_thread.start()
+  
+    def start_idle_learner(self) -> None:
+        """Start the background idle-learning loop. Call only after
+        set_memorize() has been called — the loop reads self._memorize
+        on its first iteration."""
+        if self._idle_learner_thread is not None:
+            return
+        if self._get_memorize() is None:
+            log.warning("[think] Memory unavailable — idle learner not started.")
+            return
+        self._idle_learner_thread = threading.Thread(
+            target=learn.idle_learner_loop, args=(self,), daemon=True
+        )
+        self._idle_learner_thread.start()
+  
+    def _current_system_prompt(self, user_input: str = "") -> str:
+        """Assemble this turn's system prompt: static persona core + fresh
+        per-user context + any conditional overrides this input triggers.
 
         Call only from within a turn where current_user_id()/current_display_name()
         already resolve to the real caller — never at construction time.
         """
         display_name, user_block = _load_user_context()
-        return self._persona.replace("USER_ID_HERE", display_name) + user_block
-
+        base = self._persona.replace("USER_ID_HERE", display_name) + user_block
+        try:
+            from cognition.memory.edge_state import for_identity
+            state_obj = for_identity(current_user_id())
+            state_obj.record_activity(os.getenv("AIKO_ACTIVITY", ""))
+            state_obj.continuous_tick()
+            state_obj.persist()
+            state_obj.persist()
+            state = state_obj.context(user_input)
+            if state:
+                base += "\n\n" + state
+            try:
+                from system.schedule import list_schedule_records
+                scheduled_jobs = list_schedule_records(user_id=current_user_id())
+            except Exception:
+                scheduled_jobs = []
+            project_signals = []
+            if _CODE_TRIGGER_RE.search(user_input) or _LOCAL_KNOWLEDGE_RE.search(user_input):
+                try:
+                    result = subprocess.run(
+                        ["git", "status", "--short", "--untracked-files=no"],
+                        cwd=Path.cwd(), capture_output=True, text=True, timeout=1, check=False,
+                    )
+                    project_signals = [line.strip() for line in result.stdout.splitlines() if line.strip()][:5]
+                except Exception:
+                    project_signals = []
+            grounded = for_identity(current_user_id()).grounded_context(
+                now=bioclock.local_now(),
+                idle_seconds=max(0.0, time.time() - self._last_chat_time),
+                resting=self.is_proactive_resting(),
+                scheduled_jobs=scheduled_jobs,
+                project_signals=project_signals,
+            )
+            base += "\n\n" + grounded
+            base += "\n\n" + state_obj.adaptive_response_guidance()
+            base += "\n\n" + state_obj.reflection_summary()
+            base += "\n\n" + state_obj.preference_guidance()
+            base += "\n\n" + state_obj.lesson_guidance()
+            base += "\n\n" + state_obj.identity_guidance()
+            base += "\n\n" + state_obj.self_model_context()
+            base += "\n\n" + state_obj.subconscious_guidance()
+            priming = state_obj.priming_context(user_input)
+            if priming:
+                base += "\n\n" + priming
+            base += "\n\n" + state_obj.subconscious_guidance()
+        except Exception:
+            pass
+        return base + _conditional_persona_blocks(user_input)
+  
     # ── public api ────────────────────────────────────────────────────────────
 
     def route(self, user_input: str, token_callback=None) -> str:
-        """Main entry point. Ternary routing.
+        """Main entry point. Quaternary routing.
 
-        Memory + knowledge-base fetch is kicked off here, BEFORE intent is
-        known — every path (localchat/webchat/agentic) needs both, so
-        there's no reason to wait for _route_intent() to finish before
-        starting them. The future is threaded through to whichever handler
-        ends up running.
+        Intent is resolved before memory/KB recall. Greeting-only turns are
+        intentionally cheap: they go straight to the LLM with persona + recent
+        chat history only and skip memory recall, KB recall, and memory
+        extraction/writeback. Non-greeting turns then start the shared
+        memory+KB future and pass it to the selected handler.
 
         Per-user-active tracking: multiple users' turns can run concurrently
         (e.g. agentic loop for one user, quick chat for another). Shared
@@ -328,23 +526,73 @@ class AikoThink:
         with self._active_users_lock:
             self._active_user_ids.add(user_id)
         self._note_user_activity()
+        _route_t0 = time.monotonic()
+        # Approval commands ("approve run-<id>", "yes") must be handled
+        # BEFORE intent classification — the quaternary intent LLM labels
+        # terse commands like "Approve run-…" as chat, which would skip
+        # run_agentic_chat and leave the pending tool permanently stuck.
         try:
-            embedder = self._memorize._mem._embedder
-            query_vec = embedder.embed_query(user_input)
+            from agentic.agentic import _maybe_resume_approval
+            resumed = _maybe_resume_approval(self, user_input, token_callback=token_callback)
+            if resumed is not None:
+                try:
+                    from cognition.memory.edge_state import for_identity
+                    for_identity(user_id).record_turn_latency(time.monotonic() - _route_t0)
+                except Exception:
+                    pass
+                return resumed
+        except Exception as exc:
+            log.debug("[route] approval resume pre-check skipped: %s", exc)
+
+        # Self-assessment *before* quaternary routing so localchat/webchat
+        # also get executable soft outcomes (defer / clarify / degrade_chat).
+        try:
+            from cognition.memory.edge_state import for_identity
+            state = for_identity(user_id)
+            ok, reason, action = state.should_attempt(user_input, mode="route")
+            if not ok:
+                log.info("[route] should_attempt action=%s reason=%s", action, reason)
+                return self._soft_gate_reply(
+                    user_input, action, reason, token_callback=token_callback,
+                )
+        except Exception as exc:
+            log.debug("[route] should_attempt skipped: %s", exc)
+
+        try:
+            intent, route_vec = self._route_intent(user_input)
+            log.info("[route] intent=%s", intent)
+
+            if intent == "greeting":
+                return self.chat(
+                    user_input,
+                    token_callback=token_callback,
+                    _skip_search=True,
+                    skip_memory=True,
+                    store_turn=False,
+                )
+
+            # Reuse the embedding computed during intent routing as the memory
+            # query vector instead of embedding the same text a second time
+            # with _QUERY_INSTRUCT. This drops one HTTP embed call per turn.
+            query_vec = route_vec
+            if query_vec is None:
+                embedder = self._get_memorize()._mem._embedder
+                query_vec = embedder.embed_query(user_input)
             mem_kb_future = CONTEXT_POOL.submit(
                 self._fetch_memory_and_knowledge, user_input, query_vec
             )
 
-            intent = self._route_intent(user_input)
-            log.info("[route] intent=%s", intent)
-
             if intent == "agentic":
-                return self.agentic_chat(user_input, token_callback=token_callback, mem_kb_future=mem_kb_future, query_vec=query_vec)
-            elif intent == "webchat":
-                return self.webchat(user_input, token_callback=token_callback, mem_kb_future=mem_kb_future)
-            else:  # localchat
-                return self.chat(user_input, token_callback=token_callback, _skip_search=True, mem_kb_future=mem_kb_future)
+                return self.agentic_chat(user_input, token_callback=token_callback, mem_kb_future=mem_kb_future, query_vec=query_vec, _from_route=True)
+            if intent == "webchat":
+                return self.webchat(user_input, token_callback=token_callback, mem_kb_future=mem_kb_future, query_vec=query_vec)
+            return self.chat(user_input, token_callback=token_callback, _skip_search=True, mem_kb_future=mem_kb_future, query_vec=query_vec)
         finally:
+            try:
+                from cognition.memory.edge_state import for_identity
+                for_identity(user_id).record_turn_latency(time.monotonic() - _route_t0)
+            except Exception:
+                pass
             with self._active_users_lock:
                 self._active_user_ids.discard(user_id)
                 if not self._active_user_ids:
@@ -357,9 +605,9 @@ class AikoThink:
         """Fetch long-term memory + learned-knowledge (KB) concurrently.
 
         Both are independent reads against separate stores (memory.db /
-        knowledge.db) with no dependency on user intent, so route() fires
-        this off before intent routing even runs and hands the resulting
-        future to whichever path (agentic/webchat/localchat) gets picked.
+        knowledge.db). route() now starts this only after quaternary intent
+        routing, so greeting-only turns can skip recall entirely while
+        agentic/webchat/localchat still receive the same shared future.
         Callers that run standalone (e.g. a scheduled agentic job with no
         prior route() call) can call this directly instead.
 
@@ -368,13 +616,21 @@ class AikoThink:
 
         Returns (memories, knowledge_block).
         """
-        embedder = self._memorize._mem._embedder
-        mem_future = CONTEXT_POOL.submit(self._memorize.search, user_input, limit=mem_limit, query_vector=query_vector)
+        memorize = self._get_memorize()
+        if memorize is None:
+            log.warning("[think] Memory unavailable — skipping memory/KB recall.")
+            return [], ""
+        embedder = memorize._mem._embedder
+        mem_future = CONTEXT_POOL.submit(memorize.search, user_input, limit=mem_limit, query_vector=query_vector)
         know_future = CONTEXT_POOL.submit(
             knowledge_context_for, user_input, limit=know_limit, max_chars=2000, embedder=embedder
         )
         try:
-            memories = mem_future.result()
+            memories = mem_future.result(timeout=MEMORY_RECALL_TIMEOUT)
+        except concurrent.futures.TimeoutError:
+            log.warning("Memory recall timed out after %.1fs; skipping", MEMORY_RECALL_TIMEOUT)
+            know_future.cancel()
+            memories = []
         except Exception as e:
             log.error("Memory search failed: %s", e)
             know_future.cancel()
@@ -401,7 +657,10 @@ class AikoThink:
         handler was called standalone (no future supplied by route())."""
         if mem_kb_future is not None:
             try:
-                return mem_kb_future.result()
+                return mem_kb_future.result(timeout=MEMORY_RECALL_TIMEOUT)
+            except concurrent.futures.TimeoutError:
+                log.warning("Memory/KB recall timed out after %.1fs; skipping", MEMORY_RECALL_TIMEOUT)
+                return [], "<knowledge_context>\nLookup timed out.\n</knowledge_context>"
             except Exception as e:
                 log.error("Memory/KB fetch failed: %s", e)
                 return [], "<knowledge_context>\nLookup failed.\n</knowledge_context>"
@@ -426,8 +685,8 @@ class AikoThink:
         with self._proactive_lock:
             self._proactive_resting = resting
 
-    def _route_intent(self, user_input: str) -> str:
-        """Ternary routing: single embedding, three-way decision with a
+    def _route_intent(self, user_input: str) -> tuple[str, np.ndarray | None]:
+        """Quaternary routing: single embedding, four-way decision with a
         high-confidence margin so a close call doesn't get committed to
         agentic (or webchat) just because it happened to be checked first.
 
@@ -436,15 +695,25 @@ class AikoThink:
         only owns the routing policy (thresholds, gap, LLM tie-break).
         ROUTE_MODE picks the classification method; AGENTIC_MODE_ON gates
         whether "agentic" can ever be the result, independent of method.
+
+        Returns (intent, query_vec). The embedding computed for routing is
+        returned so route() can reuse it for memory recall instead of paying
+        for a second embed of the same text (see route()).
         """
     
         if not _ROUTE_ENABLED:
-            return "localchat"
+            return "localchat", None
+        if _ROUTE_MODE == "llm_only":
+            return self._classify_quaternary_intent_llm(user_input, allow_agentic=_AGENTIC_MODE_ON), None
     
-        instruct = _ROUTE_INSTRUCT_TERNARY
-        embedder = self._memorize._mem._embedder
+        instruct = _ROUTE_INSTRUCT_QUATERNARY
+        memorize = self._get_memorize()
+        if memorize is None:
+            log.warning("[think] Memory unavailable — intent routing via LLM only")
+            return self._classify_quaternary_intent_llm(user_input, allow_agentic=_AGENTIC_MODE_ON), None
+        embedder = memorize._mem._embedder
         query_vec = embedder.embed_query(user_input, instruct=instruct)
-        labels, example_vecs = self._semantic_example_vectors(_ROUTE_TERNARY_EXAMPLES, instruct)
+        labels, example_vecs = self._semantic_example_vectors(_ROUTE_QUATERNARY_EXAMPLES, instruct)
         scores = reason.label_scores_topk(query_vec, labels, example_vecs, top_k=_SEMANTIC_LABEL_TOP_K)
 
         if not _AGENTIC_MODE_ON:
@@ -453,6 +722,7 @@ class AikoThink:
             # webchat-vs-localchat decision — no separate code path needed.
             scores.pop("agentic", None)
       
+        greeting_score = scores.get("greeting", 0.0)
         agentic_score = scores.get("agentic", 0.0)
         webchat_score = scores.get("webchat", 0.0)
     
@@ -462,47 +732,56 @@ class AikoThink:
     
         agentic_threshold = float(os.getenv("ROUTE_AGENTIC_THRESHOLD", "0.65"))
         webchat_threshold = float(os.getenv("ROUTE_WEBCHAT_THRESHOLD", "0.60"))
+        greeting_threshold = float(os.getenv("ROUTE_GREETING_THRESHOLD", "0.60"))
     
         log.debug(
-            "[route] ternary scores: agentic=%.3f webchat=%.3f best=%s gap=%.3f for: %r",
-            agentic_score, webchat_score, best_label, gap, user_input
+            "[route] quaternary scores: greeting=%.3f agentic=%.3f webchat=%.3f best=%s gap=%.3f for: %r",
+            greeting_score, agentic_score, webchat_score, best_label, gap, user_input
         )
+
+        if best_label == "greeting" and greeting_score >= greeting_threshold and (gap >= _SEMANTIC_ROUTE_MIN_GAP or _is_greeting_only(user_input)):
+            return "greeting", query_vec
     
         if best_label == "agentic" and agentic_score >= agentic_threshold and gap >= _SEMANTIC_ROUTE_MIN_GAP:
-            return "agentic"
+            return "agentic", query_vec
         if best_label == "webchat" and webchat_score >= webchat_threshold and gap >= _SEMANTIC_ROUTE_MIN_GAP:
-            return "webchat"
+            return "webchat", query_vec
     
         # Above threshold but too close to call cleanly.
         ambiguous = (
-            (agentic_score >= agentic_threshold or webchat_score >= webchat_threshold)
+            (agentic_score >= agentic_threshold or webchat_score >= webchat_threshold or greeting_score >= greeting_threshold)
             and gap < _SEMANTIC_ROUTE_MIN_GAP
         )
         if ambiguous:
+            if _is_greeting_only(user_input):
+                return "greeting", query_vec
             if _ROUTE_MODE == "semantic_only":
                 # Deterministic mode: no LLM call on ambiguity.
                 log.debug("[route] semantic_only: ambiguous gap, defaulting localchat")
-                return "localchat"
+                return "localchat", query_vec
             if _ROUTE_MODE == "llm":
-                return self._classify_ternary_intent_llm(user_input, allow_agentic=_AGENTIC_MODE_ON)
+                return self._classify_quaternary_intent_llm(user_input, allow_agentic=_AGENTIC_MODE_ON), query_vec
             # "semantic" mode's original binary tie-break. If agentic is
             # off, there's nothing left for this binary check to decide
             # (it only ever distinguishes agentic vs chat), so skip the
             # LLM call entirely rather than spend it on a moot question.
             if not _AGENTIC_MODE_ON:
-                return "localchat"
+                return "localchat", query_vec
             llm_label = self._classify_agent_intent(user_input)
-            return "agentic" if llm_label == "agentic" else "localchat"
+            return ("agentic" if llm_label == "agentic" else "localchat"), query_vec
+
+        if _is_greeting_only(user_input):
+            return "greeting", query_vec
     
-        return "localchat"
+        return "localchat", query_vec
 
     def _semantic_example_vectors(self, examples_by_label: dict, instruct: str) -> tuple[list[str], object]:
         """Return cached route-example vectors.
 
         Hot turns use the in-memory cache. Cold boots can reuse a per-user
         on-disk NumPy archive keyed by the route examples, instruct string, and
-        embedding backend metadata when ROUTE_VECTOR_CACHE_ENABLED=1. If the
-        cache is missing/stale/unreadable, Aiko recomputes and overwrites it.
+        embedding backend metadata.
+        If the cache is missing/stale/unreadable, Aiko recomputes and overwrites it.
         """
         cache_key = (id(examples_by_label), instruct)
         with self._semantic_example_cache_lock:
@@ -510,7 +789,7 @@ class AikoThink:
             if cached is not None:
                 return cached
 
-            embedder = self._memorize._mem._embedder
+            embedder = self._get_memorize()._mem._embedder
             disk_path = self._route_vector_cache_path(examples_by_label, instruct, embedder)
             if disk_path is not None and disk_path.exists():
                 try:
@@ -535,24 +814,21 @@ class AikoThink:
             return cached
 
     def _route_vector_cache_path(self, examples_by_label: dict, instruct: str, embedder) -> Path | None:
-        if not _ROUTE_VECTOR_CACHE_ENABLED:
-            return None
-        try:
-            payload = {
-                "examples": examples_by_label,
-                "instruct": instruct,
-                "embedder": {
-                    "class": type(embedder).__name__,
-                    "model": getattr(embedder, "model", None) or getattr(embedder, "model_name", None) or getattr(embedder, "name", None),
-                    "dims": os.getenv("EMBED_DIMS", ""),
-                },
-            }
-            digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:24]
-            raw_dir = Path(_ROUTE_VECTOR_CACHE_DIR)
-            base = raw_dir if raw_dir.is_absolute() else user_state_dir(current_user_id()) / raw_dir
-            return base / f"{digest}.npz"
-        except Exception:
-            return None
+        payload = {
+            "examples": examples_by_label,
+            "instruct": instruct,
+            "embedder": {
+                "class": type(embedder).__name__,
+                "model": getattr(embedder, "model", None) or getattr(embedder, "model_name", None) or getattr(embedder, "name", None),
+                "dims": os.getenv("EMBED_DIMS", ""),
+            },
+        }
+        return reason.cache_vector_path(
+            payload,
+            cache_dir_env="ROUTE_VECTOR_CACHE_DIR",
+            default_dir=_ROUTE_VECTOR_CACHE_DIR,
+            per_user=True,
+        )
 
     def _classify_agent_intent(self, user_input: str, skip_regex: bool = False) -> str:
         """Ask the local model for a compact binary route label when semantics are ambiguous."""
@@ -577,7 +853,7 @@ class AikoThink:
                     "Label: agentic\n\n"
                     "Message: 'compare ollama vs llama.cpp and recommend one'\n"
                     "Label: agentic\n\n"
-                    "Message: 'open soul.md and show the persona block'\n"
+                    "Message: 'open SOUL.md and show the persona block'\n"
                     "Label: agentic\n\n"
                     "Message: 'continue working on the reflection script'\n"
                     "Label: agentic\n\n"
@@ -598,59 +874,60 @@ class AikoThink:
             log.warning("Intent routing failed: %s", e)
             return "chat"
 
-    def _classify_ternary_intent_llm(self, user_input: str, allow_agentic: bool = True) -> str:
-        """LLM classify for ROUTE_MODE=llm (ambiguity tie-break) and
-        ROUTE_MODE=llm_only (sole routing decision, every turn).
+    def _intent_llm_prompt_parts(self, *, allow_agentic: bool, include_greeting: bool) -> tuple[str, str, set[str]]:
+        labels = []
+        guidance_parts: list[str] = []
+        examples: list[str] = []
+        valid: set[str] = set()
 
-        allow_agentic=False collapses this to a binary webchat/chat
-        classification — agentic is never offered as a label, so
-        AGENTIC_MODE_ON=0 holds regardless of which ROUTE_MODE is active.
-        """
-        if allow_agentic and _AGENTIC_ROUTE_RE.search(user_input):
-            return "agentic"
+        if include_greeting:
+            labels.append("greeting")
+            valid.add("greeting")
+            guidance_parts.append(
+                "greeting = the entire message is only a salutation, thanks, "
+                "or small acknowledgement with no substantive request.\n"
+            )
+            examples.extend([
+                "Message: 'hey Aiko'\nLabel: greeting\n",
+                "Message: 'thanks'\nLabel: greeting\n",
+            ])
 
         if allow_agentic:
-            labels_line = "Labels: [agentic, webchat, chat]"
-            guidance = (
+            labels.append("agentic")
+            valid.add("agentic")
+            guidance_parts.append(
                 "agentic = the message asks for an action/task (write, save, "
                 "schedule, debug, plan, remind, research-and-report).\n"
-                "webchat = the message needs current/external information "
-                "(news, prices, scores, recent releases, real-time facts) but "
-                "is not itself a task.\n"
-                "chat = casual conversation, opinions, or something answerable "
-                "from general/persona knowledge alone.\n\n"
-                "Message: 'set a reminder for 9pm'\n"
-                "Label: agentic\n\n"
-                "Message: 'debug why asyncio.run() hangs'\n"
-                "Label: agentic\n\n"
-                "Message: 'what's the weather in Vancouver right now'\n"
-                "Label: webchat\n\n"
-                "Message: 'who won the game last night'\n"
-                "Label: webchat\n\n"
-                "Message: 'what do you think about minimalism'\n"
-                "Label: chat\n\n"
-                "Message: 'explain semaphores from memory'\n"
-                "Label: chat\n\n"
             )
-            valid = {"agentic", "webchat", "chat"}
-        else:
-            labels_line = "Labels: [webchat, chat]"
-            guidance = (
-                "webchat = the message needs current/external information "
-                "(news, prices, scores, recent releases, real-time facts).\n"
-                "chat = casual conversation, opinions, or something answerable "
-                "from general/persona knowledge alone.\n\n"
-                "Message: 'what's the weather in Vancouver right now'\n"
-                "Label: webchat\n\n"
-                "Message: 'who won the game last night'\n"
-                "Label: webchat\n\n"
-                "Message: 'what do you think about minimalism'\n"
-                "Label: chat\n\n"
-                "Message: 'explain semaphores from memory'\n"
-                "Label: chat\n\n"
-            )
-            valid = {"webchat", "chat"}
+            examples.extend([
+                "Message: 'set a reminder for 9pm'\nLabel: agentic\n",
+                "Message: 'debug why asyncio.run() hangs'\nLabel: agentic\n",
+            ])
 
+        labels.extend(["webchat", "chat"])
+        valid.update({"webchat", "chat"})
+        guidance_parts.extend([
+            "webchat = the message needs current/external information "
+            "(news, prices, scores, recent releases, real-time facts) but "
+            "is not itself a task.\n",
+            "chat = casual conversation, opinions, or something answerable "
+            "from general/persona knowledge alone.\n",
+        ])
+        examples.extend([
+            "Message: 'what's the weather in Vancouver right now'\nLabel: webchat\n",
+            "Message: 'who won the game last night'\nLabel: webchat\n",
+            "Message: 'what do you think about minimalism'\nLabel: chat\n",
+            "Message: 'explain semaphores from memory'\nLabel: chat\n",
+        ])
+        return f"Labels: [{', '.join(labels)}]", "\n".join(guidance_parts + examples), valid
+
+    def _classify_intent_llm(self, user_input: str, *, allow_agentic: bool, include_greeting: bool, log_name: str) -> str:
+        if allow_agentic and _AGENTIC_ROUTE_RE.search(user_input):
+            return "agentic"
+        labels_line, guidance, valid = self._intent_llm_prompt_parts(
+            allow_agentic=allow_agentic,
+            include_greeting=include_greeting,
+        )
         try:
             resp = self._client.chat.completions.create(
                 model=self._router_model,
@@ -669,65 +946,210 @@ class AikoThink:
                 return "localchat"
             return "localchat" if label == "chat" else label
         except Exception as e:
-            log.warning("Ternary LLM routing failed: %s", e)
+            log.warning("%s LLM routing failed: %s", log_name, e)
             return "localchat"
+
+    def _classify_quaternary_intent_llm(self, user_input: str, allow_agentic: bool = True) -> str:
+        """LLM classify with greeting/agentic/webchat/chat labels."""
+        return self._classify_intent_llm(
+            user_input,
+            allow_agentic=allow_agentic,
+            include_greeting=True,
+            log_name="Quaternary",
+        )
+
+    def _classify_ternary_intent_llm(self, user_input: str, allow_agentic: bool = True) -> str:
+        """Backward-compatible LLM classifier with no greeting label."""
+        return self._classify_intent_llm(
+            user_input,
+            allow_agentic=allow_agentic,
+            include_greeting=False,
+            log_name="Ternary",
+        )
   
-    def agentic_chat(self, user_input: str, token_callback=None, mem_kb_future=None, query_vec: np.ndarray | None = None) -> str:
-        """Delegate task-mode execution to skills.agentic."""
+    def _soft_gate_reply(
+        self,
+        user_input: str,
+        action: str,
+        reason: str,
+        token_callback=None,
+        mem_kb_future=None,
+        query_vec: np.ndarray | None = None,
+    ) -> str:
+        """Handle defer / clarify / degrade_chat without starting agentic tools.
+
+        Used by route() (pre-routing) and agentic_chat() (direct agentic entry).
+        Prompts come from attempt_gate.soft_user_prompt (one short reply only).
+        """
+        try:
+            from cognition.memory.edge_state import for_identity
+            state = for_identity(current_user_id())
+            kind = action if action in {"defer", "clarify"} else "stance"
+            state.record_self_decision(kind, reason)
+            state.persist()
+        except Exception:
+            pass
+        from cognition.memory.attempt_gate import soft_user_prompt
+        prompt = soft_user_prompt(user_input, action, reason)
+        return self.chat(
+            prompt,
+            token_callback=token_callback,
+            _skip_search=True,
+            mem_kb_future=mem_kb_future,
+            query_vec=query_vec,
+            store_turn=True,
+        )
+
+    def agentic_chat(self, user_input: str, token_callback=None, mem_kb_future=None, query_vec: np.ndarray | None = None, _from_route: bool = False) -> str:
+        """Delegate task-mode execution to agentic.agentic.
+
+        Runs a bounded self-assessment gate first (edge_state.should_attempt).
+        Critical requests always proceed; discretionary work may degrade to
+        chat, defer, or ask for clarification instead of starting the tool loop.
+        Direct entry (scheduled jobs) still gates here; normal turns are gated
+        earlier in route() with mode=route.
+        """
         user_id = current_user_id()
         with self._active_users_lock:
             self._active_user_ids.add(user_id)
+        _agentic_t0 = time.monotonic()
         try:
-            embedder = self._memorize._mem._embedder
+            # Self-assessment before committing to the agentic tool loop
+            # (covers scheduled/direct agentic entry; normal turns already gated in route).
+            try:
+                from cognition.memory.edge_state import for_identity
+                state = for_identity(user_id)
+                ok, reason, action = state.should_attempt(user_input, mode="agentic")
+                if not ok:
+                    log.info("[agentic_chat] should_attempt action=%s reason=%s", action, reason)
+                    return self._soft_gate_reply(
+                        user_input,
+                        action,
+                        reason,
+                        token_callback=token_callback,
+                        mem_kb_future=mem_kb_future,
+                        query_vec=query_vec,
+                    )
+            except Exception as exc:
+                log.debug("[agentic_chat] should_attempt skipped: %s", exc)
+
+            memorize = self._get_memorize()
+            embedder = memorize._mem._embedder if memorize is not None else None
             cap_vec = embedder.embed_query(
                 user_input,
                 instruct="Which capability/tool domain applies to this task?",
-            )
-            return run_agentic_chat(self, user_input, token_callback=token_callback, mem_kb_future=mem_kb_future, query_vec=query_vec, cap_vec=cap_vec)
+            ) if embedder is not None else None
+            response = run_agentic_chat(self, user_input, token_callback=token_callback, mem_kb_future=mem_kb_future, query_vec=query_vec, cap_vec=cap_vec)
+            return response
         finally:
+            # Only record latency if called directly (not from route, which already records)
+            if not _from_route:
+                try:
+                    from cognition.memory.edge_state import for_identity
+                    for_identity(user_id).record_turn_latency(time.monotonic() - _agentic_t0)
+                except Exception:
+                    pass
             with self._active_users_lock:
                 self._active_user_ids.discard(user_id)
                 if not self._active_user_ids:
                     self._last_chat_time = time.time()
               
-    def webchat(self, user_input: str, token_callback=None, mem_kb_future=None) -> str:
+    def webchat(self, user_input: str, token_callback=None, mem_kb_future=None, query_vec: np.ndarray | None = None) -> str:
         """Web-aware chat: web_search + optional webfetch fallback."""
-        if self._speak and self._speak.is_playing():
-            self._speak.stop()
+        speak = self._get_speak()
+        if speak and speak.is_playing():
+            speak.stop()
         
         # Memory + KB — either resolved from route()'s pre-intent future,
         # or fetched directly if this was called standalone.
         memories, knowledge_block = self._resolve_mem_kb(user_input, mem_kb_future)
-        memory_block = self._memorize.format_for_context(memories)
+        from cognition.memory.edge_state import for_identity
+        memories = for_identity(current_user_id()).prioritize_memories(user_input, memories)
+        memory_block = self._get_memorize().format_for_context(
+          memories, query=user_input, query_vector=query_vec
+        )
+        persona_block = self._get_memorize().persona_context()
+        situation_block = ""
+        metacognitive_block = ""
+        try:
+            state = for_identity(current_user_id())
+            situation_block = state.situation_context(user_input, memories, knowledge_block)
+            metacognitive_block = state.metacognitive_context(user_input, memories)
+        except Exception:
+            pass
 
         # Build base system (persona + memory + knowledge)
         system = self._current_system_prompt()
         system += "\n\n" + bioclock.current_datetime_block()
+        if persona_block:
+            system = f"{system}\n\n{persona_block}"
         if memory_block:
             system = f"{system}\n\n{memory_block}"
+        if situation_block:
+            system = f"{system}\n\n{situation_block}"
+        if metacognitive_block:
+            system = f"{system}\n\n{metacognitive_block}"
         system = f"{system}\n\n{knowledge_block}"
         
         # Search directly with the raw user input — same approach as /web.
         # No LLM-based query condensation: it adds latency, depends on a
         # small router model that often produces worse queries than the
         # original text, and /web already proves the raw path works.
+        display_name = current_display_name()
         if token_callback:
+            token_callback(f"__STATUS__:searching\n")
             token_callback(f"__SEARCHING__:{user_input}\n")
-        
-        context = web_search_context(user_input, max_results=int(os.getenv("SEARXNG_MAX_RESULTS", 3)))
+
+        max_results = int(os.getenv("SEARXNG_MAX_RESULTS", 3))
+        from agentic.toolkit.websearch import web_search as _web_search
+        from urllib.parse import urlparse as _urlparse
+
+        def _format_hits(query: str, results: list) -> tuple[str, list]:
+            if not results:
+                return "", []
+            lines = [f"[Web search results for: {query}]"]
+            sources: list[dict] = []
+            for i, result in enumerate(results, 1):
+                title = (result.get("title") or "").strip()
+                url = (result.get("url") or "").strip()
+                content = (result.get("content") or "").strip()
+                lines.append(f"{i}. {title}\n   {url}\n   {content}")
+                domain = ""
+                try:
+                    domain = _urlparse(url).netloc.lower().removeprefix("www.")
+                except Exception:
+                    domain = ""
+                if url:
+                    sources.append({"title": title or url, "url": url, "domain": domain})
+            context = "\n\n".join(lines) + f"\n\nUser asked: {query}"
+            return context, sources
+
+        results, search_err = _web_search(user_input, max_results)
+        if search_err:
+            log.warning("[webchat] search error: %s", search_err)
+        context, sources = _format_hits(user_input, results or [])
 
         if not context:
             log.info("[webchat] First search returned nothing, retrying once...")
             if token_callback:
+                token_callback("__STATUS__:retry\n")
                 token_callback("__RETRYING__\n")
             try:
-                context = web_search_context(user_input, max_results=1)
+                results, search_err = _web_search(user_input, 1)
+                if search_err:
+                    log.warning("[webchat] retry error: %s", search_err)
+                context, sources = _format_hits(user_input, results or [])
             except Exception as e:
                 log.warning("[webchat] Retry failed: %s", e)
-                context = None
-        
+                context, sources = "", []
+
+        if sources and token_callback:
+            token_callback("__SOURCES__:" + json.dumps(sources, ensure_ascii=False) + "\n")
+
         # Inject web context if available
         if context:
+            if token_callback:
+                token_callback("__STATUS__:ok\n")
             system = (
                 f"{system}\n\n"
                 f"<search_results query='{user_input}'>\n"
@@ -737,17 +1159,18 @@ class AikoThink:
             )
         else:
             if token_callback:
-                token_callback("[No web results available; using local knowledge]\n")
+                token_callback("__STATUS__:offline\n")
             system = (
                 f"{system}\n\n"
                 "<search_failed>\n"
-                "Web search was attempted for this question but returned no usable "
-                "results. You have no current information on this topic — not from "
-                "search, and your training data may be stale on anything time-sensitive "
-                "(scores, news, prices, current events, recent releases). Do not guess "
-                "or invent scores, names, dates, or other current-event details. Say "
-                "plainly that you couldn't retrieve current information on this. It is "
-                "fine and expected to say you don't know.\n"
+                f"Web search returned no usable results. You are speaking with {display_name}.\n"
+                "Respond as Aiko in one or two short natural sentences:\n"
+                "- Briefly acknowledge you could not reach live internet information (vary wording; "
+                "no fixed script, no system tokens, no phrases like 'using local knowledge').\n"
+                "- Do NOT invent time-sensitive facts (weather, scores, headlines, prices).\n"
+                "- If memory or knowledge context genuinely helps a non-live question, offer that "
+                "briefly; otherwise say you do not have current information.\n"
+                "- Stay in character. No meta commentary about tools or pipelines.\n"
                 "</search_failed>"
             )
 
@@ -777,7 +1200,8 @@ class AikoThink:
         }
         
         # Stream response
-        raw_response = self._stream_response(trimmed, system=system, token_callback=token_callback)
+        raw_response = self._stream_response(trimmed, system=system, token_callback=token_callback, emit=False)
+        raw_response = self._finalize_response(user_input, raw_response, token_callback)
         
         # Store in history
         with self._history_lock:
@@ -808,7 +1232,9 @@ class AikoThink:
                     f"Write only the message Aiko should say to {display_name} now."
                 ),
             }]
-            return self._stream_response(messages, system=system, token_callback=None)
+            response = self._stream_response(messages, system=system, token_callback=None, emit=False)
+            response = self._finalize_response(prompt_hint, response, None)
+            return response
         finally:
             with self._active_users_lock:
                 self._active_user_ids.discard(_SENTINEL)
@@ -817,32 +1243,62 @@ class AikoThink:
 
     # ── proactive idle check-in loop ──────────────────────────────────────────
 
-    def chat(self, user_input: str, token_callback=None, _skip_search: bool = True, _history_label: str | None = None, mem_kb_future=None) -> str:
-        """Standard chat: local knowledge only (persona + memory + KB)."""
-        if self._speak and self._speak.is_playing():
-            self._speak.stop()
+    def chat(self, user_input: str, token_callback=None, _skip_search: bool = True, _history_label: str | None = None, mem_kb_future=None, *, skip_memory: bool = False, store_turn: bool = True, query_vec: np.ndarray | None = None) -> str:
+        """Standard chat: persona plus optional memory/KB context."""
+        speak = self._get_speak()
+        if speak and speak.is_playing():
+            speak.stop()
         
-        # Memory + KB — either resolved from route()'s pre-intent future,
-        # or fetched directly if this was called standalone.
-        memories, knowledge_block = self._resolve_mem_kb(user_input, mem_kb_future)
-        memory_block = self._memorize.format_for_context(memories)
-        
-        system = self._current_system_prompt()
-        system += "\n\n" + bioclock.current_datetime_block()
-        if memory_block:
-            system = f"{system}\n\n{memory_block}"
+        if skip_memory:
+            memories = []
+            knowledge_block = ""
+            memory_block = ""
+            persona_block = ""
         else:
-            system += "\n\n<memory_context>\nNo relevant memories found.\n</memory_context>"
-        system = f"{system}\n\n{knowledge_block}"
+            # Memory + KB — either resolved from route()'s post-intent future,
+            # or fetched directly if this was called standalone.
+            memorize = self._get_memorize()
+            from cognition.memory.edge_state import for_identity
+            memories, knowledge_block = self._resolve_mem_kb(user_input, mem_kb_future)
+            memories = for_identity(current_user_id()).prioritize_memories(user_input, memories)
+            memory_block = memorize.format_for_context(
+              memories, query=user_input, query_vector=query_vec
+            ) if memorize is not None else ""
+            persona_block = memorize.persona_context() if memorize is not None else ""
+            situation_block = ""
+            metacognitive_block = ""
+            try:
+                from cognition.memory.edge_state import for_identity
+                situation_block = for_identity(current_user_id()).situation_context(user_input, memories, knowledge_block)
+                metacognitive_block = for_identity(current_user_id()).metacognitive_context(user_input, memories)
+            except Exception:
+                pass
+        
+        system = self._current_system_prompt(user_input)
+        system += "\n\n" + bioclock.current_datetime_block()
+        if not skip_memory:
+            if persona_block:
+                system = f"{system}\n\n{persona_block}"
+            if memory_block:
+                system = f"{system}\n\n{memory_block}"
+            if situation_block:
+                system = f"{system}\n\n{situation_block}"
+            if metacognitive_block:
+                system = f"{system}\n\n{metacognitive_block}"
+            if not memory_block:
+                system += "\n\n<memory_context>\nNo relevant memories found.\n</memory_context>"
+            system = f"{system}\n\n{knowledge_block}"
         
         # Additional narrower wiki lookup — only when the user is asking
         # about Aiko's own architecture/docs, distinct from the general KB
         # fetch above. Gated so casual chat doesn't pay for it every turn.
-        if _should_use_local_knowledge(user_input):
+        if not skip_memory and _should_use_local_knowledge(user_input):
             try:
+                memorize = self._get_memorize()
+                embedder = memorize._mem._embedder if memorize is not None else None
                 wiki_context = wiki_knowledge_context_for(
                     user_input, limit=3, max_chars=3000,
-                    embedder=self._memorize._mem._embedder,
+                    embedder=embedder,
                 )
                 system = f"{system}\n\n{wiki_context}"
             except Exception as e:
@@ -865,22 +1321,25 @@ class AikoThink:
         
         # Log debug
         self.last_prompt_debug = {
-            "mode": "localchat",
+            "mode": "greeting" if skip_memory else "localchat",
             "system_prompt": system,
             "memory_prompt": memory_block or "<memory_context>\nNo memories.\n</memory_context>",
             "knowledge_prompt": knowledge_block,
             "web_prompt": "",
             "previous_chat_messages": [dict(m) for m in trimmed],
         }
-        
+        _dump_full_prompt(self.last_prompt_debug)
+    
         # Stream response
-        raw_response = self._stream_response(trimmed, system=system, token_callback=token_callback)
+        raw_response = self._stream_response(trimmed, system=system, token_callback=token_callback, emit=False)
+        raw_response = self._finalize_response(user_input, raw_response, token_callback)
         
         # Store
         with self._history_lock:
             self._history.append({"role": "assistant", "content": raw_response})
         
-        self._store_async(user_input, raw_response)
+        if store_turn:
+            self._store_async(user_input, raw_response)
         self._reasoning = False
         return raw_response
 
@@ -909,19 +1368,54 @@ class AikoThink:
 
     def set_speak(self, speak) -> None:
         with self._speak_lock:
+            old = self._speak
             self._speak = speak
+        if old is not None and old is not speak:
+            old.stop()   # AikoSpeak.stop() is idempotent/safe to call even if already stopped
 
+    def compare_and_set_speak(self, expected, new_value) -> bool:
+        """Atomically set _speak to new_value only if it's still `expected`.
+        Used by the proactive-checkin save/mute/restore sequence in
+        orchestrate.py: if a concurrent explicit toggle (e.g. /voice) changed
+        _speak while we were muted for the check-in, that change is more
+        recent and should win — we skip the restore instead of stomping it.
+        Returns True if the swap happened, False if _speak had already moved."""
+        with self._speak_lock:
+            if self._speak is expected:
+                old = self._speak
+                self._speak = new_value
+                swapped = True
+            else:
+                old = None
+                swapped = False
+        if swapped and old is not None and old is not new_value:
+            old.stop()
+        return swapped
+  
+    def _get_speak(self):
+        with self._speak_lock:
+            return self._speak
+          
+    def set_memorize(self, memorize) -> None:
+        """Inject the memory backend after boot. Thread-safe against concurrent reads."""
+        with self._memorize_lock:
+            self._memorize = memorize
+    
+    def _get_memorize(self):
+        with self._memorize_lock:
+            return self._memorize
+  
     def wait_for_memory(self, timeout: float | None = None) -> bool:
         """Block until AikoMemorize's async write queue drains, or timeout
-        elapses. The queue itself now lives in memory.memorize; this is a
+        elapses. The queue itself now lives in cognition.memory.memorize; this is a
         thin passthrough kept for call sites that only know about the
-        AikoThink instance. No longer called from skills.agentic's turn
+        AikoThink instance. No longer called from agentic.agentic's turn
         start (see run_agentic_chat) — draining there was removed since
         the write's own idle-grace window plus real turn latency meant it
         rarely caught anything. Still available for any caller that
         genuinely needs to block until writes are flushed (e.g. shutdown).
         """
-        return self._memorize.wait_for_writes(timeout=timeout)
+        return self._get_memorize().wait_for_writes(timeout=timeout)
 
     def handle_scheduled_job(self, job: DueJob) -> None:
         """Announce or execute a due scheduled job without blocking the scheduler."""
@@ -929,12 +1423,26 @@ class AikoThink:
         log.info("[schedule] due %s action=%s: %s", job.id, job.action, text)
         if job.action == "announce":
             _play_beep()
-            if self._speak:
-                self._speak.speak(text)
+            speak = self._get_speak()
+            if speak:
+                speak.speak(text)
             else:
                 log.info(f"Aiko scheduled job: {text}")
             return
+        if job.action == "tool":
+            threading.Thread(target=self._run_scheduled_tool_job, args=(job,), daemon=True).start()
+            return
         threading.Thread(target=self._run_scheduled_agentic_job, args=(job,), daemon=True).start()
+
+    def _run_scheduled_tool_job(self, job: DueJob) -> None:
+        """Invoke one registered agentic tool from a schedule.json record."""
+        tool_call = job.tool_call or {}
+        try:
+            from agentic.agentic import invoke_registered_tool
+            result = invoke_registered_tool(tool_call.get("name", ""), tool_call.get("arguments", {}))
+            log.info("Scheduled tool job %s completed: %s", job.id, result)
+        except Exception as e:
+            log.error("Scheduled tool job %s failed: %s", job.id, e)
 
     def _run_scheduled_agentic_job(self, job: DueJob) -> None:
         """Run a scheduled autonomous task through Aiko's agent loop."""
@@ -942,6 +1450,7 @@ class AikoThink:
             "Scheduled job due. Use only local available tools. If external action "
             "is unavailable, draft/save the best local artifact and state next step.\n\n"
             f"Title: {job.title}\nTask: {job.task}"
+            + (f"\n\nScheduled skill instructions:\n{job.skill}" if job.skill else "")
         )
         try:
             self.agentic_chat(prompt)
@@ -952,20 +1461,21 @@ class AikoThink:
 
     def _emit(self, text: str, token_callback=None) -> None:
         if not text: return
-
+    
         # Always drive the TUI callback directly, regardless of TTS
         if token_callback:
             words = text.split(" ")
             for i, word in enumerate(words):
                 token_callback(word if i == 0 else " " + word)
                 time.sleep(float(os.getenv("EMIT_DELAY", 0.005)))
-
+    
         # TTS runs independently
-        if self._speak:
-            self._speak.feed(text)
-            self._speak.play_async()
+        speak = self._get_speak()
+        if speak:
+            speak.feed(text)
+            speak.play_async()
 
-    def _stream_response(self, messages: list[dict], system: str = "", token_callback=None) -> str:
+    def _stream_response(self, messages: list[dict], system: str = "", token_callback=None, emit: bool = True) -> str:
         full_response = []
         max_tokens = _BASE_PREDICT * _REASONING_SCALE if self._reasoning else _BASE_PREDICT
         all_messages = [{"role": "system", "content": system}] + messages if system else messages
@@ -976,14 +1486,17 @@ class AikoThink:
             "completion_tokens": None,
             "total_tokens": None,
         }
-
+    
+        speak = self._get_speak()   # single snapshot for this call — avoids a toggle mid-stream
+                                     # producing inconsistent behavior across the checks below
+    
         karaoke_text = bool(
-            self._speak and token_callback and getattr(self._speak, "karaoke_text", False)
+            emit and speak and token_callback and getattr(speak, "karaoke_text", False)
             and not self._reasoning
         )
-        if self._speak:
-            self._speak.start_speech_stream(token_callback if karaoke_text else None)
-
+        if speak and emit:
+            speak.start_speech_stream(token_callback if karaoke_text else None)
+    
         sentence_buffer = ""
         stream_success = False
         try:
@@ -1003,39 +1516,40 @@ class AikoThink:
             for chunk in stream:
                 delta = chunk.choices[0].delta if chunk.choices else None
                 token = (delta.content or "") if delta else ""
-                
-                if token_callback and token and not karaoke_text:
+    
+                if emit and token_callback and token and not karaoke_text:
                     token_callback(token)
-                
+    
                 full_response.append(token)
-                
-                if self._speak and token:
+    
+                if emit and speak and token:
                     sentence_buffer += token
                     sentences, sentence_buffer = split_stream_sentences(sentence_buffer)
                     for sentence in sentences:
-                        self._speak.feed_speech_stream(sentence)
-
+                        speak.feed_speech_stream(sentence)
+    
             text = "".join(full_response).strip()
             if text:
                 self.last_usage["completion_text"] = text
                 stream_success = True
-                if self._speak and sentence_buffer.strip():
-                    self._speak.feed_speech_stream(sentence_buffer)
+                if emit and speak and sentence_buffer.strip():
+                    speak.feed_speech_stream(sentence_buffer)
         except Exception as e:
             log.error(f"LLM stream failed: {e}")
         finally:
-            if self._speak:
-                self._speak.stop_speech_stream()
-
+            if speak and emit:
+                speak.stop_speech_stream()
+    
         if stream_success:
             return text
-
+    
         fallback_text = self._fallback_completion(
             all_messages,
             max_tokens,
             "LLM stream failed or completed without content",
         )
-        self._emit(fallback_text, token_callback=token_callback)
+        if emit:
+            self._emit(fallback_text, token_callback=token_callback)
         return fallback_text
 
     def _fallback_completion(self, messages: list[dict], max_tokens: int, reason: str) -> str:
@@ -1078,25 +1592,102 @@ class AikoThink:
         while sanitized and sanitized[0]["role"] != "user": sanitized.pop(0)
         return sanitized
 
+    def _finalize_response(self, user_input: str, draft: str, token_callback=None) -> str:
+        review = self._review_response(user_input, draft)
+        response = self._correct_response(user_input, draft, review)
+        if response != draft:
+            self._review_response(user_input, response)
+        try:
+            from cognition.memory.edge_state import for_identity
+            speak = self._get_speak()
+            if speak is not None and hasattr(speak, "set_expression"):
+                snap = for_identity(current_user_id()).snapshot()
+                affect = float(snap.get("affect", 0.0))
+                volume = 1.05 if affect > 0.25 else 0.9 if affect < -0.25 else 1.0
+                pitch = 0.05 if affect > 0.25 else -0.05 if affect < -0.25 else 0.0
+                speak.set_expression(for_identity(current_user_id()).adaptive_tts_rate(), volume, pitch)
+            elif speak is not None and hasattr(speak, "set_speech_rate"):
+                speak.set_speech_rate(for_identity(current_user_id()).adaptive_tts_rate())
+        except Exception:
+            pass
+        self._emit(response, token_callback=token_callback)
+        return response
+
+    def _correct_response(self, user_input: str, draft: str, review: dict | None) -> str:
+        """Repair only high-risk drafts, keeping the correction bounded."""
+        if not review or len(review.get("flags", [])) < 2 or not draft.strip():
+            return draft
+        system = (
+            f"{self._current_system_prompt()}\n\n"
+            "You are Aiko's final response editor. Rewrite the draft only to fix the listed reliability issues. "
+            "Preserve the user's intent, do not invent facts, and return only the corrected answer. "
+            "If information is uncertain, say so plainly. Keep the original tone and length when possible."
+        )
+        prompt = (
+            f"User request:\n{user_input[:1200]}\n\n"
+            f"Draft:\n{draft[:3000]}\n\n"
+            f"Warnings:\n- " + "\n- ".join(review.get("flags", [])[:4])
+        )
+        corrected = self._fallback_completion(
+            [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+            min(600, _BASE_PREDICT),
+            "metacognitive response correction",
+        )
+        return draft if not corrected.strip() or corrected.startswith("[LLM error]") else corrected.strip()
+
+    def _review_response(self, user_input: str, response_text: str) -> dict:
+        try:
+            from cognition.memory.edge_state import for_identity
+            state = for_identity(current_user_id())
+            review = state.review_response(user_input, response_text)
+            state.persist()
+            return review
+        except Exception:
+            return {}
     def _store_async(self, user_input: str, response_text: str) -> None:
         """Queue a fire-and-forget memory write. The actual queue/worker
-        thread now lives on AikoMemorize (memory.memorize); this just wires
+        thread now lives on AikoMemorize (cognition.memory.memorize); this just wires
         up this instance's idle-tracking callables (is_active_turn /
         idle_since) so the write waits for a genuinely idle window before
         using the shared LLM for fact extraction. Kept as a method (rather
-        than inlining self._memorize.queue_write(...) at every call site)
-        because skills.agentic's run_agentic_chat also calls
+        than inlining self._get_memorize().queue_write(...) at every call site)
+        because agentic.agentic's run_agentic_chat also calls
         owner._store_async(...) directly at the end of the agent loop.
+
+        EMC-2: also stage the turn into episodic memory (best-effort, never
+        blocks the turn and never invents metadata).
         """
+        cognitive_state = None
+        try:
+            from cognition.memory.edge_state import for_identity
+            state = for_identity(current_user_id())
+            confirmed = state.confirm_memory_update(user_input)
+            if confirmed:
+                memorize = self._get_memorize()
+                for conflict in confirmed:
+                    if conflict.get("memory_id") and memorize is not None:
+                        memorize.supersede_exact(conflict["memory_id"], conflict.get("current", user_input), current_user_id())
+            state.record(user_input, response_text)
+            _sync_goal_review_schedule(state)
+            state.persist()
+            cognitive_state = for_identity(current_user_id()).snapshot()
+        except Exception:
+            pass
+
         def _is_any_active():
             with self._active_users_lock:
                 return bool(self._active_user_ids)
-        self._memorize.queue_write(
+        mem = self._get_memorize()
+        mem.queue_write(
             user_input,
             response_text,
             is_active_turn=_is_any_active,
             idle_since=lambda: self._last_chat_time,
         )
+        try:
+            mem.queue_episode(user_input, response_text, cognitive_state=cognitive_state)
+        except Exception:
+            pass
 
 
 _STREAM_SENTENCE_END = set(".?!。？！")

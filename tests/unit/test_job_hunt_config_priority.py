@@ -153,6 +153,85 @@ def test_fetch_one_greenhouse_board_uses_rss_style_config(monkeypatch, tmp_path)
     assert (tmp_path / "fetch_2026-08-28_greenhouse_0.jsonl").exists()
 
 
+def test_greenhouse_fetch_enriches_matching_job_with_detail_salary(monkeypatch):
+    from agentic.workflows.job_hunt import toolset
+
+    requested_urls = []
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    def fake_get(url, **kwargs):
+        requested_urls.append(url)
+        if url.endswith("/jobs?content=true&pay_transparency=true"):
+            return Response({"jobs": [
+                {"id": 101, "title": "Software Engineer", "content": "Python APIs", "updated_at": "2026-08-29T10:00:00Z"},
+                {"id": 202, "title": "Store Manager", "content": "Retail operations", "updated_at": "2026-08-29T10:00:00Z"},
+            ]})
+        return Response({
+            "content": "Detailed Python API role",
+            "pay_input_ranges": [{"title": "Base", "currency_type": "USD", "min_cents": 10000000, "max_cents": 12000000}],
+        })
+
+    monkeypatch.setattr(toolset, "_http_get_with_tls_fallback", fake_get)
+    monkeypatch.setattr(toolset, "local_now", lambda: toolset.datetime.fromisoformat("2026-08-29T12:00:00+00:00"))
+
+    jobs = toolset.fetch_today_jobs_from_greenhouse({
+        "greenhouse_source": {"base_url": "https://boards-api.greenhouse.io/v1/boards", "board_tokens": ["acme"]},
+        "job_keywords": ["software"],
+        "date_range_days": 1,
+    })
+
+    assert len(jobs) == 1
+    assert jobs[0]["salary"] == "Base: USD 100,000-120,000"
+    assert requested_urls == [
+        "https://boards-api.greenhouse.io/v1/boards/acme/jobs?content=true&pay_transparency=true",
+        "https://boards-api.greenhouse.io/v1/boards/acme/jobs/101?content=true&pay_transparency=true",
+    ]
+
+
+def test_greenhouse_fetch_keeps_matching_list_item_when_detail_fails(monkeypatch):
+    from agentic.workflows.job_hunt import toolset
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"jobs": [{
+                "id": 303,
+                "title": "Software Engineer",
+                "content": "Python APIs",
+                "absolute_url": "https://boards.greenhouse.io/acme/jobs/303",
+                "updated_at": "2026-08-29T10:00:00Z",
+            }]}
+
+    def fake_get(url, **kwargs):
+        if "/jobs/303?" in url:
+            raise RuntimeError("detail unavailable")
+        return Response()
+
+    monkeypatch.setattr(toolset, "_http_get_with_tls_fallback", fake_get)
+    monkeypatch.setattr(toolset, "local_now", lambda: toolset.datetime.fromisoformat("2026-08-29T12:00:00+00:00"))
+
+    jobs = toolset.fetch_today_jobs_from_greenhouse({
+        "greenhouse_source": {"base_url": "https://boards-api.greenhouse.io/v1/boards", "board_tokens": ["acme"]},
+        "job_keywords": ["software"],
+        "date_range_days": 1,
+    })
+
+    assert len(jobs) == 1
+    assert jobs[0]["url"] == "https://boards.greenhouse.io/acme/jobs/303"
+    assert jobs[0]["salary"] == ""
+
+
 def test_job_board_tokens_parse_lever_and_ashby_urls():
     from agentic.workflows.job_hunt.toolset import _job_board_tokens
 

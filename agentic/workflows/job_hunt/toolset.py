@@ -909,24 +909,42 @@ def fetch_today_jobs_from_greenhouse(config: dict[str, Any] | None = None, filte
             title = re.sub(r"\s+", " ", str(job.get("title") or "")).strip()
             if not _has_any_keyword(f"{title} {summary}", keywords):
                 continue
-            link = str(job.get("absolute_url") or f"https://boards.greenhouse.io/{token}/jobs/{job.get('id', '')}").strip()
-            guid = f"greenhouse:{token}:{job.get('id') or link}"
+            merged_job = job
+            job_id = job.get("id")
+            if job_id:
+                detail_url = f"{base_url}/{token}/jobs/{job_id}?content=true&pay_transparency=true"
+                try:
+                    detail_resp = _http_get_with_tls_fallback(
+                        detail_url,
+                        timeout=30,
+                        headers={"User-Agent": "Aiko-chan Greenhouse job API/1.0", "Accept": "application/json"},
+                    )
+                    detail_resp.raise_for_status()
+                    detail = detail_resp.json()
+                    if isinstance(detail, dict):
+                        merged_job = {**job, **detail}
+                except Exception as e:
+                    log.warning("Lane D Greenhouse detail fetch failed for board %s job %s: %s", token, job_id, e)
+
+            summary = _strip_html(str(merged_job.get("content") or ""), config=config)
+            link = str(merged_job.get("absolute_url") or f"https://boards.greenhouse.io/{token}/jobs/{job_id or ''}").strip()
+            guid = f"greenhouse:{token}:{job_id or link}"
             link_key, guid_key = _dedupe_key(link, guid)
             if link_key in seen_ids or guid_key in seen_ids:
                 continue
             seen_ids.update({link_key, guid_key})
-            location = job.get("location") if isinstance(job.get("location"), dict) else {}
+            location = merged_job.get("location") if isinstance(merged_job.get("location"), dict) else {}
             kept.append({
                 "title": title or "Untitled role",
-                "organization": str(job.get("company_name") or token).strip(),
+                "organization": str(merged_job.get("company_name") or token).strip(),
                 "url": link,
                 "guid": guid,
                 "summary": summary,
                 "location": str(location.get("name") or "").strip(),
                 "employment_type": "",
-                "salary": _greenhouse_salary(job),
+                "salary": _greenhouse_salary(merged_job),
                 "experience": "",
-                "close_date": str(job.get("application_deadline") or "").strip(),
+                "close_date": str(merged_job.get("application_deadline") or "").strip(),
                 "posted_date": posted.isoformat() if posted else "",
                 "source_feed": url,
                 "source": "greenhouse",

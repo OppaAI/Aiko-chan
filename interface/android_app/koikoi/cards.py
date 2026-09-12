@@ -16,6 +16,9 @@ Yaku (standard scores, documented in-app on the rules page):
   Goko 10 · Shiko 8 · Ame-shiko 7 · Sanko 5 · Tsukimi/Hanami-zake 5 ·
   Ino-shika-cho 5 · Akatan/Aotan 5 · Tane 1+extra · Tanzaku 1+extra ·
   Kasu 1+extra (10 needed).
+Dealt yaku (checked on the initial 8-card hands, auto-win, no koi-koi):
+  Teshi (four of a month) 6 · Kuttsuki (four pairs) 6.
+Month yaku: Tsuki-fuda (all four of the round's calendar month) 4.
 """
 
 from __future__ import annotations
@@ -124,9 +127,37 @@ BUTTERFLY = 5 * 4
 DEER = 9 * 4
 SAKE_CUP = 8 * 4
 
+TESHI_POINTS = 6
+KUTTSUKI_POINTS = 6
+TSUKI_POINTS = 4
 
-def detect_yaku(captured: list[int]) -> list[dict]:
-    """All completed yaku in a captured collection, each {id, name, jp, points}."""
+
+def detect_hand_yaku(hand: list[int]) -> list[dict]:
+    """Dealt yaku on an initial 8-card hand (teshi before kuttsuki).
+
+    A hand can hold at most one of them (teshi uses 4 of one month,
+    kuttsuki needs 4 distinct pairs).
+    """
+    counts: dict[int, int] = {}
+    for c in hand:
+        m = month_of(c)
+        counts[m] = counts.get(m, 0) + 1
+    if any(n >= 4 for n in counts.values()):
+        return [{"id": "teshi", "name": "Four of a Month", "jp": "手四",
+                 "points": TESHI_POINTS}]
+    if len(hand) >= 8 and len(counts) == 4 and all(n == 2 for n in counts.values()):
+        return [{"id": "kuttsuki", "name": "Four Pairs", "jp": "くっつき",
+                 "points": KUTTSUKI_POINTS}]
+    return []
+
+
+def detect_yaku(captured: list[int], round_month: int | None = None) -> list[dict]:
+    """All completed yaku in a captured collection, each {id, name, jp, points}.
+
+    round_month is the 1-based calendar month of the current round
+    (round N plays month N): holding all four of its cards completes
+    Tsuki-fuda (月札, 4 pts).
+    """
     have = set(captured)
     kinds = [kind_of(c) for c in captured]
     yaku: list[dict] = []
@@ -175,6 +206,13 @@ def detect_yaku(captured: list[int]) -> list[dict]:
             "id": "kasu", "name": f"Chaff ×{n_kasu}", "jp": "カス",
             "points": 1 + (n_kasu - 10),
         })
+    if round_month is not None:
+        need = {(round_month - 1) * 4 + s for s in range(4)}
+        if need <= have:
+            yaku.append({
+                "id": "tsuki-fuda", "name": "Month Cards", "jp": "月札",
+                "points": TSUKI_POINTS,
+            })
     return yaku
 
 

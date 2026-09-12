@@ -145,18 +145,18 @@ def _views(cards: list[int]) -> list[dict]:
     return [_view(c) for c in cards]
 
 
-def _yaku(cap: list[int]) -> list[dict]:
-    return C.detect_yaku(cap)
+def _yaku(game: dict, side: str) -> list[dict]:
+    return C.detect_yaku(game["cap"][side], game.get("month"))
 
 
 def _claimed_map(game: dict, side: str) -> dict[str, int]:
-    return {y["id"]: y["points"] for y in _yaku(game["cap"][side])}
+    return {y["id"]: y["points"] for y in _yaku(game, side)}
 
 
 def _new_yaku(game: dict, side: str) -> list[dict]:
     """Completed yaku not yet acknowledged (new ids or grown points)."""
     claimed: dict[str, int] = game["claimed"][side]
-    return [y for y in _yaku(game["cap"][side]) if claimed.get(y["id"]) != y["points"]]
+    return [y for y in _yaku(game, side) if claimed.get(y["id"]) != y["points"]]
 
 
 def _ack(game: dict, side: str) -> None:
@@ -193,11 +193,63 @@ def _advance(game: dict) -> None:
     game["oya"] = game["round_result"]["winner"] if game["round_result"] else game["oya"]
     if game["round_result"] and game["round_result"]["winner"] == "draw":
         pass  # oya keeps deal on exhausted-draw months
+    if game.get("mode") == "practice":
+        game["oya"] = "you"  # solitaire practice: human always opens
     _new_round(game)
+    _auto_dealt(game)
+
+
+def _check_dealt_yaku(game: dict) -> Optional[tuple[str, dict]]:
+    """Teshi/kuttsuki on the just-dealt hands: (side, yaku) or None.
+
+    Teshi outranks kuttsuki; same kind goes to the dealer (oya).
+    """
+    hits: list[tuple[str, dict, int]] = []
+    for side in ("you", "aiko"):
+        found = C.detect_hand_yaku(game["hand"][side])
+        if found:
+            rank = 0 if found[0]["id"] == "teshi" else 1
+            hits.append((side, found[0], rank))
+    if not hits:
+        return None
+    hits.sort(key=lambda h: (h[2], 0 if h[0] == game["oya"] else 1))
+    side, yaku, _ = hits[0]
+    return side, yaku
+
+
+def _settle_dealt(game: dict, side: str, yaku: dict) -> dict:
+    """Bank a dealt yaku (teshi/kuttsuki): no koi-koi possible, ×1."""
+    gained = yaku["points"]
+    game["totals"][side] += gained
+    _ack(game, "you")
+    _ack(game, "aiko")
+    game["round_result"] = {
+        "winner": side, "points": gained, "base": gained,
+        "multiplier": 1, "reason": yaku["id"],
+    }
+    game["pending"] = None
+    _advance(game)
+    return game["round_result"]
+
+
+def _auto_dealt(game: dict) -> list[str]:
+    """Settle teshi/kuttsuki chains after a deal (recurses via _advance)."""
+    notes: list[str] = []
+    guard = 0
+    while game.get("status") == "playing" and guard < 14:
+        guard += 1
+        hit = _check_dealt_yaku(game)
+        if not hit:
+            break
+        side, yaku = hit
+        res = _settle_dealt(game, side, yaku)
+        who = "You are" if side == "you" else "Aiko is"
+        notes.append(f"{who} dealt {yaku['name']} ({yaku['jp']}) +{res['points']}! 🎴")
+    return notes
 
 
 def _settle_stop(game: dict, side: str) -> dict:
-    base = C.yaku_points(_yaku(game["cap"][side]))
+    base = C.yaku_points(_yaku(game, side))
     mult = _mult(game)
     gained = base * mult
     game["totals"][side] += gained
@@ -213,8 +265,8 @@ def _settle_stop(game: dict, side: str) -> dict:
 
 
 def _settle_exhausted(game: dict) -> dict:
-    py = C.yaku_points(_yaku(game["cap"]["you"]))
-    pa = C.yaku_points(_yaku(game["cap"]["aiko"]))
+    py = C.yaku_points(_yaku(game, "you"))
+    pa = C.yaku_points(_yaku(game, "aiko"))
     if py == pa == 0:
         winner, gained = "draw", 0
     elif py > pa:
@@ -272,7 +324,7 @@ def _pending_view(game: dict) -> Optional[dict]:
             "new_yaku": [], "would_score": 0, "multiplier": _mult(game),
         }
     new = _new_yaku(game, p["side"])
-    base = C.yaku_points(_yaku(game["cap"][p["side"]]))
+    base = C.yaku_points(_yaku(game, p["side"]))
     return {
         "kind": "decision", "flip": None, "options": [],
         "new_yaku": new, "would_score": base * _mult(game), "multiplier": _mult(game),
@@ -288,8 +340,8 @@ def _state_response(uid: str, ai_comment: Optional[str] = None) -> KoiState:
         field=_views(game["field"]),
         cap_you=_views(game["cap"]["you"]),
         cap_aiko=_views(game["cap"]["aiko"]),
-        yaku_you=_yaku(game["cap"]["you"]),
-        yaku_aiko=_yaku(game["cap"]["aiko"]),
+        yaku_you=_yaku(game, "you"),
+        yaku_aiko=_yaku(game, "aiko"),
         totals=dict(game["totals"]),
         month=game["month"],
         months=game["months"],
@@ -319,7 +371,9 @@ def _ai_turn(game: dict) -> str:
             _settle_exhausted(game)
             notes.append("cards exhausted")
             break
-        hand, take = _ai.choose_play(game["hand"]["aiko"], game["field"], game["cap"]["aiko"], diff, rng)
+        hand, take = _ai.choose_play(
+            game["hand"]["aiko"], game["field"], game["cap"]["aiko"],
+            diff, rng, game.get("month"))
         _apply_hand_play(game, "aiko", hand, take)
         if take:
             notes.append(f"Aiko takes {len(take) + 1} with {_card_name(hand)}")
@@ -329,7 +383,8 @@ def _ai_turn(game: dict) -> str:
             if not opts:
                 _apply_flip(game, "aiko", flip, [])
             else:
-                chosen = _ai.choose_flip(flip, opts, game["cap"]["aiko"], diff, rng)
+                chosen = _ai.choose_flip(
+                    flip, opts, game["cap"]["aiko"], diff, rng, game.get("month"))
                 _apply_flip(game, "aiko", flip, chosen)
                 if chosen:
                     notes.append(f"flip {_card_name(flip)} takes {len(chosen)}")
@@ -337,7 +392,8 @@ def _ai_turn(game: dict) -> str:
         if new and game["status"] == "playing":
             cards_left = len(game["hand"]["you"]) + len(game["hand"]["aiko"]) + len(game["stock"])
             call = _ai.choose_decision(
-                game["cap"]["aiko"], game["cap"]["you"], game["koi"], cards_left, diff, rng)
+                game["cap"]["aiko"], game["cap"]["you"], game["koi"], cards_left,
+                diff, rng, game.get("month"))
             if call == "koi":
                 game["koi"] += 1
                 _ack(game, "aiko")
@@ -417,10 +473,17 @@ async def start_game(body: StartRequest, session: dict = Depends(_require_user))
     }
     _games[uid] = game
     _new_round(game)
+    notes = _auto_dealt(game)
     comment = (
         f"New {months}-month match — you deal first 🌸 "
         f"(Aiko plays {diff}; her heuristic is always ready)"
     )
+    if notes:
+        comment += " " + " ".join(notes)
+    if game["status"] == "playing" and game["turn"] == "aiko" and mode != "practice":
+        extra = _drain_aiko(game)
+        if extra:
+            comment += " · " + extra
     log.info("Koikoi match started for %s months=%s difficulty=%s", uid, months, diff)
     return _state_response(uid, ai_comment=comment)
 
@@ -482,7 +545,7 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
         new = _new_yaku(game, "you")
         if new:
             game["pending"] = {"kind": "decision", "side": "you"}
-            base = C.yaku_points(_yaku(game["cap"]["you"]))
+            base = C.yaku_points(_yaku(game, "you"))
             names = ", ".join(y["name"] for y in new)
             return _state_response(
                 uid, ai_comment=f"Yaku! {names} ({base} pts) — koi-koi or stop? 🌸")
@@ -538,7 +601,7 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
     new = _new_yaku(game, "you")
     if new:
         game["pending"] = {"kind": "decision", "side": "you"}
-        base = C.yaku_points(_yaku(game["cap"]["you"]))
+        base = C.yaku_points(_yaku(game, "you"))
         names = ", ".join(y["name"] for y in new)
         return _state_response(
             uid, ai_comment=f"Yaku! {names} ({base} pts) — koi-koi or stop? 🌸")

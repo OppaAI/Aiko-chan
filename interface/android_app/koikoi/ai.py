@@ -31,11 +31,12 @@ def available() -> bool:
     return True
 
 
-def _option_value(hand: int, take: list[int], captured: list[int]) -> float:
+def _option_value(hand: int, take: list[int], captured: list[int],
+                   round_month: int | None = None) -> float:
     """Value of playing `hand` and taking `take` (field ids)."""
-    before = C.yaku_points(C.detect_yaku(captured))
+    before = C.yaku_points(C.detect_yaku(captured, round_month))
     after_cards = captured + [hand] + list(take)
-    after = C.yaku_points(C.detect_yaku(after_cards))
+    after = C.yaku_points(C.detect_yaku(after_cards, round_month))
     gain = (after - before) * 3.0
     loot = sum(C.card_value(c) for c in [hand] + list(take))
     progress = (C.near_yaku_score(after_cards) - C.near_yaku_score(captured)) * 1.5
@@ -63,6 +64,7 @@ def choose_play(
     captured: list[int],
     difficulty: str | None = None,
     rng: random.Random | None = None,
+    round_month: int | None = None,
 ) -> tuple[int, list[int]]:
     rng = rng or random.Random()
     options = enumerate_plays(hand_cards, field)
@@ -70,7 +72,7 @@ def choose_play(
         raise ValueError("no cards to play")
     if rng.random() < _BLUNDER[difficulty_name(difficulty)]:
         return rng.choice(options)
-    return max(options, key=lambda o: (_option_value(o[0], o[1], captured), rng.random()))
+    return max(options, key=lambda o: (_option_value(o[0], o[1], captured, round_month), rng.random()))
 
 
 def choose_flip(
@@ -79,6 +81,7 @@ def choose_flip(
     captured: list[int],
     difficulty: str | None = None,
     rng: random.Random | None = None,
+    round_month: int | None = None,
 ) -> list[int]:
     """Pick among deck-flip takes (each option already includes the flip)."""
     rng = rng or random.Random()
@@ -88,7 +91,7 @@ def choose_flip(
         return list(options[0])
     if rng.random() < _BLUNDER[difficulty_name(difficulty)]:
         return list(rng.choice(options))
-    scored = [(_option_value(flip, o, captured), o) for o in options]
+    scored = [(_option_value(flip, o, captured, round_month), o) for o in options]
     return list(max(scored, key=lambda s: (s[0], rng.random()))[1])
 
 
@@ -99,11 +102,12 @@ def choose_decision(
     cards_left: int,
     difficulty: str | None = None,
     rng: random.Random | None = None,
+    round_month: int | None = None,
 ) -> str:
     """'stop' (bank points) or 'koi' (continue, doubling the stakes)."""
     rng = rng or random.Random()
     level = difficulty_name(difficulty)
-    current = C.yaku_points(C.detect_yaku(captured))
+    current = C.yaku_points(C.detect_yaku(captured, round_month))
     potential = C.near_yaku_score(captured)
     threat = C.near_yaku_score(opp_captured) + len(opp_captured) / 48.0
     late = cards_left <= 10

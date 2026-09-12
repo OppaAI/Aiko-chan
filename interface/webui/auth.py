@@ -122,6 +122,13 @@ try:
 except Exception as e:
     log.warning(f"Could not mount Go router: {e}")
 
+# Koi-Koi (こいこい, hanafuda) game API — Android-app backend, parallel to go/
+try:
+    from interface.android_app.koikoi import router as koikoi_router
+    app.include_router(koikoi_router)
+except Exception as e:
+    log.warning(f"Could not mount Koi-Koi router: {e}")
+
 # Codebase Figure Studio (sharp silhouette — brain/eyes/ears/mouth/legs)
 try:
     from interface.webui.studio.codebase.backend.api import app as codebase_studio_app

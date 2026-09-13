@@ -126,6 +126,49 @@ LLM_STOP_SEQUENCES = [s.strip() for s in os.getenv("LLM_STOP_SEQUENCES", "</s>,<
 # ignore the field. Disable with LLM_CACHE_PROMPT=0 if a non-llama proxy
 # rejects unknown body params.
 _LLM_CACHE_PROMPT = os.getenv("LLM_CACHE_PROMPT", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+# No-think mode for hybrid-reasoning templates (MiniCPM5 `enable_thinking`,
+# Qwen3-style `enable_thinking`, MiniCPM4.1 `/no_think` suffix). When set,
+# chat requests both append the `/no_think` suffix to the final user turn
+# (template-level, works through any server that honors the convention)
+# AND send chat_template_kwargs.enable_thinking=false (honored by
+# vLLM/SGLang and any llama.cpp build that forwards template kwargs; inert
+# JSON elsewhere). Either mechanism firing is enough. Leave off for
+# non-thinking models (ministral) — the suffix would be visible prompt
+# noise to a template that doesn't strip it.
+_LLM_NO_THINK = os.getenv("LLM_NO_THINK", "").strip().lower() in {"1", "true", "yes", "on"}
+_NO_THINK_SUFFIX = " /no_think"
+
+
+def _llm_extra_body() -> dict:
+    """Extra OpenAI body params for chat completions (cache + no-think)."""
+    body: dict = {
+        "cache_prompt": _LLM_CACHE_PROMPT,
+        "repeat_penalty": float(os.getenv("REPEAT_PENALTY", 1.15)),
+        "repeat_last_n":  int(os.getenv("REPEAT_LAST_N", 64)),
+        "top_k":          int(os.getenv("TOP_K", 40)),
+    }
+    if _LLM_NO_THINK:
+        body["chat_template_kwargs"] = {"enable_thinking": False}
+    return body
+
+
+def _apply_no_think(messages: list[dict]) -> list[dict]:
+    """Return a copy with `/no_think` appended to the last user turn.
+
+    Idempotent (skips when already suffixed). History/store keep the raw
+    text — this only touches the request payload.
+    """
+    if not _LLM_NO_THINK or not messages:
+        return messages
+    out = [dict(m) for m in messages]
+    for m in reversed(out):
+        if m.get("role") == "user":
+            content = str(m.get("content") or "")
+            if not content.rstrip().endswith("/no_think"):
+                m["content"] = content.rstrip() + _NO_THINK_SUFFIX
+            break
+    return out
 CONTEXT_WINDOW_TURNS = env_int("CONTEXT_WINDOW_TURNS", 8)
 
 # Shared default recall/knowledge depth across all three chat paths
@@ -154,6 +197,58 @@ def _resolve_base_predict() -> int:
 
 _BASE_PREDICT    = _resolve_base_predict()
 _REASONING_SCALE = env_int("REASONING_SCALE", 3)
+
+# Thinking-model headroom. Reasoning-capable templates (granite-4, MiniCPM-
+# think, …) spend tokens in a separate think channel BEFORE any answer
+# content; with only _BASE_PREDICT (280) they hit `finish=length` mid-think
+# and return 0 content chars — stream and fallback both "empty" with no
+# error. The extra budget is added whenever the backend is a known thinker:
+# explicitly via LLM_THINKING=1, or automatically after the first turn that
+# yields reasoning tokens (see _note_thinker_detected). Tune per model —
+# granite-4.2 needed ~280 think + answer on a greeting; slower Jetson
+# builds pay ~5-10 tok/s for every extra token.
+_LLM_THINK_BUDGET = env_int("LLM_THINK_BUDGET", 512)
+_LLM_THINKING_HINT = os.getenv("LLM_THINKING", "").strip().lower() in {"1", "true", "yes", "on"}
+_THINKER_DETECTED = False
+_THINKER_LOCK = threading.Lock()
+# Set when the last stream produced reasoning but no content: the empty
+# result is a burned think budget, NOT a message-shape rejection, so the
+# no-system retry would just burn another full budget thinking. The
+# fallback consumes (resets) it when deciding to skip that retry.
+_LAST_STREAM_REASONED = False
+
+
+def _note_thinker_detected() -> None:
+    """Latch that the backend emits thinking-channel tokens (idempotent)."""
+    global _THINKER_DETECTED
+    if _THINKER_DETECTED:
+        return
+    with _THINKER_LOCK:
+        _THINKER_DETECTED = True
+    log.warning("LLM backend emits thinking tokens — adding %d headroom to max_tokens from now on", _LLM_THINK_BUDGET)
+
+
+def _note_stream_reasoned(reasoned_without_content: bool) -> None:
+    """Record whether the last stream thought without answering."""
+    global _LAST_STREAM_REASONED
+    with _THINKER_LOCK:
+        _LAST_STREAM_REASONED = bool(reasoned_without_content)
+
+
+def _take_stream_reasoned() -> bool:
+    """Consume the flag (reset to False), returning its previous value."""
+    global _LAST_STREAM_REASONED
+    with _THINKER_LOCK:
+        val = _LAST_STREAM_REASONED
+        _LAST_STREAM_REASONED = False
+        return val
+
+
+def _effective_max_tokens(base: int) -> int:
+    """Base prediction budget plus think headroom when the backend thinks."""
+    if _LLM_THINKING_HINT or _THINKER_DETECTED:
+        return int(base) + _LLM_THINK_BUDGET
+    return int(base)
 _ROUTE_ENABLED = os.getenv("ROUTE_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
 
 # ROUTE_MODE selects the classification METHOD only (see yaml comment for
@@ -2067,7 +2162,8 @@ class AikoThink:
 
     def _stream_response(self, messages: list[dict], system: str = "", token_callback=None, emit: bool = True, system_tail: str = "") -> str:
         full_response = []
-        max_tokens = _BASE_PREDICT * _REASONING_SCALE if self._reasoning else _BASE_PREDICT
+        base_tokens = _BASE_PREDICT * _REASONING_SCALE if self._reasoning else _BASE_PREDICT
+        max_tokens = _effective_max_tokens(base_tokens)
 
         # Message layout for llama-server cache_prompt reuse:
         #   [system core] [history ...] [system volatile tail] [user]
@@ -2079,6 +2175,8 @@ class AikoThink:
             all_messages = all_messages[:-1] + [{"role": "system", "content": system_tail}, all_messages[-1]]
         elif system_tail:
             all_messages = all_messages + [{"role": "system", "content": system_tail}]
+        # No-think suffix applies to the request payload only (see helper).
+        all_messages = _apply_no_think(all_messages)
 
         self.last_usage = {
             "prompt_messages": all_messages,
@@ -2113,18 +2211,14 @@ class AikoThink:
                 top_p=float(os.getenv("TOP_P", 0.90)),
                 stop=LLM_STOP_SEQUENCES,
                 timeout=LLM_TIMEOUT,
-                extra_body={
-                    "cache_prompt": _LLM_CACHE_PROMPT,
-                    "repeat_penalty": float(os.getenv("REPEAT_PENALTY", 1.15)),
-                    "repeat_last_n":  int(os.getenv("REPEAT_LAST_N", 64)),
-                    "top_k":          int(os.getenv("TOP_K", 40)),
-                },
+                extra_body=_llm_extra_body(),
             )
             _brain_trace.record_step(
                 "think._stream_response.llm_open",
                 layer="stream",
                 outputs={"model": self._llm_model, "max_tokens": max_tokens,
                          "cache_prompt": _LLM_CACHE_PROMPT,
+                         "no_think": _LLM_NO_THINK,
                          "n_messages": len(all_messages)},
                 factors=["cache_prompt=True reuses KV across turns for stable core prefix"],
             )
@@ -2178,7 +2272,13 @@ class AikoThink:
 
             text = "".join(full_response).strip()
             reasoning_text = "".join(reasoning_buffer).strip()
+            _note_stream_reasoned(bool(reasoning_text) and not bool(text))
             if reasoning_text:
+                _note_thinker_detected()
+                # Recompute from the pre-budget base: the flag may have
+                # flipped mid-stream, in which case the in-turn fallback
+                # below must already carry headroom (same-turn recovery).
+                max_tokens = _effective_max_tokens(base_tokens)
                 # Never served raw, but decisive for diagnosis: content-empty
                 # + reasoning-full means a thinking model spent the budget in
                 # the think channel (raise max_tokens or disable thinking
@@ -2229,12 +2329,7 @@ class AikoThink:
                         top_p=float(os.getenv("TOP_P", 0.90)),
                         stop=LLM_STOP_SEQUENCES,
                         timeout=LLM_TIMEOUT,
-                        extra_body={
-                            "cache_prompt": _LLM_CACHE_PROMPT,
-                            "repeat_penalty": float(os.getenv("REPEAT_PENALTY", 1.15)),
-                            "repeat_last_n":  int(os.getenv("REPEAT_LAST_N", 64)),
-                            "top_k":          int(os.getenv("TOP_K", 40)),
-                        },
+                        extra_body=_llm_extra_body(),
                     )
                     full_response = []
                     token_buffer = []
@@ -2297,14 +2392,14 @@ class AikoThink:
         def _try_once(msgs: list[dict]) -> str | None:
             resp = self._client.chat.completions.create(
                 model=self._llm_model,
-                messages=msgs,
+                messages=_apply_no_think(msgs),
                 stream=False,
                 max_tokens=max_tokens,
                 temperature=float(os.getenv("TEMPERATURE", 0.72)),
                 top_p=float(os.getenv("TOP_P", 0.90)),
                 stop=LLM_STOP_SEQUENCES,
                 timeout=LLM_TIMEOUT,
-                extra_body={"cache_prompt": _LLM_CACHE_PROMPT},
+                extra_body=_llm_extra_body(),
             )
             choice = resp.choices[0] if resp.choices else None
             msg = getattr(choice, "message", None)
@@ -2349,8 +2444,11 @@ class AikoThink:
             if text:
                 log.warning("%s; recovered with non-streaming completion", reason)
                 return text
-            # Empty but system role present — retry as user-merged (some templates return empty instead of 500)
-            if any(m.get("role") == "system" for m in messages):
+            # Empty but system role present — retry as user-merged (some templates return empty instead of 500).
+            # Skipped when the stream already proved the cause is a burned
+            # think budget (reasoning without content): re-sending would
+            # burn another full budget thinking, not fix anything.
+            if any(m.get("role") == "system" for m in messages) and not _take_stream_reasoned():
                 try:
                     alt_empty = self._messages_without_system(messages)
                     log.warning("Non-streaming empty with system role; retrying without system (%d msgs)", len(alt_empty))
@@ -2446,7 +2544,7 @@ class AikoThink:
         )
         corrected = self._fallback_completion(
             [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-            min(600, _BASE_PREDICT),
+            _effective_max_tokens(min(600, _BASE_PREDICT)),
             "metacognitive response correction",
         )
         return draft if not corrected.strip() or corrected.startswith("[LLM error]") else corrected.strip()

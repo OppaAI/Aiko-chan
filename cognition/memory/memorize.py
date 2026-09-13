@@ -167,6 +167,23 @@ from .episode import (
 from .episode import MEMORY_WM_CAPACITY  # re-exported from episode for compat
 
 
+def _thinker_headroom() -> int:
+    """Extra max_tokens for fact extraction when the LLM backend thinks.
+
+    Thinking-channel models burn the whole prediction budget reasoning
+    before emitting the JSON facts (same failure as chat turns — empty
+    content, `finish=length`). Detection lives in cognition.think; read it
+    lazily to avoid a top-level import cycle (think.py imports this package).
+    """
+    try:
+        from cognition.think import _LLM_THINK_BUDGET, _LLM_THINKING_HINT, _THINKER_DETECTED
+        if _LLM_THINKING_HINT or _THINKER_DETECTED:
+            return int(_LLM_THINK_BUDGET)
+    except Exception:
+        pass
+    return 0
+
+
 class _MemoryBackend:
     """
     sqlite-vec + FTS5 + RRF memory backend.
@@ -424,7 +441,7 @@ class _MemoryBackend:
             model=self._model,
             messages=[{"role": "user", "content": prompt}],
             stream=False,
-            max_tokens=_EXTRACT_MAX_TOKENS,
+            max_tokens=_EXTRACT_MAX_TOKENS + _thinker_headroom(),
             temperature=0.0,  # deterministic — reduces hallucinated facts
             timeout=_EXTRACT_TIMEOUT,
         )

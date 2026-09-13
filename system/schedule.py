@@ -1749,6 +1749,11 @@ class ScheduleRunner:
                         else:
                             self._run_monthly_consolidate()
                             self._next_monthly = _next_monthly_consolidate()
+                    except Exception:
+                        # Transient store failure (e.g. sqlite hiccup on a
+                        # network home dir) must not kill the scheduler
+                        # thread — log and retry on the next tick.
+                        log.exception("Scheduler: system job %s skipped", name)
                     finally:
                         reset_current_user_id(uid_token)
 
@@ -1774,6 +1779,11 @@ class ScheduleRunner:
                             self._fire_due_user_jobs(uid)
                         if due_graphs:
                             self._fire_due_schedule_graphs(uid)
+                    except Exception:
+                        # One user's transient store failure must not kill
+                        # the scheduler thread or starve other users — log
+                        # and continue; the job stays due for the next tick.
+                        log.exception("Scheduler: user %s tick skipped", uid)
                     finally:
                         reset_current_user_id(uid_token)
 

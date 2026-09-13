@@ -2103,6 +2103,7 @@ class AikoThink:
         # Buffer tokens/sentences until stream success to prevent partial emission on failure
         token_buffer = []
         tts_sentence_buffer = []
+        reasoning_buffer: list[str] = []
 
         try:
             stream = self._client.chat.completions.create(
@@ -2130,6 +2131,29 @@ class AikoThink:
             for chunk in stream:
                 delta = chunk.choices[0].delta if chunk.choices else None
                 token = (delta.content or "") if delta else ""
+                # Thinking-channel harvest: reasoning-capable templates
+                # (granite-4, MiniCPM-think, …) may emit the whole turn as
+                # thinking tokens. Some servers surface those as
+                # `reasoning_content` deltas with EMPTY content — without
+                # this we burn the full token budget and see "empty".
+                # Collected for diagnostics; never served raw (see below).
+                reason_part = ""
+                if delta is not None:
+                    for attr in ("reasoning_content", "reasoning"):
+                        try:
+                            val = getattr(delta, attr, None)
+                        except Exception:
+                            val = None
+                        if val:
+                            reason_part = str(val)
+                            break
+                    if not reason_part and isinstance(delta, dict):
+                        for key in ("reasoning_content", "reasoning"):
+                            if delta.get(key):
+                                reason_part = str(delta[key])
+                                break
+                if reason_part:
+                    reasoning_buffer.append(reason_part)
 
                 # Buffer tokens for emission only after stream success
                 if emit and token_callback and token and not karaoke_text:
@@ -2153,6 +2177,26 @@ class AikoThink:
                         tts_sentence_buffer.extend(sentences)
 
             text = "".join(full_response).strip()
+            reasoning_text = "".join(reasoning_buffer).strip()
+            if reasoning_text:
+                # Never served raw, but decisive for diagnosis: content-empty
+                # + reasoning-full means a thinking model spent the budget in
+                # the think channel (raise max_tokens or disable thinking
+                # server-side); content-empty + reasoning-empty means the
+                # template emitted EOS immediately (template/EOS mismatch).
+                log.warning(
+                    "LLM stream thinking-channel: %d reasoning chars, %d content chars (model=%s)",
+                    len(reasoning_text), len(text), self._llm_model,
+                )
+                _brain_trace.record_step(
+                    "think._stream_response.thinking",
+                    layer="stream",
+                    outputs={"model": self._llm_model,
+                             "reasoning_chars": len(reasoning_text),
+                             "content_chars": len(text),
+                             "reasoning_preview": reasoning_text[:300]},
+                    factors=["thinking-channel tokens are never served to the user"],
+                )
             if text:
                 self.last_usage["completion_text"] = text
                 stream_success = True
@@ -2262,9 +2306,36 @@ class AikoThink:
                 timeout=LLM_TIMEOUT,
                 extra_body={"cache_prompt": _LLM_CACHE_PROMPT},
             )
-            txt = (resp.choices[0].message.content or "").strip()
-            if txt:
-                usage = getattr(resp, "usage", None)
+            choice = resp.choices[0] if resp.choices else None
+            msg = getattr(choice, "message", None)
+            txt = (getattr(msg, "content", None) or "").strip()
+            # Diagnostic surface for empty completions: stop reason +
+            # token counts + thinking channel. llama.cpp reports these on
+            # the non-streaming response; without them "empty" is a guess.
+            finish = getattr(choice, "finish_reason", None)
+            usage = getattr(resp, "usage", None)
+            think_txt = ""
+            if msg is not None:
+                for attr in ("reasoning_content", "reasoning"):
+                    try:
+                        val = getattr(msg, attr, None)
+                    except Exception:
+                        val = None
+                    if val:
+                        think_txt = str(val)
+                        break
+            if not txt:
+                log.warning(
+                    "LLM non-streaming empty: model=%s finish=%s prompt_tok=%s "
+                    "completion_tok=%s thinking_chars=%d n_msgs=%d",
+                    self._llm_model, finish,
+                    getattr(usage, "prompt_tokens", None),
+                    getattr(usage, "completion_tokens", None),
+                    len(think_txt), len(msgs),
+                )
+                if think_txt:
+                    log.warning("LLM thinking-channel preview: %.300s", think_txt)
+            else:
                 self.last_usage.update({
                     "completion_text": txt,
                     "prompt_tokens": getattr(usage, "prompt_tokens", None),

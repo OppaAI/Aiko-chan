@@ -130,7 +130,9 @@ class AikoSimpleCLI:
 
     def status_finish(self) -> None:
         self._chat_started = True
-        self.trace_enabled = getattr(self, 'trace_enabled', False) or bool(getattr(self, 'debug', False) or getattr(self, 'no_voice', False))
+        # Keep trace state set by run_cli; don't override with unrelated flags
+        if not self.trace_enabled:
+            self.trace_enabled = bool(self.debug)
         # Initialize fixed multi-line trace box at top of screen
         if self.trace_enabled:
             # Print separator and box lines

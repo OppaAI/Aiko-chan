@@ -28,5 +28,7 @@ pre-intent fetch.
 from concurrent.futures import ThreadPoolExecutor
 import atexit
 
-CONTEXT_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ctx-fetch")
+# ThreadPoolExecutor for concurrent memory/knowledge fetch.
+# Jetson Orin Nano: 4 cores shared; limit workers to 2 to avoid context-switch overhead.
+CONTEXT_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ctx-fetch")
 atexit.register(CONTEXT_POOL.shutdown, wait=False)

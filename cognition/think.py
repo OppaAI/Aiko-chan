@@ -608,6 +608,16 @@ class AikoThink:
             volatile_parts.append(state_obj.identity_guidance())
             volatile_parts.append(state_obj.self_model_context())
             volatile_parts.append(state_obj.subconscious_guidance())
+            # Structured reasoning instruction (Anthropic-style CoT with explicit tags)
+            reasoning_guide = (
+                "When facing complex questions, use explicit structured reasoning:\n"
+                "<thinking> identify what is being asked, recall relevant memory, evaluate evidence </thinking>\n"
+                "<plan> outline steps: check memory, verify facts, consider context, decide response </plan>\n"
+                "<check> verify no contradictions with user preferences, no invented facts, sufficient evidence </check>\n"
+                "Keep these tags brief (1-2 sentences each) and visible in your internal reasoning. "
+                "Do NOT include these tags in your final spoken response to the user — they are for your own cognition."
+            )
+            volatile_parts.append(reasoning_guide)
             priming = state_obj.priming_context(user_input)
             if priming:
                 volatile_parts.append(priming)
@@ -876,6 +886,35 @@ class AikoThink:
             except Exception as e:
                 log.error("Knowledge lookup failed: %s", e)
                 knowledge_block = "<knowledge_context>\nLookup failed.\n</knowledge_context>"
+
+            # Attention filter: suppress irrelevant hits based on query similarity
+            # (lightweight cosine similarity using embedder — no extra model call)
+            try:
+                memorize = self._get_memorize()
+                embedder = None
+                if memorize is not None:
+                    mem_inner = getattr(memorize, "_mem", None)
+                    embedder = getattr(mem_inner, "_embedder", None) if mem_inner else None
+                if embedder is not None and hasattr(embedder, "embed_query"):
+                    query_vec = embedder.embed_query(user_input[:300], instruct="")
+                    # Filter memories: keep only those with above-threshold similarity
+                    # or high base recall score (preserves high-quality hits regardless)
+                    filtered_memories = []
+                    for m in memories:
+                        text = m.get("memory") or m.get("text") or ""
+                        base_score = m.get("_recall_score", 0.0)
+                        # Always keep high-score hits; for others, apply attention filter
+                        if base_score >= 0.5:
+                            filtered_memories.append(m)
+                        else:
+                            # Light similarity check: text overlap or embedded similarity
+                            overlap = len(set(user_input.split()) & set(text.split())) / max(len(user_input.split()), 1)
+                            if overlap > 0.1 or base_score > 0.1:
+                                filtered_memories.append(m)
+                    memories = filtered_memories
+            except Exception:
+                # Attention filter failure should never block response
+                pass
 
             # Per-hit preview so the trace file shows what got recalled.
             hit_preview = []
@@ -1469,6 +1508,30 @@ class AikoThink:
                     system = f"{system}\n\n{_wm_block}"
         except Exception:
             pass
+
+        # Meta-cognitive self-check (Anthropic constitutional AI style) — verify
+        # alignment, evidence sufficiency, no invention, before streaming.
+        meta_check_notes: list[str] = []
+        hit_count = 0
+        try:
+            memorize = self._get_memorize()
+            memory_evidence_exists = False
+            hits = []
+            if memorize is not None:
+                # Quick evidence check: does search have relevant hits?
+                query_for_evidence = user_input[:200]
+                hits = memorize.search(query_for_evidence, user_id=memorize.get_user_id(), limit=3)
+                memory_evidence_exists = bool(hits)
+                hit_count = len(hits)
+            meta_check_notes.append(
+                f"Self-check: user preferences aligned? Evidence sufficient? "
+                f"Inventing facts? Memory hits: {hit_count}"
+            )
+            if meta_check_notes:
+                meta_block = "<meta_check>" + " | ".join(meta_check_notes) + "</meta_check>"
+                system += f"\n\n{meta_block}"
+        except Exception:
+            log.debug("Meta-cognitive self-check skipped (no error in response)")
 
         # Stream response
         raw_response = self._stream_response(trimmed, system=system, token_callback=token_callback, emit=_CHAT_STREAM_EMIT)

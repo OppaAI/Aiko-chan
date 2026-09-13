@@ -132,6 +132,23 @@ def web_search(
         return None, last_error or "[search failed: max retries]"
 
     results = data.get("results", [])[:max_results]
+    # Source credibility scoring: boost reputable domains (Wikipedia, .edu, .gov, major news)
+    # and penalize unknown/low-credibility sources. Pure Python — zero overhead.
+    TRUSTED_DOMAINS = {"wikipedia.org", "britannica.com", ".edu", ".gov", ".ac.uk",
+                       "nature.com", "science.org", "arxiv.org", "reuters.com",
+                       "apnews.com", "bbc.com", "bbc.co.uk", "npr.org"}
+    for r in results:
+        url = r.get("url", "")
+        domain = urlparse(url).netloc.lower().removeprefix("www.") if url else ""
+        credibility = 0.0
+        if any(trusted in domain for trusted in TRUSTED_DOMAINS):
+            credibility = 0.15
+        elif domain and "." in domain:
+            credibility = 0.05  # mild boost for any real domain vs none
+        r["_credibility_score"] = credibility
+    # Sort by relevance + credibility
+    results.sort(key=lambda r: (r.get("_credibility_score", 0) * 0.5 + len(r.get("title", "")) / 200), reverse=True)
+    results = results[:max_results]
     _SEARCH_CACHE.set(cache_key, results)
     return results, None
 

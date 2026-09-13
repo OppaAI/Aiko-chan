@@ -1496,7 +1496,24 @@ class _MemoryBackend:
                     except Exception:
                         pass
 
-                # Phase 3: entity importance boost
+                # Phase 3.5: emotional / affective weight boost (human memory strengthens for emotional events)
+                # Combines valence_score (positive/negative intensity) + arousal_score + pinned flag into single weight.
+                try:
+                    affective_boost = 0.0
+                    val_score = row.get("valence_score")
+                    val_score = int(val_score) if val_score is not None else 0
+                    arousal_score = row.get("arousal_score")
+                    arousal_score = int(arousal_score) if arousal_score is not None else 0
+                    # Emotional intensity = |valence| + |arousal| / 2, scaled to mild boost
+                    emotional_intensity = (abs(val_score) + abs(arousal_score) / 2.0) / 2.0
+                    affective_boost = min(0.015, emotional_intensity * 0.006)
+                    if row.get("pinned"):
+                        affective_boost += 0.005  # pinned emotional memories are even stronger
+                    score += affective_boost
+                except Exception:
+                    pass
+
+                # Phase 4: entity importance boost
                 if MEMORY_RANK_ENTITY_IMPORTANCE_WEIGHT > 0 and entity_importance_map:
                     try:
                         from cognition.memory.entity import memory_max_entity_importance
@@ -4090,13 +4107,60 @@ class AikoMemorize:
         pinned = sum(1 for row in rows if int(row.get("pinned") or 0))
         candidates = self.rebalance_pins(uid, max_age_days=max_age_days, min_access_count=min_access_count, dry_run=True)
         total = len(rows)
+        # DB size cap check (Jetson Nano: cap at ~50MB to avoid memory pressure)
+        try:
+            import os
+            db_path = self._mem._db_path if hasattr(self._mem, '_db_path') else None
+            db_size_mb = 0.0
+            if db_path and os.path.exists(db_path):
+                db_size_mb = os.path.getsize(db_path) / (1024 * 1024)
+        except Exception:
+            db_size_mb = 0.0
         return {
             "total": total,
             "pinned": pinned,
             "pinned_ratio": round(pinned / total, 3) if total else 0.0,
             "eligible_for_unpin": len(candidates.get("candidates", [])),
             "healthy_pin_ratio": pinned == 0 or pinned / max(total, 1) <= 0.25,
+            "db_size_mb": round(db_size_mb, 2),
+            "db_healthy": db_size_mb < 50.0,
         }
+
+    # ── working memory buffer (human-like short-term memory) ────────────────────
+    # Human WM holds 4±1 chunks for ~20s. This buffer holds the last N conversation
+    # turns with simple time decay, separate from the sqlite long-term store.
+    # Low overhead: pure Python list + float timestamps — no extra DB.
+    # Used by think.py for immediate context without full DB recall.
+    def wm_context_block(self, user_id: str | None = None, max_chunks: int = 4, max_age_s: float = 20.0) -> str | None:
+        wm_buf = getattr(self, '_wm_buffer', None)
+        if wm_buf is None:
+            self._wm_buffer: list[dict] = []
+            wm_buf = self._wm_buffer
+        # Filter by age
+        now = time.time()
+        alive = [item for item in wm_buf if (now - item.get('ts', 0)) < max_age_s]
+        # Keep last max_chunks
+        alive = alive[-max_chunks:]
+        self._wm_buffer = alive
+        if not alive:
+            return None
+        lines = ["<working_memory>", "Recent conversation chunks (short-term):", ""]
+        for item in alive:
+            text = (item.get('content') or '')[:150]
+            lines.append(f"  [{item.get('role', '?')}] {text}")
+        lines.append("</working_memory>")
+        return "\n".join(lines)
+
+    def wm_push(self, role: str, content: str) -> None:
+        wm_buf = getattr(self, '_wm_buffer', None)
+        if wm_buf is None:
+            self._wm_buffer: list[dict] = []
+            wm_buf = self._wm_buffer
+        wm_buf.append({"role": role, "content": content, "ts": time.time()})
+        # Cap buffer size
+        if len(wm_buf) > 8:
+            wm_buf = wm_buf[-8:]
+            self._wm_buffer = wm_buf
 
     def optimize(self) -> None:
         """Run SQLite PRAGMA optimize to rebuild query planner statistics."""

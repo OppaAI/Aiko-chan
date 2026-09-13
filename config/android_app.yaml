@@ -18,6 +18,13 @@ SHOGI_BANTER_FREQUENCY: "0.25"  # Odds of a line on a quiet move (0 = notable mo
 SHOGI_MAIN_TIME_S: "3600"  # Main time per side in seconds (60 min). 0 = sudden-death byoyomi (every move within SHOGI_BYOYOMI_S).
 SHOGI_BYOYOMI_S: "60"  # Byoyomi allowance per move in seconds once main time is gone. 0 with 0 main = no clock.
 
+# -- KataGo (Go engine, GTP) --
+# Built for Jetson Orin Nano (aarch64, TensorRT backend). b10c128 is the
+# Nano-friendly network. Blank PATH = search PATH, fallback to random moves.
+KATAGO_PATH: "/home/oppa-ai/KataGo/cpp/katago"
+KATAGO_MODEL: "/home/oppa-ai/KataGo/models/kata1-b10c128-s1141046784-d204142634.txt.gz"
+KATAGO_CONFIG: "/home/oppa-ai/KataGo/cpp/configs/gtp_example.cfg"
+
 # -- Go banter (same social gate as Shogi: notable moments + occasional lines) --
 GO_BANTER: "1"  # 1/true/yes/on to enable; 0 = silent template comments only.
 GO_BANTER_FREQUENCY: "0.25"  # Odds of a line on a quiet move (0 = notable moments only, 1 = every move).

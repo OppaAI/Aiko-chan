@@ -89,6 +89,17 @@ _QUESTION_RE = re.compile(r"\?|\b(what|why|how|when|where|who|which|remember|can
 _COMMITMENT_RE = re.compile(r"\b(i will|i'll|we will|we'll|need to|remember to|don't forget|next step|todo)\b", re.I)
 _TASK_RE = re.compile(r"\b(?:can you|could you|please|do|check|find|make|fix|write|create|build|draft|show me)\b", re.I)
 _IDENTITY_QUERY_RE = re.compile(r"\b(?:do you know me|who am i|what is my name|what\x27s my name|remember me)\b", re.I)
+# Injected "[Style only — never quote this. ...]" control blocks (see
+# soft_user_prompt). Must never reach goals/loops/contradictions/memory —
+# the same block repeats every clarify turn, so it also manufactures false
+# contradiction overlaps. think.chat strips these before recording, but
+# record() strips defensively too (it has other callers) and scrubs entries
+# persisted while the leak was live.
+_STYLE_DIRECTIVE_RE = re.compile(
+    r"\s*\[Style only\s*[—–-]\s*never quote this\.[^\]]*\]",
+    re.IGNORECASE | re.DOTALL,
+)
+_STYLE_JUNK_RE = re.compile(r"style only|never quote", re.IGNORECASE)
 _GOAL_RE = re.compile(r"\b(?:i want to|i need to|we need to|let\x27s|lets|goal is to|trying to|working on)\s+(.{3,180})", re.I)
 _DONE_RE = re.compile(r"\b(done|finished|completed|fixed|solved|never mind|forget it)\b", re.I)
 _UNCERTAIN_RE = re.compile(r"\b(i don\x27t know|not sure|unclear|maybe|might|probably|could be|i think)\b", re.I)
@@ -275,7 +286,13 @@ def should_attempt(
         cap = {"domain": "any", "samples": 0, "success_rate": None, "confidence": "unknown", "avoid": False}
 
     text_tokens = _gate_tokens(text)
-    related_contradictions = [c for c in (contradictions or []) if len(text_tokens & _gate_tokens(c)) >= 1]
+    # Contradiction overlap uses content words (stopwords filtered): the
+    # summaries share boilerplate ("current=... | earlier=...") and raw
+    # tokens let filler words ("do", "you") match everything. _detect needs
+    # ≥2 shared tokens + a negation flip to record; the gate mirrors that
+    # topical bar instead of firing on a single stopword.
+    query_content = _tokens(text)
+    related_contradictions = [c for c in (contradictions or []) if len(query_content & _tokens(c)) >= 1]
     latest_review = (response_reviews or [{}])[0] if response_reviews else {}
     latest_flags = [str(f) for f in latest_review.get("flags", [])] if isinstance(latest_review, dict) else []
     incomplete_flag = any("may not answer" in flag or "completeness" in flag for flag in latest_flags)
@@ -510,15 +527,42 @@ class EdgeCognitiveState:
         self._intuitions: deque[str] = self._subliminal._intuitions if self._subliminal is not None else deque(maxlen=4)  # alias for compat
         self._last_tick = time.monotonic()
 
+    def _scrub_style_junk(self) -> None:
+        """Drop goals/loops/contradictions polluted by leaked style directives.
+
+        Must be called with self._lock held. Entries containing the directive
+        marker words can only have come from fused soft-gate prompts, never
+        from the user. Self-heals state persisted while the leak was live.
+        """
+        for coll in (self._open_loops, self._contradictions, self._identity_questions):
+            for item in list(coll):
+                if _STYLE_JUNK_RE.search(item or ""):
+                    try:
+                        coll.remove(item)
+                    except ValueError:
+                        pass
+        for goal in list(self._goals):
+            if _STYLE_JUNK_RE.search(getattr(goal, "text", "") or ""):
+                try:
+                    self._goals.remove(goal)
+                except ValueError:
+                    pass
+
     def record(self, user: str, assistant: str) -> None:
         """Ingest one turn. Dormant engram registration. Active state updates."""
         if not EDGE_COGNITION_ENABLED:
             return
+        # Never let injected style directives into cognitive state (see
+        # _STYLE_DIRECTIVE_RE). Also scrub entries persisted while the leak
+        # was live — one-time self-heal, no-op afterwards.
+        user = _STYLE_DIRECTIVE_RE.sub("", user or "").strip() or user
+        assistant = _STYLE_DIRECTIVE_RE.sub("", assistant or "").strip() or assistant
         user = " ".join((user or "").split())[:360]
         assistant = " ".join((assistant or "").split())[:360]
         if not user and not assistant:
             return
         with self._lock:
+            self._scrub_style_junk()
             self._apply_explicit_preferences(user)
             self._learn_preferences(user)
             self._detect_contradictions(user)

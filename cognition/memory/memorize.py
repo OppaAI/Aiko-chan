@@ -256,11 +256,8 @@ class _MemoryBackend:
         self._json_schema_supported: bool | None = None
         self._conn = self._connect()
         self._db_lock = threading.RLock()
-        # Search-result cache — _search_top() reads/writes this directly, so it
-        # must live on _MemoryBackend (the type that actually owns the method),
-        # not just on the AikoMemorize wrapper. AikoMemorize's __init__ also
-        # creates its own copy (used by switch_user paths) but the backend's
-        # instance is the one the search path touches.
+        # Search-result cache slot (kept for API compat; the live recall
+        # cache is AikoMemorize._search_cache, owned by _search_top).
         from collections import OrderedDict as _OD
         self._search_cache: _OD[tuple[str, str, int, bool], tuple[float, list[dict]]] = _OD()
         self._search_cache_lock = threading.RLock()
@@ -1987,85 +1984,6 @@ class _MemoryBackend:
         )
         return results
 
-    def _search_top(self, query, user_id, limit, query_vector, include_history, ctx):
-        """Heavy lift of AikoMemorize.search — extracted so the brain tracer
-        can wrap the whole call without forcing a return through `with`."""
-        user_id = self._resolve_user_id(user_id)
-        if _is_trivial_input(query or ""):
-            ctx.set(outputs={"skipped": True, "reason": "trivial_input"},
-                    factors=["input matches trivial pattern (hi/ok/thanks/...) — no KNN/FTS cost"])
-            log.debug(f"Skipping search for trivial input: {query!r}")
-            return []
-
-        if _BROAD_RECALL_RE.search(query or ""):
-            results = self._recent_or_important_memories(
-                user_id=user_id, limit=limit, include_history=include_history
-            )
-            results = self._expand_scenes(user_id, results[:int(limit)])
-            self._touch_memories(results)
-            ctx.set(outputs={"short_circuit": "broad_recall", "returned": len(results)},
-                    factors=[f"query matches _BROAD_RECALL_RE → recent_or_important path (no KNN)"])
-            return results
-
-        cache_key = (user_id, " ".join((query or "").lower().split()), int(limit), bool(include_history))
-        now_s = time.monotonic()
-
-        with self._search_cache_lock:
-            cached = self._search_cache.get(cache_key)
-            if cached and now_s - cached[0] <= MEMORY_SEARCH_CACHE_TTL:
-                self._search_cache.move_to_end(cache_key)
-                results = [dict(r) for r in cached[1]]
-                try:
-                    from cognition.memory.entity import MEMORY_SUPERSESSION_CHAIN_EXPAND
-                    if MEMORY_SUPERSESSION_CHAIN_EXPAND and results:
-                        results = self._mem._expand_supersession_chains(
-                            query, user_id, results, limit=limit
-                        )
-                except Exception as exc:
-                    log.debug("supersession chain expand skipped: %s", exc)
-                self._touch_memories(results)
-                ctx.set(outputs={"cache": "hit", "returned": len(results)},
-                        factors=[f"cache TTL {MEMORY_SEARCH_CACHE_TTL}s"])
-                return results
-            if cached:
-                self._search_cache.pop(cache_key, None)
-
-        # Run the core RRF search (KNN + FTS + entity graph, fused)
-        results = self._mem.search(
-            query,
-            user_id=user_id,
-            limit=limit,
-            vector=query_vector,
-            include_history=include_history,
-        )
-        # Fold L2 scene parents/members into the recall set (see _expand_scenes).
-        results = self._expand_scenes(user_id, results)
-        log.debug("[memory] search miss, scores=%s", [r.get("_recall_score") for r in results])
-
-        # Search replay logging (optional, feature-gated)
-        if os.getenv("AIKO_REPLAY_SEARCHES"):
-            self._write_search_replay(query, results, user_id)
-
-        # Cache and return
-        with self._search_cache_lock:
-            self._search_cache[cache_key] = (now_s, [dict(r) for r in results])
-            while len(self._search_cache) > MEMORY_SEARCH_CACHE_SIZE:
-                self._search_cache.popitem(last=False)
-
-        try:
-            from cognition.memory.entity import MEMORY_SUPERSESSION_CHAIN_EXPAND
-            if MEMORY_SUPERSESSION_CHAIN_EXPAND and results:
-                results = self._mem._expand_supersession_chains(
-                    query, user_id, results, limit=limit
-                )
-        except Exception as exc:
-            log.debug("supersession chain expand skipped: %s", exc)
-
-        self._touch_memories(results)
-        ctx.set(outputs={"cache": "miss", "returned": len(results)},
-                factors=[f"scene_expansion applied", "touch_memories incremented access_count"])
-        return results
-
     # ── L2 scene expansion ─────────────────────────────────────────────────────
     # After RRF returns a set, re-link episode structure so yes the scene row
     # itself is searchable, but also: a recalled-member pulls in its parent
@@ -2374,9 +2292,89 @@ class AikoMemorize:
             return self._mem_backend._db_lock
         return threading.RLock()
 
-    def _search_top(self, *args, **kwargs):  # type: ignore[override]
-        """Proxy so direct AikoMemorize._search_top calls don't crash (owner is _MemoryBackend)."""
-        return self._mem._search_top(*args, **kwargs)
+    def _search_top(self, query, user_id, limit, query_vector, include_history, ctx):
+        """Heavy lift of AikoMemorize.search — extracted so the brain tracer
+        can wrap the whole call without forcing a return through `with`.
+
+        Lives on AikoMemorize (not _MemoryBackend): it touches the wrapper's
+        own search cache, scene expansion, touch/replay helpers and resolves
+        user_id against the wrapper's bound identity.
+        """
+        user_id = self._resolve_user_id(user_id)
+        if _is_trivial_input(query or ""):
+            ctx.set(outputs={"skipped": True, "reason": "trivial_input"},
+                    factors=["input matches trivial pattern (hi/ok/thanks/...) — no KNN/FTS cost"])
+            log.debug(f"Skipping search for trivial input: {query!r}")
+            return []
+
+        if _BROAD_RECALL_RE.search(query or ""):
+            results = self._recent_or_important_memories(
+                user_id=user_id, limit=limit, include_history=include_history
+            )
+            results = self._expand_scenes(user_id, results[:int(limit)])
+            self._touch_memories(results)
+            ctx.set(outputs={"short_circuit": "broad_recall", "returned": len(results)},
+                    factors=[f"query matches _BROAD_RECALL_RE → recent_or_important path (no KNN)"])
+            return results
+
+        cache_key = (user_id, " ".join((query or "").lower().split()), int(limit), bool(include_history))
+        now_s = time.monotonic()
+
+        with self._search_cache_lock:
+            cached = self._search_cache.get(cache_key)
+            if cached and now_s - cached[0] <= MEMORY_SEARCH_CACHE_TTL:
+                self._search_cache.move_to_end(cache_key)
+                results = [dict(r) for r in cached[1]]
+                try:
+                    from cognition.memory.entity import MEMORY_SUPERSESSION_CHAIN_EXPAND
+                    if MEMORY_SUPERSESSION_CHAIN_EXPAND and results:
+                        results = self._mem._expand_supersession_chains(
+                            query, user_id, results, limit=limit
+                        )
+                except Exception as exc:
+                    log.debug("supersession chain expand skipped: %s", exc)
+                self._touch_memories(results)
+                ctx.set(outputs={"cache": "hit", "returned": len(results)},
+                        factors=[f"cache TTL {MEMORY_SEARCH_CACHE_TTL}s"])
+                return results
+            if cached:
+                self._search_cache.pop(cache_key, None)
+
+        # Run the core RRF search (KNN + FTS + entity graph, fused)
+        results = self._mem.search(
+            query,
+            user_id=user_id,
+            limit=limit,
+            vector=query_vector,
+            include_history=include_history,
+        )
+        # Fold L2 scene parents/members into the recall set (see _expand_scenes).
+        results = self._expand_scenes(user_id, results)
+        log.debug("[memory] search miss, scores=%s", [r.get("_recall_score") for r in results])
+
+        # Search replay logging (optional, feature-gated)
+        if os.getenv("AIKO_REPLAY_SEARCHES"):
+            self._write_search_replay(query, results, user_id)
+
+        # Cache and return
+        with self._search_cache_lock:
+            self._search_cache[cache_key] = (now_s, [dict(r) for r in results])
+            while len(self._search_cache) > MEMORY_SEARCH_CACHE_SIZE:
+                self._search_cache.popitem(last=False)
+
+        try:
+            from cognition.memory.entity import MEMORY_SUPERSESSION_CHAIN_EXPAND
+            if MEMORY_SUPERSESSION_CHAIN_EXPAND and results:
+                results = self._mem._expand_supersession_chains(
+                    query, user_id, results, limit=limit
+                )
+        except Exception as exc:
+            log.debug("supersession chain expand skipped: %s", exc)
+
+        self._touch_memories(results)
+        ctx.set(outputs={"cache": "miss", "returned": len(results)},
+                factors=[f"scene_expansion applied", "touch_memories incremented access_count"])
+        return results
 
     def _insert_row(self, *args, **kwargs):  # type: ignore[override]
         """Proxy so AikoMemorize._dream_schema's schema-gist insert doesn't crash (owner is _MemoryBackend)."""
@@ -2795,7 +2793,7 @@ class AikoMemorize:
                                inputs={"query": query, "limit": limit,
                                        "user_id": user_id,
                                        "vector_supplied": query_vector is not None}) as ctx:
-            return self._mem._search_top(query, user_id, limit, query_vector, include_history, ctx)
+            return self._search_top(query, user_id, limit, query_vector, include_history, ctx)
 
     # ── L2 scene expansion ─────────────────────────────────────────────────────
     # After RRF returns a set, re-link episode structure so yes the scene row

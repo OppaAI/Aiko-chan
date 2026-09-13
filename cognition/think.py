@@ -216,7 +216,10 @@ def _is_personal_sharing(text: str) -> bool:
 _PERSONA_PATH = Path(__file__).resolve().parent.parent / "persona" / "SOUL.md"
 _LOCAL_KNOWLEDGE_RE = re.compile(
     r"\b("
-    r"aiko|your architecture|your hardware|your features?|your functions?|"
+    # NOTE: no bare "aiko" alternative — it fired on every self-addressed
+    # greeting ("Hi Aiko...") and injected ~3k chars of wiki docs into
+    # smalltalk prompts. Real doc questions match the phrases below.
+    r"your architecture|your hardware|your features?|your functions?|"
     r"what can you do|how do you work|how are you built|"
     r"knowledge base|wiki|docs?|readme|roadmap|install|config|"
     r"SOUL\.md|USER\.md|SKILLS?\.md|SCHEDULE\.md|"
@@ -430,6 +433,26 @@ _GREETING_ONLY_RE = re.compile(
 
 def _is_greeting_only(user_input: str) -> bool:
     return bool(_GREETING_ONLY_RE.match(user_input or ""))
+
+
+# Matches our own injected "[Style only — never quote this. ...]" control
+# blocks (see cognition.attention.soft_user_prompt). The LLM prompt keeps
+# them, but recall queries, history, cognitive-state recording and memory
+# writes must use the raw user text — otherwise the instruction words leak
+# into memory search, goals/open-loops ("... style only never quote ask"),
+# false contradiction hits (the same block repeats every clarify turn) and
+# durable semantic facts.
+_STYLE_DIRECTIVE_RE = re.compile(
+    r"\s*\[Style only\s*[—–-]\s*never quote this\.[^\]]*\]",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _strip_style_directives(text: str) -> str:
+    """Remove injected style-control blocks, returning the raw user text."""
+    if not text:
+        return text
+    return _STYLE_DIRECTIVE_RE.sub("", text).strip()
 
 
 def _extract_search_results_block(system_prompt: str) -> str:
@@ -993,6 +1016,14 @@ class AikoThink:
             if not _ROUTE_ENABLED:
                 ctx.set(outputs={"intent": "localchat", "vector": None},
                         factors=["ROUTE_ENABLED=0 → forced localchat"])
+                return "localchat", None
+            # Tiny inputs ("dl y", "ok?") carry no signal for semantic
+            # label scoring — embedding noise once routed "dl y" to
+            # greeting with memory skipped. Fall through to localchat
+            # (full recall + store) unless it's an explicit greeting.
+            if len((user_input or "").split()) <= 2 and not _is_greeting_only(user_input):
+                ctx.set(outputs={"intent": "localchat", "vector": None},
+                        factors=["≤2 tokens and no greeting-only regex → localchat default (no semantic score)"])
                 return "localchat", None
             if _ROUTE_MODE == "llm_only":
                 label = self._classify_quaternary_intent_llm(user_input, allow_agentic=_AGENTIC_MODE_ON)
@@ -1633,8 +1664,14 @@ class AikoThink:
         if speak and speak.is_playing():
             speak.stop()
 
+        # Fused soft-gate prompts (see _soft_gate_reply) carry an injected
+        # "[Style only — ...]" control block for the LLM. Everything below
+        # except llm_prompt uses the raw user text so the directive never
+        # leaks into recall, history, cognitive state or memory writes.
+        raw_input = _strip_style_directives(user_input)
+
         with _brain_trace.step("think.chat", layer="context",
-                               inputs={"user_input": user_input, "skip_memory": skip_memory,
+                               inputs={"user_input": user_input, "raw_input": raw_input, "skip_memory": skip_memory,
                                        "store_turn": store_turn, "websearch_net": websearch_net}) as ctx:
             situation_block = ""
             metacognitive_block = ""
@@ -1646,20 +1683,20 @@ class AikoThink:
             else:
                 memorize = self._get_memorize()
                 from cognition.attention import for_identity
-                memories, knowledge_block = self._resolve_mem_kb(user_input, mem_kb_future)
-                memories = for_identity(current_user_id()).prioritize_memories(user_input, memories)
+                memories, knowledge_block = self._resolve_mem_kb(raw_input, mem_kb_future)
+                memories = for_identity(current_user_id()).prioritize_memories(raw_input, memories)
                 memory_block = memorize.format_for_context(
-                  memories, query=user_input, query_vector=query_vec
+                  memories, query=raw_input, query_vector=query_vec
                 ) if memorize is not None else ""
                 persona_block = memorize.persona_context() if memorize is not None else ""
                 try:
                     from cognition.attention import for_identity
-                    situation_block = for_identity(current_user_id()).situation_context(user_input, memories, knowledge_block)
-                    metacognitive_block = for_identity(current_user_id()).metacognitive_context(user_input, memories)
+                    situation_block = for_identity(current_user_id()).situation_context(raw_input, memories, knowledge_block)
+                    metacognitive_block = for_identity(current_user_id()).metacognitive_context(raw_input, memories)
                 except Exception:
                     pass
 
-            core_system, volatile_system = self._current_system_prompt_parts(user_input)
+            core_system, volatile_system = self._current_system_prompt_parts(raw_input)
             if not skip_memory:
                 if persona_block:
                     volatile_system = f"{volatile_system}\n\n{persona_block}"
@@ -1674,23 +1711,23 @@ class AikoThink:
                 if knowledge_block:
                     volatile_system = f"{volatile_system}\n\n{knowledge_block}"
                 # Codebase RAG — when user explicitly asks from your codebase/code
-                if not skip_memory and any(k in (user_input or "").lower() for k in ("codebase", "from your code", "from your codebase", "attention gate", "how does your code", "where is", "repo", "source file")):
+                if not skip_memory and any(k in (raw_input or "").lower() for k in ("codebase", "from your code", "from your codebase", "attention gate", "how does your code", "where is", "repo", "source file")):
                     try:
                         from cognition.knowledge.codebase import codebase_context_for
                         memorize = self._get_memorize()
                         embedder = memorize.embedder() if memorize is not None else None
-                        cb_block = codebase_context_for(user_input, limit=4, max_chars=3500, embedder=embedder)
+                        cb_block = codebase_context_for(raw_input, limit=4, max_chars=3500, embedder=embedder)
                         if cb_block and "No matching codebase" not in cb_block:
                             volatile_system = f"{volatile_system}\n\n{cb_block}"
                     except Exception as e:
                         log.debug("codebase_context inject failed: %s", e)
 
-            if not skip_memory and _should_use_local_knowledge(user_input):
+            if not skip_memory and _should_use_local_knowledge(raw_input):
                 try:
                     memorize = self._get_memorize()
                     embedder = memorize.embedder() if memorize is not None else None
                     wiki_context = wiki_knowledge_context_for(
-                        user_input, limit=3, max_chars=3000,
+                        raw_input, limit=3, max_chars=3000,
                         embedder=embedder,
                     )
                     if wiki_context:
@@ -1702,13 +1739,13 @@ class AikoThink:
                 not skip_memory
                 and websearch_net
                 and _CHAT_WEBSEARCH_NET_ENABLED
-                and _WEBSEARCH_HINT_RE.search(user_input)
+                and _WEBSEARCH_HINT_RE.search(raw_input)
             ):
-                net_context = self._websearch_net_block(user_input, token_callback)
+                net_context = self._websearch_net_block(raw_input, token_callback)
                 if net_context:
                     volatile_system = (
                         f"{volatile_system}\n\n"
-                        f"<search_results query='{user_input}'>\n"
+                        f"<search_results query='{raw_input}'>\n"
                         f"Live web results — use them when they are relevant; do not invent time-sensitive facts:\n\n"
                         f"{net_context}\n"
                         f"</search_results>"
@@ -1733,7 +1770,7 @@ class AikoThink:
                 llm_prompt = f"{user_input}\n\nThink through this carefully."
 
             with self._history_lock:
-                self._history.append({"role": "user", "content": user_input})
+                self._history.append({"role": "user", "content": raw_input})
                 if len(self._history) > CONTEXT_WINDOW_TURNS * 10:
                     self._history = self._history[-(CONTEXT_WINDOW_TURNS * 10):]
                 trimmed = self._history[-(CONTEXT_WINDOW_TURNS * 2):]
@@ -1768,8 +1805,8 @@ class AikoThink:
                 factors=[
                     f"memories reranked: {len(memories)}",
                     f"situation/metacognitive added: {bool(situation_block)}/{bool(metacognitive_block)}",
-                    f"wiki trigger: {_should_use_local_knowledge(user_input)}",
-                    f"websearch_net trigger: {_WEBSEARCH_HINT_RE.search(user_input) is not None}",
+                    f"wiki trigger: {_should_use_local_knowledge(raw_input)}",
+                    f"websearch_net trigger: {_WEBSEARCH_HINT_RE.search(raw_input) is not None}",
                 ],
             )
 
@@ -1780,13 +1817,13 @@ class AikoThink:
                 token_callback=token_callback,
                 emit=_CHAT_STREAM_EMIT,
             )
-            raw_response = self._finalize_response(user_input, raw_response, token_callback, already_emitted=_CHAT_STREAM_EMIT)
+            raw_response = self._finalize_response(raw_input, raw_response, token_callback, already_emitted=_CHAT_STREAM_EMIT)
 
             with self._history_lock:
                 self._history.append({"role": "assistant", "content": raw_response})
 
             if store_turn:
-                self._store_async(user_input, raw_response)
+                self._store_async(raw_input, raw_response)
             self._reasoning = False
             ctx.set(outputs={"reply_chars": len(raw_response or "")},
                     factors=[f"LLM stream done; reply {len(raw_response or '')} chars"])
@@ -2377,10 +2414,16 @@ class AikoThink:
                     for conflict in confirmed:
                         if conflict.get("memory_id") and memorize is not None:
                             memorize.supersede_exact(conflict["memory_id"], conflict.get("current", user_input), current_user_id())
-                state.record(user_input, response_text)
-                _sync_goal_review_schedule(state)
-                state.persist()
-                cognitive_state = for_identity(current_user_id()).snapshot()
+            except Exception:
+                # Conflict confirmation must never skip recording below.
+                pass
+            try:
+                from cognition.attention import for_identity as _for_identity
+                _state = _for_identity(current_user_id())
+                _state.record(user_input, response_text)
+                _sync_goal_review_schedule(_state)
+                _state.persist()
+                cognitive_state = _for_identity(current_user_id()).snapshot()
             except Exception:
                 pass
 

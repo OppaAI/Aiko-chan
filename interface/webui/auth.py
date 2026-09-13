@@ -129,6 +129,13 @@ try:
 except Exception as e:
     log.warning(f"Could not mount Koi-Koi router: {e}")
 
+# Onmyoji (Sengoku history RPG) API — companion backend, parallel to games/
+try:
+    from interface.android_app.onmyoji import router as onmyoji_router
+    app.include_router(onmyoji_router)
+except Exception as e:
+    log.warning(f"Could not mount Onmyoji router: {e}")
+
 # Codebase Figure Studio (sharp silhouette — brain/eyes/ears/mouth/legs)
 try:
     from interface.webui.studio.codebase.backend.api import app as codebase_studio_app

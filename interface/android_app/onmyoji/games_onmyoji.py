@@ -21,7 +21,8 @@ import random
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from .state import JourneyState, ROADS, RITUALS, do_rest, do_ritual, do_search, do_travel, new_journey
+from .state import JourneyState, ROADS, RITUALS, ALL_SKILLS, WORK_TOWNS, AIKO_GREETING
+from .state import do_rest, do_ritual, do_search, do_talk, do_train, do_work, do_travel, new_journey, push_dialogue
 
 log = logging.getLogger(__name__)
 
@@ -37,14 +38,26 @@ class StartRequest(BaseModel):
 
 
 class ActRequest(BaseModel):
-    action: str = Field(description="travel | rest | search | ritual")
+    action: str = Field(description="travel | rest | search | talk | train | work | ritual")
     to: str = ""  # travel destination
     ritual: str = ""  # ritual name (ward | bind | purify | banish)
-    target: str = ""  # entity id for ritual
+    target: str = ""  # entity id for ritual / talk
+    skill: str = ""  # art name for train
 
 
 class ActResponse(BaseModel):
     journey: JourneyState
+    events: list[str] = Field(default_factory=list)
+
+
+class TalkRequest(BaseModel):
+    target: str = Field(default="aiko", description="aiko or a known entity id")
+    message: str = Field(description="free text, max 500 chars")
+
+
+class TalkResponse(BaseModel):
+    journey: JourneyState
+    reply: str = ""
     events: list[str] = Field(default_factory=list)
 
 
@@ -80,6 +93,7 @@ async def start_journey(body: StartRequest, session: dict = Depends(_require_use
     journey = new_journey()
     journey.location = (body.location or "Kyoto").strip() or "Kyoto"
     journey.date = (body.date or "1582-06-01").strip() or "1582-06-01"
+    push_dialogue(journey, "aiko", "you", AIKO_GREETING)
     _journeys[uid] = journey
     log.info("Onmyoji journey started for %s at %s %s", uid, journey.date, journey.location)
     return journey
@@ -93,16 +107,107 @@ async def journey_state(session: dict = Depends(_require_user)):
     return _journeys[uid]
 
 
+@router.post("/talk", response_model=TalkResponse)
+async def talk(body: TalkRequest, session: dict = Depends(_require_user)):
+    """Free-text dialogue with Aiko or a known entity (LLM voiced)."""
+    uid = session["user_id"]
+    if uid not in _journeys:
+        raise HTTPException(status_code=404, detail="No journey — call POST /start first")
+    journey = _journeys[uid]
+    text = (body.message or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="message is required")
+    text = text[:500]
+    target = (body.target or "aiko").strip().lower()
+    if target != "aiko" and not any(e.id == body.target.strip() for e in journey.entities):
+        raise HTTPException(status_code=400, detail=f"Unknown entity '{body.target.strip()}' — talk to Aiko or someone met")
+    if target != "aiko":
+        target = body.target.strip()
+    push_dialogue(journey, "you", target, text)
+    reply = await _voice_line(journey, target, text)
+    push_dialogue(journey, target, "you", reply)
+    return TalkResponse(journey=journey, reply=reply)
+
+
+async def _voice_line(journey: JourneyState, target: str, user_text: str) -> str:
+    """One LLM-voiced reply, or a graceful offline fallback."""
+    fallback = (
+        "…The words hang in the night air. (Aiko's voice is quiet — "
+        "the mind behind her is offline.)"
+    )
+    try:
+        from interface.webui import auth
+        think = auth.aiko_web_instance._think if auth.aiko_web_instance else None
+        if think is None:
+            return fallback
+    except Exception:
+        return fallback
+    if target == "aiko":
+        persona = (
+            "You are Aiko, a playful cat-girl bound as a shikigami "
+            "(spirit servant) to the player, an onmyoji in Sengoku Japan. "
+            "You act on your own initiative but ask your master for orders "
+            "on real decisions. Loyal through the pact, warm within it. "
+            f"Pact-bond level {journey.bond}."
+        )
+        who = "Aiko"
+    else:
+        ent = next(e for e in journey.entities if e.id == target)
+        nature = "a spirit" if ent.kind == "spirit" else "a person"
+        flavor = f" Dread {ent.dread}/3." if ent.kind == "spirit" else ""
+        persona = (
+            f"You are {ent.name or target}, {nature} in Sengoku Japan "
+            f"({ent.role or 'wanderer'}; {ent.disposition or 'hard to read'})."
+            f"{flavor} Stay in character, brief and vivid."
+        )
+        who = ent.name or target
+    recent = journey.dialogue[-6:]
+    history = "\n".join(
+        f"{'You' if d.get('who') == 'you' else who}: {d.get('text', '')}" for d in recent
+    )
+    orders = ""
+    if journey.standing_orders:
+        orders = "Standing orders: " + "; ".join(journey.standing_orders) + "\n"
+    try:
+        response = await asyncio.to_thread(
+            think._client.chat.completions.create,
+            model=think._llm_model,
+            messages=[
+                {"role": "system", "content": persona},
+                {"role": "user", "content": (
+                    f"Sengoku Japan, {journey.date}, {journey.location}.\n"
+                    f"{orders}"
+                    f"Conversation so far:\n{history}\n"
+                    f"You say to {who}: {user_text}\n"
+                    f"Reply as {who} in 1-3 short sentences."
+                )},
+            ],
+            max_tokens=150,
+            timeout=30.0,
+        )
+        line = (response.choices[0].message.content or "").strip()
+        return line or fallback
+    except Exception:
+        log.debug("onmyoji talk failed", exc_info=True)
+        return fallback
+    uid = session["user_id"]
+    if uid not in _journeys:
+        raise HTTPException(status_code=404, detail="No journey — call POST /start first")
+    return _journeys[uid]
+
+
 @router.get("/options")
 async def act_options(session: dict = Depends(_require_user)):
     """Valid actions for the phone UI (destinations, rituals)."""
     uid = session["user_id"]
     loc = _journeys[uid].location if uid in _journeys else "Kyoto"
     return {
-        "actions": ["travel", "rest", "search", "ritual"],
+        "actions": ["travel", "rest", "search", "talk", "train", "work", "ritual"],
         "destinations": sorted(ROADS.get(loc, [])),
         "all_places": sorted(ROADS),
         "rituals": sorted(RITUALS),
+        "skills": list(ALL_SKILLS),
+        "work_towns": sorted(WORK_TOWNS),
     }
 
 
@@ -119,12 +224,18 @@ async def do_act(body: ActRequest, session: dict = Depends(_require_user)):
         ok, note = do_rest(journey)
     elif action == "search":
         ok, note = do_search(journey, random.Random())
+    elif action == "talk":
+        ok, note = do_talk(journey, body.target)
+    elif action == "train":
+        ok, note = do_train(journey, body.skill)
+    elif action == "work":
+        ok, note = do_work(journey)
     elif action == "ritual":
         ok, note = do_ritual(journey, body.ritual, body.target)
     else:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown action '{body.action}' (travel | rest | search | ritual)",
+            detail=f"Unknown action '{body.action}' (travel | rest | search | talk | train | work | ritual)",
         )
     if not ok:
         raise HTTPException(status_code=400, detail=note)

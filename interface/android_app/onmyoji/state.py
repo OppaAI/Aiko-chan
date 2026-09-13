@@ -37,6 +37,20 @@ SEARCH_LOOT: dict[str, list[str]] = {
     "Odawara": ["salt", "herbs"],
 }
 
+# Castle/merchant towns with odd jobs to be had.
+WORK_TOWNS = ("Kyoto", "Azuchi", "Osaka", "Sakai")
+
+# Greetings cycle deterministically so repeats stay fresh without an LLM.
+FIRST_MEETING_NOTES = {
+    "human": "You introduce yourself as a traveling onmyoji. {name} the {role} studies you, then bows — {disp}.",
+    "spirit": "The air chills. {name} regards you without blinking — {disp}. Aiko steps half before you.",
+}
+RETURN_NOTES = [
+    "{name} nods at your return. {disp_cap}, as ever.",
+    "You exchange road news with {name}.",
+    "{name} seems glad — or at least less wary — to see you again.",
+]
+
 # --- Vitals, skills, morality ---
 MAX_HP = 10
 MAX_MP = 10
@@ -111,6 +125,7 @@ class JourneyState(BaseModel):
     standing_orders: list[str] = Field(default_factory=list)
     journey_summary: str = Field(default="", description="Rolling narrator summary")
     entities: list[Entity] = Field(default_factory=list)
+    dialogue: list[dict] = Field(default_factory=list, description="Recent exchanges {who, target, text}, newest last")
     flags: list[str] = Field(default_factory=list, description="One-shot markers, e.g. searched:Kyoto:1582-06-01")
     hp: int = Field(default=MAX_HP, description="Vitality; collapse at 0")
     max_hp: int = Field(default=MAX_HP)
@@ -272,6 +287,64 @@ def do_ritual(state: JourneyState, ritual: str, target_id: str, rng=None) -> tup
     for awakening in check_awakenings(state, skill):
         note += f" {awakening}"
     return ok, note
+
+
+def do_talk(state: JourneyState, target_id: str) -> tuple[bool, str]:
+    """Greet someone (or something) you know. First meetings build standing."""
+    target = next((e for e in state.entities if e.id == target_id), None)
+    if target is None:
+        return False, f"no known entity '{target_id}'"
+    name = target.name or target_id
+    role = target.role or ("spirit" if target.kind == "spirit" else "traveler")
+    disp = target.disposition or "hard to read"
+    met_key = f"met:{target_id}"
+    if met_key not in (state.flags or []):
+        state.flags = list(state.flags or []) + [met_key]
+        st = state.standing if isinstance(state.standing, dict) else {}
+        st[target_id] = int(st.get(target_id, 0)) + 1
+        state.standing = st
+        template = FIRST_MEETING_NOTES["spirit" if target.kind == "spirit" else "human"]
+        return True, "💬 " + template.format(name=name, role=role, disp=disp) + " They will remember you (+standing)."
+    n = sum(1 for f in (state.flags or []) if f == met_key)
+    state.flags = list(state.flags or []) + [met_key]
+    line = RETURN_NOTES[n % len(RETURN_NOTES)].format(
+        name=name, disp_cap=disp[:1].upper() + disp[1:] if disp else "Wary")
+    return True, f"💬 {line}"
+
+
+def do_train(state: JourneyState, skill: str) -> tuple[bool, str]:
+    """Drill one art for a day. Slow, honest XP outside of live rituals."""
+    skill = (skill or "").strip().lower()
+    if skill not in ALL_SKILLS:
+        return False, f"unknown art '{skill}' ({', '.join(ALL_SKILLS)})"
+    advance_day(state, 1)
+    leveled = gain_xp(state, skill)
+    note = f"🎴 You drill {skill} through the day ({state.date})."
+    if leveled:
+        note += f" Your {skill} art rises to {skill_level(state, skill)}!"
+    return True, note
+
+
+def do_work(state: JourneyState) -> tuple[bool, str]:
+    """A day's odd jobs for coin. Only where merchants gather."""
+    if state.location not in WORK_TOWNS:
+        return False, f"no odd jobs to be had in {state.location} — try a merchant town"
+    advance_day(state, 1)
+    state.inventory.append("coin")
+    state.inventory.append("coin")
+    return True, f"💰 A day's labor in {state.location} earns 2 coin ({state.date})."
+
+
+AIKO_GREETING = (
+    "Master… the pact is sealed, and I am yours. 🐱 "
+    "Kyoto sleeps, but the roads whisper. What are your orders?"
+)
+
+
+def push_dialogue(state: JourneyState, who: str, target: str, text: str, cap: int = 12) -> None:
+    """Append one exchange line, keeping only recent context."""
+    state.dialogue.append({"who": who, "target": target, "text": text[:500]})
+    del state.dialogue[:-cap]
 
 
 def prune_entities(state: JourneyState) -> list[Entity]:

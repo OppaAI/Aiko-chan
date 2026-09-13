@@ -34,6 +34,7 @@ from pathlib import Path
 from system.log import get_logger
 from system.orchestrate import _c, _CTX_COLORS, _ctx_preview
 from system.wakeup import AikoWakeup
+from system import brain_trace as _brain_trace
 
 log = get_logger(__name__)
 
@@ -77,6 +78,9 @@ class AikoSimpleCLI:
         # (previously a module global in main.py — instance state is
         # cleaner and doesn't leak across AikoSimpleCLI instances)
         self._agent_step = 0
+        self.trace_enabled = False
+        self._trace_box_lines = [" [trace] ready...", " [trace] —", " [trace] —"]
+        self._box_saved = False
 
     # ── boot / status ────────────────────────────────────────────────────
     _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
@@ -126,17 +130,69 @@ class AikoSimpleCLI:
 
     def status_finish(self) -> None:
         self._chat_started = True
-        print("\r" + " " * 70 + "\r", end="", flush=True)
-        print("\n🌸 Aiko-chan is ready. Type a message, or /help for commands.\n")
+        self.trace_enabled = getattr(self, 'trace_enabled', False) or bool(getattr(self, 'debug', False) or getattr(self, 'no_voice', False))
+        # Initialize fixed multi-line trace box at top of screen
+        if self.trace_enabled:
+            # Print separator and box lines
+            print("─" * 70)
+            for line in self._trace_box_lines:
+                print(line[:70])
+            print("─" * 70)
+            # Save cursor position (line 4, below box) so chat can restore here
+            sys.stdout.write("\033[s")
+            sys.stdout.flush()
+            self._box_saved = True
+        else:
+            print("\r" + " " * 70 + "\r", end="", flush=True)
+            print("\n🌸 Aiko-chan is ready. Type a message, or /help for commands.\n")
 
     # ── rendering ────────────────────────────────────────────────────────
     def _draw(self, buf: list | None = None) -> None:
         # Plain scrolling CLI — nothing to redraw, output is already live.
         pass
 
+    def _redraw_trace_box(self, partial_text: str) -> None:
+        """Update the fixed 3-line trace box at the top of the terminal."""
+        if not self.trace_enabled or not self._box_saved or not self._chat_started:
+            return
+        # Truncate text for partial display
+        text = partial_text[:60]
+        # Build 3 compact box lines with partial info
+        box_lines = [
+            f" [brain] turn active | {text}",
+            f" [mem] add/search/clear | {text[:40]}",
+            " [sys] trace mode — partial text above",
+        ]
+        self._trace_box_lines = box_lines
+        # Save chat position, go to home, redraw box, restore
+        sys.stdout.write("\033[s")
+        sys.stdout.write("\033[H")
+        for line in box_lines:
+            # Clear line and print
+            sys.stdout.write("\033[K")
+            sys.stdout.write(line[:70] + "\n")
+        sys.stdout.write("\033[u")
+        sys.stdout.flush()
+
     def add_message(self, role: str, text: str) -> None:
+        if self.trace_enabled and role == 'sys' and self._chat_started:
+            # Update trace box with partial text instead of scrolling
+            self._redraw_trace_box(text)
+            # After updating box, restore to chat position and print minimal sys tag
+            sys.stdout.write("\033[u")
+            sys.stdout.write(f"· trace updated\n")
+            sys.stdout.write("\033[s")
+            sys.stdout.flush()
+            return
         prefix = _CLI_ROLE_PREFIX.get(role, role)
-        print(f"{prefix}: {text}")
+        if self.trace_enabled and self._box_saved and self._chat_started:
+            # Restore to chat position (below box) and save again
+            sys.stdout.write("\033[u")
+            print(f"{prefix}: {text}")
+            sys.stdout.write("\033[s")
+            sys.stdout.flush()
+        else:
+            print(f"{prefix}: {text}")
 
     def turn_start(self) -> None:
         self._streaming = True
@@ -335,4 +391,5 @@ def run_cli(args) -> None:
         log.info("CLI session display=%s", display_name)
 
     ui = AikoSimpleCLI(no_voice=args.text, debug=args.debug)
+    ui.trace_enabled = args.trace or args.debug
     run_session(ui, args)

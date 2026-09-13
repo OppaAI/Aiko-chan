@@ -789,6 +789,17 @@ class AikoThink:
         except Exception:
             recent = []
         tail = " ".join(reversed(recent)).strip()
+        enriched = user_input
+        if tail:
+            enriched = f"{user_input}\n{tail}"[:600]
+        if _brain_trace and _brain_trace.TRACE_ENABLED:
+            _brain_trace.record_step(
+                "think._recall_query",
+                layer="context",
+                inputs={"user_input": user_input, "enriched": enriched != user_input},
+                outputs={"query": enriched, "tail_chars": len(tail), "enriched_query_preview": enriched[:600]},
+                factors=["pronoun resolution: recent chat tail folded into query for memory recall"],
+            )
         if not tail:
             return user_input
         return f"{user_input}\n{tail}"[:600]
@@ -868,11 +879,11 @@ class AikoThink:
 
             # Per-hit preview so the trace file shows what got recalled.
             hit_preview = []
-            for i, m in enumerate((memories or [])[:5], 1):
+            for i, m in enumerate((memories or [])[:10], 1):
                 hit_preview.append({
                     "rank": i,
                     "score": round(float(m.get("_recall_score", 0.0)), 4),
-                    "text": (m.get("memory") or m.get("text") or "")[:160],
+                    "text": (m.get("memory") or m.get("text") or "")[:400],
                     "kind": m.get("kind"),
                     "pinned": bool(m.get("pinned")),
                 })

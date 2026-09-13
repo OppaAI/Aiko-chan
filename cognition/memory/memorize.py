@@ -3257,7 +3257,7 @@ class AikoMemorize:
             layer="context",
             inputs={"memories_count": len(memories),
                     "cross_store_enabled": bool(MEMORY_CROSS_STORE_ENABLED)},
-            outputs={"block_chars": len(block or ""), "block_preview": (block or "")[:1200]},
+            outputs={"block_chars": len(block or ""), "block_preview": (block or "")[:3000]},
             factors=[
                 f"age labels computed in local tz: today/yesterday/N days ago",
                 f"stale temporal facts dropped via _is_stale_temporal_fact",
@@ -4170,6 +4170,14 @@ class AikoMemorize:
     def clear(self, user_id: str | None = None) -> None:
         """Wipe all memories for a user. Use carefully."""
         user_id = self._resolve_user_id(user_id)
+        if _brain_trace and _brain_trace.TRACE_ENABLED:
+            _brain_trace.record_step(
+                "semantic.clear",
+                layer="write",
+                inputs={"user_id": user_id},
+                outputs={"action": "delete_all", "user_id": user_id},
+                factors=["manual clear: all memories deleted for user"],
+            )
         self._mem.delete_all(user_id=user_id)
         self._clear_search_cache()
         log.info(f"Cleared all memories for user '{user_id}'.")

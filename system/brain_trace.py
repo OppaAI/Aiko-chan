@@ -379,6 +379,24 @@ def _emit_step(step: dict, *, phase: str = "end") -> None:
         _emit(_c(layer_color, "  └─ done"))
 
 
+def get_box_summary(max_lines: int = 3, max_chars: int = 200) -> list[str]:
+    """Return a compact multi-line box summary of recent trace steps for CLI top-box display."""
+    steps = get_recent_steps(max_lines)
+    lines = []
+    for s in steps[-max_lines:]:
+        name = s.get("name", "?")
+        layer = s.get("layer", "?")
+        inputs_text = ", ".join(f"{k}={str(v)[:20]}" for k, v in (s.get("inputs") or {}).items() if v is not None) or "-"
+        outputs_text = ", ".join(f"{k}={str(v)[:20]}" for k, v in (s.get("outputs") or {}).items() if v is not None) or "-"
+        inputs_text = inputs_text[:max_chars]
+        outputs_text = outputs_text[:max_chars]
+        lines.append(f"[{layer}] {name} | in: {inputs_text} | out: {outputs_text}")
+    # Pad/trim to exactly max_lines
+    while len(lines) < max_lines:
+        lines.insert(0, " [trace] waiting...")
+    return lines[-max_lines:]
+
+
 def get_recent_steps(limit: int = 50) -> list[dict]:
     """Return the last `limit` recorded steps — useful for /trace command."""
     with _lock:

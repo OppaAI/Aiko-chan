@@ -26,13 +26,11 @@ VISION_API_KEY: ""
 
 # -- Token budgets --
 LLM_MAX_TOKENS: "280"  # Base max tokens for normal chat replies.
-BASE_PREDICT: "280"  # Legacy alias for LLM_MAX_TOKENS; keep equal unless old scripts need another value.
 CONTEXT_WINDOW_TURNS: "5"  # Number of recent user+assistant turns sent as short-term context.
 REASONING_SCALE: "3"  # Multiplier applied to LLM_MAX_TOKENS for reasoning mode.
 LLM_THINKING: "1"  # 1/0 — set 1 when the backend is a thinking model (granite-4, MiniCPM-think): adds LLM_THINK_BUDGET headroom immediately instead of waiting for auto-detect on the first reasoning turn.
 LLM_THINK_BUDGET: "768"  # Extra max_tokens reserved for the think channel when LLM_THINKING=1 or thinking is auto-detected. The thinker fills whatever it gets, so raise only if answers still truncate after thinking ends.
 LLM_NO_THINK: "0"  # 1/0 — ask hybrid-reasoning templates for direct answers: appends /no_think to the request's final user turn and sends chat_template_kwargs.enable_thinking=false. Needs a template/server that honors either; inert otherwise. Keep 0 for non-thinking models.
-LLM_MAX_TOKENS: "280"  # Max tokens for reflection/blog posts; also base for LLM_MAX_TOKENS * REASONING_SCALE.
 
 # -- Sampling --
 TEMPERATURE: "0.5"  # Creativity/randomness; 0.7 made small models word-salad under long persona prompts. Persona carries the voice; keep sampling conservative.

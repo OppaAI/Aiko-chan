@@ -186,21 +186,19 @@ MEMORY_RECALL_TIMEOUT = env_float("MEMORY_RECALL_TIMEOUT", 5.0)
 # 0 = off (default) — no memory is ever dropped for being weak.
 MEMORY_MIN_SCORE = env_float("MEMORY_MIN_SCORE", 0.0)
 
-def _resolve_base_predict() -> int:
-    for key in ("LLM_MAX_TOKENS", "BASE_PREDICT"):
-        try:
-            return int(os.getenv(key, ""))
-        except (TypeError, ValueError):
-            continue
-    return 280
+def _resolve_base_tokens() -> int:
+    try:
+        return int(os.getenv("LLM_MAX_TOKENS", "280"))
+    except (TypeError, ValueError):
+        return 280
 
 
-_BASE_PREDICT    = _resolve_base_predict()
+_BASE_TOKENS     = _resolve_base_tokens()
 _REASONING_SCALE = env_int("REASONING_SCALE", 3)
 
 # Thinking-model headroom. Reasoning-capable templates (granite-4, MiniCPM-
 # think, …) spend tokens in a separate think channel BEFORE any answer
-# content; with only _BASE_PREDICT (280) they hit `finish=length` mid-think
+# content; with only _BASE_TOKENS (280) they hit `finish=length` mid-think
 # and return 0 content chars — stream and fallback both "empty" with no
 # error. The extra budget is added whenever the backend is a known thinker:
 # explicitly via LLM_THINKING=1, or automatically after the first turn that
@@ -2162,7 +2160,7 @@ class AikoThink:
 
     def _stream_response(self, messages: list[dict], system: str = "", token_callback=None, emit: bool = True, system_tail: str = "") -> str:
         full_response = []
-        base_tokens = _BASE_PREDICT * _REASONING_SCALE if self._reasoning else _BASE_PREDICT
+        base_tokens = _BASE_TOKENS * _REASONING_SCALE if self._reasoning else _BASE_TOKENS
         max_tokens = _effective_max_tokens(base_tokens)
 
         # Message layout for llama-server cache_prompt reuse:
@@ -2544,7 +2542,7 @@ class AikoThink:
         )
         corrected = self._fallback_completion(
             [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-            _effective_max_tokens(min(600, _BASE_PREDICT)),
+            _effective_max_tokens(min(600, _BASE_TOKENS)),
             "metacognitive response correction",
         )
         return draft if not corrected.strip() or corrected.startswith("[LLM error]") else corrected.strip()

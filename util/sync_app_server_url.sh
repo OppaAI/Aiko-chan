@@ -20,6 +20,7 @@
 #   AGE_KEY       path to age identity         default: ~/.aiko/age-key.txt
 #   GAMES_DIR     Aiko-Games checkout          default: <repo>/../Aiko-Games
 #   LINGO_DIR     Aiko-Lingo checkout          default: <repo>/../Aiko-Lingo
+#   ONMYOJI_DIR   Aiko-Onmyoji checkout        default: <repo>/../Aiko-Onmyoji
 
 set -euo pipefail
 
@@ -28,6 +29,7 @@ ENC="${ENV_AGE_PATH:-$HOME/.aiko/.env.age}"
 KEY="${AGE_KEY:-$HOME/.aiko/age-key.txt}"
 GAMES_DIR="${GAMES_DIR:-$(dirname "$REPO")/Aiko-Games}"
 LINGO_DIR="${LINGO_DIR:-$(dirname "$REPO")/Aiko-Lingo}"
+ONMYOJI_DIR="${ONMYOJI_DIR:-$(dirname "$REPO")/Aiko-Onmyoji}"
 
 trim() {
     local s="$1"
@@ -112,7 +114,7 @@ if [[ "${1:-}" == "--print-only" ]]; then
 fi
 
 echo "Resolved AIKO_PUBLIC_BASE_URL=$URL"
-for dir in "$GAMES_DIR" "$LINGO_DIR"; do
+for dir in "$GAMES_DIR" "$LINGO_DIR" "$ONMYOJI_DIR"; do
     if [[ ! -d "$dir/app" ]]; then
         echo "  skip $dir (not found)" >&2
         continue

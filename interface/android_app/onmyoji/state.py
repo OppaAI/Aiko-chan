@@ -11,10 +11,31 @@ dial, entity fade with farewell, ritual grammar over combat.
 from __future__ import annotations
 
 from datetime import date as _date
+from datetime import timedelta
 from pydantic import BaseModel, Field
 
 # In-game weeks before a passing encounter fades (with a farewell beat).
 FADE_AFTER_DAYS = 21
+
+# Sengoku road graph: where you can travel directly.
+ROADS: dict[str, list[str]] = {
+    "Kyoto": ["Azuchi", "Osaka", "Kiyosu"],
+    "Azuchi": ["Kyoto", "Kiyosu"],
+    "Osaka": ["Kyoto", "Sakai"],
+    "Sakai": ["Osaka", "Kyoto"],
+    "Kiyosu": ["Kyoto", "Azuchi", "Odawara"],
+    "Odawara": ["Kiyosu"],
+}
+
+# What a careful search can turn up, per location.
+SEARCH_LOOT: dict[str, list[str]] = {
+    "Kyoto": ["coin", "salt", "ofuda"],
+    "Azuchi": ["coin", "sake"],
+    "Osaka": ["coin", "coin", "salt"],
+    "Sakai": ["coin", "sake", "sake"],
+    "Kiyosu": ["salt", "cord"],
+    "Odawara": ["salt", "herbs"],
+}
 
 
 class Entity(BaseModel):
@@ -58,6 +79,7 @@ class JourneyState(BaseModel):
     standing_orders: list[str] = Field(default_factory=list)
     journey_summary: str = Field(default="", description="Rolling narrator summary")
     entities: list[Entity] = Field(default_factory=list)
+    flags: list[str] = Field(default_factory=list, description="One-shot markers, e.g. searched:Kyoto:1582-06-01")
 
 
 def new_journey() -> JourneyState:
@@ -71,6 +93,64 @@ def _days_between(then_iso: str, now_iso: str) -> int:
         return (_date.fromisoformat(now_iso) - _date.fromisoformat(then_iso)).days
     except ValueError:
         return 0
+
+
+def advance_day(state: JourneyState, n: int = 1) -> None:
+    """Move the calendar forward; clears per-day flags."""
+    try:
+        day = _date.fromisoformat(state.date)
+    except ValueError:
+        return
+    state.date = (day + timedelta(days=max(0, n))).isoformat()
+    state.flags = [f for f in state.flags if not f.startswith("searched:")]
+
+
+def do_travel(state: JourneyState, dest: str) -> tuple[bool, str]:
+    """Travel the road graph. Returns (ok, note)."""
+    dest = (dest or "").strip()
+    if dest not in ROADS:
+        return False, f"no such place on the map: {dest or '?'} (try {', '.join(sorted(ROADS))})"
+    if dest == state.location:
+        return False, f"you are already in {dest}"
+    if dest not in ROADS.get(state.location, []):
+        return False, f"no direct road from {state.location} to {dest} — try {', '.join(ROADS.get(state.location, [])) or 'nowhere'}"
+    state.location = dest
+    advance_day(state, 1)
+    faded = prune_entities(state)
+    note = f"🧭 Travel to {dest} (1 day, now {state.date}). Aiko scouts ahead and reports the road clear."
+    if faded:
+        names = ", ".join(e.name or e.id for e in faded)
+        verb = "goes" if len(faded) == 1 else "go"
+        note += f" Farewells: {names} {verb} their separate way."
+    return True, note
+
+
+def do_rest(state: JourneyState) -> tuple[bool, str]:
+    """Rest a day. Aiko keeps watch."""
+    advance_day(state, 1)
+    return True, f"😴 You rest in {state.location} ({state.date}). Aiko keeps watch through the night."
+
+
+def do_search(state: JourneyState, rng=None) -> tuple[bool, str]:
+    """Search the area once per place per day."""
+    import random as _random
+    key = f"searched:{state.location}:{state.date}"
+    if key in state.flags:
+        return False, "you have already searched here today — travel or rest first"
+    state.flags.append(key)
+    pool = SEARCH_LOOT.get(state.location, ["salt"])
+    found = (rng or _random).choice(pool)
+    state.inventory.append(found)
+    return True, f"🔍 Searching {state.location} turns up: {found}."
+
+
+def do_ritual(state: JourneyState, ritual: str, target_id: str) -> tuple[bool, str]:
+    """Cast via resolve_ritual; successes that help earn bond."""
+    ok, note = resolve_ritual(state, ritual, target_id)
+    if ok and (ritual or "").strip().lower() in ("purify", "banish"):
+        state.bond += 1
+        note += f" Bond with Aiko deepens ({state.bond})."
+    return ok, note
 
 
 def prune_entities(state: JourneyState) -> list[Entity]:

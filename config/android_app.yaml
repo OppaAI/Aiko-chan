@@ -33,6 +33,9 @@ GO_BANTER_FREQUENCY: "0.25"  # Odds of a line on a quiet move (0 = notable momen
 KOIKOI_BANTER: "1"  # 1/true/yes/on to enable; 0 = silent template comments only.
 KOIKOI_BANTER_FREQUENCY: "0.25"  # Odds of a line on a quiet turn.
 
+# -- Koi-Koi Aiko-leads experiment (LLM picks, engine vetoes) --
+KOIKOI_AIKO_LEADS: "1"  # Aiko chooses her own plays; engine overrules picks >1.5 pts off best. Adds one LLM call per AI turn; 0 = pure heuristic.
+
 # -- Lingo vocab spawn pool (server side, used by Aiko-Lingo Learn) --
 LINGO_SPAWN_BATCH: "20"  # LLM-spawned vocab items per top-up batch.
 LINGO_POOL_MIN: "30"  # Minimum pooled items per JLPT level before top-up triggers.

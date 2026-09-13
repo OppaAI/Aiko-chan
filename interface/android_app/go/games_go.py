@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .board import BLACK, WHITE, GoBoard, color_name
+from . import records as _records
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +115,7 @@ def difficulty_name(value: Optional[str] = None) -> str:
 def _state_response(uid: str, ai_comment: Optional[str] = None) -> GameState:
     game = _games[uid]
     board: GoBoard = game["board"]
+    _maybe_record_go(uid, game, board)
     return GameState(
         size=board.size,
         turn=color_name(board.turn),
@@ -130,14 +132,66 @@ def _state_response(uid: str, ai_comment: Optional[str] = None) -> GameState:
     )
 
 
-def _ai_move(board: GoBoard, difficulty: Optional[str] = None):
+def _blunder_rate(difficulty: Optional[str], uid: Optional[str] = None) -> float:
+    """Casual-mistake rate nudged by learned bias (clamped, never raises)."""
+    base = _DIFFICULTY_PRESETS[difficulty_name(difficulty)]["blunder"]
+    try:
+        delta = _records.biases(uid).get("blunder_delta", 0.0) if uid else 0.0
+    except Exception:
+        delta = 0.0
+    return min(0.5, max(0.0, base + delta))
+
+
+def _maybe_record_go(uid: str, game: dict, board: GoBoard) -> None:
+    """Persist finished vs_ai games once (learning loop feed)."""
+    try:
+        if game.get("mode") != "vs_ai" or game.get("recorded"):
+            return
+        status = board.status if board.status != "playing" else game.get("status", board.status)
+        if status in ("playing", None, ""):
+            return
+        game["recorded"] = True
+        user_side = game.get("side", "black")
+        you_black = user_side == "black"
+        try:
+            cap_black = board.captured.get(BLACK, 0)
+            cap_white = board.captured.get(WHITE, 0)
+        except Exception:
+            cap_black = cap_white = 0
+        _records.append_match(uid, {
+            "difficulty": game.get("difficulty"),
+            "size": board.size,
+            # resign endpoint: only the human can resign. finished
+            # (double pass) has no server scoring -> unknown winner.
+            "winner": "aiko" if status == "resigned" else "",
+            "moves_made": len(board.history),
+            "cap_you": cap_white if you_black else cap_black,
+            "cap_aiko": cap_black if you_black else cap_white,
+            "engine": game.get("engine", ""),
+        })
+        _records.maybe_reflect(uid, _learn_think())
+    except Exception:
+        log.debug("go record failed", exc_info=True)
+
+
+def _learn_think():
+    try:
+        from interface.webui import auth
+
+        inst = auth.aiko_web_instance
+        return inst._think if inst and inst._think else None
+    except Exception:
+        return None
+
+
+def _ai_move(board: GoBoard, difficulty: Optional[str] = None, *,
+             uid: Optional[str] = None):
     """Return (gtp_move | None, engine_name)."""
     legal = board.legal_moves_gtp()
     if not legal:
         return None, None
 
-    preset = _DIFFICULTY_PRESETS[difficulty_name(difficulty)]
-    if preset["blunder"] > 0 and random.random() < preset["blunder"]:
+    if random.random() < _blunder_rate(difficulty, uid):
         # Prefer non-pass when possible for casual play
         non_pass = [m for m in legal if m != "pass"]
         return random.choice(non_pass or legal), "random"
@@ -211,11 +265,13 @@ def _banter_for_go(
     status: str,
     reason: Optional[str] = None,
     move_count: Optional[int] = None,
+    lessons: tuple = (),
 ) -> Optional[str]:
     """One short Aiko line about her just-played Go move, or None.
 
     Never raises: any failure (no LLM instance, timeout, empty reply)
-    falls back to the template comment.
+    falls back to the template comment. `lessons` are past distilled
+    lessons injected by the caller (loaded per game).
     """
     try:
         from interface.webui import auth
@@ -226,6 +282,10 @@ def _banter_for_go(
         ending = " and the game just ended" if status != "playing" else ""
         moment = f" Something notable just happened: {reason}." if reason else ""
         where = f" This is move {move_count}." if move_count else ""
+        past = ""
+        if lessons:
+            past = (" Lessons Aiko distilled from your past games:\n" +
+                    "\n".join(f"- {t}" for t in lessons[:5]) + "\n")
         response = think._client.chat.completions.create(
             model=think._llm_model,
             messages=[
@@ -235,7 +295,7 @@ def _banter_for_go(
                         "You are Aiko, a playful cat-girl AI playing go "
                         "(the board game) as White against the user. "
                         f"You just played {gtp} in a {difficulty_name(difficulty)} game{ending}."
-                        f"{moment}{where} "
+                        f"{moment}{where}{past} "
                         "Reply with ONE short playful line (under 20 words, "
                         "English with a touch of Japanese flavor). No board "
                         "analysis, no notation lecture, no quotes."
@@ -311,6 +371,8 @@ async def start_game(body: StartRequest, session: dict = Depends(_require_user))
         "last_move": None,
         "status": "playing",
         "engine": eng,
+        "uid": uid,
+        "lessons": _records.lesson_texts(uid),
     }
 
     if side == "black":
@@ -323,7 +385,7 @@ async def start_game(body: StartRequest, session: dict = Depends(_require_user))
         comment += " (KataGo offline — casual moves)"
 
     if side == "white" and mode == "vs_ai":
-        ai, eng2 = await asyncio.to_thread(_ai_move, board, diff)
+        ai, eng2 = await asyncio.to_thread(_ai_move, board, diff, uid=uid)
         _games[uid]["engine"] = eng2
         if ai is not None:
             board.play_gtp(ai)
@@ -388,7 +450,7 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
 
     ai_comment = None
     if game["mode"] == "vs_ai" and board.status == "playing":
-        ai, engine = await asyncio.to_thread(_ai_move, board, game.get("difficulty"))
+        ai, engine = await asyncio.to_thread(_ai_move, board, game.get("difficulty"), uid=uid)
         game["engine"] = engine
         if ai is not None:
             ai_cap = 0
@@ -425,6 +487,7 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
                     line = await asyncio.to_thread(
                         _banter_for_go, ai, game.get("difficulty"),
                         game.get("status", board.status), reason, len(board.history),
+                        tuple(game.get("lessons") or ()),
                     )
                     if line:
                         ai_comment = f"{ai_comment} — {line}"

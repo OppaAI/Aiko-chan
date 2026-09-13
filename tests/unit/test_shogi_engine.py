@@ -139,8 +139,8 @@ def test_make_move_runs_ai_search_in_worker_and_updates_engine(monkeypatch):
     monkeypatch.setenv("SHOGI_BANTER_FREQUENCY", "1")
     calls = []
 
-    async def fake_to_thread(function, *args):
-        calls.append((function, *args))
+    async def fake_to_thread(function, *args, **kwargs):
+        calls.append((function, args, kwargs))
         if function is games_shogi._banter_for:
             return "mocked banter"
         return Move("3c3d"), "random"
@@ -151,8 +151,8 @@ def test_make_move_runs_ai_search_in_worker_and_updates_engine(monkeypatch):
     )
 
     assert calls == [
-        (games_shogi._ai_move, board, None, None),
-        (games_shogi._banter_for, "3c3d", None, "playing", "an ordinary moment", None),
+        (games_shogi._ai_move, (board, None, None), {"uid": "user"}),
+        (games_shogi._banter_for, ("3c3d", None, "playing", "an ordinary moment", None, ()), {}),
     ]
     assert response.engine == "random"
     assert response.ai_comment.endswith("mocked banter")
@@ -326,8 +326,8 @@ def test_banter_disabled_skips_llm_call(monkeypatch):
     monkeypatch.setattr(games_shogi, "_turn_label", lambda board: "black")
     calls = []
 
-    async def fake_to_thread(function, *args):
-        calls.append((function, *args))
+    async def fake_to_thread(function, *args, **kwargs):
+        calls.append((function, args, kwargs))
         return Move("3c3d"), "random"
 
     monkeypatch.setattr(games_shogi.asyncio, "to_thread", fake_to_thread)
@@ -335,7 +335,7 @@ def test_banter_disabled_skips_llm_call(monkeypatch):
         games_shogi.make_move(games_shogi.MoveRequest(move="7g7f"), {"user_id": "user"})
     )
 
-    assert calls == [(games_shogi._ai_move, board, None, None)]
+    assert calls == [(games_shogi._ai_move, (board, None, None), {"uid": "user"})]
     assert response.ai_comment == "Aiko plays 3c3d"
 
 

@@ -23,6 +23,7 @@ In-memory games keyed by user_id (single worker), same as shogi/go.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import random
@@ -33,6 +34,7 @@ from pydantic import BaseModel, Field
 
 from . import ai as _ai
 from . import cards as C
+from . import records as _records
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +131,13 @@ async def _banter_for_koikoi(
             prompt += f"Yaku completed: {yaku_str}\n"
         if move_usi:
             prompt += f"Move: {move_usi}\n"
+        try:
+            past = _records.lesson_texts(game.get("uid") or "")
+        except Exception:
+            past = []
+        if past:
+            prompt += ("Lessons Aiko distilled from your past matches:\n" +
+                       "\n".join(f"- {t}" for t in past) + "\n")
         prompt += "\nReact as Aiko:"
 
         response = await asyncio.to_thread(
@@ -273,6 +282,103 @@ def _mult(game: dict) -> int:
     return 2 ** game["koi"] if game["koi"] > 0 else 1
 
 
+def _leads_enabled() -> bool:
+    """Aiko-leads experiment: LLM picks, engine vetoes (KOIKOI_AIKO_LEADS)."""
+    return (os.getenv("KOIKOI_AIKO_LEADS", "0") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _short_card(card: int) -> str:
+    m = C.month_of(card)
+    return f"{C.MONTHS[m][0]}-{C.kind_of(card)[:3]}#{card}"
+
+
+async def _ai_lead_pick(game: dict, options: list[tuple[int, list[int]]]
+                        ) -> tuple[int, list[int], bool]:
+    """Let Aiko choose, engine checks. Returns (hand, take, vetoed).
+
+    Falls back to the heuristic best on any failure (no LLM, bad JSON,
+    illegal pick). Accept margin: within 1.5 value points of best.
+    """
+    best_h, best_t = max(
+        options,
+        key=lambda o: _ai.score_play(o[0], o[1], game["cap"]["aiko"], game.get("month")),
+    )
+    think = _get_think()
+    if think is None:
+        return best_h, list(best_t), False
+    try:
+        cap = game["cap"]["aiko"]
+        yaku = ", ".join(y["name"] for y in C.detect_yaku(cap, game.get("month"))) or "none yet"
+        lines = [f"{i}: play {_short_card(h)}" +
+                 (f" take {','.join(_short_card(c) for c in t)}" if t else " (no capture)")
+                 for i, (h, t) in enumerate(options)]
+        prompt = (
+            "You play Koi-Koi (hanafuda) as Aiko. Pick ONE of these legal "
+            f"plays by number. Hand: {', '.join(_short_card(c) for c in game['hand']['aiko'])}. "
+            f"Your collection yaku: {yaku}. Stakes ×{_mult(game)}.\n"
+            + "\n".join(lines) +
+            '\nReply with EXACTLY one JSON object: {"pick": <number>}'
+        )
+        response = await asyncio.to_thread(
+            think._client.chat.completions.create,
+            model=think._llm_model,
+            messages=[
+                {"role": "system",
+                 "content": "You choose Koi-Koi plays. Reply with exactly one JSON object."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=40,
+            timeout=30.0,
+        )
+        text = (response.choices[0].message.content or "").strip()
+        start, end = text.index("{"), text.rindex("}") + 1
+        pick = json.loads(text[start:end]).get("pick")
+        if not isinstance(pick, int) or not (0 <= pick < len(options)):
+            raise ValueError("bad pick")
+        h, t = options[pick]
+        mine = _ai.score_play(h, t, game["cap"]["aiko"], game.get("month"))
+        top = _ai.score_play(best_h, best_t, game["cap"]["aiko"], game.get("month"))
+        game["leads"] = game.get("leads", 0) + 1
+        if mine >= top - 1.5:
+            return h, list(t), False
+        game["vetoes"] = game.get("vetoes", 0) + 1
+        return best_h, list(best_t), True
+    except Exception:
+        log.debug("aiko-leads pick failed, heuristic best stands", exc_info=True)
+        return best_h, list(best_t), False
+
+
+def _get_think():
+    """LLM think client when the server has one, else None (never raises)."""
+    try:
+        from interface.webui import auth
+        inst = auth.aiko_web_instance
+        return inst._think if inst and inst._think else None
+    except Exception:
+        return None
+
+
+def _record_match(game: dict) -> None:
+    """Persist one finished match + occasionally trigger reflection."""
+    try:
+        uid = game.get("uid") or ""
+        _records.append_match(uid, {
+            "difficulty": game.get("difficulty"),
+            "months": game.get("months"),
+            "winner": game.get("winner"),
+            "totals": dict(game.get("totals", {})),
+            "koi_calls": game.get("koi_calls", 0),
+            "moves_made": game.get("moves_made", 0),
+            "leads": game.get("leads", 0),
+            "vetoes": game.get("vetoes", 0),
+        })
+        _records.maybe_reflect(uid, _get_think())
+    except Exception:
+        log.debug("koikoi record failed", exc_info=True)
+
+
 def _new_round(game: dict) -> None:
     rng: random.Random = game["rng"]
     you, aiko, field, stock = C.deal(rng)
@@ -294,6 +400,7 @@ def _advance(game: dict) -> None:
         game["status"] = "finished"
         ty, ta = game["totals"]["you"], game["totals"]["aiko"]
         game["winner"] = "you" if ty > ta else ("aiko" if ta > ty else "draw")
+        _record_match(game)
         return
     game["month"] += 1
     game["oya"] = game["round_result"]["winner"] if game["round_result"] else game["oya"]
@@ -473,13 +580,20 @@ async def _ai_turn(game: dict) -> str:
     guard = 0
     while game["turn"] == "aiko" and game["status"] == "playing" and guard < 40:
         guard += 1
+        game["moves_made"] = game.get("moves_made", 0) + 1
         if not game["hand"]["aiko"]:
             _settle_exhausted(game)
             notes.append("cards exhausted")
             break
-        hand, take = _ai.choose_play(
-            game["hand"]["aiko"], game["field"], game["cap"]["aiko"],
-            diff, rng, game.get("month"))
+        options = _ai.enumerate_plays(game["hand"]["aiko"], game["field"])
+        if _leads_enabled() and len(options) > 1:
+            hand, take, vetoed = await _ai_lead_pick(game, options)
+            if vetoed:
+                notes.append("Aiko's idea was greedy — engine overruled ♡")
+        else:
+            hand, take = _ai.choose_play(
+                game["hand"]["aiko"], game["field"], game["cap"]["aiko"],
+                diff, rng, game.get("month"), uid=game.get("uid"))
         _apply_hand_play(game, "aiko", hand, take)
         if take:
             notes.append(f"Aiko takes {len(take) + 1} with {_card_name(hand)}")
@@ -490,7 +604,8 @@ async def _ai_turn(game: dict) -> str:
                 _apply_flip(game, "aiko", flip, [])
             else:
                 chosen = _ai.choose_flip(
-                    flip, opts, game["cap"]["aiko"], diff, rng, game.get("month"))
+                    flip, opts, game["cap"]["aiko"], diff, rng,
+                    game.get("month"), uid=game.get("uid"))
                 _apply_flip(game, "aiko", flip, chosen)
                 if chosen:
                     notes.append(f"flip {_card_name(flip)} takes {len(chosen)}")
@@ -499,9 +614,10 @@ async def _ai_turn(game: dict) -> str:
             cards_left = len(game["hand"]["you"]) + len(game["hand"]["aiko"]) + len(game["stock"])
             call = _ai.choose_decision(
                 game["cap"]["aiko"], game["cap"]["you"], game["koi"], cards_left,
-                diff, rng, game.get("month"))
+                diff, rng, game.get("month"), uid=game.get("uid"))
             if call == "koi":
                 game["koi"] += 1
+                game["koi_calls"] = game.get("koi_calls", 0) + 1
                 _ack(game, "aiko")
                 names = ", ".join(y["name"] for y in new)
                 notes.append(f"Aiko calls koi-koi on {names}! 🌸 (stakes ×{_mult(game)})")
@@ -579,11 +695,13 @@ async def start_game(body: StartRequest, session: dict = Depends(_require_user))
     diff = _ai.difficulty_name(body.difficulty)
     months = body.months if body.months in _MONTH_CHOICES else _DEFAULT_MONTHS
     game = {
+        "uid": uid,
         "mode": mode, "difficulty": diff, "months": months,
         "month": 1, "oya": "you", "turn": "you", "status": "playing",
         "totals": {"you": 0, "aiko": 0}, "winner": None,
         "engine": "aiko", "round_result": None,
-        "rng": random.Random(),
+        "rng": random.Random(), "koi_calls": 0, "moves_made": 0,
+        "leads": 0, "vetoes": 0,
     }
     _games[uid] = game
     _new_round(game)
@@ -637,6 +755,7 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
                     comment += " · " + extra
             return _state_response(uid, ai_comment=comment)
         game["koi"] += 1
+        game["koi_calls"] = game.get("koi_calls", 0) + 1
         _ack(game, side)
         game["pending"] = None
         who = "You call" if side == "you" else "Aiko calls"
@@ -709,6 +828,7 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
                 raise HTTPException(status_code=400, detail="Illegal take for that card")
             take = list(match)
     _apply_hand_play(game, "you", body.hand, take)
+    game["moves_made"] = game.get("moves_made", 0) + 1
 
     if game["stock"]:
         flip = game["stock"].pop(0)

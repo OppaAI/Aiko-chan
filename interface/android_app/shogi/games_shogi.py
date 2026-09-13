@@ -37,6 +37,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from . import records as _records
+
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/games/shogi", tags=["games"])
@@ -291,13 +293,14 @@ def _banter_for(
     status: str,
     reason: Optional[str] = None,
     phase: Optional[str] = None,
+    lessons: tuple = (),
 ) -> Optional[str]:
     """One short Aiko line about her just-played move, or None.
 
     Never raises and never blocks the game: any failure (no LLM
     instance, timeout, empty reply) falls back to the template comment.
-    `reason` (why this moment is notable) and `phase` come from the
-    social-intelligence gate; both optional for backward compatibility.
+    `reason` (why this moment is notable), `phase`, and past `lessons`
+    come from the social-intelligence gate; all optional.
     """
     try:
         from interface.webui import auth
@@ -308,6 +311,10 @@ def _banter_for(
         ending = " and checkmated the user" if status == "checkmate" else ""
         moment = f" Something notable just happened: {reason}." if reason else ""
         where = f" The game is in the {phase}." if phase else ""
+        past = ""
+        if lessons:
+            past = (" Lessons Aiko distilled from your past games:\n" +
+                    "\n".join(f"- {t}" for t in lessons[:5]) + "\n")
         response = think._client.chat.completions.create(
             model=think._llm_model,
             messages=[
@@ -317,7 +324,7 @@ def _banter_for(
                         "You are Aiko, a playful cat-girl AI playing shogi "
                         "(Japanese chess) as White against the user. "
                         f"You just played {usi} in a {difficulty_name(difficulty)} game{ending}."
-                        f"{moment}{where} "
+                        f"{moment}{where}{past} "
                         "Reply with ONE short playful line (under 20 words, "
                         "English with a touch of Japanese flavor). No board "
                         "analysis, no notation lecture, no quotes."
@@ -336,10 +343,69 @@ def _banter_for(
         return None
 
 
+def _blunder_rate(difficulty: Optional[str], uid: Optional[str] = None) -> float:
+    """Casual-mistake rate nudged by learned bias (clamped, never raises)."""
+    base = _DIFFICULTY_PRESETS[difficulty_name(difficulty)]["blunder"]
+    try:
+        delta = _records.biases(uid).get("blunder_delta", 0.0) if uid else 0.0
+    except Exception:
+        delta = 0.0
+    return min(0.5, max(0.0, base + delta))
+
+
+def _maybe_record_shogi(uid: str, game: dict, board) -> None:
+    """Persist finished vs_ai games once (learning loop feed)."""
+    try:
+        if game.get("mode") != "vs_ai" or game.get("recorded"):
+            return
+        status = game.get("status", "playing")
+        if status in ("playing", None, ""):
+            return
+        game["recorded"] = True
+        user_side = game.get("side", "black")
+        if status == "checkmate":
+            turn = _turn_label(board)
+            winner_side = "white" if turn == "black" else "black"
+            winner = "you" if winner_side == user_side else "aiko"
+        elif status == "resigned":
+            winner = "aiko"  # only the human can resign via the endpoint
+        elif status == "timeout":
+            flagged = game.get("flagged", "you")
+            winner = "aiko" if flagged == "you" else "you"
+        else:  # draw, stalemate
+            winner = "draw"
+        try:
+            moves_made = int(getattr(board, "move_number", 0) or 0)
+        except Exception:
+            moves_made = 0
+        _records.append_match(uid, {
+            "difficulty": game.get("difficulty"),
+            "winner": winner,
+            "moves_made": moves_made,
+            "end": status,
+            "engine": game.get("engine", ""),
+        })
+        _records.maybe_reflect(uid, _learn_think())
+    except Exception:
+        log.debug("shogi record failed", exc_info=True)
+
+
+def _learn_think():
+    try:
+        from interface.webui import auth
+
+        inst = auth.aiko_web_instance
+        return inst._think if inst and inst._think else None
+    except Exception:
+        return None
+
+
 def _ai_move(
     board,
     difficulty: Optional[str] = None,
     movetime_cap_ms: Optional[float] = None,
+    *,
+    uid: Optional[str] = None,
 ):
     """
     Aiko asks YaneuraOu for the right move when available;
@@ -363,7 +429,7 @@ def _ai_move(
             movetime_ms = max(50, int(movetime_cap_ms))
 
     # 0) Human-like blunder: occasional random move, no engine search.
-    if preset["blunder"] > 0 and random.random() < preset["blunder"]:
+    if random.random() < _blunder_rate(difficulty, uid):
         return random.choice(legal), "random"
 
     # 1) Ask YaneuraOu (depth-capped unless hard)
@@ -399,6 +465,7 @@ def _state_response(
 ) -> GameState:
     game = _games[uid]
     board = game["board"]
+    _maybe_record_shogi(uid, game, board)
     black_ms, white_ms, byoyomi_ms = _clock_view(game)
     return GameState(
         sfen=board.sfen(),
@@ -475,6 +542,8 @@ async def start_game(body: StartRequest, session: dict = Depends(_require_user))
         "clock": _new_clock(),
         "last_move": None,
         "status": "playing",
+        "uid": uid,
+        "lessons": _records.lesson_texts(uid),
     }
     eng = None
     try:
@@ -494,7 +563,7 @@ async def start_game(body: StartRequest, session: dict = Depends(_require_user))
         comment += " (engine offline — Aiko plays casual moves)"
     if side == "white" and mode == "vs_ai":
         # Aiko (black) opens immediately so it is the user's turn.
-        ai, eng2 = await asyncio.to_thread(_ai_move, _games[uid]["board"], diff, None)
+        ai, eng2 = await asyncio.to_thread(_ai_move, _games[uid]["board"], diff, None, uid=uid)
         _games[uid]["engine"] = eng2
         if ai is not None:
             _games[uid]["board"].push(ai)
@@ -549,6 +618,7 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
         elapsed_ms = (now - game["clock"]["stamp"]) * 1000.0
         if not _charge_clock(game, user_side, elapsed_ms):
             game["status"] = "timeout"
+            game["flagged"] = user_side
             log.info("Shogi flag: %s ran out of time", uid)
             return _state_response(uid, ai_comment="Flag! You ran out of time — Aiko wins. ⏰")
         game["clock"]["stamp"] = now
@@ -580,12 +650,13 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
             cap_ms = max(50.0, game["clock"]["remaining"][ai_side] - 100.0)
         ai_start = time.monotonic()
         ai, engine = await asyncio.to_thread(
-            _ai_move, board, game.get("difficulty"), cap_ms
+            _ai_move, board, game.get("difficulty"), cap_ms, uid=uid
         )
         if game.get("clock"):
             ai_elapsed_ms = (time.monotonic() - ai_start) * 1000.0
             if not _charge_clock(game, ai_side, ai_elapsed_ms):
                 game["status"] = "timeout"
+                game["flagged"] = ai_side
                 game["engine"] = engine
                 return _state_response(uid, ai_comment="Flag! Aiko ran out of time — you win! 🐱⏰")
             game["clock"]["stamp"] = time.monotonic()
@@ -639,7 +710,7 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
                 # failure (including a quiet gate — most moves stay silent).
                 line = await asyncio.to_thread(
                     _banter_for, usi, game.get("difficulty"), game["status"],
-                    reason, phase,
+                    reason, phase, tuple(game.get("lessons") or ()),
                 )
                 if line:
                     ai_comment = f"{ai_comment} — {line}"
@@ -683,5 +754,6 @@ async def resign(session: dict = Depends(_require_user)):
             comment = await asyncio.to_thread(
                 _banter_for, "", _games[uid].get("difficulty"),
                 "resigned", reason or "you resigned", None,
+                tuple(_games[uid].get("lessons") or ()),
             )
     return _state_response(uid, ai_comment=comment)

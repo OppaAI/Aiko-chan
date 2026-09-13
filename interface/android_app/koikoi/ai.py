@@ -58,6 +58,27 @@ def enumerate_plays(hand_cards: list[int], field: list[int]) -> list[tuple[int, 
     return options
 
 
+def score_play(hand: int, take: list[int], captured: list[int],
+               round_month: int | None = None) -> float:
+    """Public value of a play (used by Aiko-leads vetting)."""
+    return _option_value(hand, take, captured, round_month)
+
+
+def _biases(uid=None) -> dict:
+    """Learned offsets for this user (neutral zeros when absent/errors)."""
+    try:
+        from . import records as _rec
+        return _rec.biases(uid)
+    except Exception:
+        return {"koi_courage": 0.0, "blunder_delta": 0.0}
+
+
+def _blunder_rate(level: str, uid=None) -> float:
+    base = _BLUNDER[difficulty_name(level if level in _BLUNDER else None)]
+    delta = _biases(uid).get("blunder_delta", 0.0)
+    return min(0.5, max(0.0, base + delta))
+
+
 def choose_play(
     hand_cards: list[int],
     field: list[int],
@@ -65,12 +86,13 @@ def choose_play(
     difficulty: str | None = None,
     rng: random.Random | None = None,
     round_month: int | None = None,
+    uid: str | None = None,
 ) -> tuple[int, list[int]]:
     rng = rng or random.Random()
     options = enumerate_plays(hand_cards, field)
     if not options:
         raise ValueError("no cards to play")
-    if rng.random() < _BLUNDER[difficulty_name(difficulty)]:
+    if rng.random() < _blunder_rate(difficulty, uid):
         return rng.choice(options)
     return max(options, key=lambda o: (_option_value(o[0], o[1], captured, round_month), rng.random()))
 
@@ -82,6 +104,7 @@ def choose_flip(
     difficulty: str | None = None,
     rng: random.Random | None = None,
     round_month: int | None = None,
+    uid: str | None = None,
 ) -> list[int]:
     """Pick among deck-flip takes (each option already includes the flip)."""
     rng = rng or random.Random()
@@ -89,7 +112,7 @@ def choose_flip(
         return []
     if len(options) == 1:
         return list(options[0])
-    if rng.random() < _BLUNDER[difficulty_name(difficulty)]:
+    if rng.random() < _blunder_rate(difficulty, uid):
         return list(rng.choice(options))
     scored = [(_option_value(flip, o, captured, round_month), o) for o in options]
     return list(max(scored, key=lambda s: (s[0], rng.random()))[1])
@@ -103,6 +126,7 @@ def choose_decision(
     difficulty: str | None = None,
     rng: random.Random | None = None,
     round_month: int | None = None,
+    uid: str | None = None,
 ) -> str:
     """'stop' (bank points) or 'koi' (continue, doubling the stakes)."""
     rng = rng or random.Random()
@@ -112,7 +136,7 @@ def choose_decision(
     threat = C.near_yaku_score(opp_captured) + len(opp_captured) / 48.0
     late = cards_left <= 10
 
-    if rng.random() < _BLUNDER[level]:
+    if rng.random() < _blunder_rate(level, uid):
         # Casual mistake: sometimes bank tiny scores, sometimes chase recklessly.
         return rng.choice(["stop", "koi"])
 
@@ -125,7 +149,9 @@ def choose_decision(
     if threat >= 1.4 and current >= 4:
         return "stop"
     # Chase when there is real potential and little banked.
-    chase_line = {"easy": 1.2, "medium": 0.7, "hard": 0.45}[level]
+    # Learned courage shifts the bar (positive = bolder koi-koi).
+    courage = _biases(uid).get("koi_courage", 0.0)
+    chase_line = {"easy": 1.2, "medium": 0.7, "hard": 0.45}[level] - courage
     if potential >= chase_line and not late:
         return "koi"
     # Small score with nothing brewing: bank it rather than risk the double.

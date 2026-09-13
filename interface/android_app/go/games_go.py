@@ -163,6 +163,97 @@ def _ai_move(board: GoBoard, difficulty: Optional[str] = None):
     return random.choice(non_pass or legal), "random"
 
 
+def _banter_enabled() -> bool:
+    """LLM move chatter on/off (GO_BANTER, default on)."""
+    return (os.getenv("GO_BANTER", "1") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _banter_frequency() -> float:
+    """Odds of a personality line on a quiet move (GO_BANTER_FREQUENCY)."""
+    try:
+        return max(0.0, min(1.0, float(os.getenv("GO_BANTER_FREQUENCY", "0.25"))))
+    except (TypeError, ValueError):
+        return 0.25
+
+
+def _should_speak_go(game: dict, info: dict) -> tuple[bool, str]:
+    """Social-intelligence gate for Go banter.
+
+    info keys: status, user_cap, ai_cap (stones captured this round of
+    moves), user_pass, move_count. Never raises; missing signals just mean
+    fewer triggers — the frequency roll still applies.
+    """
+    status = info.get("status", "playing")
+    if status in ("finished", "resigned"):
+        return True, "game just ended"
+    if (info.get("user_cap") or 0) >= 2:
+        return True, "you just captured Aiko's stones"
+    if (info.get("ai_cap") or 0) >= 2:
+        return True, "Aiko just captured your stones"
+    if info.get("user_pass"):
+        return True, "you passed — the endgame is near"
+    move_count = info.get("move_count") or 0
+    if move_count and move_count % 8 == 0:
+        return True, "a few quiet moves have passed"
+    if random.random() < _banter_frequency():
+        return True, "an ordinary moment"
+    return False, ""
+
+
+def _banter_for_go(
+    gtp: str,
+    difficulty: Optional[str],
+    status: str,
+    reason: Optional[str] = None,
+    move_count: Optional[int] = None,
+) -> Optional[str]:
+    """One short Aiko line about her just-played Go move, or None.
+
+    Never raises: any failure (no LLM instance, timeout, empty reply)
+    falls back to the template comment.
+    """
+    try:
+        from interface.webui import auth
+
+        if not auth.aiko_web_instance or not auth.aiko_web_instance._think:
+            return None
+        think = auth.aiko_web_instance._think
+        ending = " and the game just ended" if status != "playing" else ""
+        moment = f" Something notable just happened: {reason}." if reason else ""
+        where = f" This is move {move_count}." if move_count else ""
+        response = think._client.chat.completions.create(
+            model=think._llm_model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Aiko, a playful cat-girl AI playing go "
+                        "(the board game) as White against the user. "
+                        f"You just played {gtp} in a {difficulty_name(difficulty)} game{ending}."
+                        f"{moment}{where} "
+                        "Reply with ONE short playful line (under 20 words, "
+                        "English with a touch of Japanese flavor). No board "
+                        "analysis, no notation lecture, no quotes."
+                    ),
+                },
+                {"role": "user", "content": "React to your move."},
+            ],
+            max_tokens=60,
+            timeout=30.0,
+        )
+        text = (response.choices[0].message.content or "").strip().splitlines()
+        line = (text[0] if text else "").strip().strip("\"'")[:140]
+        return line or None
+    except Exception:
+        log.debug("Go banter failed, using template comment", exc_info=True)
+        return None
+
+
 @router.get("/engine")
 async def engine_status(session: dict = Depends(_require_user)):
     try:
@@ -267,6 +358,7 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
 
     user_side = game.get("side", "black")
     user_color = BLACK if user_side == "black" else WHITE
+    ai_color = WHITE if user_color == BLACK else BLACK
     move_str = (body.move or "").strip()
     if not move_str:
         raise HTTPException(status_code=400, detail="move is required (GTP, e.g. D4 or pass)")
@@ -274,10 +366,20 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
     if game.get("mode") == "vs_ai" and board.turn != user_color:
         raise HTTPException(status_code=400, detail="Not your turn")
 
+    user_pass = move_str.strip().upper() in ("PASS", "PA")
+    try:
+        cap_before = dict(board.captured)
+    except Exception:
+        cap_before = {}
     try:
         board.play_gtp(move_str)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    user_cap = 0
+    try:
+        user_cap = max(0, board.captured.get(ai_color, 0) - cap_before.get(ai_color, 0))
+    except Exception:
+        user_cap = 0
 
     game["last_move"] = move_str.strip().upper() if move_str.upper() not in ("PASS", "PA") else "pass"
     if board.status != "playing":
@@ -289,8 +391,17 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
         ai, engine = await asyncio.to_thread(_ai_move, board, game.get("difficulty"))
         game["engine"] = engine
         if ai is not None:
+            ai_cap = 0
+            try:
+                ai_cap_before = dict(board.captured)
+            except Exception:
+                ai_cap_before = {}
             try:
                 board.play_gtp(ai)
+                try:
+                    ai_cap = max(0, board.captured.get(user_color, 0) - ai_cap_before.get(user_color, 0))
+                except Exception:
+                    ai_cap = 0
                 game["last_move"] = ai
                 if board.status != "playing":
                     game["status"] = board.status
@@ -298,6 +409,25 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
                     ai_comment = f"Aiko (via KataGo) plays {ai}"
                 else:
                     ai_comment = f"Aiko plays {ai}"
+                speak, reason = False, ""
+                if _banter_enabled():
+                    speak, reason = _should_speak_go(game, {
+                        "status": game.get("status", board.status),
+                        "user_cap": user_cap,
+                        "ai_cap": ai_cap,
+                        "user_pass": user_pass,
+                        "move_count": len(board.history),
+                    })
+                if speak:
+                    # LLM chatter runs after the move is committed, in a
+                    # worker; the template above survives any failure
+                    # (including a quiet gate — most moves stay silent).
+                    line = await asyncio.to_thread(
+                        _banter_for_go, ai, game.get("difficulty"),
+                        game.get("status", board.status), reason, len(board.history),
+                    )
+                    if line:
+                        ai_comment = f"{ai_comment} — {line}"
             except Exception as e:
                 log.warning("AI move failed: %s", e)
                 ai_comment = "Aiko hesitated… your move again?"

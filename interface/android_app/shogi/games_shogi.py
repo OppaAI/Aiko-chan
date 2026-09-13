@@ -234,11 +234,70 @@ def _banter_enabled() -> bool:
     }
 
 
-def _banter_for(usi: str, difficulty: Optional[str], status: str) -> Optional[str]:
+def _banter_frequency() -> float:
+    """Odds of a personality line on a quiet move (SHOGI_BANTER_FREQUENCY)."""
+    try:
+        return max(0.0, min(1.0, float(os.getenv("SHOGI_BANTER_FREQUENCY", "0.25"))))
+    except (TypeError, ValueError):
+        return 0.25
+
+
+# Rough piece values for "big capture" praise (SFEN letters).
+_PIECE_VALUES = {"P": 1, "L": 3, "N": 4, "S": 5, "G": 6, "B": 9, "R": 10, "K": 99}
+
+
+def _phase_of(move_number: int) -> str:
+    if move_number < 16:
+        return "opening"
+    if move_number < 50:
+        return "middlegame"
+    return "endgame"
+
+
+def _should_speak_shogi(game: dict, info: dict) -> tuple[bool, str]:
+    """Social-intelligence gate: speak on notable moments, else occasionally.
+
+    info keys: status, phase_changed, user_cap, ai_cap (piece values),
+    user_check, ai_check, promoted, dropped, move_number.
+    Never raises; missing signals (e.g. stub boards in tests) just mean
+    fewer triggers — the frequency roll still applies.
+    """
+    status = info.get("status", "playing")
+    if status in ("checkmate", "resigned", "timeout", "draw", "stalemate"):
+        return True, "game just ended"
+    if info.get("phase_changed"):
+        return True, f"game entered the {info.get('phase', 'next phase')}"
+    if (info.get("user_cap") or 0) >= 9:
+        return True, "you captured Aiko's rook or bishop"
+    if (info.get("ai_cap") or 0) >= 9:
+        return True, "Aiko captured your rook or bishop"
+    if info.get("user_check") or info.get("ai_check"):
+        return True, "a check was just given"
+    if info.get("promoted"):
+        return True, "a piece just promoted"
+    if info.get("dropped"):
+        return True, "a piece was just dropped from hand"
+    move_number = info.get("move_number") or 0
+    if move_number and move_number % 6 == 0:
+        return True, "a few quiet moves have passed"
+    if random.random() < _banter_frequency():
+        return True, "an ordinary moment"
+    return False, ""
+
+
+def _banter_for(
+    usi: str,
+    difficulty: Optional[str],
+    status: str,
+    reason: Optional[str] = None,
+    phase: Optional[str] = None,
+) -> Optional[str]:
     """One short Aiko line about her just-played move, or None.
 
     Never raises and never blocks the game: any failure (no LLM
     instance, timeout, empty reply) falls back to the template comment.
+    `reason` (why this moment is notable) and `phase` come from the
+    social-intelligence gate; both optional for backward compatibility.
     """
     try:
         from interface.webui import auth
@@ -247,6 +306,8 @@ def _banter_for(usi: str, difficulty: Optional[str], status: str) -> Optional[st
             return None
         think = auth.aiko_web_instance._think
         ending = " and checkmated the user" if status == "checkmate" else ""
+        moment = f" Something notable just happened: {reason}." if reason else ""
+        where = f" The game is in the {phase}." if phase else ""
         response = think._client.chat.completions.create(
             model=think._llm_model,
             messages=[
@@ -255,7 +316,8 @@ def _banter_for(usi: str, difficulty: Optional[str], status: str) -> Optional[st
                     "content": (
                         "You are Aiko, a playful cat-girl AI playing shogi "
                         "(Japanese chess) as White against the user. "
-                        f"You just played {usi} in a {difficulty_name(difficulty)} game{ending}. "
+                        f"You just played {usi} in a {difficulty_name(difficulty)} game{ending}."
+                        f"{moment}{where} "
                         "Reply with ONE short playful line (under 20 words, "
                         "English with a touch of Japanese flavor). No board "
                         "analysis, no notation lecture, no quotes."
@@ -491,10 +553,24 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
             return _state_response(uid, ai_comment="Flag! You ran out of time — Aiko wins. ⏰")
         game["clock"]["stamp"] = now
 
+    user_cap = 0
+    to_sq = getattr(move, "to_square", None)
+    if to_sq is not None and hasattr(board, "piece_at"):
+        try:
+            target = board.piece_at(to_sq)
+            if target is not None:
+                user_cap = _PIECE_VALUES.get(str(target).upper(), 0)
+        except Exception:
+            user_cap = 0
+
     board.push(move)
     game["last_move"] = move_str
     status = _status_for(board)
     game["status"] = status
+    try:
+        user_check = bool(board.is_check())
+    except Exception:
+        user_check = False
 
     ai_comment = None
     engine = None
@@ -515,22 +591,55 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
             game["clock"]["stamp"] = time.monotonic()
         game["engine"] = engine
         if ai is not None:
+            ai_cap = 0
+            ai_to = getattr(ai, "to_square", None)
+            if ai_to is not None and hasattr(board, "piece_at"):
+                try:
+                    ai_target = board.piece_at(ai_to)
+                    if ai_target is not None:
+                        ai_cap = _PIECE_VALUES.get(str(ai_target).upper(), 0)
+                except Exception:
+                    ai_cap = 0
             board.push(ai)
             usi = ai.usi()
             game["last_move"] = usi
             game["status"] = _status_for(board)
+            try:
+                ai_check = bool(board.is_check())
+            except Exception:
+                ai_check = False
+            move_number = getattr(board, "move_number", 0) or 0
+            phase = _phase_of(move_number) if move_number else None
+            phase_changed = bool(phase) and game.get("phase") != phase
+            if phase:
+                game["phase"] = phase
             if engine == "yaneuraou":
                 ai_comment = f"Aiko (via YaneuraOu) plays {usi}"
             else:
                 ai_comment = f"Aiko plays {usi}"
             if game["status"] == "checkmate":
                 ai_comment += " — checkmate! 🐱"
-            elif _banter_enabled():
+            speak, reason = False, ""
+            if _banter_enabled():
+                speak, reason = _should_speak_shogi(game, {
+                    "status": game["status"],
+                    "phase": phase,
+                    "phase_changed": phase_changed,
+                    "user_cap": user_cap,
+                    "ai_cap": ai_cap,
+                    "user_check": user_check,
+                    "ai_check": ai_check,
+                    "promoted": usi.endswith("+") or move_str.endswith("+"),
+                    "dropped": "*" in usi or "*" in move_str,
+                    "move_number": move_number,
+                })
+            if speak:
                 # LLM chatter runs after the move is committed, in a worker
                 # so the event loop stays free; template above survives any
-                # failure.
+                # failure (including a quiet gate — most moves stay silent).
                 line = await asyncio.to_thread(
-                    _banter_for, usi, game.get("difficulty"), game["status"]
+                    _banter_for, usi, game.get("difficulty"), game["status"],
+                    reason, phase,
                 )
                 if line:
                     ai_comment = f"{ai_comment} — {line}"
@@ -566,4 +675,13 @@ async def resign(session: dict = Depends(_require_user)):
     if uid not in _games:
         raise HTTPException(status_code=404, detail="No active game")
     _games[uid]["status"] = "resigned"
-    return _state_response(uid)
+    comment = None
+    if _banter_enabled():
+        speak, reason = _should_speak_shogi(
+            _games[uid], {"status": "resigned"})
+        if speak:
+            comment = await asyncio.to_thread(
+                _banter_for, "", _games[uid].get("difficulty"),
+                "resigned", reason or "you resigned", None,
+            )
+    return _state_response(uid, ai_comment=comment)

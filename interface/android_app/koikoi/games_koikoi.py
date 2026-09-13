@@ -22,6 +22,7 @@ In-memory games keyed by user_id (single worker), same as shogi/go.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import random
@@ -41,6 +42,111 @@ _games: dict[str, dict] = {}
 
 _MONTH_CHOICES = (3, 6, 12)
 _DEFAULT_MONTHS = 6
+
+# Banter configuration
+KOIKOI_BANTER_FREQUENCY = float(os.getenv("KOIKOI_BANTER_FREQUENCY", "0.25"))
+
+
+def _banter_enabled() -> bool:
+    """Check if banter is enabled via env var (default on)."""
+    return (os.getenv("KOIKOI_BANTER", "1") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _should_speak_koikoi(
+    game: dict,
+    event: str,
+    side: str = "aiko",
+    yaku_list: Optional[list[dict]] = None,
+    cards_taken: int = 0,
+    round_month: Optional[int] = None,
+) -> bool:
+    """Social intelligence gate: decide when Aiko should speak in Koi-Koi.
+
+    Triggers:
+    - Always: game end, round end, yaku completion, koi-koi call, tsuki-fuda,
+      dealt hand yaku (teshi/kuttsuki), big captures
+    - Occasional: personality comments (frequency controlled by env var)
+    """
+    # Always speak on significant events
+    if event in {
+        "game_end", "round_end", "yaku_complete", "koi_koi_call",
+        "tsuki_fuda", "dealt_yaku", "big_capture", "resign",
+    }:
+        return True
+
+    # Occasional personality comments
+    if event == "turn_start" and random.random() < KOIKOI_BANTER_FREQUENCY:
+        return True
+
+    return False
+
+
+async def _banter_for_koikoi(
+    game: dict,
+    event: str,
+    side: str = "aiko",
+    move_usi: Optional[str] = None,
+    yaku_list: Optional[list[dict]] = None,
+    cards_taken: int = 0,
+) -> Optional[str]:
+    """Generate Aiko's personality comment for Koi-Koi via LLM.
+
+    Falls back gracefully if LLM unavailable.
+    """
+    if not _banter_enabled():
+        return None
+
+    try:
+        from interface.webui import auth
+        if not auth.aiko_web_instance or not auth.aiko_web_instance._think:
+            return None
+
+        think = auth.aiko_web_instance._think
+        difficulty = game.get("difficulty", "medium")
+        month = game.get("month", 1)
+        months_total = game.get("months", 6)
+        you_total = game["totals"].get("you", 0)
+        aiko_total = game["totals"].get("aiko", 0)
+        koi_count = game.get("koi", 0)
+        multiplier = 2 ** koi_count if koi_count > 0 else 1
+
+        # Build context
+        yaku_str = ""
+        if yaku_list:
+            yaku_str = ", ".join(f"{y['name']} ({y['points']}pts)" for y in yaku_list)
+
+        prompt = (
+            "You are Aiko, a playful cat-girl AI playing Koi-Koi (hanafuda) "
+            "as the opponent. Respond with ONE short, playful line "
+            "(under 25 words, English with Japanese flavor). "
+            "No analysis, no move notation, just personality.\n\n"
+            f"Game: Koi-Koi, Month {month}/{months_total}, Round multiplier ×{multiplier}\n"
+            f"Scores: You {you_total} - Aiko {aiko_total}\n"
+            f"Event: {event}\n"
+            f"Difficulty: {difficulty}\n"
+        )
+        if yaku_str:
+            prompt += f"Yaku completed: {yaku_str}\n"
+        if move_usi:
+            prompt += f"Move: {move_usi}\n"
+        prompt += "\nReact as Aiko:"
+
+        response = await asyncio.to_thread(
+            think._client.chat.completions.create,
+            model=think._llm_model,
+            messages=[
+                {"role": "system", "content": "You are Aiko, a playful cat-girl AI playing Koi-Koi."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=60,
+            timeout=15.0,
+        )
+        text = (response.choices[0].message.content or "").strip()
+        return text if text else None
+
+    except Exception:
+        log.debug("Koi-Koi banter failed, using template", exc_info=True)
+        return None
 
 
 class StartRequest(BaseModel):
@@ -359,7 +465,7 @@ def _state_response(uid: str, ai_comment: Optional[str] = None) -> KoiState:
     )
 
 
-def _ai_turn(game: dict) -> str:
+async def _ai_turn(game: dict) -> str:
     """Run Aiko's whole turn (play + flip + koi decision). Returns a note."""
     rng: random.Random = game["rng"]
     diff = game.get("difficulty")
@@ -399,10 +505,18 @@ def _ai_turn(game: dict) -> str:
                 _ack(game, "aiko")
                 names = ", ".join(y["name"] for y in new)
                 notes.append(f"Aiko calls koi-koi on {names}! 🌸 (stakes ×{_mult(game)})")
+                if _should_speak_koikoi(game, "koi_koi_call", "aiko", new):
+                    line = await _banter_for_koikoi(game, "koi_koi_call", "aiko", yaku_list=new)
+                    if line:
+                        notes.append(f"🐱 {line}")
             else:
                 res = _settle_stop(game, "aiko")
                 names = ", ".join(y["name"] for y in new)
                 notes.append(f"Aiko stops with {names} — +{res['points']} 🌸")
+                if _should_speak_koikoi(game, "yaku_complete", "aiko", new):
+                    line = await _banter_for_koikoi(game, "yaku_complete", "aiko", yaku_list=new)
+                    if line:
+                        notes.append(f"🐱 {line}")
                 break
         if _hands_empty(game) and game["status"] == "playing":
             _settle_exhausted(game)
@@ -412,7 +526,7 @@ def _ai_turn(game: dict) -> str:
     return " · ".join(notes) if notes else "Aiko plays"
 
 
-def _drain_aiko(game: dict) -> str:
+async def _drain_aiko(game: dict) -> str:
     """Run Aiko until it is the human's turn (or the match ends).
 
     Needed whenever a human action leaves turn == "aiko": after her reply,
@@ -428,7 +542,7 @@ def _drain_aiko(game: dict) -> str:
         and guard < 40
     ):
         guard += 1
-        note = _ai_turn(game)
+        note = await _ai_turn(game)
         if note:
             notes.append(note)
     return " · ".join(notes)
@@ -480,8 +594,12 @@ async def start_game(body: StartRequest, session: dict = Depends(_require_user))
     )
     if notes:
         comment += " " + " ".join(notes)
+        if _should_speak_koikoi(game, "dealt_yaku", "aiko"):
+            line = await _banter_for_koikoi(game, "dealt_yaku", "aiko")
+            if line:
+                comment += f" 🐱 {line}"
     if game["status"] == "playing" and game["turn"] == "aiko" and mode != "practice":
-        extra = _drain_aiko(game)
+        extra = await _drain_aiko(game)
         if extra:
             comment += " · " + extra
     log.info("Koikoi match started for %s months=%s difficulty=%s", uid, months, diff)
@@ -514,7 +632,7 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
             who = "You bank" if side == "you" else "Aiko banks"
             comment = f"{who} +{res['points']} ({res['base']}×{res['multiplier']}) 🌸"
             if not practice:
-                extra = _drain_aiko(game)
+                extra = await _drain_aiko(game)
                 if extra:
                     comment += " · " + extra
             return _state_response(uid, ai_comment=comment)
@@ -526,7 +644,7 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
         if not practice:
             if side == "you":
                 game["turn"] = "aiko"
-                extra = _drain_aiko(game)
+                extra = await _drain_aiko(game)
                 if extra:
                     comment += " · " + extra
             else:
@@ -547,19 +665,23 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
             game["pending"] = {"kind": "decision", "side": "you"}
             base = C.yaku_points(_yaku(game, "you"))
             names = ", ".join(y["name"] for y in new)
-            return _state_response(
-                uid, ai_comment=f"Yaku! {names} ({base} pts) — koi-koi or stop? 🌸")
+            comment = f"Yaku! {names} ({base} pts) — koi-koi or stop? 🌸"
+            if _should_speak_koikoi(game, "yaku_complete", "you", new):
+                line = await _banter_for_koikoi(game, "yaku_complete", "you", yaku_list=new)
+                if line:
+                    comment = f"{comment} 🐱 {line}"
+            return _state_response(uid, ai_comment=comment)
         if _hands_empty(game):
             res = _settle_exhausted(game)
             comment = f"Cards exhausted — {res['winner']} takes the month"
             if not practice:
-                extra = _drain_aiko(game)
+                extra = await _drain_aiko(game)
                 if extra:
                     comment += " · " + extra
             return _state_response(uid, ai_comment=comment)
         if not practice:
             game["turn"] = "aiko"
-            note = _drain_aiko(game)
+            note = await _drain_aiko(game)
             return _state_response(uid, ai_comment=note or None)
         return _state_response(uid)
 
@@ -603,19 +725,23 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
         game["pending"] = {"kind": "decision", "side": "you"}
         base = C.yaku_points(_yaku(game, "you"))
         names = ", ".join(y["name"] for y in new)
-        return _state_response(
-            uid, ai_comment=f"Yaku! {names} ({base} pts) — koi-koi or stop? 🌸")
+        comment = f"Yaku! {names} ({base} pts) — koi-koi or stop? 🌸"
+        if _should_speak_koikoi(game, "yaku_complete", "you", new):
+            line = await _banter_for_koikoi(game, "yaku_complete", "you", yaku_list=new)
+            if line:
+                comment = f"{comment} 🐱 {line}"
+        return _state_response(uid, ai_comment=comment)
     if _hands_empty(game):
         res = _settle_exhausted(game)
         comment = f"Cards exhausted — {res['winner']} takes the month"
         if not practice:
-            extra = _drain_aiko(game)
+            extra = await _drain_aiko(game)
             if extra:
                 comment += " · " + extra
         return _state_response(uid, ai_comment=comment)
     if not practice:
         game["turn"] = "aiko"
-        note = _drain_aiko(game)
+        note = await _drain_aiko(game)
         return _state_response(uid, ai_comment=note or None)
     return _state_response(uid)
 
@@ -658,7 +784,12 @@ async def resign(session: dict = Depends(_require_user)):
     game["round_result"] = {
         "winner": "aiko", "points": 0, "base": 0, "multiplier": 1, "reason": "resigned",
     }
-    return _state_response(uid, ai_comment="You resign — Aiko takes the match 🌸")
+    comment = "You resign — Aiko takes the match 🌸"
+    if _should_speak_koikoi(game, "resign", "aiko"):
+        line = await _banter_for_koikoi(game, "resign", "aiko")
+        if line:
+            comment = f"{comment} 🐱 {line}"
+    return _state_response(uid, ai_comment=comment)
 
 
 def _self_check() -> None:  # quick stdlib sanity check, see __main__

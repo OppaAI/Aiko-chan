@@ -135,6 +135,8 @@ def test_make_move_runs_ai_search_in_worker_and_updates_engine(monkeypatch):
     monkeypatch.setattr(games_shogi, "_import_shogi", lambda: type("Shogi", (), {"Move": MoveFactory, "BLACK": 0, "WHITE": 1}))
     monkeypatch.setattr(games_shogi, "_status_for", lambda board: "playing")
     monkeypatch.setattr(games_shogi, "_turn_label", lambda board: "black")
+    # Frequency 1.0: the social gate always speaks, so the banter call happens.
+    monkeypatch.setenv("SHOGI_BANTER_FREQUENCY", "1")
     calls = []
 
     async def fake_to_thread(function, *args):
@@ -150,7 +152,7 @@ def test_make_move_runs_ai_search_in_worker_and_updates_engine(monkeypatch):
 
     assert calls == [
         (games_shogi._ai_move, board, None, None),
-        (games_shogi._banter_for, "3c3d", None, "playing"),
+        (games_shogi._banter_for, "3c3d", None, "playing", "an ordinary moment", None),
     ]
     assert response.engine == "random"
     assert response.ai_comment.endswith("mocked banter")

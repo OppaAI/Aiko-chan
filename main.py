@@ -63,7 +63,7 @@ launches never pay for it at import time.
 
 Argument-order and env-var timing notes (why --debug/--trace/logging are
 sequenced the way they are in main()) live as inline comments next to that
-code, not here — see main() below.
+code, not here — see the code below.
 """
 from __future__ import annotations            # evaluates type annotations later
 

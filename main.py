@@ -68,10 +68,6 @@ code, not here — see the code below.
 from __future__ import annotations            # evaluates type annotations later
 
 # Public libraries
-import warnings                               # for filtering out the warning messages
-# Suppress transformers FutureWarning unconditionally; cheap global call, acceptable even with deferred imports
-warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
-
 import argparse                               # for parsing CLI arguments
 import os as _os                              # for intercepting hard exits
 import traceback as _tb                       # for logging exit origins

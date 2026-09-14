@@ -14,6 +14,7 @@ Auth mirrors the games backends (session with owner fallback).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import random
@@ -185,15 +186,23 @@ async def _voice_line(journey: JourneyState, target: str, user_text: str) -> str
             max_tokens=150,
             timeout=30.0,
         )
-        line = (response.choices[0].message.content or "").strip()
+        msg = response.choices[0].message
+        content = msg.content
+        if isinstance(content, list):  # content-block style responses
+            content = " ".join(
+                (p.get("text", "") if isinstance(p, dict)
+                 else getattr(p, "text", "") or "")
+                for p in content
+            )
+        line = (content or "").strip()
+        if not line:
+            # granite/ministral thinking builds sometimes emit the reply as
+            # reasoning only (empty content) — speak that instead of silence.
+            line = (getattr(msg, "reasoning_content", "") or "").strip()
         return line or fallback
-    except Exception:
-        log.debug("onmyoji talk failed", exc_info=True)
+    except Exception as e:
+        log.warning("onmyoji talk voice failed: %r", e)
         return fallback
-    uid = session["user_id"]
-    if uid not in _journeys:
-        raise HTTPException(status_code=404, detail="No journey — call POST /start first")
-    return _journeys[uid]
 
 
 @router.get("/options")

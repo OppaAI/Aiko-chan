@@ -40,6 +40,77 @@ SEARCH_LOOT: dict[str, list[str]] = {
 # Castle/merchant towns with odd jobs to be had.
 WORK_TOWNS = ("Kyoto", "Azuchi", "Osaka", "Sakai")
 
+# Candidate encounters per town. ensure_encounters() introduces the first
+# unused candidate of each kind on arrival, so the phone UI always has
+# someone to greet (Talk) and rites always have targets (Ritual).
+# Without this the journey starts with zero entities and those buttons
+# stay disabled/hidden forever.
+ENCOUNTERS: dict[str, dict[str, list[dict]]] = {
+    "Kyoto": {
+        "human": [
+            {"suffix": "teahouse-keeper", "name": "O-Kiku", "role": "teahouse keeper",
+             "disposition": "wary but curious", "details": ["remembers every rumor on the street"]},
+        ],
+        "spirit": [
+            {"suffix": "alley-wisp", "name": "Chōchin-obake", "role": "paper-lantern ghost",
+             "disposition": "mischievous, harmless", "details": ["startles drunks, loves gossip"], "dread": 1},
+        ],
+    },
+    "Azuchi": {
+        "human": [
+            {"suffix": "ashigaru", "name": "Jinsuke", "role": "ashigaru footman",
+             "disposition": "boastful, homesick", "details": ["served at the castle works"]},
+        ],
+        "spirit": [
+            {"suffix": "burned-banner", "name": "The Banner", "role": "battlefield ghost",
+             "disposition": "restless, sorrowful", "details": ["drifts where a standard once fell"], "dread": 2},
+        ],
+    },
+    "Osaka": {
+        "human": [
+            {"suffix": "dock-foreman", "name": "Gonza", "role": "dock foreman",
+             "disposition": "loud, shrewd", "details": ["knows every cargo and its curse"]},
+        ],
+        "spirit": [
+            {"suffix": "drowned-coin", "name": "Zeni-baba", "role": "drowned miser spirit",
+             "disposition": "grasping, pitiable", "details": ["counts coins that are not there"], "dread": 1},
+        ],
+    },
+    "Sakai": {
+        "human": [
+            {"suffix": "tea-merchant", "name": "Sōan", "role": "tea merchant",
+             "disposition": "polished, watchful", "details": ["trades with Jesuits and warlords alike"]},
+        ],
+        "spirit": [
+            {"suffix": "harbor-kappa", "name": "Kawatarō", "role": "harbor kappa",
+             "disposition": "mischievous, bribable with cucumber", "details": ["steals sandals, returns them for a price"], "dread": 0},
+        ],
+    },
+    "Kiyosu": {
+        "human": [
+            {"suffix": "road-monk", "name": "Enkai", "role": "itinerant monk",
+             "disposition": "gentle, tired", "details": ["walks the Nakasendō with an empty bowl"]},
+        ],
+        "spirit": [
+            {"suffix": "crossroad-jizo", "name": "The Weeping Jizō", "role": "sorrowful roadside spirit",
+             "disposition": "quiet, grieving", "details": ["weeping heard at crossroads after rain"], "dread": 2},
+        ],
+    },
+    "Odawara": {
+        "human": [
+            {"suffix": "salt-peddler", "name": "O-Tsuru", "role": "salt peddler",
+             "disposition": "cheerful, sharp-eyed", "details": ["has walked every siege road"]},
+        ],
+        "spirit": [
+            {"suffix": "siege-dead", "name": "The Sleepless", "role": "siege dead",
+             "disposition": "cold, angry", "details": ["still mans a wall no one can see"], "dread": 3},
+        ],
+    },
+}
+
+# Hard cap on hangers-on so entity data cannot grow unbounded.
+MAX_ENTITIES = 12
+
 # Greetings cycle deterministically so repeats stay fresh without an LLM.
 FIRST_MEETING_NOTES = {
     "human": "You introduce yourself as a traveling onmyoji. {name} the {role} studies you, then bows — {disp}.",
@@ -139,13 +210,61 @@ class JourneyState(BaseModel):
 
 
 def new_journey() -> JourneyState:
-    return JourneyState(
+    state = JourneyState(
         inventory=["salt", "salt", "ofuda", "ofuda", "sake", "cord", "coin", "coin"],
         skills={s: 0 for s in ALL_SKILLS},
         skills_xp={s: 0 for s in ALL_SKILLS},
         secret_skills=[],
         limits={s: BASE_SKILL_CAP for s in ALL_SKILLS},
     )
+    ensure_encounters(state)
+    return state
+
+
+def ensure_encounters(state: JourneyState) -> list[Entity]:
+    """Introduce someone to meet at the current location.
+
+    Guarantees at least one human and one spirit is present wherever the
+    player arrives (first unused candidate per kind), so Talk/Ritual always
+    have targets. Returns the newly met entities for the narrator's
+    arrival beat. Capped by MAX_ENTITIES (oldest passing fade first).
+    """
+    pool = ENCOUNTERS.get(state.location, {})
+    added: list[Entity] = []
+    known_ids = {e.id for e in state.entities}
+    loc_slug = state.location.strip().lower().replace(" ", "-") or "road"
+    for kind in ("human", "spirit"):
+        if any(e.kind == kind and e.location in ("", state.location)
+               for e in state.entities):
+            continue
+        cands = [c for c in pool.get(kind, [])
+                 if f"{loc_slug}-{c['suffix']}" not in known_ids]
+        if not cands:
+            continue
+        c = cands[0]
+        ent = Entity(
+            id=f"{loc_slug}-{c['suffix']}",
+            kind=kind,
+            name=c.get("name", ""),
+            role=c.get("role", ""),
+            disposition=c.get("disposition", ""),
+            details=list(c.get("details", [])),
+            dread=int(c.get("dread", 0)) if kind == "spirit" else 0,
+            tier="passing",
+            last_seen=state.date,
+            location=state.location,
+        )
+        state.entities.append(ent)
+        known_ids.add(ent.id)
+        added.append(ent)
+    while len(state.entities) > MAX_ENTITIES:
+        for i, e in enumerate(state.entities):
+            if e.tier == "passing":
+                del state.entities[i]
+                break
+        else:
+            break
+    return added
 
 
 def _days_between(then_iso: str, now_iso: str) -> int:
@@ -177,7 +296,12 @@ def do_travel(state: JourneyState, dest: str) -> tuple[bool, str]:
     state.location = dest
     advance_day(state, 1)
     faded = prune_entities(state)
+    arrived = ensure_encounters(state)
     note = f"🧭 Travel to {dest} (1 day, now {state.date}). Aiko scouts ahead and reports the road clear."
+    if arrived:
+        names = ", ".join(
+            f"{e.name or e.id} ({e.role or e.kind})" for e in arrived)
+        note += f" You meet: {names}."
     if faded:
         names = ", ".join(e.name or e.id for e in faded)
         verb = "goes" if len(faded) == 1 else "go"
@@ -294,6 +418,8 @@ def do_talk(state: JourneyState, target_id: str) -> tuple[bool, str]:
     target = next((e for e in state.entities if e.id == target_id), None)
     if target is None:
         return False, f"no known entity '{target_id}'"
+    target.last_seen = state.date  # talking keeps the bond fresh (no silent fade)
+    target.location = target.location or state.location
     name = target.name or target_id
     role = target.role or ("spirit" if target.kind == "spirit" else "traveler")
     disp = target.disposition or "hard to read"

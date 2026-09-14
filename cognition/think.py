@@ -798,6 +798,7 @@ class AikoThink:
             from cognition.attention import for_identity
             state = for_identity(user_id)
             ok, reason, action = state.should_attempt(user_input, mode="route")
+            gate_result = (ok, reason, action)
             snap = state.snapshot()
             _brain_trace.record_step(
                 "attention.should_attempt",
@@ -822,6 +823,7 @@ class AikoThink:
                 )
         except Exception as exc:
             log.debug("[route] should_attempt skipped: %s", exc)
+            gate_result = (True, "gate unavailable", "proceed")
 
         try:
             intent, route_vec = self._route_intent(user_input)
@@ -868,7 +870,7 @@ class AikoThink:
                     outputs={"handler": "agentic_chat", "vector_reused": route_vec is not None},
                     factors=["agentic_score >= 0.78 and gap >= min_gap"],
                 )
-                return self.agentic_chat(user_input, token_callback=token_callback, mem_kb_future=mem_kb_future, query_vec=query_vec, _from_route=True, system_note=system_note)
+                return self.agentic_chat(user_input, token_callback=token_callback, mem_kb_future=mem_kb_future, query_vec=query_vec, _from_route=True, system_note=system_note, gate_result=gate_result)
             if intent == "webchat":
                 _brain_trace.record_step(
                     "think.route",
@@ -1002,35 +1004,6 @@ class AikoThink:
             except Exception as e:
                 log.error("Knowledge lookup failed: %s", e)
                 knowledge_block = "<knowledge_context>\nLookup failed.\n</knowledge_context>"
-
-            # Attention filter: suppress irrelevant hits based on query similarity
-            # (lightweight cosine similarity using embedder — no extra model call)
-            try:
-                memorize = self._get_memorize()
-                embedder = None
-                if memorize is not None:
-                    mem_inner = getattr(memorize, "_mem", None)
-                    embedder = getattr(mem_inner, "_embedder", None) if mem_inner else None
-                if embedder is not None and hasattr(embedder, "embed_query"):
-                    query_vec = embedder.embed_query(user_input[:300], instruct="")
-                    # Filter memories: keep only those with above-threshold similarity
-                    # or high base recall score (preserves high-quality hits regardless)
-                    filtered_memories = []
-                    for m in memories:
-                        text = m.get("memory") or m.get("text") or ""
-                        base_score = m.get("_recall_score", 0.0)
-                        # Always keep high-score hits; for others, apply attention filter
-                        if base_score >= 0.5:
-                            filtered_memories.append(m)
-                        else:
-                            # Light similarity check: text overlap or embedded similarity
-                            overlap = len(set(user_input.split()) & set(text.split())) / max(len(user_input.split()), 1)
-                            if overlap > 0.1 or base_score > 0.1:
-                                filtered_memories.append(m)
-                    memories = filtered_memories
-            except Exception:
-                # Attention filter failure should never block response
-                pass
 
             # Per-hit preview so the trace file shows what got recalled.
             hit_preview = []
@@ -1405,7 +1378,7 @@ class AikoThink:
             store_turn=True,
         )
 
-    def agentic_chat(self, user_input: str, token_callback=None, mem_kb_future=None, query_vec: np.ndarray | None = None, _from_route: bool = False, system_note: str | None = None) -> str:
+    def agentic_chat(self, user_input: str, token_callback=None, mem_kb_future=None, query_vec: np.ndarray | None = None, _from_route: bool = False, system_note: str | None = None, gate_result: tuple[bool, str, str] | None = None) -> str:
         """Delegate task-mode execution to agentic.agentic.
 
         Runs a bounded self-assessment gate first (attention.should_attempt).
@@ -1419,26 +1392,22 @@ class AikoThink:
             self._active_user_ids.add(user_id)
         _agentic_t0 = time.monotonic()
         try:
-            # Second self-assessment before committing to the agentic tool loop.
-            # This combines energy/load readiness with reliability signals:
-            # uncertainty, tool outcomes, contradictions, time sensitivity,
-            # answer completeness, and self-consistency.
-            try:
-                from cognition.attention import for_identity
-                state = for_identity(user_id)
-                ok, reason, action = state.should_attempt(user_input, mode="agentic")
-                if not ok:
-                    log.info("[agentic_chat] should_attempt action=%s reason=%s", action, reason)
-                    return self._soft_gate_reply(
-                        user_input,
-                        action,
-                        reason,
-                        token_callback=token_callback,
-                        mem_kb_future=mem_kb_future,
-                        query_vec=query_vec,
-                    )
-            except Exception as exc:
-                log.debug("[agentic_chat] should_attempt skipped: %s", exc)
+            # Reuse the route decision for routed turns; direct agentic calls gate once.
+            if gate_result is None:
+                try:
+                    from cognition.attention import for_identity
+                    state = for_identity(user_id)
+                    gate_result = state.should_attempt(user_input, mode="agentic")
+                except Exception as exc:
+                    log.debug("[agentic_chat] should_attempt skipped: %s", exc)
+                    gate_result = (True, "gate unavailable", "proceed")
+            ok, reason, action = gate_result
+            if not ok:
+                log.info("[agentic_chat] should_attempt action=%s reason=%s", action, reason)
+                return self._soft_gate_reply(
+                    user_input, action, reason, token_callback=token_callback,
+                    mem_kb_future=mem_kb_future, query_vec=query_vec,
+                )
 
             memorize = self._get_memorize()
             mem_inner = getattr(memorize, "_mem", None) if memorize is not None else None

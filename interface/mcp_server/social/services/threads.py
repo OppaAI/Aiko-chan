@@ -92,6 +92,25 @@ def _normalize_public_reply(text: str) -> str:
     return normalized.strip()
 
 
+def _message_text(msg) -> str:
+    """Reply text from a chat message.
+
+    Tolerates thinking models (ministral/granite builds) that emit the
+    answer as reasoning only, leaving content empty — without this every
+    such reply degrades to 'LLM returned an empty reply' and silence.
+    """
+    content = getattr(msg, "content", "")
+    if isinstance(content, list):  # content-block style responses
+        content = " ".join(
+            (p.get("text", "") if isinstance(p, dict) else getattr(p, "text", "") or "")
+            for p in content
+        )
+    text = (content or "").strip()
+    if not text:
+        text = (getattr(msg, "reasoning_content", "") or "").strip()
+    return text
+
+
 def _reply_language(text: str) -> str:
     body = str(text or "")
     if re.search(r"[\u3040-\u30ff\u31f0-\u31ff]", body):
@@ -635,7 +654,7 @@ for example "*{_ai} considers the question.*". Do not use XML or colon labels.""
                 raise
     except Exception:
         response = _create_without_system_on_role_error(standard_messages, "text-only")
-    text = _normalize_public_reply(response.choices[0].message.content or "")
+    text = _normalize_public_reply(_message_text(response.choices[0].message))
     if not text:
         raise RuntimeError("LLM returned an empty Threads reply")
     if _contains_sensitive_value(text):

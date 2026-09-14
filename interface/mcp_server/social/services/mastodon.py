@@ -120,6 +120,25 @@ def _contains_secret(text: str) -> bool:
     return bool(_PRIVATE_KEY_RE.search(c) or _SECRET_ASSIGNMENT_RE.search(c))
 
 
+def _message_text(msg) -> str:
+    """Reply text from a chat message.
+
+    Tolerates thinking models (ministral/granite builds) that emit the
+    answer as reasoning only, leaving content empty — without this every
+    such reply degrades to 'empty reply' and silence.
+    """
+    content = getattr(msg, "content", "")
+    if isinstance(content, list):  # content-block style responses
+        content = " ".join(
+            (p.get("text", "") if isinstance(p, dict) else getattr(p, "text", "") or "")
+            for p in content
+        )
+    text = (content or "").strip()
+    if not text:
+        text = (getattr(msg, "reasoning_content", "") or "").strip()
+    return text
+
+
 def _is_trigger(text: str) -> bool:
     body = str(text or "")
     phrase = _reply_trigger_phrase()
@@ -395,7 +414,7 @@ No quotation marks or speaker labels. Unicode emoji only when helpful."""
         max_tokens=180,
         timeout=float(env("LLM_TIMEOUT", "30")),
     )
-    text = (resp.choices[0].message.content or "").strip()
+    text = _message_text(resp.choices[0].message)
     if not text:
         raise RuntimeError("empty Mastodon reply")
     if _contains_secret(text):

@@ -73,28 +73,22 @@ from importlib.metadata import PackageNotFoundError, version  # for --version, s
 import os                                                     # for intercepting hard exits
 import traceback                                              # for logging exit origins
 
-_real_os_exit = os._exit                                      # keep the real hard-exit handle
+_original_os_exit = os._exit                                  # keep the real hard-exit handle
 
 __all__ = ["parse_args", "main"]                              # external API — internal defs keep leading _
 
 def _resolve_version() -> str:
-    """
-    Reads the installed distribution metadata (generated from pyproject.toml
-    at install time — so re-run pip install -e . after bumping the version)
-
-    Avoids hardcoding the version string a second time in argparse (which
-    drifts from pyproject.toml the moment one of the two is bumped and the
-    other isn't). Falls back to a placeholder if the package metadata isn't
-    installed/discoverable (e.g. running straight from a checkout without
-    `pip install -e .`).
-    """
+    """Return the installed package version, or a sentinel if metadata is missing."""
+    # Single source of truth: pyproject.toml read via install metadata, so the
+    # version never drifts between here and argparse. Re-run `pip install -e .`
+    # after bumping, or this falls through to the sentinel below.
     try:                                  # attempt to retrieve version of the codebase
         return version("Aiko-chan")       # must match [project].name in pyproject.toml
     except PackageNotFoundError:          # if codebase not installed properly
         return "0.0.0+unknown"            # PEP 440 / semver-valid fallback, sorts as lowest version
 
 
-def _setup_exit_logging(log) -> None:  # type: ignore[no-untyped-def]
+def _install_os_exit_trap(log) -> None:  # type: ignore[no-untyped-def]
     """Apply os._exit() wrapper for diagnostic logging (only if AIKO_TRACE_EXIT=1)."""
     if os.environ.get("AIKO_TRACE_EXIT") != "1":
         return
@@ -106,7 +100,7 @@ def _setup_exit_logging(log) -> None:  # type: ignore[no-untyped-def]
         except Exception:                     # if logging itself fails (e.g., during shutdown),
             pass                              # don't let traceback formatting block the actual exit
         finally:
-            _real_os_exit(code)               # then still perform the hard exit
+            _original_os_exit(code)           # then still perform the hard exit
 
     os._exit = _logged_os_exit                # patch applied; any code saving os._exit before this bypasses logging
 
@@ -209,7 +203,7 @@ def main() -> int:
     # Set up logging and exit tracing
     from system.log import get_logger
     log = get_logger(__name__)
-    _setup_exit_logging(log)
+    _install_os_exit_trap(log)
 
     if args.clear_mem:                                  # if clear memory argument set
         return _handle_clear_mem(log)

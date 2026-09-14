@@ -65,17 +65,17 @@ Argument-order and env-var timing notes (why --debug/--trace/logging are
 sequenced the way they are in main()) live as inline comments next to that
 code, not here — see the code below.
 """
-from __future__ import annotations            # evaluates type annotations later
+from __future__ import annotations                            # evaluates type annotations later
 
 # Public libraries
-import argparse                               # for parsing CLI arguments
-import os as _os                              # for intercepting hard exits
-import traceback as _tb                       # for logging exit origins
-from importlib.metadata import PackageNotFoundError, version as _pkg_version  # for --version, single source of truth
+import argparse                                               # for parsing CLI arguments
+from importlib.metadata import PackageNotFoundError, version  # for --version, single source of truth
+import os                                                     # for intercepting hard exits
+import traceback                                              # for logging exit origins
 
-_real_os_exit = _os._exit                     # keep the real hard-exit handle
+_real_os_exit = os._exit                                      # keep the real hard-exit handle
 
-__all__ = ["parse_args", "main"]              # external API — internal defs keep leading _
+__all__ = ["parse_args", "main"]                              # external API — internal defs keep leading _
 
 
 def _resolve_version() -> str:
@@ -88,26 +88,26 @@ def _resolve_version() -> str:
     `pip install -e .`).
     """
     try:
-        return _pkg_version("Aiko-chan")       # must match [project].name in pyproject.toml
+        return version("Aiko-chan")       # must match [project].name in pyproject.toml
     except PackageNotFoundError:
         return "0.0.0-dev"
 
 
 def _setup_exit_logging(log) -> None:  # type: ignore[no-untyped-def]
     """Apply os._exit() wrapper for diagnostic logging (only if AIKO_TRACE_EXIT=1)."""
-    if _os.environ.get("AIKO_TRACE_EXIT") != "1":
+    if os.environ.get("AIKO_TRACE_EXIT") != "1":
         return
 
     def _logged_os_exit(code):                # os._exit() cannot be caught by try/except,
         try:
             log.error("[main] os._exit(%s) called from:\n%s",  # so wrap it to log WHO called it before dying
-                      code, "".join(_tb.format_stack()))
+                      code, "".join(traceback.format_stack()))
         except Exception:                     # if logging itself fails (e.g., during shutdown),
             pass                              # don't let traceback formatting block the actual exit
         finally:
             _real_os_exit(code)               # then still perform the hard exit
 
-    _os._exit = _logged_os_exit               # patch applied; any code saving _os._exit before this bypasses logging
+    os._exit = _logged_os_exit                # patch applied; any code saving os._exit before this bypasses logging
 
 
 def _run_trapped(log, label, fn) -> None:  # type: ignore[no-untyped-def]
@@ -193,8 +193,8 @@ def main() -> int:
     load_config()
 
     if args.debug:                                      # explicit CLI flag overrides whatever .env set
-        _os.environ["LOG_CONSOLE"] = "1"
-        _os.environ["LOG_LEVEL"] = "DEBUG"
+        os.environ["LOG_CONSOLE"] = "1"
+        os.environ["LOG_LEVEL"] = "DEBUG"
         # Background social-listening daemons (Threads/Bluesky/Mastodon) get
         # their urllib3/httpcore debug lines muted automatically; set
         # AIKO_DEBUG_FULL_HTTP=1 to see raw HTTP if you ever need to.
@@ -203,7 +203,7 @@ def main() -> int:
     # you can get a clean trace without the DEBUG-level log spam, or
     # combine both for the full picture.
     if args.trace or args.debug:                        # --debug still implies --trace for backward compat
-        _os.environ.setdefault("AIKO_TRACE_BRAIN", "1")
+        os.environ.setdefault("AIKO_TRACE_BRAIN", "1")
 
     # Set up logging and exit tracing
     from system.log import get_logger

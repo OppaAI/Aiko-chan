@@ -8,10 +8,11 @@ Usage:
     python main.py --text        # WebUI, keyboard input + TTS/ASR toggled off
     python main.py --no-asr      # WebUI, keyboard input but keep TTS on
     python main.py --cli         # plain no-curses CLI, for local testing only
-    # Two-way messenger adapters run beside WebUI/CLI when AIKO_MESSENGER_ADAPTERS is set.
-    python main.py --debug       # verbose console logging (LOG_CONSOLE=1, LOG_LEVEL=DEBUG) + memory hits per turn
+    # Two-way messenger adapters (Aiko-Lingo etc.) are spawned by the front
+    # ends themselves, not by main.py — they run beside WebUI/CLI when
+    # AIKO_MESSENGER_ADAPTERS is set, but this module never touches them.
+    python main.py --debug       # verbose console logging (LOG_CONSOLE=1, LOG_LEVEL=DEBUG) + memory hits per turn; also implies --trace
     python main.py --trace       # brain trace per turn (AIKO_TRACE_BRAIN=1) without DEBUG-level log spam
-    python main.py --debug --trace  # both: full debug logs + brain trace
     python main.py --clear-mem   # wipe all stored memories and exit
     python main.py --logout      # clear stored CLI (GitHub OAuth) auth token and exit
     python main.py --name <name> # set CLI display name (only when GitHub OAuth isn't configured)
@@ -60,13 +61,9 @@ dependencies to be installed at all. The heavy AikoMemorize memory stack is
 likewise deferred into the --clear-mem branch only, so normal WebUI/CLI
 launches never pay for it at import time.
 
-Argument parsing happens BEFORE logging setup (not after) specifically so
---debug can flip LOG_CONSOLE/LOG_LEVEL in the environment before
-system.log's root-logger configuration runs — see the --debug handling
-in main() below and system/log.py's module docstring for why import-time
-resolution would be too late here. --trace follows the same pattern: it
-sets AIKO_TRACE_BRAIN=1, which system/brain_trace.py reads on import
-to gate its per-step emission.
+Argument-order and env-var timing notes (why --debug/--trace/logging are
+sequenced the way they are in main()) live as inline comments next to that
+code, not here — see main() below.
 """
 from __future__ import annotations            # evaluates type annotations later
 
@@ -134,8 +131,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-asr",    action="store_true",            # disable ASR
                    help="keyboard input but keep TTS on; ASR still loads for /listen")
     p.add_argument("--debug",     action="store_true",            # debug mode
-                   help="enable verbose console logging (sets LOG_CONSOLE=1, LOG_LEVEL=DEBUG). Does NOT enable the brain tracer on its own; pair with --trace for the full picture.")
-    p.add_argument("--trace",     action="store_true",            # brain trace only
+               help="enable verbose console logging (sets LOG_CONSOLE=1, LOG_LEVEL=DEBUG). Also implies --trace (AIKO_TRACE_BRAIN=1) for backward compat.")
+    p.add_argument("--trace",     action="store_true",            # trace Aiko's brain
                    help="enable the per-step brain tracer (AIKO_TRACE_BRAIN=1) without the DEBUG-level log spam. Use this when you only want to see what Aiko is thinking, not every internal HTTP call.")
     p.add_argument("--cli",       action="store_true",            # launch in CLI
                    help="use the plain no-curses CLI instead of the WebUI — for local testing only")

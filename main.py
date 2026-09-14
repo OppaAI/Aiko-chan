@@ -88,8 +88,8 @@ def _resolve_version() -> str:
         return "0.0.0+unknown"            # PEP 440 / semver-valid fallback, sorts as lowest version
 
 
-def _install_os_exit_trap(log) -> None:  # type: ignore[no-untyped-def]
-    """Apply os._exit() wrapper for diagnostic logging (only if AIKO_TRACE_EXIT=1)."""
+def _install_os_exit_trap(log) -> None:
+    """Monkeypatch os._exit to log the caller's stack before the hard exit (only if AIKO_TRACE_EXIT=1)."""
     if os.environ.get("AIKO_TRACE_EXIT") != "1":
         return
 

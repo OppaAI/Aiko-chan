@@ -119,33 +119,6 @@ def _run_trapped(log, label, fn) -> None:  # type: ignore[no-untyped-def]
         raise
 
 
-def parse_args() -> argparse.Namespace:
-    """Parse and return the CLI argument namespace for Aiko-chan's launch options."""
-    p = argparse.ArgumentParser(description="Aiko-chan")          # create argument object for declaring arguments
-    p.add_argument("--text",      action="store_true",            # text (keyboard) input only
-                   help="keyboard input + TTS/ASR initially off; both subsystems still load for /voice and /listen toggles")
-    p.add_argument("--no-asr",    action="store_true",            # disable ASR
-                   help="keyboard input but keep TTS on; ASR still loads for /listen")
-    p.add_argument("--debug",     action="store_true",            # debug mode
-               help="enable verbose console logging (sets LOG_CONSOLE=1, LOG_LEVEL=DEBUG). Also implies --trace (AIKO_TRACE_BRAIN=1) for backward compat.")
-    p.add_argument("--trace",     action="store_true",            # trace Aiko's brain
-                   help="enable the per-step brain tracer (AIKO_TRACE_BRAIN=1) without the DEBUG-level log spam. Use this when you only want to see what Aiko is thinking, not every internal HTTP call.")
-    p.add_argument("--cli",       action="store_true",            # launch in CLI
-                   help="use the plain no-curses CLI instead of the WebUI — for local testing only")
-    g = p.add_mutually_exclusive_group()      # prevent conflicting exits (industrial: --clear-mem vs --logout)
-    g.add_argument("--clear-mem", action="store_true",            # wipe out all memory and exit
-                   help="WARNING: irreversibly wipes all stored memories, then exits")
-    g.add_argument("--logout",   action="store_true",             # logout user session
-                   help="clear stored CLI auth token and exit")
-    p.add_argument("--name",     type=str, default="",            # for use in CLI mode without OAuth setup
-                   help="set display name (CLI mode only, ignored with GitHub OAuth)")
-    p.add_argument("--version", action="version", version=f"%(prog)s {_resolve_version()}")  # reads pyproject.toml via importlib.metadata
-    args = p.parse_args()                                         # return namespace of the arguments
-    if args.name and not args.cli:            # validate display name only meaningful in CLI (industrial: early fail)
-        p.error("--name requires --cli")
-    return args
-
-
 def _handle_clear_mem(log) -> int:  # type: ignore[no-untyped-def]
     """Handle --clear-mem branch (extracted to reduce main() complexity C901)."""
     try:
@@ -178,6 +151,33 @@ def _handle_logout(log) -> int:  # type: ignore[no-untyped-def]
         return 1
     _run_trapped(log, "handle_logout()", handle_logout)
     return 0                                     # exit code 0
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse and return the CLI argument namespace for Aiko-chan's launch options."""
+    p = argparse.ArgumentParser(description="Aiko-chan")          # create argument object for declaring arguments
+    p.add_argument("--text",      action="store_true",            # text (keyboard) input only
+                   help="keyboard input + TTS/ASR initially off; both subsystems still load for /voice and /listen toggles")
+    p.add_argument("--no-asr",    action="store_true",            # disable ASR
+                   help="keyboard input but keep TTS on; ASR still loads for /listen")
+    p.add_argument("--debug",     action="store_true",            # debug mode
+               help="enable verbose console logging (sets LOG_CONSOLE=1, LOG_LEVEL=DEBUG). Also implies --trace (AIKO_TRACE_BRAIN=1) for backward compat.")
+    p.add_argument("--trace",     action="store_true",            # trace Aiko's brain
+                   help="enable the per-step brain tracer (AIKO_TRACE_BRAIN=1) without the DEBUG-level log spam. Use this when you only want to see what Aiko is thinking, not every internal HTTP call.")
+    p.add_argument("--cli",       action="store_true",            # launch in CLI
+                   help="use the plain no-curses CLI instead of the WebUI — for local testing only")
+    g = p.add_mutually_exclusive_group()      # prevent conflicting exits (industrial: --clear-mem vs --logout)
+    g.add_argument("--clear-mem", action="store_true",            # wipe out all memory and exit
+                   help="WARNING: irreversibly wipes all stored memories, then exits")
+    g.add_argument("--logout",   action="store_true",             # logout user session
+                   help="clear stored CLI auth token and exit")
+    p.add_argument("--name",     type=str, default="",            # for use in CLI mode without OAuth setup
+                   help="set display name (CLI mode only, ignored with GitHub OAuth)")
+    p.add_argument("--version", action="version", version=f"%(prog)s {_resolve_version()}")  # reads pyproject.toml via importlib.metadata
+    args = p.parse_args()                                         # return namespace of the arguments
+    if args.name and not args.cli:            # validate display name only meaningful in CLI (industrial: early fail)
+        p.error("--name requires --cli")
+    return args
 
 
 def main() -> int:

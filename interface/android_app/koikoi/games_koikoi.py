@@ -118,8 +118,9 @@ async def _banter_for_koikoi(
             yaku_str = ", ".join(f"{y['name']} ({y['points']}pts)" for y in yaku_list)
 
         prompt = (
-            "You are Aiko, a playful cat-girl AI playing Koi-Koi (hanafuda) "
-            "as the opponent. Respond with ONE short, playful line "
+            "You are Aiko, OppaAI's AI companion. Your tone is quiet, "
+            "dry, and observant. You are playing Koi-Koi (hanafuda) "
+            "as the opponent. Respond with ONE short playful line "
             "(under 25 words, English with Japanese flavor). "
             "No analysis, no move notation, just personality.\n\n"
             f"Game: Koi-Koi, Month {month}/{months_total}, Round multiplier ×{multiplier}\n"
@@ -144,7 +145,7 @@ async def _banter_for_koikoi(
             think._client.chat.completions.create,
             model=think._llm_model,
             messages=[
-                {"role": "system", "content": "You are Aiko, a playful cat-girl AI playing Koi-Koi."},
+                {"role": "system", "content": "You are Aiko, OppaAI's AI companion."},
                 {"role": "user", "content": prompt},
             ],
             max_tokens=60,
@@ -624,7 +625,7 @@ async def _ai_turn(game: dict) -> str:
                 if _should_speak_koikoi(game, "koi_koi_call", "aiko", new):
                     line = await _banter_for_koikoi(game, "koi_koi_call", "aiko", yaku_list=new)
                     if line:
-                        notes.append(f"🐱 {line}")
+                        notes.append(line)
             else:
                 res = _settle_stop(game, "aiko")
                 names = ", ".join(y["name"] for y in new)
@@ -632,7 +633,7 @@ async def _ai_turn(game: dict) -> str:
                 if _should_speak_koikoi(game, "yaku_complete", "aiko", new):
                     line = await _banter_for_koikoi(game, "yaku_complete", "aiko", yaku_list=new)
                     if line:
-                        notes.append(f"🐱 {line}")
+                        notes.append(line)
                 break
         if _hands_empty(game) and game["status"] == "playing":
             _settle_exhausted(game)
@@ -715,7 +716,7 @@ async def start_game(body: StartRequest, session: dict = Depends(_require_user))
         if _should_speak_koikoi(game, "dealt_yaku", "aiko"):
             line = await _banter_for_koikoi(game, "dealt_yaku", "aiko")
             if line:
-                comment += f" 🐱 {line}"
+                comment += f" {line}"
     if game["status"] == "playing" and game["turn"] == "aiko" and mode != "practice":
         extra = await _drain_aiko(game)
         if extra:
@@ -788,7 +789,7 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
             if _should_speak_koikoi(game, "yaku_complete", "you", new):
                 line = await _banter_for_koikoi(game, "yaku_complete", "you", yaku_list=new)
                 if line:
-                    comment = f"{comment} 🐱 {line}"
+                    comment = f"{comment} {line}"
             return _state_response(uid, ai_comment=comment)
         if _hands_empty(game):
             res = _settle_exhausted(game)
@@ -908,7 +909,7 @@ async def resign(session: dict = Depends(_require_user)):
     if _should_speak_koikoi(game, "resign", "aiko"):
         line = await _banter_for_koikoi(game, "resign", "aiko")
         if line:
-            comment = f"{comment} 🐱 {line}"
+            comment = f"{comment} {line}"
     return _state_response(uid, ai_comment=comment)
 
 

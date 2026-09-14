@@ -116,6 +116,7 @@ class StartRequest(BaseModel):
     side: Optional[str] = Field(
         default=None, description="black (first, 先手) | white (second, 後手)"
     )
+    use_engine: bool = Field(default=True, description="Whether to use the strong engine (YaneuraOu)")
 
 
 class MoveRequest(BaseModel):
@@ -321,7 +322,8 @@ def _banter_for(
                 {
                     "role": "system",
                     "content": (
-                        "You are Aiko, a playful cat-girl AI playing shogi "
+                        "You are Aiko, OppaAI's AI companion. Your tone is quiet, "
+                        "dry, and observant. You are playing shogi "
                         "(Japanese chess) as White against the user. "
                         f"You just played {usi} in a {difficulty_name(difficulty)} game{ending}."
                         f"{moment}{where}{past} "
@@ -406,6 +408,7 @@ def _ai_move(
     movetime_cap_ms: Optional[float] = None,
     *,
     uid: Optional[str] = None,
+    use_engine: bool = True,
 ):
     """
     Aiko asks YaneuraOu for the right move when available;
@@ -420,6 +423,9 @@ def _ai_move(
     legal = list(board.legal_moves)
     if not legal:
         return None, None
+
+    if not use_engine:
+        return random.choice(legal), "random"
 
     preset = _DIFFICULTY_PRESETS[difficulty_name(difficulty)]
     movetime_ms = preset["movetime_ms"]
@@ -544,6 +550,7 @@ async def start_game(body: StartRequest, session: dict = Depends(_require_user))
         "status": "playing",
         "uid": uid,
         "lessons": _records.lesson_texts(uid),
+        "use_engine": body.use_engine,
     }
     eng = None
     try:
@@ -563,7 +570,7 @@ async def start_game(body: StartRequest, session: dict = Depends(_require_user))
         comment += " (engine offline — Aiko plays casual moves)"
     if side == "white" and mode == "vs_ai":
         # Aiko (black) opens immediately so it is the user's turn.
-        ai, eng2 = await asyncio.to_thread(_ai_move, _games[uid]["board"], diff, None, uid=uid)
+        ai, eng2 = await asyncio.to_thread(_ai_move, _games[uid]["board"], diff, None, uid=uid, use_engine=body.use_engine)
         _games[uid]["engine"] = eng2
         if ai is not None:
             _games[uid]["board"].push(ai)
@@ -650,7 +657,7 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
             cap_ms = max(50.0, game["clock"]["remaining"][ai_side] - 100.0)
         ai_start = time.monotonic()
         ai, engine = await asyncio.to_thread(
-            _ai_move, board, game.get("difficulty"), cap_ms, uid=uid
+            _ai_move, board, game.get("difficulty"), cap_ms, uid=uid, use_engine=game.get("use_engine", True)
         )
         if game.get("clock"):
             ai_elapsed_ms = (time.monotonic() - ai_start) * 1000.0
@@ -658,7 +665,7 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
                 game["status"] = "timeout"
                 game["flagged"] = ai_side
                 game["engine"] = engine
-                return _state_response(uid, ai_comment="Flag! Aiko ran out of time — you win! 🐱⏰")
+                return _state_response(uid, ai_comment="Flag! Aiko ran out of time — you win! ⏰")
             game["clock"]["stamp"] = time.monotonic()
         game["engine"] = engine
         if ai is not None:
@@ -689,7 +696,7 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
             else:
                 ai_comment = f"Aiko plays {usi}"
             if game["status"] == "checkmate":
-                ai_comment += " — checkmate! 🐱"
+                ai_comment += " — checkmate!"
             speak, reason = False, ""
             if _banter_enabled():
                 speak, reason = _should_speak_shogi(game, {

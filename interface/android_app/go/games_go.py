@@ -46,6 +46,7 @@ class StartRequest(BaseModel):
     side: Optional[str] = Field(
         default=None, description="black (first) | white (second)"
     )
+    use_engine: bool = Field(default=True, description="Whether to use the strong engine (KataGo)")
 
 
 class MoveRequest(BaseModel):
@@ -185,11 +186,16 @@ def _learn_think():
 
 
 def _ai_move(board: GoBoard, difficulty: Optional[str] = None, *,
-             uid: Optional[str] = None):
+             uid: Optional[str] = None, use_engine: bool = True):
     """Return (gtp_move | None, engine_name)."""
     legal = board.legal_moves_gtp()
     if not legal:
         return None, None
+
+    if not use_engine:
+        # Prefer non-pass when possible for casual play
+        non_pass = [m for m in legal if m != "pass"]
+        return random.choice(non_pass or legal), "random"
 
     if random.random() < _blunder_rate(difficulty, uid):
         # Prefer non-pass when possible for casual play
@@ -292,7 +298,8 @@ def _banter_for_go(
                 {
                     "role": "system",
                     "content": (
-                        "You are Aiko, a playful cat-girl AI playing go "
+                        "You are Aiko, OppaAI's AI companion. Your tone is quiet, "
+                        "dry, and observant. You are playing go "
                         "(the board game) as White against the user. "
                         f"You just played {gtp} in a {difficulty_name(difficulty)} game{ending}."
                         f"{moment}{where}{past} "
@@ -373,6 +380,7 @@ async def start_game(body: StartRequest, session: dict = Depends(_require_user))
         "engine": eng,
         "uid": uid,
         "lessons": _records.lesson_texts(uid),
+        "use_engine": body.use_engine,
     }
 
     if side == "black":
@@ -385,7 +393,7 @@ async def start_game(body: StartRequest, session: dict = Depends(_require_user))
         comment += " (KataGo offline — casual moves)"
 
     if side == "white" and mode == "vs_ai":
-        ai, eng2 = await asyncio.to_thread(_ai_move, board, diff, uid=uid)
+        ai, eng2 = await asyncio.to_thread(_ai_move, board, diff, uid=uid, use_engine=body.use_engine)
         _games[uid]["engine"] = eng2
         if ai is not None:
             board.play_gtp(ai)
@@ -450,7 +458,7 @@ async def make_move(body: MoveRequest, session: dict = Depends(_require_user)):
 
     ai_comment = None
     if game["mode"] == "vs_ai" and board.status == "playing":
-        ai, engine = await asyncio.to_thread(_ai_move, board, game.get("difficulty"), uid=uid)
+        ai, engine = await asyncio.to_thread(_ai_move, board, game.get("difficulty"), uid=uid, use_engine=game.get("use_engine", True))
         game["engine"] = engine
         if ai is not None:
             ai_cap = 0

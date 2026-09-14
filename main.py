@@ -77,7 +77,6 @@ _real_os_exit = os._exit                                      # keep the real ha
 
 __all__ = ["parse_args", "main"]                              # external API — internal defs keep leading _
 
-
 def _resolve_version() -> str:
     """
     Reads the installed distribution metadata (generated from pyproject.toml
@@ -89,10 +88,10 @@ def _resolve_version() -> str:
     installed/discoverable (e.g. running straight from a checkout without
     `pip install -e .`).
     """
-    try:
+    try:                                  # attempt to retrieve version of the codebase
         return version("Aiko-chan")       # must match [project].name in pyproject.toml
-    except PackageNotFoundError:
-        return "0.0.0-dev"
+    except PackageNotFoundError:          # if codebase not installed properly
+        return "0.0.0+unknown"            # PEP 440 / semver-valid fallback, sorts as lowest version
 
 
 def _setup_exit_logging(log) -> None:  # type: ignore[no-untyped-def]

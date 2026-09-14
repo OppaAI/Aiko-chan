@@ -79,7 +79,9 @@ __all__ = ["parse_args", "main"]                              # external API —
 
 
 def _resolve_version() -> str:
-    """Read the installed package version from pyproject.toml metadata.
+    """
+    Reads the installed distribution metadata (generated from pyproject.toml
+    at install time — so re-run pip install -e . after bumping the version)
 
     Avoids hardcoding the version string a second time in argparse (which
     drifts from pyproject.toml the moment one of the two is bumped and the

@@ -221,26 +221,26 @@ def parse_args() -> argparse.Namespace:
         prog="main.py",
         description="Aiko-chan — local assistant. Front ends: WebUI (default) or CLI (--cli); maintenance: --clear-mem, --logout.",
         epilog="Exit codes: 0 = success or user-declined · 1 = operation failed.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=argparse.RawDescriptionHelpFormatter,   # keep the epilog's line breaks as written
     )
 
     # ---- Front end selection -------------------------------------------------
-    p.add_argument("--cli",  action="store_true",
+    p.add_argument("--cli",  action="store_true",               # store_true = flag only, no value after it
                    help="terminal chat front end instead of the WebUI")
-    p.add_argument("--name", metavar="NAME", default="",
-                   help="companion name for this session (requires --cli)")
-    p.add_argument("--text",   action="store_true",
+    p.add_argument("--name", metavar="NAME", default="",        # default "" (not None) — truthiness test below works either way,
+                   help="companion name for this session (requires --cli)")   # and consumers get a str, never None
+    p.add_argument("--text",   action="store_true",             # quiet-mode preset: ASR + TTS both off
                    help="keyboard input, TTS AND ASR both off (implies --no-asr); subsystems still load for /voice and /listen toggles")
-    p.add_argument("--no-asr", action="store_true",
+    p.add_argument("--no-asr", action="store_true",             # narrower preset: only ASR off, TTS stays on
                    help="keyboard input, TTS stays on, ASR off; ASR still loads for /listen")
 
     # ---- Version -------------------------------------------------------------
     p.add_argument("--version", action="version",
-                   version=f"%(prog)s {_resolve_version()}",
-                   help="show installed version and exit")
+                   version=f"%(prog)s {_resolve_version()}",    # evaluated HERE at parse time, not import — bare checkout
+                   help="show installed version and exit")      # gets the sentinel instead of crashing on --help
 
     # ---- Maintenance (mutually exclusive — each owns the process) ------------
-    maintenance = p.add_mutually_exclusive_group()
+    maintenance = p.add_mutually_exclusive_group()              # argparse enforces: second flag on one cmdline → error+exit 2
     maintenance.add_argument("--clear-mem", action="store_true",
                              help="wipe ALL stored memories (two-gate confirm, then exit)")
     maintenance.add_argument("--logout",    action="store_true",
@@ -249,21 +249,22 @@ def parse_args() -> argparse.Namespace:
     # ---- Debug / diagnostics ---------------------------------------------------
     p.add_argument("--debug", action="store_true",
                    help="verbose stderr logging (DEBUG level)")
-    p.add_argument("--trace", action="store_true",
-                   help="per-turn brain tracer (AIKO_TRACE_BRAIN=1) — what Aiko is thinking, without DEBUG-level log spam")
+    p.add_argument("--trace", action="store_true",              # CLI twin of AIKO_TRACE_BRAIN=1 — main() maps this flag
+                   help="per-turn brain tracer (AIKO_TRACE_BRAIN=1) — what Aiko is thinking, without DEBUG-level log spam")   # onto the env var so the consumer reads only one source
 
     args = p.parse_args()
 
     # ---- Post-parse normalization & validation -------------------------------
     # --text is the "quiet mode" preset: it includes ASR-off, so consumers only
     # ever check one flag for ASR. --no-tts is deliberately omitted (never used).
-    if args.text:
-        args.no_asr = True
+    if args.text:                                               # normalization, not validation: make the implication
+        args.no_asr = True                                      # real in the namespace so front ends check one flag
 
-    if args.name and not args.cli:
-        p.error("--name requires --cli")
+    if args.name and not args.cli:                              # single validation point — front ends never re-check (docstring contract)
+        p.error("--name requires --cli")                        # p.error prints usage + msg, exits with code 2
 
     return args
+
 
 
 def main() -> int:

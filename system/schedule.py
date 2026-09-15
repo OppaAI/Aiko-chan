@@ -2100,7 +2100,14 @@ class ScheduleRunner:
                 )
                 if handler_name and handler_name in _SYSTEM_HANDLERS:
                     try:
-                        _SYSTEM_HANDLERS[handler_name](self._memorize)
+                        result = _SYSTEM_HANDLERS[handler_name](self._memorize)
+                        # Log the outcome (truncated): silent skips previously
+                        # made weekly jobs look like they never fired.
+                        if isinstance(result, dict):
+                            flag = "skipped" if result.get("skipped") else ("ok" if result.get("success", True) else "failed")
+                            log.info("system handler %r completed (%s): %s", handler_name, flag, str(result)[:300])
+                        else:
+                            log.info("system handler %r completed: %s", handler_name, type(result).__name__)
                     except Exception as e:
                         log.error("system handler %r failed: %s", handler_name, e)
                 elif handler_name:

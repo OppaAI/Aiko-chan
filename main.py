@@ -69,7 +69,7 @@ code, not here — see the code below.
 
 # Comment conventions:
 #   untagged = permanent doc (traps, invariants, why)
-#   NTS:     = personal study note, safe to delete
+#   NOTE:    = personal study note, safe to delete
 
 from __future__ import annotations   # annotations become lazy strings — forward refs & newer syntax OK
 
@@ -80,17 +80,15 @@ import traceback                     # logging exit origins
 from typing import Callable          # callable type annotation
 from importlib.metadata import PackageNotFoundError, version
                                      # reads installed dist metadata — version comes from
-                                     # pyproject.toml, never hardcoded (single source of truth)
+                                     # NOTE: pyproject.toml, never hardcoded (single source of truth)
 
-_original_os_exit = os._exit         # capture BEFORE the patch — calling os._exit inside the
-                                     # wrapper would recurse into itself
-                                     # NTS: Python binds the function at assignment time — after
+_original_os_exit = os._exit         # capture BEFORE the patch — calling os._exit inside the wrapper would recurse into itself
+                                     # NOTE: Python binds the function at assignment time — after
                                      # os._exit = wrapper, the name points at the wrapper, so the
                                      # capture must happen first
 
-_FALLBACK_VERSION = "0.0.0+unknown"  # PEP 440 sentinel when metadata is missing; 0.0.0 sorts
-                                     # below any real release
-                                     # NTS: +unknown is a PEP 440 "local version" — valid, not semver
+_FALLBACK_VERSION = "0.0.0+unknown"  # PEP 440 sentinel when metadata is missing; 0.0.0 sorts below any real release
+                                     # NOTE: +unknown is a PEP 440 "local version" — valid, not semver
 _CONFIRM_PHRASE = "Clear All Aiko's Memories."       # exact string the user must type to arm the wipe
 
 
@@ -105,8 +103,7 @@ def _resolve_version() -> str:
     try:
         return version("Aiko-chan")          # must match [project].name in pyproject.toml
     except PackageNotFoundError:             # bare checkout / metadata not installed
-        return _FALLBACK_VERSION             # NTS: raised when the dist name isn't found —
-                                             # i.e. running without `pip install -e .`
+        return _FALLBACK_VERSION             # raised when the dist name isn't found — i.e. running without `pip install -e .`
 
 
 def _install_os_exit_trap(log: logging.Logger) -> None:
@@ -117,27 +114,18 @@ def _install_os_exit_trap(log: logging.Logger) -> None:
     # os._exit() cannot be caught by try/except, so the only way to observe it
     # is to wrap it: log WHO called it, then perform the real exit.
     def _logged_os_exit(code: int | str | None) -> None:
-        try:                                                     # Attempt to log, but don't let logging failures kill the exit
-            log.error("[main] os._exit(%s) called from:\n%s",    # NTS: .format_stack() returns list of str, join() makes it one str
+        try:                                                     # Attempt to log the caller's stack
+            log.error("[main] os._exit(%s) called from:\n%s",    # .format_stack() returns list of str, join() makes it one str
                       code, "".join(traceback.format_stack()))
-        except Exception:                                        # NTS: Exception, not BaseException — a Ctrl+C
+        except Exception:                                        # Exception, not BaseException — a Ctrl+C
             pass                                                 # during logging still exits via finally
-        finally:                                                 # NTS: finally runs on EVERY path — this is
+        finally:                                                 # finally runs on EVERY path — this is
             _original_os_exit(code)                              # what guarantees the real exit
 
     os._exit = _logged_os_exit     # patch applied; anything that bound os._exit before this bypasses logging
-    # Not idempotent — calling this twice double-wraps os._exit (harmless
+    # NOTE: Not idempotent — calling this twice double-wraps os._exit (harmless
     # but noisy: two stack logs, still one real exit). Currently called
     # once, unconditionally, in main(). If that ever changes, add a guard.
-
-
-def _run_with_error_logging(log: logging.Logger, label: str, fn: Callable[[], None]) -> None:
-    """Run fn(); on exception, log traceback under `label`, then re-raise."""
-    try:                                                     # NTS: try = run, expect possible failure
-        fn()                                                 # NTS: zero-arg, per Callable[[], None]
-    except Exception:                                        # NTS: Exception not BaseException — lets Ctrl+C through
-        log.exception("[main] fatal error in %s", label)     # NTS: .exception auto-appends traceback; %s = lazy style
-        raise                                                # bare raise = re-raise the ORIGINAL exception, traceback intact
 
 
 def _handle_clear_mem(log: logging.Logger) -> int:
@@ -155,58 +143,54 @@ def _handle_clear_mem(log: logging.Logger) -> int:
     # Gate 1: Yes/No. Abort on Ctrl-C / Ctrl-D. Non-tty stdin (piped/CI) hits
     # EOFError here and aborts safely — --clear-mem never wipes unattended
     # unless a human answered both gates.
-    try:                                              # Attempt to 
+    try:                                              # Attempt to make a confirmation prompt
         confirm = input("WARNING: This will PERMANENTLY erase all memories. Continue? [Yes/No]: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):             # NTS: Ctrl-D raises EOFError, Ctrl-C raises
-                                                      # KeyboardInterrupt — both mean "stop, don't wipe"
+    except (EOFError, KeyboardInterrupt):             # Ctrl-D raises EOFError, Ctrl-C raises KeyboardInterrupt — both mean "stop, don't wipe"
         print("\nAborted.")
-        return 0                                      # NTS: intentional indistinguishability from a successful wipe
-    if confirm not in ("y", "yes"):                   # NTS: anything except an explicit yes aborts;
-                                                      # default (empty input/Enter) is also an abort
+        return 0                                      # if the user aborts, return 0
+    if confirm not in ("y", "yes"):                   # anything except an explicit yes aborts;
+                                                      # NOTE: default (empty input/Enter) is also an abort
         print("Aborted memory clear.")
-        return 0                                      # NTS: intentional indistinguishability from a successful wipe
+        return 0                                      # if the user aborts, return 0
 
     # Gate 2: typed phrase. Guards against fat-finger 'y' on an irreversible
     # op, and against shell-history accidents re-running --clear-mem.
     try:
         typed = input(f'To confirm, type exactly: "{_CONFIRM_PHRASE}"\n> ').strip()
-    except (EOFError, KeyboardInterrupt):             # NTS: same abort semantics as gate 1
+    except (EOFError, KeyboardInterrupt):             # same abort semantics as gate 1
         print("\nAborted.")
-        return 0
-    if typed != _CONFIRM_PHRASE:                      # NTS: exact match — case and punctuation must
-                                                      # match; near-misses ('clear all aiko memories')
-                                                      # are deliberately rejected
+        return 0                                      # if the user aborts, return 0
+    if typed != _CONFIRM_PHRASE:                      # exact match — case and punctuation must match;
+                                                      # near-misses ('clear all aiko memories') are deliberately rejected
         print("Confirmation phrase did not match. Aborted memory clear.")
-        return 0
+        return 0                                      # if the user aborts, return 0
 
     log.info("Clearing all memories...")
-    print("Clearing all memories...")                 # NTS: LOG_CONSOLE is off by default on this path,
+    print("Clearing all memories...")                 # LOG_CONSOLE is off by default on this path,
                                                       # so log.info alone would be silent in the terminal
 
     # Deferred heavy import — memory stack (embedding models, vector store)
     # is only paid for on this destructive branch; normal WebUI/CLI launches
     # never touch it. Key Orin win: no torch/vector-store RAM on normal boots.
-    from cognition.memory.memorize import AikoMemorize
+    from cognition.memory.memorize import AikoMemorize # import the AikoMemorize class from the cognition.memory.memorize module
 
     try:
-        mem = AikoMemorize()                          # NTS: may load embedding models — on an 8 GB Orin,
+        mem = AikoMemorize()                          # may load embedding models — on an 8 GB Orin,
                                                       # check whether clear() needs models at all
                                                       # (storage-layer delete would skip that allocation)
         mem.clear()                                   # NOTE: assumes clear() is atomic or idempotent —
                                                       # if it isn't, a mid-wipe failure can leave
                                                       # partially-cleared storage behind.
-        del mem                                       # NTS: drop refs so sqlite/faiss/file handles close
+        del mem                                       # drop refs so sqlite/faiss/file handles close
                                                       # on GC before exit
-    except Exception:                                 # NTS: Exception, not BaseException — lets Ctrl+C through
-                                                      # NTS: contain the failure HERE — old
-                                                      # _run_with_error_logging re-raise escaped main() raw
+    except Exception:                                 # Exception, not BaseException — lets Ctrl+C through
         log.exception("[main] memory wipe (--clear-mem) failed")
         print("ERROR: memory wipe failed — see aiko.log for details.")
-        return 1
+        return 1                                      # returns 1 on failure to distinguish from 0 == aborted
 
     log.info("Memory cleared.")
     print("Memory cleared.")
-    return 0
+    return 0                                          # Returns 0 for success, 1 for failure
 
 
 def _handle_logout(log: logging.Logger) -> int:
@@ -214,19 +198,17 @@ def _handle_logout(log: logging.Logger) -> int:
 
     Exit codes: 0 = token cleared; 1 = handler missing (ImportError) or failed.
     """
-    try:
-        from interface.cli.cli import handle_logout  # deferred — CLI deps not needed for --clear-mem path
-    except ImportError as e:
+    try:                                              # attempt to import the handle_logout function from the interface.cli.cli module
+        from interface.cli.cli import handle_logout   # CLI deps not needed for --clear-mem or default WebUI launch
+    except ImportError as e:                          # raised when an import fails
         log.error("Could not load CLI logout handler (missing dependencies?): %s", e)
-        return 1
-    try:
-        handle_logout()                              # NTS: same containment fix as --clear-mem — the old
-                                                     # _run_with_error_logging re-raise skipped this
-                                                     # function's `return 0` and escaped main() raw
-    except Exception:                                # NTS: Exception, not BaseException — lets Ctrl+C through
+        return 1                                      # Returns 1 on failure to distinguish from 0 == success
+    try:                                              # attempt to call the handle_logout function
+        handle_logout()                               # same containment fix as --clear-mem — the old
+    except Exception:                                 # Exception, not BaseException — lets Ctrl+C through
         log.exception("[main] handle_logout() failed")
-        return 1
-    return 0
+        return 1                                      # Returns 1 on failure to distinguish from 0 == success
+    return 0                                          # Returns 0 for success, 1 for failure
 
 
 

@@ -46,6 +46,7 @@ from openai import OpenAI
 
 from system.bioclock import get_timezone
 from system.log import get_logger
+from system.tls import heal_verify, is_ca_bundle_error
 from cognition.memory.memorize import AikoMemorize
 from system.userspace import user_workspace_root
 from agentic.mcp_client.bridge import bootstrap_mcp
@@ -55,6 +56,28 @@ from agentic.toolkit.common import workspace_root
 from agentic.toolkit.photography import scan_photo_workspace, scan_video_workspace
 
 log = get_logger(__name__)
+
+
+def _tls_resilient_get(url, *, headers=None, params=None, timeout=30):
+    """GET with one CA-bundle healing retry (verification never disabled).
+
+    The checkout lives on removable-media-backed storage; when it hiccups,
+    the certifi bundle inside .venv transiently stops resolving (or a stale
+    REQUESTS_CA_BUNDLE points at another machine's venv) and requests dies
+    with OSError before any bytes hit the wire. Re-resolve a bundle that
+    exists right now and retry once — verification is re-pointed, never
+    disabled.
+    """
+    try:
+        return requests.get(url, headers=headers, params=params, timeout=timeout)
+    except Exception as e:
+        if not is_ca_bundle_error(e):
+            raise
+        healed = heal_verify(True)
+        if not healed:
+            raise
+        log.warning("Lane A1 CA bundle healed -> %s; retrying fetch", healed)
+        return requests.get(url, headers=headers, params=params, timeout=timeout, verify=healed)
 
 SOCIAL_PERSONA_PATH = os.path.expanduser(os.getenv("SOCIAL_PERSONA_PATH", "persona/SOCIAL.md"))
 
@@ -325,7 +348,7 @@ def _fetch_latest_patreon_post() -> dict[str, Any] | None:
         next_url = url
         current_params = params
         while next_url:
-            resp = requests.get(next_url, headers=headers, params=current_params, timeout=30)
+            resp = _tls_resilient_get(next_url, headers=headers, params=current_params, timeout=30)
             resp.raise_for_status()
             payload = resp.json()
             data = payload.get("data")
@@ -587,10 +610,38 @@ def _push_a1_hugo_images(slug: str, image_paths: list[Path]) -> list[dict[str, A
             results.append({"ok": False, "path": str(p), "error": str(e)})
     return results
 
+def _newest_existing_weekly_draft() -> dict[str, Any] | None:
+    """Return the newest on-disk weekly draft bundle, if any.
+
+    Fallback for when the Patreon fetch fails (network/TLS outage): the
+    already-drafted post is still reviewable and postable, so callers can
+    proceed to the approval/posting checks instead of aborting the run.
+    """
+    try:
+        root = weekly_social_root()
+        if not root.is_dir():
+            return None
+        candidates = [p for p in root.iterdir() if p.is_dir() and (p / "draft.json").is_file()]
+        if not candidates:
+            return None
+        newest = max(candidates, key=lambda p: (p / "draft.json").stat().st_mtime)
+        meta = json.loads((newest / "draft.json").read_text(encoding="utf-8"))
+        return {"success": True, "skipped": True, "draft_dir": str(newest), "meta": meta, "stale_fetch": True}
+    except Exception as e:
+        log.warning("Lane A1 existing-draft fallback failed: %s", e)
+        return None
+
+
 def generate_weekly_draft(memorize: AikoMemorize, *, force: bool = False, now: datetime | None = None) -> dict[str, Any]:
     """Create a Lane A1 Patreon dev-post syndication draft bundle."""
     post = _fetch_latest_patreon_post()
     if not post:
+        # Fetch failed (network/TLS/API): fall back to the newest existing
+        # draft so approval/posting checks can still proceed this run.
+        fallback = _newest_existing_weekly_draft()
+        if fallback is not None:
+            log.warning("Lane A1 Patreon fetch failed; proceeding with existing draft %s", fallback["draft_dir"])
+            return fallback
         return {"success": False, "reason": "no_patreon_post"}
     label = _slugify(str(post.get("id") or post.get("title") or "latest"))
     draft_dir = weekly_social_root() / label

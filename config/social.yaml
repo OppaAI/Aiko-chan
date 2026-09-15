@@ -81,7 +81,7 @@ A1_TEASER_PROVIDERS: "bluesky,mastodon,discord,threads"
 SOCIAL_MCP_DB_PATH: ""
 
 # -- Messenger adapters --
-AIKO_MESSENGER_ADAPTERS: "discord,telegram"
+MESSENGER_ADAPTERS: "discord,telegram"
 
 # -- Vision model (photo captioning) --
 VISION_MODEL: "ministral"

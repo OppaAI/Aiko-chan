@@ -75,7 +75,7 @@ from __future__ import annotations   # annotations become lazy strings — forwa
 
 import argparse                      # CLI argument parsing
 import logging                       # logger for all [main] output
-import os                            # env gate (AIKO_TRACE_EXIT) + hard-exit trap
+import os                            # env gate + hard-exit trap
 import traceback                     # logging exit origins
 from importlib.metadata import PackageNotFoundError, version
                                      # reads installed dist metadata — version comes from
@@ -105,9 +105,9 @@ def _resolve_version() -> str:
         return _FALLBACK_VERSION             # raised when the dist name isn't found — i.e. running without `pip install -e .`
 
 
-def _install_os_exit_trap(log: logging.Logger) -> None:
-    """Monkeypatch os._exit to log the caller's stack before the hard exit (only if AIKO_TRACE_EXIT=1)."""
-    if os.environ.get("AIKO_TRACE_EXIT") != "1":                 # trap is opt-in: off unless explicitly enabled
+def _install_os_exit_trap(log: logging.Logger, enabled: bool) -> None:
+    """Monkeypatch os._exit to log the caller's stack before the hard exit (only when enabled)."""
+    if not enabled:                          # trap is opt-in: off unless explicitly enabled
         return
 
     # os._exit() cannot be caught by try/except, so the only way to observe it
@@ -298,7 +298,7 @@ def main() -> int:
     # Installed before any deferred heavy imports (CLI/WebUI, voice, memory)
     # below, so os._exit is trapped for the whole process lifetime, not
     # just this module's own exit paths.
-    _install_os_exit_trap(log)
+    _install_os_exit_trap(log, args.debug)
 
     if args.clear_mem:                                  # if clear memory argument set
         return _handle_clear_mem(log)

@@ -11,7 +11,7 @@ Usage:
     python main.py --cli         # plain no-curses CLI, for local testing only
     # Two-way messenger adapters (Aiko-Lingo etc.) are spawned by the front
     # ends themselves, not by main.py — they run beside WebUI/CLI when
-    # AIKO_MESSENGER_ADAPTERS is set, but this module never them.
+    # AIKO_MESSENGER_ADAPTERS is set, but this module never spawns them.
     python main.py --debug       # verbose console logging (LOG_CONSOLE=1, LOG_LEVEL=DEBUG) + memory hits per turn; also implies --trace
     python main.py --trace       brain trace per turn (AIKO_TRACE_BRAIN=1) without DEBUG-level log spam
     python main.py --clear-mem   # wipe all stored memories and exit
@@ -117,7 +117,7 @@ def _install_os_exit_trap(log: logging.Logger) -> None:
             log.error("[main] os._exit(%s) called from:\n%s",    # .format_stack() returns list of str, join() makes it one str
                       code, "".join(traceback.format_stack()))
         except Exception:                                        # Exception, not BaseException — a Ctrl+C
-            pass                                                 # during still exits via finally
+            pass                                                 # during logging still exits via finally
         finally:                                                 # finally runs on EVERY path — this is
             _original_os_exit(code)                              # what guarantees the real exit
 

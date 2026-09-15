@@ -216,30 +216,53 @@ def _handle_logout(log: logging.Logger) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse and return the CLI argument namespace for Aiko-chan's launch options."""
-    p = argparse.ArgumentParser(description="Aiko-chan")          # create argument object for declaring arguments
-    p.add_argument("--text",      action="store_true",            # text (keyboard) input only
-                   help="keyboard input + TTS/ASR initially off; both subsystems still load for /voice and /listen toggles")
-    p.add_argument("--no-asr",    action="store_true",            # disable ASR
-                   help="keyboard input but keep TTS on; ASR still loads for /listen")
-    p.add_argument("--debug",     action="store_true",            # debug mode
-                   help="enable verbose console logging (sets LOG_CONSOLE=1, LOG_LEVEL=DEBUG). Also implies --trace (AIKO_TRACE_BRAIN=1) for backward compat.")
-    p.add_argument("--trace",     action="store_true",            # trace Aiko's brain
-                   help="enable the per-step brain tracer (AIKO_TRACE_BRAIN=1) without the DEBUG-level log spam. Use this when you only want to see what Aiko is thinking, not every internal HTTP call.")
-    p.add_argument("--cli",       action="store_true",            # launch in CLI
-                   help="use the plain no-curses CLI instead of the WebUI — for local testing only")
-    g = p.add_mutually_exclusive_group()                          # prevent conflicting exits (industrial: --clear-mem vs --logout)
-    g.add_argument("--clear-mem", action="store_true",            # wipe out all memory and exit
-                   help="WARNING: irreversibly wipes all stored memories, then exits")
-    g.add_argument("--logout",   action="store_true",             # logout user session
-                   help="clear stored CLI auth token and exit")
-    p.add_argument("--name",     type=str, default="",            # for use in CLI mode without OAuth setup
-                   help="set display name (CLI mode only, ignored with GitHub OAuth)")
-    p.add_argument("--version", action="version", version=f"%(prog)s {_resolve_version()}")  # reads pyproject.toml via importlib.metadata
-    args = p.parse_args()                                         # return namespace of the arguments
-    if args.name and not args.cli:                                # validate display name only meaningful in CLI (industrial: early fail)
+    """Parse CLI flags. Values validated here in ONE place — front ends never re-check."""
+    p = argparse.ArgumentParser(
+        prog="main.py",
+        description="Aiko-chan — local assistant. Front ends: WebUI (default) or CLI (--cli); maintenance: --clear-mem, --logout.",
+        epilog="Exit codes: 0 = success or user-declined · 1 = operation failed.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    # ---- Front end selection -------------------------------------------------
+    p.add_argument("--cli",  action="store_true",
+                   help="terminal chat front end instead of the WebUI")
+    p.add_argument("--name", metavar="NAME",
+                   help="companion name for this session (requires --cli)")
+    p.add_argument("--text",   action="store_true",
+                   help="keyboard input, TTS AND ASR both off (implies --no-asr); subsystems still load for /voice and /listen toggles")
+    p.add_argument("--no-asr", action="store_true",
+                   help="keyboard input, TTS stays on, ASR off; ASR still loads for /listen")
+
+    # ---- Version -------------------------------------------------------------
+    p.add_argument("--version", action="version",
+                   version=f"%(prog)s {_resolve_version()}",
+                   help="show installed version and exit")
+
+    # ---- Maintenance (mutually exclusive — each owns the process) ------------
+    maintenance = p.add_mutually_exclusive_group()
+    maintenance.add_argument("--clear-mem", action="store_true",
+                             help="wipe ALL stored memories (two-gate confirm, then exit)")
+    maintenance.add_argument("--logout",    action="store_true",
+                             help="clear the stored session and exit")
+
+    # ---- Debug ---------------------------------------------------------------
+    p.add_argument("--debug", action="store_true",
+                   help="verbose stderr logging (DEBUG level)")
+
+    args = p.parse_args()
+
+    # ---- Post-parse normalization & validation -------------------------------
+    # --text is the "quiet mode" preset: it includes ASR-off, so consumers only
+    # ever check one flag for ASR. --no-tts is deliberately omitted (never used).
+    if args.text:
+        args.no_asr = True
+
+    if args.name and not args.cli:
         p.error("--name requires --cli")
+
     return args
+
 
 
 def main() -> int:

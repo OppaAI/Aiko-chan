@@ -13,7 +13,7 @@ Usage:
     # ends themselves, not by main.py — they run beside WebUI/CLI when
     # AIKO_MESSENGER_ADAPTERS is set, but this module never spawns them.
     python main.py --debug       # verbose console logging (LOG_CONSOLE=1, LOG_LEVEL=DEBUG) + memory hits per turn; also implies --trace
-    python main.py --trace       brain trace per turn (AIKO_TRACE_BRAIN=1) without DEBUG-level log spam
+    python main.py --trace       brain trace per turn (TRACE_BRAIN=1) without DEBUG-level log spam
     python main.py --clear-mem   # wipe all stored memories and exit
     python main.py --logout      # clear stored CLI (GitHub OAuth) auth token and exit
     python main.py --name <name> # set CLI display name (only when GitHub OAuth isn't configured)
@@ -249,8 +249,8 @@ def parse_args() -> argparse.Namespace:
     # ---- Debug / diagnostics ---------------------------------------------------
     p.add_argument("--debug", action="store_true",
                    help="verbose stderr logging (DEBUG level)")
-    p.add_argument("--trace", action="store_true",              # CLI twin of AIKO_TRACE_BRAIN=1 — main() maps this flag
-                   help="per-turn brain tracer (AIKO_TRACE_BRAIN=1) — what Aiko is thinking, without DEBUG-level log spam")   # onto the env var so the consumer reads only one source
+    p.add_argument("--trace", action="store_true",              # CLI twin of TRACE_BRAIN=1 — main() maps this flag
+                   help="per-turn brain tracer (TRACE_BRAIN=1) — what Aiko is thinking, without DEBUG-level log spam")   # onto the env var so the consumer reads only one source
 
     args = p.parse_args()
 
@@ -290,7 +290,7 @@ def main() -> int:
     # you can get a clean trace without the DEBUG-level log spam, or
     # combine both for the full picture.
     if args.trace or args.debug:                        # --debug still implies --trace for backward compat
-        os.environ.setdefault("AIKO_TRACE_BRAIN", "1")
+        os.environ.setdefault("TRACE_BRAIN", "1")
 
     # Set up logging and exit tracing
     from system.log import get_logger

@@ -117,8 +117,8 @@ def _install_os_exit_trap(log: logging.Logger) -> None:
     # os._exit() cannot be caught by try/except, so the only way to observe it
     # is to wrap it: log WHO called it, then perform the real exit.
     def _logged_os_exit(code: int | str | None) -> None:
-        try:
-            log.error("[main] os._exit(%s) called from:\n%s",
+        try:                                                     # Attempt to log, but don't let logging failures kill the exit
+            log.error("[main] os._exit(%s) called from:\n%s",    # NTS: .format_stack() returns list of str, join() makes it one str
                       code, "".join(traceback.format_stack()))
         except Exception:                                        # NTS: Exception, not BaseException — a Ctrl+C
             pass                                                 # during logging still exits via finally
@@ -155,7 +155,7 @@ def _handle_clear_mem(log: logging.Logger) -> int:
     # Gate 1: Yes/No. Abort on Ctrl-C / Ctrl-D. Non-tty stdin (piped/CI) hits
     # EOFError here and aborts safely — --clear-mem never wipes unattended
     # unless a human answered both gates.
-    try:
+    try:                                              # Attempt to 
         confirm = input("WARNING: This will PERMANENTLY erase all memories. Continue? [Yes/No]: ").strip().lower()
     except (EOFError, KeyboardInterrupt):             # NTS: Ctrl-D raises EOFError, Ctrl-C raises
                                                       # KeyboardInterrupt — both mean "stop, don't wipe"

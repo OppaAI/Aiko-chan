@@ -227,7 +227,7 @@ def parse_args() -> argparse.Namespace:
     # ---- Front end selection -------------------------------------------------
     p.add_argument("--cli",  action="store_true",
                    help="terminal chat front end instead of the WebUI")
-    p.add_argument("--name", metavar="NAME",
+    p.add_argument("--name", metavar="NAME", default="",
                    help="companion name for this session (requires --cli)")
     p.add_argument("--text",   action="store_true",
                    help="keyboard input, TTS AND ASR both off (implies --no-asr); subsystems still load for /voice and /listen toggles")
@@ -246,9 +246,11 @@ def parse_args() -> argparse.Namespace:
     maintenance.add_argument("--logout",    action="store_true",
                              help="clear the stored session and exit")
 
-    # ---- Debug ---------------------------------------------------------------
+    # ---- Debug / diagnostics ---------------------------------------------------
     p.add_argument("--debug", action="store_true",
                    help="verbose stderr logging (DEBUG level)")
+    p.add_argument("--trace", action="store_true",
+                   help="per-turn brain tracer (AIKO_TRACE_BRAIN=1) — what Aiko is thinking, without DEBUG-level log spam")
 
     args = p.parse_args()
 
@@ -262,7 +264,6 @@ def parse_args() -> argparse.Namespace:
         p.error("--name requires --cli")
 
     return args
-
 
 
 def main() -> int:

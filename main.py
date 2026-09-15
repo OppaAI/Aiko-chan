@@ -96,6 +96,18 @@ _FALLBACK_VERSION = "0.0.0+unknown"  # PEP 440 sentinel when metadata is missing
 __all__ = ["parse_args", "main"]     # public surface: entry point + CLI parser; _ names are internal
 
 
+def _resolve_version() -> str:
+    """Return the installed package version, or a sentinel if metadata is missing."""
+    # Single source of truth: pyproject.toml read via install metadata, so the
+    # version never drifts between here and argparse. Re-run `pip install -e .`
+    # after bumping, or this falls through to the sentinel below.
+    try:
+        return version("Aiko-chan")          # must match [project].name in pyproject.toml
+    except PackageNotFoundError:             # bare checkout / metadata not installed
+        return _FALLBACK_VERSION             # NTS: raised when the dist name isn't found —
+                                             # i.e. running without `pip install -e .`
+
+
 def _install_os_exit_trap(log: logging.Logger) -> None:
     """Monkeypatch os._exit to log the caller's stack before the hard exit (only if AIKO_TRACE_EXIT=1)."""
     if os.environ.get("AIKO_TRACE_EXIT") != "1":                 # trap is opt-in: off unless explicitly enabled
@@ -116,18 +128,6 @@ def _install_os_exit_trap(log: logging.Logger) -> None:
     # Not idempotent — calling this twice double-wraps os._exit (harmless
     # but noisy: two stack logs, still one real exit). Currently called
     # once, unconditionally, in main(). If that ever changes, add a guard.
-
-
-def _resolve_version() -> str:
-    """Return the installed package version, or a sentinel if metadata is missing."""
-    # Single source of truth: pyproject.toml read via install metadata, so the
-    # version never drifts between here and argparse. Re-run `pip install -e .`
-    # after bumping, or this falls through to the sentinel below.
-    try:
-        return version("Aiko-chan")          # must match [project].name in pyproject.toml
-    except PackageNotFoundError:             # bare checkout / metadata not installed
-        return _FALLBACK_VERSION             # NTS: raised when the dist name isn't found —
-                                             # i.e. running without `pip install -e .`
 
 
 def _run_with_error_logging(log: logging.Logger, label: str, fn: Callable[[], None]) -> None:

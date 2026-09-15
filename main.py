@@ -11,9 +11,9 @@ Usage:
     python main.py --cli         # plain no-curses CLI, for local testing only
     # Two-way messenger adapters (Aiko-Lingo etc.) are spawned by the front
     # ends themselves, not by main.py — they run beside WebUI/CLI when
-    # AIKO_MESSENGER_ADAPTERS is set, but this module never touches them.
+    # AIKO_MESSENGER_ADAPTERS is set, but this module never them.
     python main.py --debug       # verbose console logging (LOG_CONSOLE=1, LOG_LEVEL=DEBUG) + memory hits per turn; also implies --trace
-    python main.py --trace       # brain trace per turn (AIKO_TRACE_BRAIN=1) without DEBUG-level log spam
+    python main.py --trace       brain trace per turn (AIKO_TRACE_BRAIN=1) without DEBUG-level log spam
     python main.py --clear-mem   # wipe all stored memories and exit
     python main.py --logout      # clear stored CLI (GitHub OAuth) auth token and exit
     python main.py --name <name> # set CLI display name (only when GitHub OAuth isn't configured)
@@ -23,7 +23,7 @@ This module only parses arguments and dispatches to the right front end:
     - interface/cli/cli.py      -> run_cli(args)     (--cli)
 
 main.py does NOT call AikoWakeup().boot() itself — each front end owns its
-own boot timing, because the two have genuinely different requirements:
+ boot timing, because the two have genuinely different requirements:
     - WebUI (interface/webui/webui.py, run_webui()): boot runs to completion
       BEFORE the HTTP/WS server opens (constructed with defer_servers=True),
       so browsers never see a half-booted Aiko. Post-login work (memory
@@ -77,10 +77,9 @@ import argparse                      # CLI argument parsing
 import logging                       # logger for all [main] output
 import os                            # env gate (AIKO_TRACE_EXIT) + hard-exit trap
 import traceback                     # logging exit origins
-from typing import Callable          # callable type annotation
 from importlib.metadata import PackageNotFoundError, version
                                      # reads installed dist metadata — version comes from
-                                     # NOTE: pyproject.toml, never hardcoded (single source of truth)
+                                     # pyproject.toml, never hardcoded (single source of truth)
 
 _original_os_exit = os._exit         # capture BEFORE the patch — calling os._exit inside the wrapper would recurse into itself
                                      # NOTE: Python binds the function at assignment time — after
@@ -89,7 +88,7 @@ _original_os_exit = os._exit         # capture BEFORE the patch — calling os._
 
 _FALLBACK_VERSION = "0.0.0+unknown"  # PEP 440 sentinel when metadata is missing; 0.0.0 sorts below any real release
                                      # NOTE: +unknown is a PEP 440 "local version" — valid, not semver
-_CONFIRM_PHRASE = "Clear All Aiko's Memories."       # exact string the user must type to arm the wipe
+_CONFIRM_PHRASE = "Clear All Aiko's Memories."       # exact string the user type to arm the wipe
 
 
 __all__ = ["parse_args", "main"]     # public surface: entry point + CLI parser; _ names are internal
@@ -118,7 +117,7 @@ def _install_os_exit_trap(log: logging.Logger) -> None:
             log.error("[main] os._exit(%s) called from:\n%s",    # .format_stack() returns list of str, join() makes it one str
                       code, "".join(traceback.format_stack()))
         except Exception:                                        # Exception, not BaseException — a Ctrl+C
-            pass                                                 # during logging still exits via finally
+            pass                                                 # during still exits via finally
         finally:                                                 # finally runs on EVERY path — this is
             _original_os_exit(code)                              # what guarantees the real exit
 
@@ -133,7 +132,7 @@ def _handle_clear_mem(log: logging.Logger) -> int:
 
     Two gates before the wipe:
         1. Yes/No prompt
-        2. Type the exact confirmation phrase (_CONFIRM_PHRASE)
+        2. Type the exact confirmation phrase (_CONFIRMHRASE)
 
     Exit codes:
         0 — memories wiped, or aborted at either gate (intentionally
@@ -143,15 +142,15 @@ def _handle_clear_mem(log: logging.Logger) -> int:
     # Gate 1: Yes/No. Abort on Ctrl-C / Ctrl-D. Non-tty stdin (piped/CI) hits
     # EOFError here and aborts safely — --clear-mem never wipes unattended
     # unless a human answered both gates.
-    try:                                              # Attempt to make a confirmation prompt
+    try:
         confirm = input("WARNING: This will PERMANENTLY erase all memories. Continue? [Yes/No]: ").strip().lower()
     except (EOFError, KeyboardInterrupt):             # Ctrl-D raises EOFError, Ctrl-C raises KeyboardInterrupt — both mean "stop, don't wipe"
         print("\nAborted.")
-        return 0                                      # if the user aborts, return 0
+        return 0
     if confirm not in ("y", "yes"):                   # anything except an explicit yes aborts;
                                                       # NOTE: default (empty input/Enter) is also an abort
         print("Aborted memory clear.")
-        return 0                                      # if the user aborts, return 0
+        return 0
 
     # Gate 2: typed phrase. Guards against fat-finger 'y' on an irreversible
     # op, and against shell-history accidents re-running --clear-mem.
@@ -159,11 +158,11 @@ def _handle_clear_mem(log: logging.Logger) -> int:
         typed = input(f'To confirm, type exactly: "{_CONFIRM_PHRASE}"\n> ').strip()
     except (EOFError, KeyboardInterrupt):             # same abort semantics as gate 1
         print("\nAborted.")
-        return 0                                      # if the user aborts, return 0
-    if typed != _CONFIRM_PHRASE:                      # exact match — case and punctuation must match;
+        return 0
+    if != _CONFIRM_PHRASE:                      # exact match — case and punctuation must match;
                                                       # near-misses ('clear all aiko memories') are deliberately rejected
         print("Confirmation phrase did not match. Aborted memory clear.")
-        return 0                                      # if the user aborts, return 0
+        return 0
 
     log.info("Clearing all memories...")
     print("Clearing all memories...")                 # LOG_CONSOLE is off by default on this path,
@@ -172,7 +171,7 @@ def _handle_clear_mem(log: logging.Logger) -> int:
     # Deferred heavy import — memory stack (embedding models, vector store)
     # is only paid for on this destructive branch; normal WebUI/CLI launches
     # never touch it. Key Orin win: no torch/vector-store RAM on normal boots.
-    from cognition.memory.memorize import AikoMemorize # import the AikoMemorize class from the cognition.memory.memorize module
+    from cognition.memory.memorize import AikoMemorize
 
     try:
         mem = AikoMemorize()                          # may load embedding models — on an 8 GB Orin,
@@ -183,14 +182,17 @@ def _handle_clear_mem(log: logging.Logger) -> int:
                                                       # partially-cleared storage behind.
         del mem                                       # drop refs so sqlite/faiss/file handles close
                                                       # on GC before exit
-    except Exception:                                 # Exception, not BaseException — lets Ctrl+C through
+    except Exception:                                 # Exception, not BaseException — lets Ctrl+C through.
+                                                      # Contain the failure HERE — this branch sits outside
+                                                      # main()'s front-end try/except, so a re-raise would
+                                                      # escape main() as a raw interpreter traceback.
         log.exception("[main] memory wipe (--clear-mem) failed")
         print("ERROR: memory wipe failed — see aiko.log for details.")
-        return 1                                      # returns 1 on failure to distinguish from 0 == aborted
+        return 1                                      # failure — distinguishable from 0 == aborted/success
 
     log.info("Memory cleared.")
     print("Memory cleared.")
-    return 0                                          # Returns 0 for success, 1 for failure
+    return 0                                          # success
 
 
 def _handle_logout(log: logging.Logger) -> int:
@@ -198,18 +200,19 @@ def _handle_logout(log: logging.Logger) -> int:
 
     Exit codes: 0 = token cleared; 1 = handler missing (ImportError) or failed.
     """
-    try:                                              # attempt to import the handle_logout function from the interface.cli.cli module
-        from interface.cli.cli import handle_logout   # CLI deps not needed for --clear-mem or default WebUI launch
+    try:
+        from interface.cli.cli import handle_logout   # deferred — CLI deps not needed for --clear-mem or default WebUI launch
     except ImportError as e:                          # raised when an import fails
         log.error("Could not load CLI logout handler (missing dependencies?): %s", e)
-        return 1                                      # Returns 1 on failure to distinguish from 0 == success
-    try:                                              # attempt to call the handle_logout function
+        return 1
+    try:
         handle_logout()                               # same containment fix as --clear-mem — the old
+                                                      # log-and-re-raise helper skipped this function's
+                                                      # `return 0` and escaped main() raw
     except Exception:                                 # Exception, not BaseException — lets Ctrl+C through
         log.exception("[main] handle_logout() failed")
-        return 1                                      # Returns 1 on failure to distinguish from 0 == success
-    return 0                                          # Returns 0 for success, 1 for failure
-
+        return 1
+    return 0 # success
 
 
 def parse_args() -> argparse.Namespace:
@@ -225,7 +228,7 @@ def parse_args() -> argparse.Namespace:
                    help="enable the per-step brain tracer (AIKO_TRACE_BRAIN=1) without the DEBUG-level log spam. Use this when you only want to see what Aiko is thinking, not every internal HTTP call.")
     p.add_argument("--cli",       action="store_true",            # launch in CLI
                    help="use the plain no-curses CLI instead of the WebUI — for local testing only")
-    g = p.add_mutually_exclusive_group()      # prevent conflicting exits (industrial: --clear-mem vs --logout)
+    g = p.add_mutually_exclusive_group()                          # prevent conflicting exits (industrial: --clear-mem vs --logout)
     g.add_argument("--clear-mem", action="store_true",            # wipe out all memory and exit
                    help="WARNING: irreversibly wipes all stored memories, then exits")
     g.add_argument("--logout",   action="store_true",             # logout user session
@@ -234,7 +237,7 @@ def parse_args() -> argparse.Namespace:
                    help="set display name (CLI mode only, ignored with GitHub OAuth)")
     p.add_argument("--version", action="version", version=f"%(prog)s {_resolve_version()}")  # reads pyproject.toml via importlib.metadata
     args = p.parse_args()                                         # return namespace of the arguments
-    if args.name and not args.cli:            # validate display name only meaningful in CLI (industrial: early fail)
+    if args.name and not args.cli:                                # validate display name only meaningful in CLI (industrial: early fail)
         p.error("--name requires --cli")
     return args
 
@@ -271,7 +274,7 @@ def main() -> int:
     # below, so os._exit is trapped for the whole process lifetime, not
     # just this module's own exit paths.
     _install_os_exit_trap(log)
-    
+
     if args.clear_mem:                                  # if clear memory argument set
         return _handle_clear_mem(log)
 
@@ -301,4 +304,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())                                              # start the entry point
+    raise SystemExit(main())                            # start the entry point

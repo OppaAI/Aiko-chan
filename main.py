@@ -73,7 +73,6 @@ code, not here — see the code below.
 
 from __future__ import annotations   # annotations become lazy strings — forward refs & newer syntax OK
 
-# Standard library
 import argparse                      # CLI argument parsing
 import logging                       # logger for all [main] output
 import os                            # env gate (AIKO_TRACE_EXIT) + hard-exit trap
@@ -92,6 +91,8 @@ _original_os_exit = os._exit         # capture BEFORE the patch — calling os._
 _FALLBACK_VERSION = "0.0.0+unknown"  # PEP 440 sentinel when metadata is missing; 0.0.0 sorts
                                      # below any real release
                                      # NTS: +unknown is a PEP 440 "local version" — valid, not semver
+_CONFIRM_PHRASE = "Clear All Aiko's Memories."       # exact string the user must type to arm the wipe
+
 
 __all__ = ["parse_args", "main"]     # public surface: entry point + CLI parser; _ names are internal
 
@@ -139,38 +140,94 @@ def _run_with_error_logging(log: logging.Logger, label: str, fn: Callable[[], No
         raise                                                # bare raise = re-raise the ORIGINAL exception, traceback intact
 
 
-def _handle_clear_mem(log) -> int:  # type: ignore[no-untyped-def]
-    """Handle --clear-mem branch (extracted to reduce main() complexity C901)."""
+def _handle_clear_mem(log: logging.Logger) -> int:
+    """Handle --clear-mem branch: two-step confirm, wipe all stored memories, exit.
+
+    Two gates before the wipe:
+        1. Yes/No prompt
+        2. Type the exact confirmation phrase (_CONFIRM_PHRASE)
+
+    Exit codes:
+        0 — memories wiped, or aborted at either gate (intentionally
+            indistinguishable so scripts don't treat a declined wipe as an error)
+        1 — wipe failed (traceback in aiko.log)
+    """
+    # Gate 1: Yes/No. Abort on Ctrl-C / Ctrl-D. Non-tty stdin (piped/CI) hits
+    # EOFError here and aborts safely — --clear-mem never wipes unattended
+    # unless a human answered both gates.
     try:
-        confirm = input("WARNING: This will permanently erase all memories. Continue? [y/N]: ").strip().lower()  # prompt for user confirm memory wiping
-    except (EOFError, KeyboardInterrupt):           # Ctrl-D or Ctrl-C during prompt
-        print("\nAborted.")                         # quiet abort message
-        return 0                                 # exit code 0
-    if confirm != "y":                              # anything other than explicit 'y' aborts
-        print("Aborted memory clear.")              # user-facing message
-        return 0                                 # exit code 0 (user chose to abort, not an error)
-    log.info("Clearing all memories...")            # log success info
-    from cognition.memory.memorize import AikoMemorize  # deferred — heavy memory stack, only needed for --clear-mem
+        confirm = input("WARNING: This will PERMANENTLY erase all memories. Continue? [Yes/No]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):             # NTS: Ctrl-D raises EOFError, Ctrl-C raises
+                                                      # KeyboardInterrupt — both mean "stop, don't wipe"
+        print("\nAborted.")
+        return 0                                      # NTS: intentional indistinguishability from a successful wipe
+    if confirm not in ("y", "yes"):                   # NTS: anything except an explicit yes aborts;
+                                                      # default (empty input/Enter) is also an abort
+        print("Aborted memory clear.")
+        return 0                                      # NTS: intentional indistinguishability from a successful wipe
 
-    def do_wipe():
-        """Initialize memory system and clear all stored memories."""
-        mem = AikoMemorize()                        # load memory system
-        mem.clear()                                 # wipe out memory
-
-    _run_with_error_logging(log, "memory wipe (--clear-mem)", do_wipe)
-    log.info("Memory cleared.")                     # log completion
-    return 0                                     # exit code 0
-
-
-def _handle_logout(log) -> int:  # type: ignore[no-untyped-def]
-    """Handle --logout branch (extracted to reduce main() complexity)."""
+    # Gate 2: typed phrase. Guards against fat-finger 'y' on an irreversible
+    # op, and against shell-history accidents re-running --clear-mem.
     try:
-        from interface.cli.cli import handle_logout  # load CLI logout handler (may fail if CLI deps missing)
+        typed = input(f'To confirm, type exactly: "{_CONFIRM_PHRASE}"\n> ').strip()
+    except (EOFError, KeyboardInterrupt):             # NTS: same abort semantics as gate 1
+        print("\nAborted.")
+        return 0
+    if typed != _CONFIRM_PHRASE:                      # NTS: exact match — case and punctuation must
+                                                      # match; near-misses ('clear all aiko memories')
+                                                      # are deliberately rejected
+        print("Confirmation phrase did not match. Aborted memory clear.")
+        return 0
+
+    log.info("Clearing all memories...")
+    print("Clearing all memories...")                 # NTS: LOG_CONSOLE is off by default on this path,
+                                                      # so log.info alone would be silent in the terminal
+
+    # Deferred heavy import — memory stack (embedding models, vector store)
+    # is only paid for on this destructive branch; normal WebUI/CLI launches
+    # never touch it. Key Orin win: no torch/vector-store RAM on normal boots.
+    from cognition.memory.memorize import AikoMemorize
+
+    try:
+        mem = AikoMemorize()                          # NTS: may load embedding models — on an 8 GB Orin,
+                                                      # check whether clear() needs models at all
+                                                      # (storage-layer delete would skip that allocation)
+        mem.clear()                                   # NOTE: assumes clear() is atomic or idempotent —
+                                                      # if it isn't, a mid-wipe failure can leave
+                                                      # partially-cleared storage behind.
+        del mem                                       # NTS: drop refs so sqlite/faiss/file handles close
+                                                      # on GC before exit
+    except Exception:                                 # NTS: Exception, not BaseException — lets Ctrl+C through
+                                                      # NTS: contain the failure HERE — old
+                                                      # _run_with_error_logging re-raise escaped main() raw
+        log.exception("[main] memory wipe (--clear-mem) failed")
+        print("ERROR: memory wipe failed — see aiko.log for details.")
+        return 1
+
+    log.info("Memory cleared.")
+    print("Memory cleared.")
+    return 0
+
+
+def _handle_logout(log: logging.Logger) -> int:
+    """Handle --logout branch: clear stored CLI auth token and exit.
+
+    Exit codes: 0 = token cleared; 1 = handler missing (ImportError) or failed.
+    """
+    try:
+        from interface.cli.cli import handle_logout  # deferred — CLI deps not needed for --clear-mem path
     except ImportError as e:
         log.error("Could not load CLI logout handler (missing dependencies?): %s", e)
         return 1
-    _run_with_error_logging(log, "handle_logout()", handle_logout)
-    return 0                                     # exit code 0
+    try:
+        handle_logout()                              # NTS: same containment fix as --clear-mem — the old
+                                                     # _run_with_error_logging re-raise skipped this
+                                                     # function's `return 0` and escaped main() raw
+    except Exception:                                # NTS: Exception, not BaseException — lets Ctrl+C through
+        log.exception("[main] handle_logout() failed")
+        return 1
+    return 0
+
 
 
 def parse_args() -> argparse.Namespace:

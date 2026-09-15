@@ -279,9 +279,11 @@ def main() -> int:
     from system.config import load_config
     load_config()
 
-    if args.debug:                                      # explicit CLI flag overrides whatever .env set
-        os.environ["LOG_CONSOLE"] = "1"
-        os.environ["LOG_LEVEL"] = "DEBUG"
+    if args.debug:                                      # --debug: verbose stderr logging. LOG_CONSOLE/LOG_LEVEL
+        os.environ["LOG_CONSOLE"] = "1"                 # are OWNED by these flags — never set them in yaml/.env,
+        os.environ["LOG_LEVEL"] = "DEBUG"               # main.py is the single write source. Direct assignment
+                                                        # (not setdefault) so the flag beats any exported shell var.
+
         # Background social-listening daemons (Threads/Bluesky/Mastodon) get
         # their urllib3/httpcore debug lines muted automatically; set
         # AIKO_DEBUG_FULL_HTTP=1 to see raw HTTP if you ever need to.
@@ -289,15 +291,15 @@ def main() -> int:
     # --trace enables the per-step brain tracer. Independent of --debug so
     # you can get a clean trace without the DEBUG-level log spam, or
     # combine both for the full picture.
-    if args.trace:
-        os.environ["TRACE_BRAIN"] = "1"
-
+    if args.trace:                                      # --trace: per-turn brain tracer, independent of --debug
+        os.environ["TRACE_BRAIN"] = "1"                 # (clean trace without DEBUG spam). Same ownership rule:
+                                                        # flag is the only write source; beats any shell export.
     # Set up logging and exit tracing
     from system.log import get_logger
     log = get_logger(__name__)
-    # Installed before any deferred heavy imports (CLI/WebUI, voice, memory)
-    # below, so os._exit is trapped for the whole process lifetime, not
-    # just this module's own exit paths.
+    # Installed before any deferred heavy imports below, so os._exit is trapped
+    # for the whole process lifetime. Gated on --debug: the exit-stack dump is
+    # heavy-debug territory; a --trace run keeps the console clean.
     _install_os_exit_trap(log, args.debug)
 
     if args.clear_mem:                                  # if clear memory argument set

@@ -223,7 +223,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-asr",    action="store_true",            # disable ASR
                    help="keyboard input but keep TTS on; ASR still loads for /listen")
     p.add_argument("--debug",     action="store_true",            # debug mode
-               help="enable verbose console logging (sets LOG_CONSOLE=1, LOG_LEVEL=DEBUG). Also implies --trace (AIKO_TRACE_BRAIN=1) for backward compat.")
+                   help="enable verbose console logging (sets LOG_CONSOLE=1, LOG_LEVEL=DEBUG). Also implies --trace (AIKO_TRACE_BRAIN=1) for backward compat.")
     p.add_argument("--trace",     action="store_true",            # trace Aiko's brain
                    help="enable the per-step brain tracer (AIKO_TRACE_BRAIN=1) without the DEBUG-level log spam. Use this when you only want to see what Aiko is thinking, not every internal HTTP call.")
     p.add_argument("--cli",       action="store_true",            # launch in CLI

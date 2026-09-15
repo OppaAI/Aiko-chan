@@ -289,8 +289,8 @@ def main() -> int:
     # --trace enables the per-step brain tracer. Independent of --debug so
     # you can get a clean trace without the DEBUG-level log spam, or
     # combine both for the full picture.
-    if args.trace or args.debug:                        # --debug still implies --trace for backward compat
-        os.environ.setdefault("TRACE_BRAIN", "1")
+    if args.trace:
+        os.environ["TRACE_BRAIN"] = "1"
 
     # Set up logging and exit tracing
     from system.log import get_logger

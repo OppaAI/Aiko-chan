@@ -47,7 +47,7 @@ Flow:
    --clear-mem       --logout          --cli           (default)
         │                │                │                 │
         ▼                ▼                ▼                 ▼
-  AikoMemorize()    handle_logout()    run_cli(args)  run_webui(args)
+  AikoMemorize()    _handle_logout()   run_cli(args)  run_webui(args)
      .clear()            │                │                 │
         │                ▼                ▼                 ▼
         ▼           SystemExit(0)  boot inside      AikoWeb(defer_servers=True)

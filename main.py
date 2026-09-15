@@ -310,9 +310,9 @@ def main() -> int:
 
     try:                                                # one shared fatal-error trap for both front ends:
         if args.cli:                                    # SystemExit in the main thread exits SILENTLY (no traceback),
-            from interface.cli.cli import run_cli       # so log WHO escaped before re-raising; BaseException catch-all
-            run_cli(args)                               # covers KeyboardInterrupt and anything else unexpected.
-        else:
+            from interface.cli.cli import run_cli       # so log WHO escaped before re-raising; the Exception handler below
+            run_cli(args)                               # covers ordinary fatals — KeyboardInterrupt has its own clause,
+        else:                                           # and asyncio cancellations ride BaseException and pass through unlogged.
             from interface.webui.webui import run_webui
             run_webui(args)
     except SystemExit as e:                             # silent-killer trap: SystemExit in the main thread

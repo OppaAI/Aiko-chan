@@ -13,7 +13,7 @@ Usage:
     # ends themselves, not by main.py — they run beside WebUI/CLI when
     # MESSENGER_ADAPTERS is set, but this module never spawns them.
     python main.py --debug       # verbose console logging (LOG_CONSOLE=1, LOG_LEVEL=DEBUG) + memory hits per turn
-    python main.py --trace       brain trace per turn (TRACE_BRAIN=1) without DEBUG-level log spam
+    python main.py --trace       # brain trace per turn (TRACE_BRAIN=1) without DEBUG-level log spam
     python main.py --clear-mem   # wipe all stored memories and exit
     python main.py --logout      # clear stored CLI (GitHub OAuth) auth token and exit
     python main.py --name <name> # set CLI display name (only when GitHub OAuth isn't configured)
@@ -123,8 +123,7 @@ def _install_os_exit_trap(log: logging.Logger, enabled: bool) -> None:
 
     os._exit = _logged_os_exit     # patch applied; anything that bound os._exit before this bypasses logging
     # NOTE: Not idempotent — calling this twice double-wraps os._exit (harmless
-    # but noisy: two stack logs, still one real exit). Currently called
-    # once, unconditionally, in main(). If that ever changes, add a guard.
+    # but noisy). Currently called once, gated on --debug, in main().
 
 
 def _handle_clear_mem(log: logging.Logger) -> int:

@@ -1,7 +1,8 @@
 """
 main.py
 
-Aiko-chan — thin entry point.
+Aiko-chan launcher: single source of truth for version, CLI parsing, and
+process-level traps. Entry point is main(); everything else is internal.
 
 Usage:
     python main.py               # browser WebUI (default) — full voice, ASR + TTS
@@ -65,17 +66,26 @@ Argument-order and env-var timing notes (why --debug/--trace/logging are
 sequenced the way they are in main()) live as inline comments next to that
 code, not here — see the code below.
 """
-from __future__ import annotations                            # evaluates type annotations later
 
-# Public libraries
-import argparse                                               # for parsing CLI arguments
-from importlib.metadata import PackageNotFoundError, version  # for --version, single source of truth
-import os                                                     # for intercepting hard exits
-import traceback                                              # for logging exit origins
+# Comment conventions:
+#   untagged = permanent doc (traps, invariants, why)
+#   NTS:     = personal study note, safe to delete
 
-_original_os_exit = os._exit                                  # keep the real hard-exit handle
+from __future__ import annotations   # annotations become lazy strings — forward refs & newer syntax OK
 
-__all__ = ["parse_args", "main"]                              # external API — internal defs keep leading _
+# Standard library
+import argparse                      # CLI argument parsing
+import logging                       # logger for all [main] output
+import os                            # env gate (AIKO_TRACE_EXIT) + hard-exit trap
+import traceback                     # logging exit origins
+from importlib.metadata import PackageNotFoundError, version
+                                     # reads installed dist metadata — version comes from
+                                     # pyproject.toml, never hardcoded (single source of truth)
+
+_original_os_exit = os._exit         # capture BEFORE the patch — calling os._exit
+                                     # inside the wrapper would recurse into itself
+
+__all__ = ["parse_args", "main"]     # public surface: entry point + CLI parser; _ names are internal
 
 def _resolve_version() -> str:
     """Return the installed package version, or a sentinel if metadata is missing."""
@@ -88,30 +98,33 @@ def _resolve_version() -> str:
         return "0.0.0+unknown"            # PEP 440 / semver-valid fallback, sorts as lowest version
 
 
-def _install_os_exit_trap(log) -> None:
+def _install_os_exit_trap(log: logging.Logger) -> None:
     """Monkeypatch os._exit to log the caller's stack before the hard exit (only if AIKO_TRACE_EXIT=1)."""
-    if os.environ.get("AIKO_TRACE_EXIT") != "1":
-        return
+    if os.environ.get("AIKO_TRACE_EXIT") != "1":                # trap is opt-in: off unless explicitly enabled
+        return                                                  # quit without setting trap
 
-    def _logged_os_exit(code):                # os._exit() cannot be caught by try/except,
+    def def _logged_os_exit(code: int | str | None) -> None:    # os._exit() cannot be caught by try/except,
         try:
-            log.error("[main] os._exit(%s) called from:\n%s",  # so wrap it to log WHO called it before dying
+            log.error("[main] os._exit(%s) called from:\n%s",   # so wrap it to log WHO called it before dying
                       code, "".join(traceback.format_stack()))
-        except Exception:                     # if logging itself fails (e.g., during shutdown),
-            pass                              # don't let traceback formatting block the actual exit
+        except Exception:                                       # if logging itself fails (e.g., during shutdown),
+            pass                                                # don't let traceback formatting block the actual exit
         finally:
-            _original_os_exit(code)           # then still perform the hard exit
+            _original_os_exit(code)                             # then still perform the hard exit
 
-    os._exit = _logged_os_exit                # patch applied; any code saving os._exit before this bypasses logging
+    os._exit = _logged_os_exit                                  # patch applied; any code saving os._exit before this bypasses logging
+    # Not idempotent — calling this twice double-wraps os._exit (harmless
+    # but noisy: two stack logs, still one real exit). Currently called
+    # once, unconditionally, in main(). If that ever changes, add a guard.
 
 
-def _run_trapped(log, label, fn) -> None:  # type: ignore[no-untyped-def]
-    """Run a function with fatal-error logging; re-raise on exception."""
-    try:
-        fn()
-    except Exception:
-        log.exception("[main] fatal error in %s", label)
-        raise
+def _run_with_error_logging(log: logging.Logger, label: str, fn: Callable[[], None]) -> None:
+    """Run fn(); on exception, log traceback under `label`, then re-raise."""
+    try:                                                        # attempt to run function
+        fn()                                                    # execute the function
+    except Exception:                                           # if error,
+        log.exception("[main] fatal error in %s", label)        # log the error, %s is lazy style to sub the label
+        raise                                                   # re-raise the original exception
 
 
 def _handle_clear_mem(log) -> int:  # type: ignore[no-untyped-def]
@@ -132,7 +145,7 @@ def _handle_clear_mem(log) -> int:  # type: ignore[no-untyped-def]
         mem = AikoMemorize()                        # load memory system
         mem.clear()                                 # wipe out memory
 
-    _run_trapped(log, "memory wipe (--clear-mem)", do_wipe)
+    _run_with_error_logging(log, "memory wipe (--clear-mem)", do_wipe)
     log.info("Memory cleared.")                     # log completion
     return 0                                     # exit code 0
 
@@ -144,7 +157,7 @@ def _handle_logout(log) -> int:  # type: ignore[no-untyped-def]
     except ImportError as e:
         log.error("Could not load CLI logout handler (missing dependencies?): %s", e)
         return 1
-    _run_trapped(log, "handle_logout()", handle_logout)
+    _run_with_error_logging(log, "handle_logout()", handle_logout)
     return 0                                     # exit code 0
 
 
@@ -203,8 +216,11 @@ def main() -> int:
     # Set up logging and exit tracing
     from system.log import get_logger
     log = get_logger(__name__)
+    # Installed before any deferred heavy imports (CLI/WebUI, voice, memory)
+    # below, so os._exit is trapped for the whole process lifetime, not
+    # just this module's own exit paths.
     _install_os_exit_trap(log)
-
+    
     if args.clear_mem:                                  # if clear memory argument set
         return _handle_clear_mem(log)
 

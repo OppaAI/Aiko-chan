@@ -12,7 +12,7 @@ Usage:
     # Two-way messenger adapters (Aiko-Lingo etc.) are spawned by the front
     # ends themselves, not by main.py — they run beside WebUI/CLI when
     # MESSENGER_ADAPTERS is set, but this module never spawns them.
-    python main.py --debug       # verbose console logging (LOG_CONSOLE=1, LOG_LEVEL=DEBUG) + memory hits per turn; also implies --trace
+    python main.py --debug       # verbose console logging (LOG_CONSOLE=1, LOG_LEVEL=DEBUG) + memory hits per turn
     python main.py --trace       brain trace per turn (TRACE_BRAIN=1) without DEBUG-level log spam
     python main.py --clear-mem   # wipe all stored memories and exit
     python main.py --logout      # clear stored CLI (GitHub OAuth) auth token and exit

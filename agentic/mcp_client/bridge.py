@@ -38,14 +38,16 @@ def bootstrap_mcp(server_url: str = "") -> bool:
         if name in _HIDDEN_MCP_POST_TOOLS:
             log.info("[mcp] Hiding raw posting tool from LLM (use *_social wrapper): %s", name)
             continue
-        is_protonmail = "protonmail" in name
+        # Email tools were renamed read_protonmail -> read_email (generic
+        # provider). Match both so Lane D / owner-email stay always_on.
+        is_email_tool = ("protonmail" in name) or (name in {"read_email", "send_email", "delete_email"})
         register_tool_schema(
             name=name,
             description=description,
             props=props,
             required=required,
             domain="social",
-            always_on=is_protonmail,  # email tools always available, not just social capability
+            always_on=is_email_tool,  # email tools always available, not just social capability
             react=True,
             graph=True,
         )

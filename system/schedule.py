@@ -1174,9 +1174,11 @@ def _check_email_handler(_memorize) -> None:
     """System-handler callable: check ProtonMail for new job-posting emails."""
     try:
         from agentic.registry import registry
-        spec = registry.get("read_protonmail")
+        # MCP tool was renamed read_protonmail -> read_email (generic provider).
+        # Prefer the new name, fall back to legacy for old MCP servers.
+        spec = registry.get("read_email") or registry.get("read_protonmail")
         if spec is None or spec.handler is None:
-            log.warning("Email check: read_protonmail MCP tool is not registered")
+            log.warning("Email check: read_email MCP tool is not registered")
             return
         result = spec.handler(max_results=20, list_only=True)
         if not isinstance(result, dict) or not result.get("ok"):

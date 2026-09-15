@@ -494,7 +494,7 @@ def summarize_emails(
     return json.dumps({
         "ok": False,
         "error": "no email adapter configured for this stub",
-        "hint": "Use check_owner_email/reply_owner_email (owner_email workflow) or the ProtonMail MCP tools (read_protonmail/search_protonmail).",
+        "hint": "Use check_owner_email/reply_owner_email (owner_email workflow) or the email MCP tools (read_email).",
     }, ensure_ascii=False)
 
 

@@ -10,13 +10,18 @@ from social.state import get_db
 
 # ── Rate limit configuration (per-platform, with breathing room) ─────────────
 RATE_LIMITS: dict[str, dict[str, int]] = {
-    "post_threads": {"per_hour": 50, "per_day": 100},
+    "post_threads": {"per_hour": 30, "per_day": 100},
     "post_youtube": {"per_hour": 5, "per_day": 10},
     "post_bluesky": {"per_hour": 100, "per_day": 500},
     "post_mastodon": {"per_hour": 30, "per_day": 100},
     "post_pixelfed": {"per_hour": 30, "per_day": 100},
     "post_discord": {"per_hour": 30, "per_day": 200},
     "post_social": {"per_hour": 30, "per_day": 100},
+    # Generic email tools (renamed from read_protonmail/send_protonmail).
+    "read_email": {"per_hour": 30, "per_day": 100},
+    "send_email": {"per_hour": 20, "per_day": 50},
+    "delete_email": {"per_hour": 20, "per_day": 50},
+    # Legacy ProtonMail-specific names kept for old clients.
     "read_protonmail": {"per_hour": 30, "per_day": 100},
     "send_protonmail": {"per_hour": 20, "per_day": 50},
 }
@@ -29,6 +34,7 @@ def _get_limits(tool_name: str) -> tuple[int, int]:
 
 
 _SKIP_IDEMPOTENCY = frozenset({
+    "read_email",
     "read_protonmail",
 })
 

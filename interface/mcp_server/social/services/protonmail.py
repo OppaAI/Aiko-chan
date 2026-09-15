@@ -20,8 +20,43 @@ warnings.filterwarnings(
 _client_cache = None
 _cache_username = None
 
+def _session_file() -> str:
+    """Resolve session path lazily (per-call, not import-time).
+
+    user_state_path() depends on the active user id (AIKO_USER_ID). Resolving
+    at import time freezes the path to whatever user (often guest) was active
+    during the first import. Resolving per call keeps OppaAI's session under
+    ~/.aiko/OppaAI/profile/ even if the module was first imported pre-login.
+    """
+    try:
+        return str(user_state_path("profile/protonmail_session.pickle"))
+    except Exception:
+        # Fallback to the import-time constant if userspace resolution fails.
+        return _SESSION_FILE_FALLBACK
+
 # protonmail-api-client stores sessions as a binary pickle, not JSON.
-_SESSION_FILE = str(user_state_path("profile/protonmail_session.pickle"))
+# Kept as fallback only; new code must call _session_file().
+_SESSION_FILE_FALLBACK = None
+try:
+    _SESSION_FILE_FALLBACK = str(user_state_path("profile/protonmail_session.pickle"))
+except Exception:
+    _SESSION_FILE_FALLBACK = os.path.expanduser("~/.aiko/OppaAI/profile/protonmail_session.pickle")
+# Legacy import-time constant (kept so external imports don't break).
+_SESSION_FILE = _SESSION_FILE_FALLBACK
+
+
+def _is_invalid_refresh_error(exc: Exception) -> bool:
+    """True when the exception looks like an expired/invalid refresh token.
+
+    protonmail-api-client raises e.g.:
+      "Can't update tokens, status: 422 json: {'Error': 'Invalid refresh token', 'Code': 10013}"
+    """
+    msg = f"{exc}".lower()
+    return (
+        "invalid refresh token" in msg
+        or "code" in msg and "10013" in msg
+        or ("422" in msg and "refresh" in msg)
+    )
 
 # stderr-bound print for ProtonMail's internal logger.
 # ProtonMail.__init__ defaults logging_func=print (stdout). Since the MCP
@@ -53,28 +88,97 @@ def _get_client():
     if _client_cache is not None and _cache_username == username:
         print("[PROTONMAIL] Using cached client", file=sys.stderr, flush=True)
         return _client_cache, None
-    if not os.path.exists(_SESSION_FILE) and not password:
+    session_file = _session_file()
+    if not os.path.exists(session_file) and not password:
         return None, {"ok": False, "error": "PROTONMAIL_PASSWORD not set for first login", "provider": "protonmail"}
     print(f"[PROTONMAIL] Authenticating as {username[:3]}{chr(42) * max(0, len(username) - 3)}...", file=sys.stderr, flush=True)
-    print(f"[PROTONMAIL] Session file exists: {os.path.exists(_SESSION_FILE)} ({_SESSION_FILE})", file=sys.stderr, flush=True)
+    print(f"[PROTONMAIL] Session file exists: {os.path.exists(session_file)} ({session_file})", file=sys.stderr, flush=True)
     try:
         client = ProtonMail(logging_func=_stderr_print)
-        if os.path.exists(_SESSION_FILE):
-            print(f"[PROTONMAIL] Loading session: {_SESSION_FILE}", file=sys.stderr, flush=True)
-            _run_client_call(client.load_session, _SESSION_FILE, auto_save=True)
-            print("[PROTONMAIL] Session loaded successfully", file=sys.stderr, flush=True)
+        if os.path.exists(session_file):
+            print(f"[PROTONMAIL] Loading session: {session_file}", file=sys.stderr, flush=True)
+            try:
+                _run_client_call(client.load_session, session_file, auto_save=True)
+            except Exception as load_err:
+                # Stale/expired refresh token (422 Code 10013): the saved
+                # pickle can never refresh again. Delete it and fall through
+                # to a fresh password login instead of failing forever.
+                if _is_invalid_refresh_error(load_err) and password:
+                    print(f"[PROTONMAIL] Saved session expired ({load_err}); deleting stale file and re-logging in...", file=sys.stderr, flush=True)
+                    try:
+                        os.remove(session_file)
+                    except OSError:
+                        pass
+                    _client_cache = None
+                    _cache_username = None
+                    client = ProtonMail(logging_func=_stderr_print)
+                    _run_client_call(client.login, username, password)
+                    Path(session_file).parent.mkdir(parents=True, exist_ok=True)
+                    _run_client_call(client.save_session, session_file)
+                    print(f"[PROTONMAIL] Session re-saved: {session_file}", file=sys.stderr, flush=True)
+                else:
+                    raise
+            else:
+                print("[PROTONMAIL] Session loaded successfully", file=sys.stderr, flush=True)
         else:
             print("[PROTONMAIL] No saved session; performing login...", file=sys.stderr, flush=True)
             _run_client_call(client.login, username, password)
-            Path(_SESSION_FILE).parent.mkdir(parents=True, exist_ok=True)
-            _run_client_call(client.save_session, _SESSION_FILE)
-            print(f"[PROTONMAIL] Session saved: {_SESSION_FILE}", file=sys.stderr, flush=True)
+            Path(session_file).parent.mkdir(parents=True, exist_ok=True)
+            _run_client_call(client.save_session, session_file)
+            print(f"[PROTONMAIL] Session saved: {session_file}", file=sys.stderr, flush=True)
         _client_cache = client
         _cache_username = username
         return client, None
     except Exception as e:
+        # Never cache a failed client; next call retries (e.g. after the user
+        # fixes credentials or deletes the stale session manually).
+        _client_cache = None
+        _cache_username = None
         print(f"[PROTONMAIL] Authentication failed: {e}", file=sys.stderr, flush=True)
-        return None, {"ok": False, "error": f"authentication failed: {e}", "provider": "protonmail"}
+        hint = ""
+        if _is_invalid_refresh_error(e) and not password:
+            hint = " (saved session expired and PROTONMAIL_PASSWORD is not set, so automatic re-login is impossible — set the password or delete the session pickle)"
+        return None, {"ok": False, "error": f"authentication failed: {e}{hint}", "provider": "protonmail"}
+
+
+def clear_cached_client() -> None:
+    """Drop the in-memory client so the next call re-authenticates."""
+    global _client_cache, _cache_username
+    _client_cache = None
+    _cache_username = None
+
+
+def _drop_stale_session(reason: object = "") -> None:
+    """Delete the saved pickle and clear the in-memory client.
+
+    Called when ProtonMail reports an invalid/expired refresh token
+    (HTTP 422 Code 10013). The pickle can never refresh again, so keeping
+    it only guarantees the same failure on every subsequent call.
+    """
+    clear_cached_client()
+    try:
+        session_file = _session_file()
+    except Exception:
+        return
+    try:
+        if os.path.exists(session_file):
+            os.remove(session_file)
+            print(f"[PROTONMAIL] Deleted stale session ({reason}): {session_file}", file=sys.stderr, flush=True)
+    except OSError as e:
+        print(f"[PROTONMAIL] Could not delete stale session: {e}", file=sys.stderr, flush=True)
+
+
+async def _reauth_fresh_client():
+    """Force a fresh password login after dropping the stale session.
+
+    Returns (client, error_dict) like _get_client(). Requires
+    PROTONMAIL_PASSWORD to be set; without it automatic recovery is
+    impossible and the caller must surface a clear error.
+    """
+    _drop_stale_session("invalid refresh token")
+    if not env("PROTONMAIL_PASSWORD"):
+        return None, {"ok": False, "error": "saved ProtonMail session expired and PROTONMAIL_PASSWORD is not set, so automatic re-login is impossible — set the password or log in manually", "provider": "protonmail"}
+    return _get_client()
 
 
 def get_client():
@@ -95,6 +199,29 @@ _FOLDER_LABEL_MAP = {
 
 async def read_messages(client, folder: str, unread: bool, max_results: int, query: str, list_only: bool, message_id: str = "") -> Dict:
     """Read messages using ProtonMail client."""
+    try:
+        return await _read_messages_inner(client, folder, unread, max_results, query, list_only, message_id)
+    except Exception as e:
+        # Token refresh happens lazily on the first API call, not inside
+        # load_session — so an expired pickle surfaces HERE as 422/10013.
+        # Drop it, fresh-login once, and retry so one stale file doesn't
+        # break every poll until manual intervention.
+        if _is_invalid_refresh_error(e):
+            print(f"[PROTONMAIL] Read hit expired session ({e}); retrying with fresh login...", file=sys.stderr, flush=True)
+            fresh, err_resp = await _reauth_fresh_client()
+            if err_resp:
+                return err_resp
+            try:
+                return await _read_messages_inner(fresh, folder, unread, max_results, query, list_only, message_id)
+            except Exception as retry_e:
+                if _is_invalid_refresh_error(retry_e):
+                    _drop_stale_session(retry_e)
+                return {"ok": False, "error": f"authentication failed: {retry_e}", "provider": "protonmail"}
+        return {"ok": False, "error": f"read failed: {e}", "provider": "protonmail"}
+
+
+async def _read_messages_inner(client, folder: str, unread: bool, max_results: int, query: str, list_only: bool, message_id: str = "") -> Dict:
+    """Read messages using ProtonMail client (no retry; wrapper handles re-auth)."""
     try:
         # Translate generic folder name to a ProtonMail label id.
         folder_lower = folder.lower()
@@ -181,50 +308,85 @@ async def read_messages(client, folder: str, unread: bool, max_results: int, que
 
         return {"ok": True, "provider": "protonmail", "count": len(results), "messages": results}
     except Exception as e:
+        # Let expired-session errors bubble to the wrapper for fresh-login retry.
+        if _is_invalid_refresh_error(e):
+            raise
         return {"ok": False, "error": f"read failed: {e}", "provider": "protonmail"}
 
 
+async def _send_message_inner(client, recipients: List[str], subject: str, body: str, cc: List[str], bcc: List[str], attachments: List[Dict]) -> Dict:
+    """Send email using ProtonMail client (no retry; wrapper handles re-auth)."""
+    # protonmail-api-client requires two-step: create_message then send_message
+    new_message = await asyncio.to_thread(
+        _run_client_call,
+        client.create_message,
+        recipients=recipients,
+        subject=subject,
+        body=body,
+        cc=cc if cc else [],
+        bcc=bcc if bcc else [],
+    )
+
+    # Send the created message
+    sent_message = await asyncio.to_thread(_run_client_call, client.send_message, new_message)
+
+    return {
+        "ok": True,
+        "provider": "protonmail",
+        "message_id": getattr(sent_message, "id", "unknown"),
+        "status": "sent"
+    }
+
+
 async def send_message(client, recipients: List[str], subject: str, body: str, cc: List[str], bcc: List[str], attachments: List[Dict]) -> Dict:
-    """Send email using ProtonMail client."""
+    """Send email using ProtonMail client (retries once on expired session)."""
     if not recipients:
         return {"ok": False, "error": "recipients required", "provider": "protonmail"}
 
     try:
-        # protonmail-api-client requires two-step: create_message then send_message
-        new_message = await asyncio.to_thread(
-            _run_client_call,
-            client.create_message,
-            recipients=recipients,
-            subject=subject,
-            body=body,
-            cc=cc if cc else [],
-            bcc=bcc if bcc else [],
-        )
-
-        # Send the created message
-        sent_message = await asyncio.to_thread(_run_client_call, client.send_message, new_message)
-
-        return {
-            "ok": True,
-            "provider": "protonmail",
-            "message_id": getattr(sent_message, "id", "unknown"),
-            "status": "sent"
-        }
+        return await _send_message_inner(client, recipients, subject, body, cc, bcc, attachments)
     except Exception as e:
+        if _is_invalid_refresh_error(e):
+            print(f"[PROTONMAIL] Send hit expired session ({e}); retrying with fresh login...", file=sys.stderr, flush=True)
+            fresh, err_resp = await _reauth_fresh_client()
+            if err_resp:
+                return err_resp
+            try:
+                return await _send_message_inner(fresh, recipients, subject, body, cc, bcc, attachments)
+            except Exception as retry_e:
+                if _is_invalid_refresh_error(retry_e):
+                    _drop_stale_session(retry_e)
+                return {"ok": False, "error": f"authentication failed: {retry_e}", "provider": "protonmail"}
         return {"ok": False, "error": f"send failed: {e}", "provider": "protonmail"}
 
 
+async def _delete_message_inner(client, message_id: str) -> Dict:
+    """Delete email using ProtonMail client (no retry; wrapper handles re-auth)."""
+    messages = await asyncio.to_thread(_run_client_call, client.get_messages)
+    target = next((msg for msg in messages if getattr(msg, "id", "") == message_id), None)
+    if target is None:
+        return {"ok": False, "error": f"message not found: {message_id}", "provider": "protonmail"}
+    await asyncio.to_thread(_run_client_call, client.delete_messages, [target])
+    return {"ok": True, "provider": "protonmail", "message_id": message_id, "status": "deleted"}
+
+
 async def delete_message(client, message_id: str) -> Dict:
-    """Delete email using ProtonMail client."""
+    """Delete email using ProtonMail client (retries once on expired session)."""
     if not message_id:
         return {"ok": False, "error": "message_id required", "provider": "protonmail"}
 
     try:
-        messages = await asyncio.to_thread(_run_client_call, client.get_messages)
-        target = next((msg for msg in messages if getattr(msg, "id", "") == message_id), None)
-        if target is None:
-            return {"ok": False, "error": f"message not found: {message_id}", "provider": "protonmail"}
-        await asyncio.to_thread(_run_client_call, client.delete_messages, [target])
-        return {"ok": True, "provider": "protonmail", "message_id": message_id, "status": "deleted"}
+        return await _delete_message_inner(client, message_id)
     except Exception as e:
+        if _is_invalid_refresh_error(e):
+            print(f"[PROTONMAIL] Delete hit expired session ({e}); retrying with fresh login...", file=sys.stderr, flush=True)
+            fresh, err_resp = await _reauth_fresh_client()
+            if err_resp:
+                return err_resp
+            try:
+                return await _delete_message_inner(fresh, message_id)
+            except Exception as retry_e:
+                if _is_invalid_refresh_error(retry_e):
+                    _drop_stale_session(retry_e)
+                return {"ok": False, "error": f"authentication failed: {retry_e}", "provider": "protonmail"}
         return {"ok": False, "error": f"delete failed: {e}", "provider": "protonmail"}

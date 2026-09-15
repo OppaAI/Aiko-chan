@@ -106,9 +106,10 @@ def check_owner_email(max_results: int = 5, *, state=None) -> str:
         return json.dumps({"ok": False, "error": "AIKO_EMAIL not set"})
     try:
         from agentic.registry import registry
-        spec = registry.get("read_protonmail")
+        # MCP tool renamed read_protonmail -> read_email; accept both.
+        spec = registry.get("read_email") or registry.get("read_protonmail")
         if spec is None or spec.handler is None:
-            return json.dumps({"ok": False, "error": "read_protonmail not registered"})
+            return json.dumps({"ok": False, "error": "read_email not registered"})
         # list_only False to get bodies; query owner email to reduce noise
         # Some providers ignore query, so filter after.
         result = spec.handler(max_results=max_results, list_only=False, query=owner)
@@ -200,9 +201,10 @@ def reply_owner_email(report_json: str = "", *, state=None) -> str:
             think = None
 
     from agentic.registry import registry
-    send_spec = registry.get("send_protonmail")
+    # MCP tool renamed send_protonmail -> send_email; accept both.
+    send_spec = registry.get("send_email") or registry.get("send_protonmail")
     if send_spec is None or send_spec.handler is None:
-        return json.dumps({"ok": False, "error": "send_protonmail not registered"})
+        return json.dumps({"ok": False, "error": "send_email not registered"})
 
     processed = _load_processed()
     replied = 0

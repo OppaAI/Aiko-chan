@@ -212,7 +212,7 @@ def _handle_logout(log: logging.Logger) -> int:
     except Exception:                                 # Exception, not BaseException — lets Ctrl+C through
         log.exception("[main] handle_logout() failed")
         return 1
-    return 0 # success
+    return 0                                          # success
 
 
 def parse_args() -> argparse.Namespace:

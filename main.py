@@ -132,7 +132,7 @@ def _handle_clear_mem(log: logging.Logger) -> int:
 
     Two gates before the wipe:
         1. Yes/No prompt
-        2. Type the exact confirmation phrase (_CONFIRMHRASE)
+        2. Type the exact confirmation phrase (_CONFIRM_PHRASE)
 
     Exit codes:
         0 — memories wiped, or aborted at either gate (intentionally
@@ -159,7 +159,7 @@ def _handle_clear_mem(log: logging.Logger) -> int:
     except (EOFError, KeyboardInterrupt):             # same abort semantics as gate 1
         print("\nAborted.")
         return 0
-    if != _CONFIRM_PHRASE:                      # exact match — case and punctuation must match;
+    if typed != _CONFIRM_PHRASE:                      # exact match — case and punctuation must match;
                                                       # near-misses ('clear all aiko memories') are deliberately rejected
         print("Confirmation phrase did not match. Aborted memory clear.")
         return 0

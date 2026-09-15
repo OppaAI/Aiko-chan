@@ -78,53 +78,65 @@ import argparse                      # CLI argument parsing
 import logging                       # logger for all [main] output
 import os                            # env gate (AIKO_TRACE_EXIT) + hard-exit trap
 import traceback                     # logging exit origins
+from typing import Callable          # callable type annotation
 from importlib.metadata import PackageNotFoundError, version
                                      # reads installed dist metadata — version comes from
                                      # pyproject.toml, never hardcoded (single source of truth)
 
-_original_os_exit = os._exit         # capture BEFORE the patch — calling os._exit
-                                     # inside the wrapper would recurse into itself
+_original_os_exit = os._exit         # capture BEFORE the patch — calling os._exit inside the
+                                     # wrapper would recurse into itself
+                                     # NTS: Python binds the function at assignment time — after
+                                     # os._exit = wrapper, the name points at the wrapper, so the
+                                     # capture must happen first
+
+_FALLBACK_VERSION = "0.0.0+unknown"  # PEP 440 sentinel when metadata is missing; 0.0.0 sorts
+                                     # below any real release
+                                     # NTS: +unknown is a PEP 440 "local version" — valid, not semver
 
 __all__ = ["parse_args", "main"]     # public surface: entry point + CLI parser; _ names are internal
+
+
+def _install_os_exit_trap(log: logging.Logger) -> None:
+    """Monkeypatch os._exit to log the caller's stack before the hard exit (only if AIKO_TRACE_EXIT=1)."""
+    if os.environ.get("AIKO_TRACE_EXIT") != "1":                 # trap is opt-in: off unless explicitly enabled
+        return
+
+    # os._exit() cannot be caught by try/except, so the only way to observe it
+    # is to wrap it: log WHO called it, then perform the real exit.
+    def _logged_os_exit(code: int | str | None) -> None:
+        try:
+            log.error("[main] os._exit(%s) called from:\n%s",
+                      code, "".join(traceback.format_stack()))
+        except Exception:                                        # NTS: Exception, not BaseException — a Ctrl+C
+            pass                                                 # during logging still exits via finally
+        finally:                                                 # NTS: finally runs on EVERY path — this is
+            _original_os_exit(code)                              # what guarantees the real exit
+
+    os._exit = _logged_os_exit     # patch applied; anything that bound os._exit before this bypasses logging
+    # Not idempotent — calling this twice double-wraps os._exit (harmless
+    # but noisy: two stack logs, still one real exit). Currently called
+    # once, unconditionally, in main(). If that ever changes, add a guard.
+
 
 def _resolve_version() -> str:
     """Return the installed package version, or a sentinel if metadata is missing."""
     # Single source of truth: pyproject.toml read via install metadata, so the
     # version never drifts between here and argparse. Re-run `pip install -e .`
     # after bumping, or this falls through to the sentinel below.
-    try:                                  # attempt to retrieve version of the codebase
-        return version("Aiko-chan")       # must match [project].name in pyproject.toml
-    except PackageNotFoundError:          # if codebase not installed properly
-        return "0.0.0+unknown"            # PEP 440 / semver-valid fallback, sorts as lowest version
-
-
-def _install_os_exit_trap(log: logging.Logger) -> None:
-    """Monkeypatch os._exit to log the caller's stack before the hard exit (only if AIKO_TRACE_EXIT=1)."""
-    if os.environ.get("AIKO_TRACE_EXIT") != "1":                # trap is opt-in: off unless explicitly enabled
-        return                                                  # quit without setting trap
-
-    def def _logged_os_exit(code: int | str | None) -> None:    # os._exit() cannot be caught by try/except,
-        try:
-            log.error("[main] os._exit(%s) called from:\n%s",   # so wrap it to log WHO called it before dying
-                      code, "".join(traceback.format_stack()))
-        except Exception:                                       # if logging itself fails (e.g., during shutdown),
-            pass                                                # don't let traceback formatting block the actual exit
-        finally:
-            _original_os_exit(code)                             # then still perform the hard exit
-
-    os._exit = _logged_os_exit                                  # patch applied; any code saving os._exit before this bypasses logging
-    # Not idempotent — calling this twice double-wraps os._exit (harmless
-    # but noisy: two stack logs, still one real exit). Currently called
-    # once, unconditionally, in main(). If that ever changes, add a guard.
+    try:
+        return version("Aiko-chan")          # must match [project].name in pyproject.toml
+    except PackageNotFoundError:             # bare checkout / metadata not installed
+        return _FALLBACK_VERSION             # NTS: raised when the dist name isn't found —
+                                             # i.e. running without `pip install -e .`
 
 
 def _run_with_error_logging(log: logging.Logger, label: str, fn: Callable[[], None]) -> None:
     """Run fn(); on exception, log traceback under `label`, then re-raise."""
-    try:                                                        # attempt to run function
-        fn()                                                    # execute the function
-    except Exception:                                           # if error,
-        log.exception("[main] fatal error in %s", label)        # log the error, %s is lazy style to sub the label
-        raise                                                   # re-raise the original exception
+    try:                                                     # NTS: try = run, expect possible failure
+        fn()                                                 # NTS: zero-arg, per Callable[[], None]
+    except Exception:                                        # NTS: Exception not BaseException — lets Ctrl+C through
+        log.exception("[main] fatal error in %s", label)     # NTS: .exception auto-appends traceback; %s = lazy style
+        raise                                                # bare raise = re-raise the ORIGINAL exception, traceback intact
 
 
 def _handle_clear_mem(log) -> int:  # type: ignore[no-untyped-def]

@@ -12,7 +12,7 @@ Usage:
     # Two-way messenger adapters (Aiko-Lingo etc.) are spawned by the front
     # ends themselves, not by main.py — they run beside WebUI/CLI when
     # MESSENGER_ADAPTERS is set, but this module never spawns them.
-    python main.py --debug       # verbose console logging (LOG_CONSOLE=1, LOG_LEVEL=DEBUG) + memory hits per turn
+    python main.py --debug       # verbose console logging (LOG_CONSOLE=1, LOG_LEVEL=DEBUG), full firehose
     python main.py --no-console    # silence console logging even with --debug (file log only)
     python main.py --trace       # brain trace per turn (TRACE_BRAIN=1) without DEBUG-level log spam
     python main.py --clear-mem   # wipe all stored memories and exit
@@ -41,20 +41,21 @@ typewriter, latency/debug accounting) — see that module for details.
 
 Flow:
 
-                                      parse_args()
-                                          │
-        ┌────────────────┼────────────────┼─────────────────┐
-        ▼                ▼                ▼                 ▼
-   --clear-mem       --logout          --cli           (default)
-        │                │                │                 │
-        ▼                ▼                ▼                 ▼
-  AikoMemorize()    _handle_logout()   run_cli(args)  run_webui(args)
-     .clear()            │                │                 │
-        │                ▼                ▼                 ▼
-        ▼           SystemExit(0)  boot inside      AikoWeb(defer_servers=True)
-   SystemExit(0)                   run_session(),    boot runs to completion,
-                                    then turn loop    THEN server opens; post-auth
-                                                      init via system/prepare.py
+                            parse_args()
+                                │
+                 load_config() + _apply_debug_trace_env()
+                 (LOG_CONSOLE/LOG_LEVEL/TRACE_BRAIN set from flags)
+                                │
+            ┌───────────────────┼───────────────────┼───────────────────┐
+            ▼                   ▼                   ▼                   ▼
+       --clear-mem           --logout             --cli             (default)
+            │                   │                   │                   │
+            ▼                   ▼                   ▼                   ▼
+     AikoMemorize()       _handle_logout()      run_cli(args)     run_webui(args)
+        .clear()            returns 0/1         then turn loop     boot to completion,
+            │                                                     THEN server opens
+            ▼
+       returns 0/1 (becomes the process exit code via SystemExit)
 
 Front-end imports are deferred into main() rather than done at module load,
 so that --clear-mem and --logout (which don't need FastAPI, uvicorn,
@@ -78,9 +79,8 @@ import argparse                      # CLI argument parsing
 import logging                       # logger for all [main] output
 import os                            # env gate + hard-exit trap
 import traceback                     # logging exit origins
-from importlib.metadata import PackageNotFoundError, version
-                                     # reads installed dist metadata — version comes from
-                                     # pyproject.toml, never hardcoded (single source of truth)
+                                     # (importlib.metadata is deferred into _resolve_version —
+                                     # its dist scan must not run on every boot, only for --version)
 
 _original_os_exit = os._exit         # capture BEFORE the patch — calling os._exit inside the wrapper would recurse into itself
                                      # NOTE: Python binds the function at assignment time — after
@@ -89,10 +89,10 @@ _original_os_exit = os._exit         # capture BEFORE the patch — calling os._
 
 _FALLBACK_VERSION = "0.0.0+unknown"  # PEP 440 sentinel when metadata is missing; 0.0.0 sorts below any real release
                                      # NOTE: +unknown is a PEP 440 "local version" — valid, not semver
-_CONFIRM_PHRASE = "Clear All Aiko's Memories."       # exact string the user type to arm the wipe
+_CONFIRM_PHRASE = "Clear All Aiko's Memories."       # exact string the user types to arm the wipe
 
 
-__all__ = ["parse_args", "main", "_apply_debug_trace_env"]     # public surface: entry point + CLI parser; _ names are internal
+__all__ = ["parse_args", "main", "_apply_debug_trace_env", "_console_enabled"]     # public surface: entry point + CLI parser; _ names are internal
 
 
 def _resolve_version() -> str:
@@ -100,10 +100,19 @@ def _resolve_version() -> str:
     # Single source of truth: pyproject.toml read via install metadata, so the
     # version never drifts between here and argparse. Re-run `pip install -e .`
     # after bumping, or this falls through to the sentinel below.
+    # Import is deferred (not module-top-level) so the dist-metadata disk scan
+    # runs only when --version is actually passed, never on normal boots.
+    from importlib.metadata import PackageNotFoundError, version
     try:
         return version("Aiko-chan")          # must match [project].name in pyproject.toml
     except PackageNotFoundError:             # bare checkout / metadata not installed
         return _FALLBACK_VERSION             # raised when the dist name isn't found — i.e. running without `pip install -e .`
+
+
+class _VersionAction(argparse.Action):
+    """Print the version and exit — resolves metadata lazily (see _resolve_version)."""
+    def __call__(self, parser, namespace, values, option_string=None):
+        parser.exit(message=f"{parser.prog} {_resolve_version()}\n")
 
 
 def _install_os_exit_trap(log: logging.Logger, enabled: bool) -> None:
@@ -125,6 +134,11 @@ def _install_os_exit_trap(log: logging.Logger, enabled: bool) -> None:
     os._exit = _logged_os_exit     # patch applied; anything that bound os._exit before this bypasses logging
     # NOTE: Not idempotent — calling this twice double-wraps os._exit (harmless
     # but noisy). Currently called once, gated on --debug, in main().
+
+
+def _console_enabled() -> bool:
+    """True when log records already reach the terminal (else print()s fill in)."""
+    return os.environ.get("LOG_CONSOLE") == "1"
 
 
 def _handle_clear_mem(log: logging.Logger) -> int:
@@ -165,8 +179,8 @@ def _handle_clear_mem(log: logging.Logger) -> int:
         return 0
 
     log.info("Clearing all memories...")
-    print("Clearing all memories...")                 # LOG_CONSOLE is off by default on this path,
-                                                      # so log.info alone would be silent in the terminal
+    if not _console_enabled():                          # log.info alone is silent in the terminal unless
+        print("Clearing all memories...")               # console logging is on — print() fills that gap only
 
     # Deferred heavy import — memory stack (embedding models, vector store)
     # is only paid for on this destructive branch; normal WebUI/CLI launches
@@ -178,20 +192,23 @@ def _handle_clear_mem(log: logging.Logger) -> int:
                                                       # check whether clear() needs models at all
                                                       # (storage-layer delete would skip that allocation)
         mem.clear()                                   # NOTE: assumes clear() is atomic or idempotent —
-                                                      # if it isn't, a mid-wipe failure can leave
-                                                      # partially-cleared storage behind.
-        del mem                                       # drop refs so sqlite/faiss/file handles close
-                                                      # on GC before exit
+                                                        # if it isn't, a mid-wipe failure can leave
+                                                        # partially-cleared storage behind.
+                                                        # (no explicit close: AikoMemorize owns no documented
+                                                        # shutdown hook, so release is left to the interpreter
+                                                        # on exit immediately below)
     except Exception:                                 # Exception, not BaseException — lets Ctrl+C through.
                                                       # Contain the failure HERE — this branch sits outside
                                                       # main()'s front-end try/except, so a re-raise would
                                                       # escape main() as a raw interpreter traceback.
         log.exception("[main] memory wipe (--clear-mem) failed")
-        print("ERROR: memory wipe failed — see aiko.log for details.")
+        if not _console_enabled():
+            print("ERROR: memory wipe failed — see aiko.log for details.")
         return 1                                      # failure — distinguishable from 0 == aborted/success
 
     log.info("Memory cleared.")
-    print("Memory cleared.")
+    if not _console_enabled():
+        print("Memory cleared.")
     return 0                                          # success
 
 
@@ -220,7 +237,12 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="main.py",
         description="Aiko-chan — local assistant. Front ends: WebUI (default) or CLI (--cli); maintenance: --clear-mem, --logout.",
-        epilog="Exit codes: 0 = success or user-declined · 1 = operation failed.",
+        epilog=("Exit codes: 0 = success or user-declined · 1 = operation failed.\n"
+                "Diagnostics — level and destination are independent:\n"
+                "  --trace                 clean brain signal (no DEBUG spam)\n"
+                "  --console               INFO and above on the terminal\n"
+                "  --debug                 full firehose (DEBUG everywhere)\n"
+                "  --debug --no-console    full firehose, file only"),
         formatter_class=argparse.RawDescriptionHelpFormatter,   # keep the epilog's line breaks as written
     )
 
@@ -235,16 +257,15 @@ def parse_args() -> argparse.Namespace:
                    help="keyboard input, TTS stays on, ASR off; ASR still loads for /listen")
 
     # ---- Version -------------------------------------------------------------
-    p.add_argument("--version", action="version",
-                   version=f"%(prog)s {_resolve_version()}",    # evaluated HERE at parse time, not import — bare checkout
-                   help="show installed version and exit")      # gets the sentinel instead of crashing on --help
+    p.add_argument("--version", action=_VersionAction, nargs=0,
+                   help="show installed version and exit")
 
     # ---- Maintenance (mutually exclusive — each owns the process) ------------
     maintenance = p.add_mutually_exclusive_group()              # argparse enforces: second flag on one cmdline → error+exit 2
     maintenance.add_argument("--clear-mem", action="store_true",
                              help="wipe ALL stored memories (two-gate confirm, then exit)")
     maintenance.add_argument("--logout",    action="store_true",
-                             help="clear the stored session and exit")
+                             help="clear the stored CLI auth token and exit")
 
     # ---- Debug / diagnostics ---------------------------------------------------
     p.add_argument("--debug", action="store_true",
@@ -268,7 +289,6 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-
 def _apply_debug_trace_env(args: argparse.Namespace) -> None:
     """Map --debug/--trace onto their owned env vars (single write source).
 
@@ -281,6 +301,8 @@ def _apply_debug_trace_env(args: argparse.Namespace) -> None:
     if args.debug:                                      # --debug: verbose stderr logging. LOG_CONSOLE/LOG_LEVEL
         os.environ["LOG_CONSOLE"] = "1"                 # are OWNED by these flags — never set them in yaml/.env,
         os.environ["LOG_LEVEL"] = "DEBUG"               # main.py is the single write source.
+                                                        # --debug is the full firehose (nothing muted, including
+                                                        # per-request HTTP chatter); use --trace for clean signal.
 
     # --console/--no-console explicitly forces console logging either way and
     # beats both --debug and any exported LOG_CONSOLE. Unset (None) keeps the
@@ -290,9 +312,6 @@ def _apply_debug_trace_env(args: argparse.Namespace) -> None:
         os.environ["LOG_CONSOLE"] = "1"
     elif args.console is False:
         os.environ["LOG_CONSOLE"] = "0"
-
-        # --debug is the full firehose (nothing muted, including per-request
-        # HTTP chatter); use --trace for the clean brain-only signal.
 
     # --trace enables the per-step brain tracer. Independent of --debug so
     # you can get a clean trace without the DEBUG-level log spam, or

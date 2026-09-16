@@ -4,14 +4,14 @@ Per-step tracer for Aiko's cognitive pipeline. When TRACE_BRAIN=1
 (set by `python main.py --trace`, or exported in the shell yourself),
 every instrumented function emits a structured step to:
 
-  1. Live UI  — colored line via ui.add_message('sys', ...) so the trace
-                scrolls past in the WebUI / CLI terminal in real time.
-                Each step is one "screen" separated by a header rule.
-  2. File     — appended to /tmp/aiko_trace_<YYYYMMDD-HHMMSS>.txt with
-                explicit `--- screen N: <step> ---` separators so you can
-                page through a session after the fact.
+  1. Log      — one log record per step via system.log (component
+                 "brain_trace") into logs/aiko.log, viewable and filterable
+                 in Log Studio. This is the full trace; the chat stays clean.
+  2. Live UI  — turn banners only (begin/end) via ui.add_message('sys', ...)
+                 so you can see turns scroll past without the step firehose
+                 shredding the conversation into confetti.
 
-Off by default. Cost when off is a single `os.getenv` per instrumented
+Off by default. Cost when off is a single boolean check per instrumented
 function call (negligible).
 
 Design:
@@ -38,23 +38,33 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import time
 from collections import deque
 from contextlib import contextmanager
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from system.config import env_int
+from system.log import get_logger
 
 # ── configuration ────────────────────────────────────────────────────────────
 
 TRACE_ENABLED = os.getenv("TRACE_BRAIN", "0").lower() in {"1", "true", "yes", "on"}
-TRACE_FILE_PATH = os.getenv("AIKO_TRACE_FILE", "")  # default: /tmp/aiko_trace_<ts>.txt
 TRACE_UI_ENABLED = os.getenv("AIKO_TRACE_UI", "1").lower() in {"1", "true", "yes", "on"}
 TRACE_MAX_VALUE_CHARS = env_int("AIKO_TRACE_MAX_VALUE_CHARS", 400)
+
+_log = get_logger("brain_trace")  # component "brain_trace" in aiko.log / Log Studio
+
+_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    """Log records must be plain text (ANSI escapes would pollute aiko.log
+    and break Log Studio's record parser)."""
+    return _ANSI_RE.sub("", text)
 
 # ── ANSI colours ──────────────────────────────────────────────────────────────
 # Distinct color per layer so the eye can group steps in the live stream.
@@ -91,10 +101,7 @@ _SENTINEL = "🧠"  # visible marker for the trace header line
 
 _lock = threading.Lock()
 _steps: deque[dict] = deque(maxlen=2000)   # in-memory ring buffer for the session
-_pending_file_steps: list[dict] = []        # buffered steps for batched file writes
 _ui_sink = None                # injected by main.py → ui.add_message("sys", ...)
-_file_handle = None            # opened lazily on first record
-_session_id: str = ""           # YYYYMMDD-HHMMSS for the report file name
 _turn_counter: int = 0
 _turn_started_at: float | None = None
 
@@ -166,30 +173,6 @@ def set_ui_sink(sink) -> None:
     _ui_sink = sink
 
 
-def _ensure_file():
-    global _file_handle, _session_id
-    if _file_handle is not None:
-        return _file_handle
-    if not TRACE_ENABLED:
-        return None
-    if not TRACE_FILE_PATH:
-        _session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
-        path = Path(f"/tmp/aiko_trace_{_session_id}.txt")
-    else:
-        path = Path(TRACE_FILE_PATH)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _file_handle = open(path, "a", encoding="utf-8", buffering=1)
-        _file_handle.write(
-            f"=== Aiko brain trace — session {_session_id} ===\n"
-            f"=== started {datetime.now().isoformat()} ===\n\n"
-        )
-        return _file_handle
-    except Exception:
-        _file_handle = None
-        return None
-
-
 def begin_turn(label: str = "") -> None:
     """Mark the start of a new turn (one user prompt → response)."""
     global _turn_counter, _turn_started_at
@@ -202,7 +185,7 @@ def begin_turn(label: str = "") -> None:
         f"{f'  [{label}]' if label else ''}"
         f"  @ {datetime.now().strftime('%H:%M:%S')} ──"
     )
-    _emit(banner, _HEADER)
+    _emit_banner(banner, _HEADER)
 
 
 def end_turn() -> None:
@@ -214,10 +197,8 @@ def end_turn() -> None:
     banner = (
         f"{_SENTINEL}  ── turn #{_turn_counter} done in {elapsed_ms} ms ──"
     )
-    _emit(banner, _HEADER)
-    _emit("")  # blank line separator
+    _emit_banner(banner, _HEADER)
     _turn_started_at = None
-    flush()
 
 
 def record_step(
@@ -230,10 +211,10 @@ def record_step(
     extras: dict | None = None,
     duration_ms: float | None = None,
 ) -> None:
-    """Record one named step to both the live UI sink and the trace file.
+    """Record one named step: ring buffer + one log record (chat stays clean).
 
     name:    "think.route", "memorize.search", "attention.situation_context", …
-    layer:   one of LAYER_COLORS keys — drives the colour of the live line
+    layer:   one of LAYER_COLORS keys — kept as structured data for filtering
     inputs:  short labels of what flowed into the step
     outputs: short labels of what came out
     factors: human-readable strings explaining WHY (route chosen, memory
@@ -329,54 +310,39 @@ class _StepCtx:
 
 # ── internal rendering ───────────────────────────────────────────────────────
 
-def _emit(text: str, color: str = "") -> None:
-    """Push a line to the UI sink (if configured) and buffer for file."""
+def _emit_banner(text: str, color: str = "") -> None:
+    """Turn banners go to the UI sink (one bubble) AND the log."""
     if TRACE_UI_ENABLED and _ui_sink is not None:
         try:
             _ui_sink.add_message("sys", _c(color, text) if color else text)
         except Exception:
             pass
-    # Buffer for batched file write
-    with _lock:
-        _pending_file_steps.append(text)
+    _log.info(_strip_ansi(text))
 
 
-def _format_kv(label: str, value: Any, color: str) -> str:
+def _format_kv(label: str, value: Any) -> str:
     rendered = _trunc(value)
-    return _c(_DIM, f"    {label}: ") + _c(color, f"{rendered}  ") + _c(_DIM, f"({_short_type(value)})")
+    return f"    {label}: {rendered}  ({_short_type(value)})"
 
 
 def _emit_step(step: dict, *, phase: str = "end") -> None:
-    layer_color = LAYER_COLORS.get(step["layer"], "")
-    name_colored = _c(_NAME_COLOR, step["name"])
-    layer_colored = _c(layer_color, f"[{step['layer']}]") if layer_color else f"[{step['layer']}]"
-    duration = step.get("duration_ms")
-    dur_str = _c(_DIM, f"  ({duration} ms)") if duration is not None else ""
-
-    header_line = (
-        f"  {_c(layer_color, '┌─')} "
-        f"{layer_colored} {name_colored}{dur_str}"
-    )
-    _emit(header_line)
-
-    if step["inputs"]:
-        for k, v in step["inputs"].items():
-            _emit(_format_kv(k, v, _INPUT_COLOR))
-    if step["outputs"]:
-        for k, v in step["outputs"].items():
-            _emit(_format_kv(k, v, _OUTPUT_COLOR))
+    """One step = one log record (multi-line message groups in Log Studio).
+    Nothing goes to the chat — steps no longer shred the conversation."""
+    lines = [
+        f"┌─ [{step['layer']}] {step['name']}"
+        + (f"  ({step['duration_ms']} ms)" if step.get("duration_ms") is not None else "")
+    ]
+    for k, v in (step["inputs"] or {}).items():
+        lines.append(_format_kv(k, v))
+    for k, v in (step["outputs"] or {}).items():
+        lines.append(_format_kv(k, v))
     if step["factors"]:
-        _emit(_c(_DIM, "    factors:"))
-        for f in step["factors"]:
-            _emit(_c(_FACTOR_COLOR, f"      • {f}"))
-    if step["extras"]:
-        for k, v in step["extras"].items():
-            _emit(_format_kv(k, v, _DIM))
-
-    if phase == "start":
-        _emit(_c(layer_color, "  │ running…"))
-    else:
-        _emit(_c(layer_color, "  └─ done"))
+        lines.append("    factors:")
+        lines.extend(f"      • {f}" for f in step["factors"])
+    for k, v in (step["extras"] or {}).items():
+        lines.append(_format_kv(k, v))
+    lines.append("│ running…" if phase == "start" else "└─ done")
+    _log.info("\n".join(lines))
 
 
 def get_box_summary(max_lines: int = 3, max_chars: int = 200) -> list[str]:
@@ -410,29 +376,13 @@ def reset() -> None:
 
 
 def flush() -> None:
-    """Flush buffered trace lines to the trace file."""
-    if not TRACE_ENABLED:
-        return
-    fh = _ensure_file()
-    if not fh:
-        return
-    with _lock:
-        for line in _pending_file_steps:
-            fh.write(line + "\n")
-        _pending_file_steps.clear()
-    fh.flush()
+    """No-op kept for API compatibility — records stream through system.log."""
+    return
 
 
 def shutdown() -> None:
-    global _file_handle
-    flush()
-    if _file_handle is not None:
-        try:
-            _file_handle.write(f"\n=== trace closed {datetime.now().isoformat()} ===\n")
-            _file_handle.close()
-        except Exception:
-            pass
-        _file_handle = None
+    """No-op kept for API compatibility (called by orchestrate on exit)."""
+    return
 
 
 __all__ = [

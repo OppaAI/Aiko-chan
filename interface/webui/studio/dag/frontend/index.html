@@ -3,32 +3,35 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Aiko Graph Studio — n8n-style</title>
+    <title>Aiko Graph Studio</title>
     <link rel="stylesheet" href="shared/css/tokens.css">
     <link rel="stylesheet" href="shared/css/base.css">
     <link rel="stylesheet" href="static/style.css">
 </head>
 <body>
     <header class="studio-header">
-        <div style="display: flex; align-items: center; gap: 14px;">
-            <a href="#" id="back-btn" title="Return to previous page" style="display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; background: #1a1028; border: 1px solid var(--dim); border-radius: 50%; color: var(--purple); text-decoration: none; transition: all 0.2s; font-weight: bold; font-size: 16px;">←</a>
+        <div class="header-left">
+            <a href="#" id="back-btn" title="Back">←</a>
             <h1>Aiko Graph Studio</h1>
         </div>
         <div class="header-actions">
-            <button id="new-graph-btn" class="btn" title="Create a new empty graph">+ New</button>
-            <button id="duplicate-graph-btn" class="btn" title="Clone selected graph">Duplicate</button>
-            <button id="delete-graph-btn" class="btn" style="color: var(--pink)" title="Delete selected user graph">Delete graph</button>
-            <span style="width:1px;height:18px;background:var(--dim);display:inline-block"></span>
-            <button id="add-node-btn" class="btn" title="Add node from palette selection (or default)">Add Node</button>
-            <button id="delete-selected-btn" class="btn" style="color: var(--pink)" title="Delete selected node or edge">Delete</button>
+            <button id="template-btn" class="btn btn-primary" title="Start from a proven workflow shape">✦ Templates</button>
+            <button id="new-graph-btn" class="btn" title="Create an empty workflow">+ New</button>
+            <button id="duplicate-graph-btn" class="btn" title="Clone the selected workflow">Duplicate</button>
+            <button id="delete-graph-btn" class="btn btn-danger" title="Delete the selected user workflow">Delete</button>
+            <span class="divider"></span>
+            <button id="add-node-btn" class="btn" title="Add the selected palette node (N)">Add Node</button>
+            <button id="delete-selected-btn" class="btn btn-danger" title="Delete selected node or edge (Del)">Remove</button>
+            <button id="tidy-btn" class="btn" title="Auto-layout the canvas">Tidy</button>
+            <span class="divider"></span>
             <button id="validate-btn" class="btn" title="Check cycles, deps, unknown tools">Validate</button>
-            <button id="run-btn" class="btn" title="Bounded dry-run (60s, 2 workers)">▶ Run</button>
+            <button id="run-btn" class="btn" title="Bounded dry-run">▶ Run</button>
             <span class="header-status" id="header-status"></span>
-            <button id="save-btn" class="btn btn-primary">Save</button>
-            <button id="import-btn" class="btn" title="Import graph JSON">Import</button>
-            <button id="export-btn" class="btn btn-primary">Export</button>
-            <button id="refresh-btn" class="btn">Refresh</button>
-            <input type="file" id="import-file" accept="application/json" style="display:none">
+            <button id="save-btn" class="btn btn-primary" title="Save (Ctrl+S)">Save</button>
+            <button id="import-btn" class="btn" title="Import workflow JSON">Import</button>
+            <button id="export-btn" class="btn" title="Export workflow JSON">Export</button>
+            <button id="refresh-btn" class="btn" title="Reload from disk">⟳</button>
+            <input type="file" id="import-file" accept="application/json" hidden>
         </div>
     </header>
 
@@ -36,49 +39,71 @@
         <aside class="sidebar">
             <h2>Workflows</h2>
             <div id="playbooks-list"></div>
-            <h2 style="margin-top:16px">Node palette</h2>
-            <input id="palette-search" class="detail-input" placeholder="Search tools…" style="margin-bottom:8px">
-            <div id="palette-hint" style="font-size:10px;color:var(--dim);margin-bottom:8px">Click a tool, then “Add Node”. Drag from a node's right port to another node's left port to connect.</div>
+
+            <h2 class="mt">Node palette</h2>
+            <input id="palette-search" class="detail-input" placeholder="Search nodes…" autocomplete="off">
+            <div id="palette-hint" class="hint">
+                Click a node then <b>Add Node</b> (or double-click it). Drag a node's right port
+                onto another node's left port to connect them.
+            </div>
             <div id="tool-palette"></div>
         </aside>
 
         <div class="canvas-area" id="canvas-area">
             <svg id="canvas"></svg>
+
             <div class="canvas-info" id="graph-info">Select a workflow</div>
+
             <div class="legend" id="legend">
                 <div class="legend-item"><span class="legend-line solid"></span> depends_on</div>
                 <div class="legend-item"><span class="legend-line dashed"></span> loop_to</div>
                 <div class="legend-item"><span class="legend-line orange"></span> fallback_to</div>
             </div>
+
             <div class="zoom-controls">
                 <button class="zoom-btn" id="zoom-in" title="Zoom in">+</button>
                 <button class="zoom-btn" id="zoom-out" title="Zoom out">−</button>
                 <button class="zoom-btn" id="zoom-fit" title="Fit to view">⊡</button>
             </div>
-            <div class="details-panel" id="details-panel" style="display:none">
-                <h3>Node Details</h3>
+
+            <div class="details-panel" id="details-panel" hidden>
+                <div class="details-panel-header">
+                    <h3 id="details-title">Node</h3>
+                    <button class="details-close" id="details-close" title="Close">×</button>
+                </div>
+                <div class="tabs" id="details-tabs">
+                    <button class="tab active" data-tab="params">Parameters</button>
+                    <button class="tab" data-tab="settings">Settings</button>
+                    <button class="tab" data-tab="output">Output</button>
+                </div>
                 <div id="details-content"></div>
             </div>
-            <div class="run-panel" id="run-panel" style="display:none">
-                <div class="details-panel-header"><h3>Validate / Run</h3><button class="details-close" onclick="document.getElementById('run-panel').style.display='none'">×</button></div>
+
+            <div class="run-panel" id="run-panel" hidden>
+                <div class="details-panel-header">
+                    <h3 id="run-title">Validate / Run</h3>
+                    <button class="details-close" id="run-close" title="Close">×</button>
+                </div>
                 <div id="run-content"></div>
             </div>
+
             <div class="tooltip" id="tooltip"></div>
+        </div>
+    </div>
+
+    <div class="modal" id="template-modal" hidden>
+        <div class="modal-card">
+            <div class="modal-head">
+                <h3>Start from a template</h3>
+                <button class="details-close" id="template-close">×</button>
+            </div>
+            <p class="modal-sub">Proven workflow shapes, already wired and runnable. Pick one, then edit it.</p>
+            <div id="template-list" class="template-grid"></div>
         </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
     <script src="shared/graph-bootstrap.js"></script>
     <script src="static/script.js"></script>
-    <script>
-      document.getElementById('back-btn').addEventListener('click', function(e) {
-        e.preventDefault();
-        if (window.history.length > 1) {
-          window.history.back();
-        } else {
-          window.location.href = '/';
-        }
-      });
-    </script>
 </body>
 </html>

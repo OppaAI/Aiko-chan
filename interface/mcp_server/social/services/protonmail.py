@@ -2,6 +2,7 @@ from typing import Optional, List, Dict
 import asyncio
 import os
 import sys
+import time
 import warnings
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -58,6 +59,148 @@ def _is_invalid_refresh_error(exc: Exception) -> bool:
         or ("422" in msg and "refresh" in msg)
     )
 
+
+def _is_captcha_or_abuse_error(exc: Exception) -> bool:
+    """True when Proton is gating the login behind human verification.
+
+    Observed server-side (Sept 2026): POST core/v4/auth answers
+      Code 9001 "For security reasons, please complete CAPTCHA ..."
+    and the client's CAPTCHA auto-solver then dies inside its own token
+    refresh with 422/Code 10013 — so the 422 below *masks* the CAPTCHA
+    gate. Match both the direct and the masked shape here.
+    """
+    msg = f"{exc}".lower()
+    kind = type(exc).__name__.lower()
+    return (
+        "captcha" in msg
+        or "captcha" in kind
+        or "9001" in msg
+        or "appeal-abuse" in msg
+        or "human verification" in msg
+        or "humanverification" in msg
+        or "too many recent logins" in msg
+        or "2028" in msg
+    )
+
+
+def _non_interactive_2fa_code() -> str:
+    """Supply a 2FA/TOTP code without touching stdin.
+
+    The MCP server runs on stdio transport: the library's default
+    getter (input("enter 2FA code:")) would consume JSON-RPC bytes as a
+    "code" and hang/corrupt the wire. Prefer an explicit one-shot code,
+    else a TOTP secret, else fail with an actionable message.
+    """
+    one_shot = (env("PROTONMAIL_2FA_CODE") or "").strip().replace(" ", "")
+    if one_shot:
+        return one_shot
+    secret = (env("PROTONMAIL_TOTP_SECRET") or "").strip().replace(" ", "")
+    if secret:
+        try:
+            import pyotp
+        except ImportError:
+            raise RuntimeError(
+                "ProtonMail requires 2FA and PROTONMAIL_TOTP_SECRET is set "
+                "but the 'pyotp' package is not installed"
+            )
+        return pyotp.TOTP(secret).now()
+    raise RuntimeError(
+        "ProtonMail account requires two-factor authentication, but neither "
+        "PROTONMAIL_2FA_CODE nor PROTONMAIL_TOTP_SECRET is set "
+        "(interactive stdin prompt is disabled on the MCP stdio transport)"
+    )
+
+
+# --- Anti-hammering backoff -------------------------------------------------
+# Proton flags accounts/IPs that log in too often (Code 9001 CAPTCHA gate,
+# Code 2028 "too many recent logins"). The scheduler retries failed email
+# polls, so without a backoff every poll burns another login attempt and
+# deepens the flag. After an abuse-class failure, fresh password logins are
+# refused for PROTONMAIL_AUTH_COOLDOWN_S (default 600s). The marker lives on
+# disk next to the session pickle so concurrent MCP processes back off too;
+# delete the marker file to retry immediately. Set the env var to 0 to
+# disable.
+_last_auth_failure_at = 0.0
+_last_auth_failure_reason = ""
+
+
+def _auth_cooldown_seconds() -> int:
+    try:
+        return max(0, int(env("PROTONMAIL_AUTH_COOLDOWN_S", "600") or "600"))
+    except (TypeError, ValueError):
+        return 600
+
+
+def _cooldown_file() -> str:
+    try:
+        base = os.path.dirname(_session_file())
+    except Exception:
+        base = os.path.expanduser("~/.aiko/OppaAI/profile")
+    return os.path.join(base, "protonmail_login_cooldown")
+
+
+def _auth_backoff_remaining() -> float:
+    """Seconds left on the login backoff, 0 when logins are allowed."""
+    cooldown = _auth_cooldown_seconds()
+    if cooldown <= 0:
+        return 0.0
+    newest = _last_auth_failure_at
+    try:
+        marker = _cooldown_file()
+        if os.path.exists(marker):
+            newest = max(newest, os.path.getmtime(marker))
+    except OSError:
+        pass
+    return max(0.0, (newest + cooldown) - time.time())
+
+
+def _record_auth_failure(reason: object = "") -> None:
+    """Start/refresh the login backoff (memory + on-disk marker)."""
+    global _last_auth_failure_at, _last_auth_failure_reason
+    _last_auth_failure_at = time.time()
+    _last_auth_failure_reason = str(reason)[:200]
+    try:
+        marker = _cooldown_file()
+        Path(marker).parent.mkdir(parents=True, exist_ok=True)
+        Path(marker).write_text(f"{_last_auth_failure_at}\n{_last_auth_failure_reason}\n")
+    except OSError as e:
+        print(f"[PROTONMAIL] Could not write cooldown marker: {e}", file=sys.stderr, flush=True)
+
+
+def _clear_auth_backoff() -> None:
+    """A login succeeded — lift any backoff."""
+    global _last_auth_failure_at, _last_auth_failure_reason
+    _last_auth_failure_at = 0.0
+    _last_auth_failure_reason = ""
+    try:
+        marker = _cooldown_file()
+        if os.path.exists(marker):
+            os.remove(marker)
+    except OSError:
+        pass
+
+
+def _cooldown_error() -> Dict:
+    remaining = int(_auth_backoff_remaining())
+    reason = _last_auth_failure_reason
+    try:
+        if not reason and os.path.exists(_cooldown_file()):
+            reason = Path(_cooldown_file()).read_text().splitlines()[1] if len(Path(_cooldown_file()).read_text().splitlines()) > 1 else ""
+    except (OSError, IndexError):
+        pass
+    detail = f" (last failure: {reason})" if reason else ""
+    return {
+        "ok": False,
+        "provider": "protonmail",
+        "error": (
+            f"ProtonMail password login paused for ~{remaining}s to avoid "
+            f"deepening Proton's anti-abuse/CAPTCHA flag{detail}. Wait for the "
+            f"backoff to expire, or delete {_cooldown_file()} to retry now "
+            f"(risks re-triggering the flag). Set PROTONMAIL_AUTH_COOLDOWN_S=0 "
+            f"to disable the backoff."
+        ),
+    }
+
 # stderr-bound print for ProtonMail's internal logger.
 # ProtonMail.__init__ defaults logging_func=print (stdout). Since the MCP
 # server runs on stdio transport any write to stdout corrupts the JSON-RPC
@@ -91,6 +234,11 @@ def _get_client():
     session_file = _session_file()
     if not os.path.exists(session_file) and not password:
         return None, {"ok": False, "error": "PROTONMAIL_PASSWORD not set for first login", "provider": "protonmail"}
+    if not os.path.exists(session_file) and _auth_backoff_remaining() > 0:
+        # No usable session and we recently hit Proton's anti-abuse gate:
+        # refuse to burn another login attempt.
+        print(f"[PROTONMAIL] Login backoff active ({int(_auth_backoff_remaining())}s left); skipping password login", file=sys.stderr, flush=True)
+        return None, _cooldown_error()
     print(f"[PROTONMAIL] Authenticating as {username[:3]}{chr(42) * max(0, len(username) - 3)}...", file=sys.stderr, flush=True)
     print(f"[PROTONMAIL] Session file exists: {os.path.exists(session_file)} ({session_file})", file=sys.stderr, flush=True)
     try:
@@ -104,6 +252,9 @@ def _get_client():
                 # pickle can never refresh again. Delete it and fall through
                 # to a fresh password login instead of failing forever.
                 if _is_invalid_refresh_error(load_err) and password:
+                    if _auth_backoff_remaining() > 0:
+                        print(f"[PROTONMAIL] Saved session expired but login backoff is active ({int(_auth_backoff_remaining())}s left); not re-logging in", file=sys.stderr, flush=True)
+                        raise
                     print(f"[PROTONMAIL] Saved session expired ({load_err}); deleting stale file and re-logging in...", file=sys.stderr, flush=True)
                     try:
                         os.remove(session_file)
@@ -112,7 +263,7 @@ def _get_client():
                     _client_cache = None
                     _cache_username = None
                     client = ProtonMail(logging_func=_stderr_print)
-                    _run_client_call(client.login, username, password)
+                    _password_login(client, username, password)
                     Path(session_file).parent.mkdir(parents=True, exist_ok=True)
                     _run_client_call(client.save_session, session_file)
                     print(f"[PROTONMAIL] Session re-saved: {session_file}", file=sys.stderr, flush=True)
@@ -122,10 +273,11 @@ def _get_client():
                 print("[PROTONMAIL] Session loaded successfully", file=sys.stderr, flush=True)
         else:
             print("[PROTONMAIL] No saved session; performing login...", file=sys.stderr, flush=True)
-            _run_client_call(client.login, username, password)
+            _password_login(client, username, password)
             Path(session_file).parent.mkdir(parents=True, exist_ok=True)
             _run_client_call(client.save_session, session_file)
             print(f"[PROTONMAIL] Session saved: {session_file}", file=sys.stderr, flush=True)
+        _clear_auth_backoff()
         _client_cache = client
         _cache_username = username
         return client, None
@@ -138,7 +290,54 @@ def _get_client():
         hint = ""
         if _is_invalid_refresh_error(e) and not password:
             hint = " (saved session expired and PROTONMAIL_PASSWORD is not set, so automatic re-login is impossible — set the password or delete the session pickle)"
+        if _is_abuse_gate(e, session_existed=os.path.exists(session_file)):
+            # Proton is demanding human/CAPTCHA verification (or we are rate
+            # limited). Retrying the login immediately only deepens the flag,
+            # so start the backoff and explain what to do.
+            _record_auth_failure(e)
+            hint = (
+                " — Proton is gating logins behind human/CAPTCHA verification "
+                "(anti-abuse) or rate-limiting this account/IP, so automatic "
+                "password login cannot proceed. What helps: (1) stop automated "
+                "retries for a while so the flag can decay (this client now "
+                "backs off automatically); (2) log in once in a real browser "
+                "from this network and solve the CAPTCHA; (3) if it persists, "
+                "appeal at https://proton.me/support/appeal-abuse"
+            )
         return None, {"ok": False, "error": f"authentication failed: {e}{hint}", "provider": "protonmail"}
+
+
+def _is_abuse_gate(exc: Exception, session_existed: bool) -> bool:
+    """True when the error means 'Proton blocked the login attempt itself'.
+
+    A 422/Code 10013 with NO session file can never be a genuinely stale
+    saved session (there is nothing to refresh) — it is the masked shape of
+    the CAPTCHA/anti-abuse gate (proven Sept 2026: the client's CAPTCHA
+    auto-solver dies in its own token refresh). Any direct CAPTCHA/rate-limit
+    signal counts regardless of session state.
+    """
+    if _is_captcha_or_abuse_error(exc):
+        return True
+    return _is_invalid_refresh_error(exc) and not session_existed
+
+
+def _password_login(client, username: str, password: str) -> None:
+    """Run the library login with a non-interactive 2FA getter and verify it.
+
+    The library logs "login failure" but does NOT raise when SRP
+    verification fails (e.g. wrong password) — it just continues into the
+    fork/cookies flow, which later explodes as a confusing 422. Check
+    authenticated() explicitly so bad credentials surface as bad
+    credentials.
+    """
+    _run_client_call(client.login, username, password, _non_interactive_2fa_code)
+    user = getattr(client, "user", None)
+    authenticated = user.authenticated() if user is not None else False
+    if not authenticated:
+        raise RuntimeError(
+            "ProtonMail SRP verification failed (server rejected the login "
+            "proof — most likely a wrong PROTONMAIL_PASSWORD)"
+        )
 
 
 def clear_cached_client() -> None:
@@ -178,6 +377,8 @@ async def _reauth_fresh_client():
     _drop_stale_session("invalid refresh token")
     if not env("PROTONMAIL_PASSWORD"):
         return None, {"ok": False, "error": "saved ProtonMail session expired and PROTONMAIL_PASSWORD is not set, so automatic re-login is impossible — set the password or log in manually", "provider": "protonmail"}
+    if _auth_backoff_remaining() > 0:
+        return None, _cooldown_error()
     return _get_client()
 
 

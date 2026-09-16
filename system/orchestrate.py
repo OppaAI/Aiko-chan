@@ -1000,7 +1000,7 @@ def run_session(ui, args) -> None:
     spin_t.start()
 
     # Wire the brain tracer to the UI sink so per-step traces stream into
-    # the WebUI / CLI as sys lines. Cheap when AIKO_TRACE_BRAIN is off.
+    # the WebUI / CLI as sys lines. Cheap when TRACE_BRAIN is off.
     _brain_trace.set_ui_sink(ui)
     _brain_trace.begin_turn("boot")  # banner
     _brain_trace.record_step(

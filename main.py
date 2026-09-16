@@ -13,6 +13,7 @@ Usage:
     # ends themselves, not by main.py — they run beside WebUI/CLI when
     # MESSENGER_ADAPTERS is set, but this module never spawns them.
     python main.py --debug       # verbose console logging (LOG_CONSOLE=1, LOG_LEVEL=DEBUG) + memory hits per turn
+    python main.py --no-console    # silence console logging even with --debug (file log only)
     python main.py --trace       # brain trace per turn (TRACE_BRAIN=1) without DEBUG-level log spam
     python main.py --clear-mem   # wipe all stored memories and exit
     python main.py --logout      # clear stored CLI (GitHub OAuth) auth token and exit
@@ -91,7 +92,7 @@ _FALLBACK_VERSION = "0.0.0+unknown"  # PEP 440 sentinel when metadata is missing
 _CONFIRM_PHRASE = "Clear All Aiko's Memories."       # exact string the user type to arm the wipe
 
 
-__all__ = ["parse_args", "main"]     # public surface: entry point + CLI parser; _ names are internal
+__all__ = ["parse_args", "main", "_apply_debug_trace_env"]     # public surface: entry point + CLI parser; _ names are internal
 
 
 def _resolve_version() -> str:
@@ -248,6 +249,8 @@ def parse_args() -> argparse.Namespace:
     # ---- Debug / diagnostics ---------------------------------------------------
     p.add_argument("--debug", action="store_true",
                    help="verbose stderr logging (DEBUG level)")
+    p.add_argument("--console", action=argparse.BooleanOptionalAction, default=None,   # None = follow the --debug rule below;
+                   help="force console logging on (--console) or off (--no-console); default: on with --debug, off otherwise)")
     p.add_argument("--trace", action="store_true",              # CLI twin of TRACE_BRAIN=1 — main() maps this flag
                    help="per-turn brain tracer (TRACE_BRAIN=1) — what Aiko is thinking, without DEBUG-level log spam")   # onto the env var so the consumer reads only one source
 
@@ -266,6 +269,39 @@ def parse_args() -> argparse.Namespace:
 
 
 
+def _apply_debug_trace_env(args: argparse.Namespace) -> None:
+    """Map --debug/--trace onto their owned env vars (single write source).
+
+    Extracted so the flag→env wiring is unit-testable without running main().
+    Direct assignment (not setdefault) so the flag beats any exported shell
+    var. Must run before any module that snapshots these vars at import time
+    (system.log reads LOG_CONSOLE/LOG_LEVEL, system.brain_trace reads
+    TRACE_BRAIN) is imported.
+    """
+    if args.debug:                                      # --debug: verbose stderr logging. LOG_CONSOLE/LOG_LEVEL
+        os.environ["LOG_CONSOLE"] = "1"                 # are OWNED by these flags — never set them in yaml/.env,
+        os.environ["LOG_LEVEL"] = "DEBUG"               # main.py is the single write source.
+
+    # --console/--no-console explicitly forces console logging either way and
+    # beats both --debug and any exported LOG_CONSOLE. Unset (None) keeps the
+    # rule above: console follows --debug. "0" (not unset) so an explicit
+    # --no-console beats a shell-exported LOG_CONSOLE=1 too.
+    if args.console is True:
+        os.environ["LOG_CONSOLE"] = "1"
+    elif args.console is False:
+        os.environ["LOG_CONSOLE"] = "0"
+
+        # --debug is the full firehose (nothing muted, including per-request
+        # HTTP chatter); use --trace for the clean brain-only signal.
+
+    # --trace enables the per-step brain tracer. Independent of --debug so
+    # you can get a clean trace without the DEBUG-level log spam, or
+    # combine both for the full picture.
+    if args.trace:                                      # --trace: per-turn brain tracer, independent of --debug
+        os.environ["TRACE_BRAIN"] = "1"                 # (clean trace without DEBUG spam). Same ownership rule:
+                                                         # flag is the only write source; beats any shell export.
+
+
 def main() -> int:
     """Primary entry point for the Aiko-chan application."""
     # Parse args FIRST — --debug needs to set LOG_CONSOLE/LOG_LEVEL in the
@@ -278,21 +314,8 @@ def main() -> int:
     from system.config import load_config
     load_config()
 
-    if args.debug:                                      # --debug: verbose stderr logging. LOG_CONSOLE/LOG_LEVEL
-        os.environ["LOG_CONSOLE"] = "1"                 # are OWNED by these flags — never set them in yaml/.env,
-        os.environ["LOG_LEVEL"] = "DEBUG"               # main.py is the single write source. Direct assignment
-                                                        # (not setdefault) so the flag beats any exported shell var.
+    _apply_debug_trace_env(args)
 
-        # Background social-listening daemons (Threads/Bluesky/Mastodon) get
-        # their urllib3/httpcore debug lines muted automatically; set
-        # AIKO_DEBUG_FULL_HTTP=1 to see raw HTTP if you ever need to.
-
-    # --trace enables the per-step brain tracer. Independent of --debug so
-    # you can get a clean trace without the DEBUG-level log spam, or
-    # combine both for the full picture.
-    if args.trace:                                      # --trace: per-turn brain tracer, independent of --debug
-        os.environ["TRACE_BRAIN"] = "1"                 # (clean trace without DEBUG spam). Same ownership rule:
-                                                        # flag is the only write source; beats any shell export.
     # Set up logging and exit tracing
     from system.log import get_logger
     log = get_logger(__name__)

@@ -187,3 +187,27 @@ class TestSilentStderr:
             pass
         # stderr should be restored — write should not raise
         os.write(2, b"restored\n")
+
+
+class TestDebugHttpMute:
+    # --debug (DEBUG level) is the full firehose: nothing muted.
+    # At any other level the polling/HTTP chatter is demoted to WARNING.
+    NOISY = ("urllib3", "httpcore", "openai._base_client", "httpx", "telegram")
+
+    def _reset_noisy(self):
+        for name in self.NOISY:
+            logging.getLogger(name).setLevel(logging.NOTSET)
+
+    def test_muted_below_debug(self, monkeypatch):
+        monkeypatch.setenv("LOG_LEVEL", "INFO")
+        self._reset_noisy()
+        get_logger("test.muted")
+        for name in self.NOISY:
+            assert logging.getLogger(name).level == logging.WARNING
+
+    def test_nothing_muted_at_debug(self, monkeypatch):
+        monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+        self._reset_noisy()
+        get_logger("test.firehose")
+        for name in self.NOISY:
+            assert logging.getLogger(name).level == logging.NOTSET

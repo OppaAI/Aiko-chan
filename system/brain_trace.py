@@ -1,8 +1,8 @@
 """system/brain_trace.py
 
-Per-step tracer for Aiko's cognitive pipeline. When AIKO_TRACE_BRAIN=1
-(set automatically by `python main.py --debug`), every instrumented
-function emits a structured step to:
+Per-step tracer for Aiko's cognitive pipeline. When TRACE_BRAIN=1
+(set by `python main.py --trace`, or exported in the shell yourself),
+every instrumented function emits a structured step to:
 
   1. Live UI  — colored line via ui.add_message('sys', ...) so the trace
                 scrolls past in the WebUI / CLI terminal in real time.
@@ -51,7 +51,7 @@ from system.config import env_int
 
 # ── configuration ────────────────────────────────────────────────────────────
 
-TRACE_ENABLED = os.getenv("AIKO_TRACE_BRAIN", "0").lower() in {"1", "true", "yes", "on"}
+TRACE_ENABLED = os.getenv("TRACE_BRAIN", "0").lower() in {"1", "true", "yes", "on"}
 TRACE_FILE_PATH = os.getenv("AIKO_TRACE_FILE", "")  # default: /tmp/aiko_trace_<ts>.txt
 TRACE_UI_ENABLED = os.getenv("AIKO_TRACE_UI", "1").lower() in {"1", "true", "yes", "on"}
 TRACE_MAX_VALUE_CHARS = env_int("AIKO_TRACE_MAX_VALUE_CHARS", 400)

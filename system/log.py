@@ -224,31 +224,21 @@ def _setup() -> None:
             ch.setFormatter(fmt)
             root.addHandler(ch)
 
-        # ── silence noisy polling libraries (telegram getUpdates every ~10s) ──
+        # ── non-DEBUG mode: mute the brain-irrelevant HTTP chatter ──
         # httpx logs every POST at INFO; with the telegram adapter that is
         # ~8.6k lines/day of `POST .../getUpdates 200 OK` with zero signal.
-        # Keep them at WARNING so real errors still surface. Re-enable by
-        # running with LOG_LEVEL=DEBUG / --debug.
+        # The Threads / Bluesky / Mastodon monitor daemons likewise poll
+        # external APIs every few seconds, and at DEBUG level urllib3 +
+        # httpcore + openai._base_client each emit a line per request.
+        # Demote all of them to WARNING so real errors still surface, while
+        # the brain trace stays readable. At DEBUG level nothing is muted:
+        # --debug is the full firehose by design (use --trace for the clean
+        # brain-only signal without DEBUG spam).
         if log_level != "DEBUG":
-            for noisy in ("httpx", "httpx2", "httpcore", "telegram", "telegram.ext"):
-                logging.getLogger(noisy).setLevel(logging.WARNING)
-
-        # ── --debug mode: still mute the brain-irrelevant HTTP chatter ──
-        # The Threads / Bluesky / Mastody monitor daemons poll external
-        # APIs every few seconds. At DEBUG level urllib3 + httpcore2 +
-        # openai._base_client each emit a line per request, drowning out
-        # the brain trace that --debug is actually for. Demote them to
-        # WARNING so only real errors surface — the brain trace itself is
-        # logged via system.brain_trace and is independent of this filter.
-        # Toggle off by setting AIKO_DEBUG_FULL_HTTP=1 if you ever need to
-        # see the raw HTTP layer.
-        if os.getenv("AIKO_DEBUG_FULL_HTTP", "0").lower() not in {"1", "true", "yes", "on"}:
-            for noisy in (
-                "urllib3", "urllib3.connectionpool", "urllib3.util.retry",
-                "httpcore", "httpcore2", "httpcore.connection",
-                "hpack", "hypercorn", "h11", "httpx", "httpx2",
-                "openai", "openai._base_client", "openai._utils",
-            ):
+            for noisy in ("httpx", "httpx2", "httpcore", "httpcore2", "telegram", "telegram.ext",
+                          "urllib3", "urllib3.connectionpool", "urllib3.util.retry",
+                          "httpcore.connection", "hpack", "hypercorn", "h11",
+                          "openai", "openai._base_client", "openai._utils"):
                 logging.getLogger(noisy).setLevel(logging.WARNING)
 
         _initialized = True

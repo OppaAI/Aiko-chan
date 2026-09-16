@@ -1,0 +1,6 @@
+See PR body for the full call-site patch. Apply against cognition/think.py and agentic/agentic.py from dev (6da70b8).
+
+Also requires:
+  - cognition/conscience/hooks.py (already on this branch)
+  - one-line import in system/wakeup.py after load_config():
+      import cognition.conscience.wiring  # noqa: F401

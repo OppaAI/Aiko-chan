@@ -1536,6 +1536,7 @@ def _build_tool_map() -> dict[str, Callable[..., Any]]:
         "agentic.workflows.common.nodes",
         "agentic.workflows.job_hunt.graph",
         "agentic.workflows.aurora_forecast.graph",
+        "agentic.toolkit.flow",          # <-- ADD
     ):
         try:
             __import__(_mod)

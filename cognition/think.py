@@ -21,6 +21,23 @@ Memory + knowledge-base fetch:
   handler. Wiki/policy/skill/experience context is agentic-only and fetched
   separately, inside agentic.agentic.run_agentic_chat, only once intent has
   actually resolved to "agentic".
+
+Deep-think mode:
+  A human being asked a hard question doesn't just answer with the first
+  idea that comes to mind — they stop, turn it over, check it against what
+  they already know, and only then speak. `/think` and an explicit natural-
+  language ask ("think this through more carefully", "really think about
+  this") both route through chat(deep_think=True) — see _DEEP_THINK_RE and
+  _is_deep_think_request() below. This is detected as a fast regex path in
+  route(), BEFORE quaternary intent classification, because it's a request
+  about *how* to answer (take more care), not *what kind* of task this is —
+  it layers on top of localchat rather than competing with agentic/webchat
+  as a fifth semantic label. Deep-think mode widens memory/knowledge recall
+  (DEEP_THINK_MEMORY_LIMIT/DEEP_THINK_KNOWLEDGE_LIMIT), multiplies the token
+  budget further than ordinary reasoning mode (DEEP_THINK_TOKEN_SCALE), and
+  injects a structured multi-angle reasoning scaffold (_DEEP_THINK_GUIDE)
+  into the prompt so the model actually works the question instead of just
+  writing more words about its first answer.
 """
 
 from __future__ import annotations
@@ -185,6 +202,15 @@ MEMORY_RECALL_TIMEOUT = env_float("MEMORY_RECALL_TIMEOUT", 5.0)
 # actually filters weak individual results out of what gets returned.
 # 0 = off (default) — no memory is ever dropped for being weak.
 MEMORY_MIN_SCORE = env_float("MEMORY_MIN_SCORE", 0.0)
+
+# ── deep-think mode ───────────────────────────────────────────────────────────
+# See module docstring. Triggered by /think (orchestrate.py) or by an
+# explicit natural-language ask matched by _DEEP_THINK_RE below. Scales well
+# past ordinary self._reasoning mode (_REASONING_SCALE) on every axis: token
+# budget, memory/knowledge recall depth, and prompt structure.
+DEEP_THINK_TOKEN_SCALE = env_int("DEEP_THINK_TOKEN_SCALE", 6)
+DEEP_THINK_MEMORY_LIMIT = env_int("DEEP_THINK_MEMORY_LIMIT", max(MEMORY_RECALL_LIMIT * 3, 8))
+DEEP_THINK_KNOWLEDGE_LIMIT = env_int("DEEP_THINK_KNOWLEDGE_LIMIT", max(KNOWLEDGE_RECALL_LIMIT * 3, 8))
 
 def _resolve_base_tokens() -> int:
     try:
@@ -528,6 +554,71 @@ def _is_greeting_only(user_input: str) -> bool:
     return bool(_GREETING_ONLY_RE.match(user_input or ""))
 
 
+# ── deep-think trigger ───────────────────────────────────────────────────────
+# Matches an explicit ask for careful/thorough reasoning, in natural language
+# — distinct from /think (orchestrate.py), which calls chat(deep_think=True)
+# directly. Kept as a fast regex path rather than a fifth semantic-routing
+# label: this is a request about HOW to answer (slow down, work it through),
+# which should layer on top of whatever localchat/webchat/agentic would have
+# picked, not compete with them for the turn.
+_DEEP_THINK_RE = re.compile(
+    r"\b(?:"
+    r"think (?:more |a bit )?(?:deeply|thoroughly|carefully|harder|longer)|"
+    r"think (?:this |it |that )?through(?: (?:carefully|thoroughly|properly))?|"
+    r"really think (?:about|through|it over)|"
+    r"take (?:your|some) time (?:and |to )?think|"
+    r"deep(?:er)? think(?:ing)?|"
+    r"deep dive(?: into)?|"
+    r"reason (?:more )?(?:deeply|carefully|thoroughly)|"
+    r"give (?:this|it) (?:some |more )?(?:careful |deep )?thought|"
+    r"analy[sz]e (?:this |it )?(?:thoroughly|carefully|deeply|in[- ]depth)|"
+    r"slow down and think|"
+    r"think (?:step[- ]by[- ]step|out loud) (?:carefully|thoroughly|properly)|"
+    r"weigh (?:this |it )?carefully|"
+    r"don'?t rush(?:,)? think|"
+    r"be (?:extra |really )?thorough"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _is_deep_think_request(text: str) -> bool:
+    """True for an explicit ask to reason more carefully than a normal turn."""
+    return bool(_DEEP_THINK_RE.search(text or ""))
+
+
+# Structured multi-angle reasoning scaffold injected only for deep-think
+# turns. Distinct from (and stacked on top of) the lightweight always-on
+# reasoning_guide built in _current_system_prompt_parts — that one is a
+# cheap nudge paid every turn; this one is the real thing, paid only when
+# asked for.
+_DEEP_THINK_GUIDE = (
+    "<deep_thinking_mode>\n"
+    "The user explicitly asked for careful, thorough thinking on this turn — "
+    "treat it the way a person stops and really works through a hard "
+    "question, rather than answering with the first plausible idea. Work "
+    "through these stages internally before answering (never show the "
+    "stages themselves, and never pad the reply just to look thorough):\n"
+    "1. Restate the real question — what is actually being asked, and what "
+    "would count as a genuinely good answer?\n"
+    "2. Recall what you already know that bears on it — from this "
+    "conversation, from memory, from knowledge context — and note honestly "
+    "what you don't know or are unsure of.\n"
+    "3. Generate at least two meaningfully different angles, "
+    "interpretations, or candidate answers. Do not just elaborate on the "
+    "first idea that came to mind.\n"
+    "4. Pressure-test each one: what evidence supports it, what would prove "
+    "it wrong, where does it conflict with something already established?\n"
+    "5. Check for contradictions with what you or the user have already "
+    "said, in this conversation or in memory.\n"
+    "6. Synthesize the strongest answer, then re-read your own draft once "
+    "for overreach, unsupported claims, or a gap you glossed over.\n"
+    "The reply itself should read as a well-organized, considered answer — "
+    "not a transcript of these steps.\n"
+    "</deep_thinking_mode>"
+)
+
+
 # Matches our own injected "[Style only — never quote this. ...]" control
 # blocks (see cognition.attention.soft_user_prompt). The LLM prompt keeps
 # them, but recall queries, history, cognitive-state recording and memory
@@ -608,6 +699,11 @@ class AikoThink:
         self._active_user_ids: set[str] = set()
         self._active_users_lock = threading.Lock()
         self._reasoning = False
+        # Deep-think mode flag — set alongside self._reasoning by
+        # chat(deep_think=True), and read only by _stream_response to pick
+        # the token-budget scale (DEEP_THINK_TOKEN_SCALE vs _REASONING_SCALE).
+        # See module docstring "Deep-think mode".
+        self._deep_think = False
         self.last_usage: dict = {}
         self.last_prompt_debug: dict = {}
         self._last_chat_time = time.time()
@@ -766,6 +862,12 @@ class AikoThink:
         extraction/writeback. Non-greeting turns then start the shared
         memory+KB future and pass it to the selected handler.
 
+        Deep-think fast path: an explicit ask to think more carefully
+        (_is_deep_think_request) is checked FIRST, before quaternary intent
+        classification — see module docstring "Deep-think mode". It routes
+        straight to chat(deep_think=True) rather than competing with
+        agentic/webchat/localchat as a fifth semantic label.
+
         Per-user-active tracking: multiple users' turns can run concurrently
         (e.g. agentic loop for one user, quick chat for another). Shared
         state (_history, _speak) has its own per-resource lock.
@@ -826,6 +928,31 @@ class AikoThink:
             gate_result = (True, "gate unavailable", "proceed")
 
         try:
+            # ── deep-think fast path ────────────────────────────────────────
+            # Checked before quaternary intent classification: an explicit
+            # "think this through carefully" style ask is a request about HOW
+            # to answer, not WHAT kind of task this is, so it bypasses
+            # agentic/webchat/localchat classification entirely rather than
+            # competing with them. See module docstring "Deep-think mode".
+            if _is_deep_think_request(user_input):
+                _brain_trace.record_step(
+                    "think.route",
+                    layer="route",
+                    inputs={"user_input": user_input},
+                    outputs={"intent": "think_chat", "handler": "chat(deep_think=True)"},
+                    factors=[
+                        "explicit deep-think phrase matched _DEEP_THINK_RE",
+                        "bypasses quaternary intent routing — same mechanism as /think",
+                    ],
+                )
+                return self.chat(
+                    user_input,
+                    token_callback=token_callback,
+                    _skip_search=True,
+                    deep_think=True,
+                    system_note=system_note,
+                )
+
             intent, route_vec = self._route_intent(user_input)
             log.info("[route] intent=%s", intent)
 
@@ -943,7 +1070,12 @@ class AikoThink:
         routing, so greeting-only turns can skip recall entirely while
         agentic/webchat/localchat still receive the same shared future.
         Callers that run standalone (e.g. a scheduled agentic job with no
-        prior route() call) can call this directly instead.
+        prior route() call, or chat(deep_think=True) with no future) can call
+        this directly instead.
+
+        mem_limit/know_limit — overridable recall depth. chat(deep_think=True)
+        passes DEEP_THINK_MEMORY_LIMIT/DEEP_THINK_KNOWLEDGE_LIMIT here so a
+        deep-think turn pulls in noticeably more context than a normal one.
 
         query_vector — pre-computed _QUERY_INSTRUCT embedding of user_input,
         avoids a redundant HTTP call inside _MemoryBackend.search().
@@ -1720,11 +1852,24 @@ class AikoThink:
         query_vec: np.ndarray | None = None,
         websearch_net: bool = True,
         system_note: str | None = None,
+        deep_think: bool = False,
     ) -> str:
-        """Standard chat: persona plus optional memory/KB context."""
+        """Standard chat: persona plus optional memory/KB context.
+
+        deep_think — see module docstring "Deep-think mode". Sets
+        self._reasoning + self._deep_think for the duration of this call
+        (both are cleared again before returning), widens memory/knowledge
+        recall to DEEP_THINK_MEMORY_LIMIT/DEEP_THINK_KNOWLEDGE_LIMIT when no
+        mem_kb_future was already supplied, and injects _DEEP_THINK_GUIDE —
+        a structured multi-angle reasoning scaffold — into the system prompt.
+        """
         speak = self._get_speak()
         if speak and speak.is_playing():
             speak.stop()
+
+        if deep_think:
+            self._reasoning = True
+            self._deep_think = True
 
         # Fused soft-gate prompts (see _soft_gate_reply) carry an injected
         # "[Style only — ...]" control block for the LLM. Everything below
@@ -1734,7 +1879,8 @@ class AikoThink:
 
         with _brain_trace.step("think.chat", layer="context",
                                inputs={"user_input": user_input, "raw_input": raw_input, "skip_memory": skip_memory,
-                                       "store_turn": store_turn, "websearch_net": websearch_net}) as ctx:
+                                       "store_turn": store_turn, "websearch_net": websearch_net,
+                                       "deep_think": deep_think}) as ctx:
             situation_block = ""
             metacognitive_block = ""
             if skip_memory:
@@ -1745,7 +1891,18 @@ class AikoThink:
             else:
                 memorize = self._get_memorize()
                 from cognition.attention import for_identity
-                memories, knowledge_block = self._resolve_mem_kb(raw_input, mem_kb_future)
+                if deep_think and mem_kb_future is None:
+                    # No pre-started future (deep-think fast path bypasses
+                    # route()'s CONTEXT_POOL future) — fetch directly with
+                    # the wider deep-think recall limits instead of the
+                    # normal MEMORY_RECALL_LIMIT/KNOWLEDGE_RECALL_LIMIT.
+                    memories, knowledge_block = self._fetch_memory_and_knowledge(
+                        raw_input, query_vector=query_vec,
+                        mem_limit=DEEP_THINK_MEMORY_LIMIT,
+                        know_limit=DEEP_THINK_KNOWLEDGE_LIMIT,
+                    )
+                else:
+                    memories, knowledge_block = self._resolve_mem_kb(raw_input, mem_kb_future)
                 memories = for_identity(current_user_id()).prioritize_memories(raw_input, memories)
                 memory_block = memorize.format_for_context(
                   memories, query=raw_input, query_vector=query_vec
@@ -1822,13 +1979,22 @@ class AikoThink:
                 except Exception:
                     pass
 
+            if deep_think:
+                volatile_system = f"{volatile_system}\n\n{_DEEP_THINK_GUIDE}"
+
             volatile_system = f"{volatile_system}\n\n{bioclock.current_datetime_block()}".strip()
             notices_block = _format_system_notices(system_note)
             if notices_block:
                 volatile_system = f"{volatile_system}\n\n{notices_block}"
 
             llm_prompt = user_input
-            if self._reasoning:
+            if deep_think:
+                llm_prompt = (
+                    f"{user_input}\n\n"
+                    "Take real time to think this through thoroughly before answering "
+                    "— see the deep-thinking guidance above."
+                )
+            elif self._reasoning:
                 llm_prompt = f"{user_input}\n\nThink through this carefully."
 
             with self._history_lock:
@@ -1842,7 +2008,7 @@ class AikoThink:
                 trimmed = trimmed[:-1] + [{"role": "user", "content": llm_prompt}]
 
             self.last_prompt_debug = {
-                "mode": "greeting" if skip_memory else "localchat",
+                "mode": "greeting" if skip_memory else ("deep_think" if deep_think else "localchat"),
                 "system_prompt": core_system + ("\n\n" + volatile_system if volatile_system else ""),
                 "memory_prompt": memory_block or "<memory_context>\nNo memories.\n</memory_context>",
                 "knowledge_prompt": knowledge_block,
@@ -1869,6 +2035,7 @@ class AikoThink:
                     f"situation/metacognitive added: {bool(situation_block)}/{bool(metacognitive_block)}",
                     f"wiki trigger: {_should_use_local_knowledge(raw_input)}",
                     f"websearch_net trigger: {_WEBSEARCH_HINT_RE.search(raw_input) is not None}",
+                    f"deep_think: {deep_think} (token_scale={DEEP_THINK_TOKEN_SCALE if deep_think else (_REASONING_SCALE if self._reasoning else 1)})",
                 ],
             )
 
@@ -1887,6 +2054,7 @@ class AikoThink:
             if store_turn:
                 self._store_async(raw_input, raw_response)
             self._reasoning = False
+            self._deep_think = False
             ctx.set(outputs={"reply_chars": len(raw_response or "")},
                     factors=[f"LLM stream done; reply {len(raw_response or '')} chars"])
             return raw_response
@@ -2129,7 +2297,13 @@ class AikoThink:
 
     def _stream_response(self, messages: list[dict], system: str = "", token_callback=None, emit: bool = True, system_tail: str = "") -> str:
         full_response = []
-        base_tokens = _BASE_TOKENS * _REASONING_SCALE if self._reasoning else _BASE_TOKENS
+        if self._reasoning:
+            # Deep-think mode gets its own, much larger scale than ordinary
+            # self._reasoning — see module docstring "Deep-think mode".
+            scale = DEEP_THINK_TOKEN_SCALE if self._deep_think else _REASONING_SCALE
+            base_tokens = _BASE_TOKENS * scale
+        else:
+            base_tokens = _BASE_TOKENS
         max_tokens = _effective_max_tokens(base_tokens)
 
         # Message layout for llama-server cache_prompt reuse:

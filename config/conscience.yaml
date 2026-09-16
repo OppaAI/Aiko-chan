@@ -1,0 +1,113 @@
+# config/conscience.yaml
+#
+# Conscience Circuit Core tunables. Flattened into os.environ by
+# system.config.load_config() like every other config/*.yaml — remember to add
+# "conscience.yaml" to config/index.yaml's `configs:` list.
+#
+# Naming follows the CCC_* prefix so `env | grep CCC_` shows the whole circuit.
+
+CCC:
+  # Master switch. Off => evaluate() returns a permissive verdict with
+  # gate="disabled" and costs one boolean check.
+  ENABLED: 1
+
+  # Constitution version. Recorded on every ledger row so decisions can be
+  # replayed against a revised canon. Bump whenever canon.seed.jsonl changes.
+  CANON_VERSION: "1.0.0"
+
+  # ── salience floor ────────────────────────────────────────────────────────
+  # Turns below this never enter the circuit (greetings, acknowledgements,
+  # trivially short input). Keeps the gate off the hot path for ~60% of turns.
+  MIN_CHARS: 12
+  SKIP_GREETINGS: 1
+
+  # ── layer ladder ──────────────────────────────────────────────────────────
+  # 0 = reflex only, 1 = +recall, 2 = +SLM judge, 3 = +LLM deliberation,
+  # 4 = +human escalation. Lower this to degrade gracefully under load.
+  MAX_LAYER: 4
+
+  # Escalate to L3 deliberation when the L2 judge is below this confidence.
+  DELIBERATE_THRESHOLD: 0.62
+  # Escalate to a human when, after L3, confidence is still below this.
+  HITL_THRESHOLD: 0.45
+  # Doubt rule (Rom 14:23): an unresolved escalation resolves to refuse, never
+  # to allow. Seconds to wait for a human before the default-closed timeout.
+  HITL_TIMEOUT_SECONDS: 900
+  HITL_DEFAULT: "refuse"
+
+  # ── verdict thresholds ────────────────────────────────────────────────────
+  # Either axis at or below REFUSE_AT (with confidence) => refuse.
+  REFUSE_AT: -0.60
+  # Either axis at or below CAUTION_AT => caution.
+  CAUTION_AT: -0.20
+  # Disagreement between the two axes wider than this is treated as unresolved
+  # regardless of confidence (e.g. "good for the user, bad for a third party").
+  AXIS_CONFLICT_GAP: 0.80
+
+  # ── tool policy ───────────────────────────────────────────────────────────
+  # Any caution on an irreversible tool is upgraded to escalate.
+  IRREVERSIBLE_REQUIRES_APPROVAL: 1
+  # Irreversible AND outward-facing (scope external/public/network) goes to a
+  # human even on a clean verdict. This is the excessive-agency control; turn
+  # it off only if you genuinely want Aiko posting unsupervised.
+  ESCALATE_IRREVERSIBLE_EXTERNAL: 1
+  # Tools always routed through a human regardless of verdict.
+  ALWAYS_APPROVE_TOOLS:
+    - post_social
+    - post_x
+    - post_threads
+    - send_email
+    - github_push
+    - delete_memory
+    - clear_memory
+
+  # ── canon retrieval ───────────────────────────────────────────────────────
+  CANON_PATH: "data/conscience/canon.seed.jsonl"
+  CANON_TOP_K: 6
+  # Use the shared HarrierEmbedder for semantic norm retrieval. When 0, falls
+  # back to lexical (token overlap) retrieval only — no embed call on the gate.
+  CANON_SEMANTIC: 1
+  CANON_CACHE_TTL: 300.0
+  # Shrink judge confidence when fewer than this many norms were retrieved.
+  THIN_EVIDENCE_MIN: 2
+  THIN_EVIDENCE_PENALTY: 0.25
+
+  # ── conscience SLM (L2) ───────────────────────────────────────────────────
+  # Second llama-server instance. Leave SLM_BASE_URL empty to disable the SLM
+  # and run on the lexical fallback scorer alone.
+  SLM_BASE_URL: "http://127.0.0.1:8081/v1"
+  SLM_MODEL: "conscience-qwen35-08b"
+  SLM_MAX_TOKENS: 96
+  SLM_TIMEOUT: 2.5
+  SLM_TEMPERATURE: 0.0
+  # Blend weight between SLM score and lexical score when both are available.
+  # 1.0 = trust the SLM entirely, 0.0 = ignore it.
+  SLM_WEIGHT: 0.75
+
+  # ── L3 deliberation (main LLM) ────────────────────────────────────────────
+  DELIBERATE_MODEL: ""        # empty => reuse LLM_MODEL
+  DELIBERATE_MAX_TOKENS: 220
+  DELIBERATE_TIMEOUT: 20.0
+
+  # ── speech policy ─────────────────────────────────────────────────────────
+  # Never volunteer moral commentary. A pastoral_note is voiced only on a
+  # refusal (where Aiko owes an explanation) or when explicitly asked.
+  # Setting this to 1 makes her preachy and will wreck the companion tone.
+  VOICE_UNSOLICITED_NOTES: 0
+  # Max chars of the refusal explanation folded into the prompt.
+  NOTE_MAX_CHARS: 240
+
+  # ── ledger ────────────────────────────────────────────────────────────────
+  LEDGER_ENABLED: 1
+  LEDGER_DB_PATH: "memory/conscience.db"
+  # Store the raw content of the judged act. 0 = store only a SHA-256 digest
+  # plus the verdict (safer on a shared box; useless for training).
+  LEDGER_STORE_CONTENT: 1
+  LEDGER_RETAIN_DAYS: 365
+
+  # ── safeguards (L0) ───────────────────────────────────────────────────────
+  # Rule families in guardrails.py. Disable individually by id prefix.
+  GUARDRAILS_ENABLED: 1
+  GUARDRAIL_DISABLED_RULES: ""     # comma-separated rule ids, e.g. "SG-PRIV-02"
+  # Treat a guardrail hit on outbound content as refuse (1) or caution (0).
+  GUARDRAIL_EGRESS_STRICT: 1

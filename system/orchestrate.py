@@ -1499,7 +1499,7 @@ def run_session(ui, args) -> None:
                     '/clear                   — wipe long-term memories',
                     '/remember                — pin last turn forever (decay-proof)',
                     '/memory                  — show stored memories',
-                    '/think <question>        — reason step-by-step (single-shot, 3× token budget)',
+                    '/think <question>        — deep, thorough reasoning pass (wider recall + reasoning scaffold)',
                     '/web <query>             — web search',
                     '/voice                   — toggle TTS on/off',
                     '/listen                  — toggle ASR on/off',

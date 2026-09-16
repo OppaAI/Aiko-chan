@@ -37,6 +37,7 @@ from agentic.toolkit import needle_team  # noqa: F401  # Needle2 multi-agent del
 from agentic.toolkit import codebase  # noqa: F401  # codebase RAG (Jetson-optimized, separate DB)
 from agentic.toolkit import tool_result_cache  # noqa: F401
 from agentic.toolkit import tool_result_cache_tools  # noqa: F401  # registers cache_* graph tools
+from agentic.toolkit import flow  # noqa: F401  # n8n-style core flow/transform/IO nodes   <-- ADD
 from agentic.workflows.job_hunt import toolset  # noqa: F401
 from agentic.toolkit import social  # noqa: F401
 

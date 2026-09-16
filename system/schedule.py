@@ -2238,15 +2238,23 @@ class ScheduleRunner:
             # Fallback: build from playbook nodes (legacy)
             nodes = []
             for raw in playbook.get("nodes", []):
+                if raw.get("tool") == "sticky_note": continue
                 if isinstance(raw, dict) and raw.get("id") and raw.get("tool"):
                     nodes.append(PlanNode(
                         id=str(raw["id"]),
                         tool=str(raw["tool"]),
                         args=dict(raw.get("args", {})),
                         depends_on=tuple(str(d) for d in raw.get("depends_on", [])),
+                        run_if=dict(raw["run_if"]) if isinstance(raw.get("run_if"), dict) else None,
+                        when=dict(raw["when"]) if isinstance(raw.get("when"), dict) else None,
                         loop_to=str(raw["loop_to"]) if raw.get("loop_to") else None,
                         loop_condition=dict(raw["loop_condition"]) if raw.get("loop_condition") else None,
                         max_visits=int(raw["max_visits"]) if raw.get("max_visits") else 0,
+                        timeout_seconds=float(raw["timeout_seconds"]) if raw.get("timeout_seconds") else None,
+                        max_retries=int(raw.get("max_retries", 0) or 0),
+                        retry_backoff_seconds=float(raw.get("retry_backoff_seconds", 1.0) or 1.0),
+                        fallback_to=str(raw["fallback_to"]) if raw.get("fallback_to") else None,
+                        needs_approval=bool(raw.get("needs_approval", False)),
                     ))
             if not nodes:
                 log.debug("Playbook %r has no valid nodes — skipping", graph_id)

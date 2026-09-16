@@ -140,6 +140,9 @@ class KnowledgeSchema:
     def vacuum(self, user_id: str | None = None) -> None:
         vacuum_knowledge_db(user_id)
 
+    def delete_all(self, user_id: str | None = None) -> dict[str, int]:
+        return delete_all(user_id)
+
 
 def connect(user_id: str | None = None) -> sqlite3.Connection:
     """Legacy free-function shim: sole implementation that
@@ -206,3 +209,29 @@ def vacuum_knowledge_db(user_id: str | None = None) -> None:
         conn.execute("ANALYZE")
     finally:
         conn.close()
+
+
+def delete_all(user_id: str | None = None) -> dict[str, int]:
+    """Delete all learned knowledge rows for a user; return per-table counts.
+
+    Covers docs, chunks, archive, and prune meta. The FTS/vec side tables are
+    maintained by triggers. The codebase index (codebase.db) is a rebuildable
+    cache, not learned state, and is NOT touched.
+    """
+    uid = user_id or current_user_id()
+    conn = connect(uid)
+    try:
+        counts = {}
+        counts["learned_chunks"] = conn.execute(
+            "DELETE FROM learned_chunks WHERE user_id=?", (uid,)).rowcount
+        counts["learned_docs"] = conn.execute(
+            "DELETE FROM learned_docs WHERE user_id=?", (uid,)).rowcount
+        counts["learned_chunks_archive"] = conn.execute(
+            "DELETE FROM learned_chunks_archive WHERE user_id=?", (uid,)).rowcount
+        counts["knowledge_prune_meta"] = conn.execute(
+            "DELETE FROM knowledge_prune_meta WHERE user_id=?", (uid,)).rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    vacuum_knowledge_db(uid)
+    return counts

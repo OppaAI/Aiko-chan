@@ -55,6 +55,7 @@ except ImportError:  # lightweight practice.py/test environments may not have nu
     def entities_from_json(raw): return []
     def entity_overlap_score(query, ents): return 0.0
 from system.log import get_logger
+from system.userspace import current_user_id
 
 log = get_logger(__name__)
 
@@ -165,6 +166,9 @@ class ExperienceSchema:
     def ensure_migrated(self, conn: sqlite3.Connection) -> None:
         ensure_experience_schema_migrated(conn)
 
+    def delete_all(self, user_id: str | None = None) -> dict[str, int]:
+        return delete_all(user_id)
+
 
 def _db_path() -> str:
     """Resolve EXPERIENCE_DB_PATH from the facade namespace at call time.
@@ -224,3 +228,26 @@ def _now() -> str:
 
 # Legacy alias: graph_export.py and tests import _connect directly.
 _connect = connect
+
+
+def delete_all(user_id: str | None = None) -> dict[str, int]:
+    """Delete all experience rows for a user; return per-table counts.
+
+    The FTS/vec side tables are maintained by triggers. Engram relations are
+    removed explicitly (SQLite does not enforce ON DELETE CASCADE unless
+    PRAGMA foreign_keys is on, which store connections don't guarantee).
+    """
+    uid = user_id or current_user_id()
+    conn = connect(uid)
+    try:
+        counts = {}
+        counts["engram_relations"] = conn.execute(
+            "DELETE FROM engram_relations WHERE from_engram IN "
+            "(SELECT id FROM experiences WHERE user_id=?) OR to_engram IN "
+            "(SELECT id FROM experiences WHERE user_id=?)", (uid, uid)).rowcount
+        counts["experiences"] = conn.execute(
+            "DELETE FROM experiences WHERE user_id=?", (uid,)).rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    return counts

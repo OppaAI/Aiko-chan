@@ -15,7 +15,7 @@ Usage:
     python main.py --debug       # verbose console logging (LOG_CONSOLE=1, LOG_LEVEL=DEBUG), full firehose
     python main.py --no-console    # silence console logging even with --debug (file log only)
     python main.py --trace       # brain trace per turn (TRACE_BRAIN=1) without DEBUG-level log spam
-    python main.py --clear-mem   # wipe all stored memories and exit
+    python main.py --clear-mem   # wipe learned state (memories, knowledge, experience) and exit
     python main.py --logout      # clear stored CLI (GitHub OAuth) auth token and exit
     python main.py --name <name> # set CLI display name (only when GitHub OAuth isn't configured)
 
@@ -141,8 +141,27 @@ def _console_enabled() -> bool:
     return os.environ.get("LOG_CONSOLE") == "1"
 
 
+def _clear_dream_scratch(log: logging.Logger) -> None:
+    """Delete deep-study scratch DBs for the active user (transient work files)."""
+    from system.userspace import user_state_path
+    dream_dir = user_state_path("dream")
+    if not dream_dir.is_dir():
+        return
+    for child in dream_dir.iterdir():
+        try:
+            if child.is_file() or child.is_symlink():
+                child.unlink()
+        except OSError as e:                            # keep wiping the rest; report at the end via log
+            log.warning("[main] could not remove dream scratch %s: %s", child, e)
+
+
 def _handle_clear_mem(log: logging.Logger) -> int:
-    """Handle --clear-mem branch: two-step confirm, wipe all stored memories, exit.
+    """Handle --clear-mem branch: two-step confirm, wipe learned state, exit.
+
+    Scope (learned state only): episodic memories, learned knowledge,
+    agentic experience, and deep-study scratch. Deliberately kept: the
+    codebase index (rebuildable cache), profile/identity, skills, workspace,
+    mail sessions, and gamification — use a factory reset for those.
 
     Two gates before the wipe:
         1. Yes/No prompt
@@ -189,14 +208,21 @@ def _handle_clear_mem(log: logging.Logger) -> int:
 
     try:
         mem = AikoMemorize()                          # may load embedding models — on an 8 GB Orin,
-                                                      # check whether clear() needs models at all
-                                                      # (storage-layer delete would skip that allocation)
+                                                        # check whether clear() needs models at all
+                                                        # (storage-layer delete would skip that allocation)
         mem.clear()                                   # NOTE: assumes clear() is atomic or idempotent —
                                                         # if it isn't, a mid-wipe failure can leave
                                                         # partially-cleared storage behind.
                                                         # (no explicit close: AikoMemorize owns no documented
                                                         # shutdown hook, so release is left to the interpreter
                                                         # on exit immediately below)
+        from cognition.knowledge.schema import delete_all as delete_knowledge
+        from agentic.experience.schema import delete_all as delete_experience
+        knowledge_counts = delete_knowledge()         # learned docs/chunks (codebase index cache kept)
+        experience_counts = delete_experience()       # agentic task outcomes
+        _clear_dream_scratch(log)                     # deep-study scratch DBs
+        log.info("[main] cleared knowledge=%s experience=%s",
+                 knowledge_counts, experience_counts)
     except Exception:                                 # Exception, not BaseException — lets Ctrl+C through.
                                                       # Contain the failure HERE — this branch sits outside
                                                       # main()'s front-end try/except, so a re-raise would
@@ -263,7 +289,7 @@ def parse_args() -> argparse.Namespace:
     # ---- Maintenance (mutually exclusive — each owns the process) ------------
     maintenance = p.add_mutually_exclusive_group()              # argparse enforces: second flag on one cmdline → error+exit 2
     maintenance.add_argument("--clear-mem", action="store_true",
-                             help="wipe ALL stored memories (two-gate confirm, then exit)")
+                             help="wipe learned state: memories, knowledge, experience, dream scratch (two-gate confirm, then exit)")
     maintenance.add_argument("--logout",    action="store_true",
                              help="clear the stored CLI auth token and exit")
 

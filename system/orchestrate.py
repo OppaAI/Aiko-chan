@@ -1378,6 +1378,51 @@ def run_session(ui, args) -> None:
                     ui._draw()
                     continue
 
+                # deep_think=True does everything set_reasoning(True) used to
+                # (token budget scale) plus widens memory/knowledge recall and
+                # injects the structured multi-angle reasoning scaffold — see
+                # cognition.think's module docstring "Deep-think mode". Same
+                # path a plain "think this through more carefully" message
+                # takes via route()'s fast-path check.
+                ui.add_message('you', f'[think] {query}')
+                ui.turn_start()
+                ui._draw()
+
+                raw_chunks     = []
+                in_think_block = False
+                think_closed   = False
+
+                def _think_token_cb(token):
+                    nonlocal in_think_block, think_closed
+                    raw_chunks.append(token)
+                    assembled = "".join(raw_chunks)
+
+                    if not think_closed:
+                        if "<think>" in assembled and not in_think_block:
+                            in_think_block = True
+                        if in_think_block:
+                            if "</think>" in assembled:
+                                in_think_block = False
+                                think_closed   = True
+                            return
+
+                    ui.stream_token(token)
+                    ui._draw(buf=[])
+
+                think.chat(query, token_callback=_think_token_cb, deep_think=True)
+
+                assembled_full   = "".join(raw_chunks)
+                scratchpad_match = re.search(r"<think>(.*?)</think>", assembled_full, re.DOTALL)
+                if scratchpad_match:
+                    inner = scratchpad_match.group(1).strip()
+                    if inner:
+                        ui.add_message('sys',
+                            f'[scratchpad] {inner[:300]}{"…" if len(inner) > 300 else ""}')
+
+                ui.stream_commit()
+                ui._draw()
+                continue
+
                 think.set_reasoning(True)
                 ui.add_message('you', f'[think] {query}')
                 ui.turn_start()

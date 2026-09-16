@@ -6,6 +6,7 @@ configs:
 - agentic.yaml  # wiki, skillsets, agentic loop, web search
 - social.yaml  # social, messenger, pixelfed, MCP
 - cognition.yaml  # LLM, routing, reflection, proactive
+- conscience.yaml  # Conscience Circuit Core; guardrail, morality check
 - memory.yaml  # knowledge, learn, episodic memory, experience
 - system.yaml  # identity, timezone, scheduler, logging
 - sensory.yaml  # ASR, VAD, TTS

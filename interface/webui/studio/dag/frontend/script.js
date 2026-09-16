@@ -1,938 +1,1348 @@
-const SIDE = 60;
-        const NODE_W = 180;
-        const NODE_H = 52;
-        const PORT_R = 4;
-        const PORT_HIT_R = 10;
-        const LAYER_GAP = 200;
-        const NODE_GAP = 80;
+/* Aiko Graph Studio — n8n-style canvas editor.
+ *
+ * Talks to interface/webui/studio/dag/backend/api.py:
+ *   /api/playbooks   CRUD + validate + run
+ *   /api/nodes       palette categories + per-node parameter forms
+ *   /api/templates   starter blueprints
+ *
+ * Design notes
+ *   - Node positions live on the node (`node.position`) and are saved with the
+ *     workflow, so the canvas you arrange is the canvas you get back.
+ *   - Parameter forms are generated from the backend catalog, so adding a new
+ *     tool in Python makes it configurable here with zero JS changes.
+ *   - Everything edits the in-memory workflow immediately; Save persists.
+ */
 
-        let currentPlaybooks = [];
-        let selectedPlaybook = null;
-        let selectedNodeId = null;
-        let selectedEdgeId = null;
-        let transform = d3.zoomIdentity;
-        let currentZoom = null;
-        let draggingEdge = null;
+(function () {
+  "use strict";
 
-        // Detect base path for API calls via the shared studio bootstrap
-        const API_BASE = GraphBoot.apiBase();
+  // ── constants ────────────────────────────────────────────────────────────
+  const NODE_W = 200;
+  const NODE_H = 62;
+  const PORT_R = 4.5;
+  const PORT_HIT_R = 11;
+  const COL_GAP = 260;
+  const ROW_GAP = 130;
+  const STICKY_W = 210;
+  const STICKY_H = 96;
 
-        async function fetchPlaybooks() {
-            try {
-                const resp = await fetch(`${API_BASE}/playbooks`);
-                currentPlaybooks = await resp.json();
+  // GraphBoot ships with the studio shell; fall back gracefully if absent.
+  const Boot = window.GraphBoot || {
+    apiBase: () => {
+      const path = window.location.pathname.replace(/\/$/, "");
+      return path.endsWith("/studio/dag") ? `${path}/api` : "/api";
+    },
+    makeZoom: (opts) =>
+      d3.zoom().scaleExtent(opts.scaleExtent || [0.3, 3]).on("zoom", (event) => {
+        opts.target.attr("transform", event.transform);
+        if (opts.onZoom) opts.onZoom(event);
+      }),
+  };
+  const API = Boot.apiBase();
 
-                // Reconcile selectedPlaybook with refreshed data
-                if (selectedPlaybook) {
-                    const refreshed = currentPlaybooks.find(pb => pb.id === selectedPlaybook.id);
-                    if (refreshed) {
-                        selectedPlaybook = refreshed;
-                        renderGraph(selectedPlaybook);
-                    } else {
-                        // Playbook no longer exists, clear selection
-                        selectedPlaybook = null;
-                        selectedNodeId = null;
-                        selectedEdgeId = null;
-                        const svg = d3.select('#canvas');
-                        svg.selectAll('*').remove();
-                        hideDetails();
-                    }
-                }
+  // ── state ────────────────────────────────────────────────────────────────
+  let playbooks = [];
+  let catalog = { categories: [], groups: {}, nodes: {}, featured: [] };
+  let templates = [];
+  let current = null;          // selected workflow (mutable working copy)
+  let selectedNodeId = null;
+  let selectedEdgeKey = null;
+  let selectedTool = null;
+  let lastRun = null;          // { nodes: {id: result}, ... }
+  let activeTab = "params";
+  let showAdvanced = false;
+  let dirty = false;
+  let zoom = null;
+  let svgRoot = null;
+  let viewport = null;
+  let dragging = null;
 
-                renderPlaybooksList();
-            } catch (err) {
-                console.error('Failed to fetch playbooks:', err);
-                document.getElementById('playbooks-list').innerHTML =
-                    '<div style="color:var(--pink);font-size:11px">Failed to load playbooks</div>';
-            }
-        }
+  // ── tiny helpers ─────────────────────────────────────────────────────────
+  const $ = (id) => document.getElementById(id);
 
-        function renderPlaybooksList() {
-            const container = document.getElementById('playbooks-list');
-            container.innerHTML = '';
-            if (!currentPlaybooks.length) {
-                container.innerHTML = '<div style="color:var(--dim);font-size:11px">No playbooks available</div>';
-                return;
-            }
-            currentPlaybooks.forEach(pb => {
-                const nodeCount = Array.isArray(pb.nodes) ? pb.nodes.length : 0;
-                const button = document.createElement('button');
-                button.className = 'playbook-item' + (selectedPlaybook && selectedPlaybook.id === pb.id ? ' active' : '');
-                button.innerHTML = `
-                    <div class="pb-name">${escapeHTML(pb.name || pb.id)}</div>
-                    <div class="pb-id">${escapeHTML(pb.id)}</div>
-                    <div class="pb-meta"><span>${nodeCount} nodes</span></div>
-                `;
-                button.onclick = () => selectPlaybook(pb);
-                container.appendChild(button);
-            });
-        }
+  function esc(value) {
+    const div = document.createElement("div");
+    div.textContent = value === undefined || value === null ? "" : String(value);
+    return div.innerHTML;
+  }
 
-        function escapeHTML(str) {
-            const d = document.createElement('div');
-            d.textContent = str || '';
-            return d.innerHTML;
-        }
+  function status(text, tone) {
+    const el = $("header-status");
+    if (!el) return;
+    el.textContent = text || "";
+    el.style.color = tone === "bad" ? "var(--pink)" : tone === "good" ? "var(--green)" : "var(--dim)";
+  }
 
-        function selectPlaybook(playbook) {
-            selectedPlaybook = playbook;
-            selectedNodeId = null;
-            selectedEdgeId = null;
-            renderPlaybooksList();
-            renderGraph(playbook);
-            hideDetails();
-        }
+  function markDirty() {
+    dirty = true;
+    status("Unsaved ●");
+  }
 
-        function edgeTypeColor(edge) {
-            const t = edge.type || 'depends_on';
-            if (t === 'fallback_to') return 'fallback';
-            if (t === 'loop_to') return 'loop';
-            return 'depends';
-        }
+  async function api(path, options) {
+    const response = await fetch(`${API}${path}`, options);
+    let data = null;
+    try { data = await response.json(); } catch (_) { data = null; }
+    if (!response.ok) {
+      const message = (data && (data.detail || data.error)) || response.statusText;
+      throw new Error(message);
+    }
+    return data;
+  }
 
-        function computeLayout(nodes, edges) {
-            if (!nodes.length) return {};
-            const adj = {};
-            const revAdj = {};
-            nodes.forEach(n => { adj[n.id] = []; revAdj[n.id] = []; });
-            edges.forEach(e => {
-                const sid = typeof e.source === 'string' ? e.source : e.source?.id;
-                const tid = typeof e.target === 'string' ? e.target : e.target?.id;
-                if (sid && tid && adj[sid] && revAdj[tid]) {
-                    adj[sid].push(tid);
-                    revAdj[tid].push(sid);
-                }
-            });
+  function categoryOf(toolName) {
+    const entry = catalog.nodes[toolName];
+    return (entry && entry.category) || "other";
+  }
 
-            const levels = {};
-            const visited = new Set();
-            function assignLevel(id, level) {
-                if (visited.has(id)) return;
-                visited.add(id);
-                levels[id] = level;
-                (adj[id] || []).forEach(child => assignLevel(child, level + 1));
-            }
-            const roots = nodes.filter(n => !(revAdj[n.id] || []).length);
-            if (!roots.length) {
-                roots.push(nodes[0]);
-                assignLevel(nodes[0].id, 0);
-            }
-            roots.forEach(r => assignLevel(r.id, 0));
+  function categoryColor(categoryId) {
+    const found = (catalog.categories || []).find((c) => c.id === categoryId);
+    return (found && found.color) || "#6b5f85";
+  }
 
-            const unvisited = nodes.filter(n => levels[n.id] === undefined);
-            let maxLevel = Math.max(0, ...Object.values(levels));
-            unvisited.forEach(n => { levels[n.id] = ++maxLevel; });
+  function nodeMeta(toolName) {
+    return catalog.nodes[toolName] || {
+      name: toolName, label: toolName, category: "other", icon: "◆",
+      summary: "", params: [], defaults: {},
+    };
+  }
 
-            const levelNodes = {};
-            Object.entries(levels).forEach(([id, lv]) => {
-                if (!levelNodes[lv]) levelNodes[lv] = [];
-                levelNodes[lv].push(id);
-            });
-            const maxNodesInLevel = Math.max(1, ...Object.values(levelNodes).map(g => g.length));
-            const maxWidth = Math.min(maxNodesInLevel * (NODE_W + NODE_GAP), 1400);
+  function isDecorative(node) {
+    return node && node.tool === "sticky_note";
+  }
 
-            const positions = {};
-            const startY = 60;
-            const startX = 80;
-            Object.entries(levelNodes).forEach(([lv, ids]) => {
-                const level = parseInt(lv);
-                const rowH = NODE_H + 60;
-                const totalW = (ids.length - 1) * (NODE_W + NODE_GAP);
-                const offsetX = (maxWidth - totalW) / 2;
-                ids.forEach((id, i) => {
-                    positions[id] = {
-                        x: startX + offsetX + i * (NODE_W + NODE_GAP),
-                        y: startY + level * rowH
-                    };
-                });
-            });
+  // ── workflow list ────────────────────────────────────────────────────────
+  async function fetchPlaybooks(keepSelection) {
+    try {
+      playbooks = await api("/playbooks");
+    } catch (err) {
+      $("playbooks-list").innerHTML =
+        `<div style="color:var(--pink);font-size:11px">Failed to load workflows: ${esc(err.message)}</div>`;
+      return;
+    }
+    if (keepSelection && current) {
+      const fresh = playbooks.find((p) => p.id === current.id);
+      if (fresh && !dirty) selectPlaybook(fresh);
+      else if (!fresh) { current = null; clearCanvas(); }
+    }
+    renderPlaybookList();
+  }
 
-            return positions;
-        }
+  function renderPlaybookList() {
+    const container = $("playbooks-list");
+    container.innerHTML = "";
+    if (!playbooks.length) {
+      container.innerHTML = '<div class="hint">No workflows yet — start from a template.</div>';
+      return;
+    }
+    playbooks.forEach((pb) => {
+      const count = Array.isArray(pb.nodes) ? pb.nodes.length : 0;
+      const button = document.createElement("button");
+      button.className = "playbook-item" + (current && current.id === pb.id ? " active" : "");
+      const badge = pb.readonly
+        ? '<span class="pb-badge">spec</span>'
+        : pb.source === "studio" ? '<span class="pb-badge">mine</span>' : "";
+      button.innerHTML =
+        `<div class="pb-name">${esc(pb.name || pb.id)} ${badge}</div>` +
+        `<div class="pb-id">${esc(pb.id)}</div>` +
+        `<div class="pb-meta"><span>${count} nodes</span></div>`;
+      button.onclick = () => {
+        if (dirty && !window.confirm("Discard unsaved changes?")) return;
+        selectPlaybook(pb);
+      };
+      container.appendChild(button);
+    });
+  }
 
-        function getPortPos(node, side) {
-            const pos = node._layout || { x: 0, y: 0 };
-            if (side === 'left') return { x: pos.x, y: pos.y + NODE_H / 2 };
-            if (side === 'right') return { x: pos.x + NODE_W, y: pos.y + NODE_H / 2 };
-            return pos;
-        }
+  function selectPlaybook(pb) {
+    current = JSON.parse(JSON.stringify(pb));
+    current.nodes = current.nodes || [];
+    current.edges = current.edges || [];
+    selectedNodeId = null;
+    selectedEdgeKey = null;
+    lastRun = null;
+    dirty = false;
+    status("");
+    ensurePositions();
+    renderPlaybookList();
+    renderGraph();
+    hideDetails();
+  }
 
-        function renderGraph(playbook) {
-            const svg = d3.select('#canvas');
-            svg.selectAll('*').remove();
-            const container = document.getElementById('canvas-area');
-            const width = container.clientWidth || 1200;
-            const height = container.clientHeight || 800;
-            svg.attr('viewBox', `0 0 ${width} ${height}`);
+  function clearCanvas() {
+    d3.select("#canvas").selectAll("*").remove();
+    $("graph-info").textContent = "Select a workflow";
+  }
 
-            if (!playbook.nodes?.length) {
-                svg.append('text')
-                    .attr('x', width / 2).attr('y', height / 2)
-                    .attr('text-anchor', 'middle')
-                    .attr('fill', 'var(--dim)')
-                    .attr('font-size', '14px')
-                    .text('No graph data available');
-                document.getElementById('graph-info').textContent = 'No data';
-                return;
-            }
+  // ── layout ───────────────────────────────────────────────────────────────
+  function autoLayout(nodes, edges) {
+    const positions = {};
+    if (!nodes.length) return positions;
+    const incoming = {};
+    const outgoing = {};
+    nodes.forEach((n) => { incoming[n.id] = []; outgoing[n.id] = []; });
+    edges.forEach((e) => {
+      if (e.type && e.type !== "depends_on") return;
+      if (outgoing[e.source] && incoming[e.target]) {
+        outgoing[e.source].push(e.target);
+        incoming[e.target].push(e.source);
+      }
+    });
 
-            const nodes = playbook.nodes;
-            const edges = playbook.edges || [];
+    const level = {};
+    const seen = new Set();
+    function assign(id, depth) {
+      if (seen.has(id)) { level[id] = Math.max(level[id] || 0, depth); return; }
+      seen.add(id);
+      level[id] = depth;
+      (outgoing[id] || []).forEach((child) => assign(child, depth + 1));
+    }
+    nodes.filter((n) => !(incoming[n.id] || []).length).forEach((n) => assign(n.id, 0));
+    nodes.forEach((n) => { if (level[n.id] === undefined) level[n.id] = 0; });
 
-            const positions = computeLayout(nodes, edges);
-            nodes.forEach(n => { n._layout = positions[n.id] || { x: 200, y: 200 }; });
+    const byLevel = {};
+    nodes.forEach((n) => {
+      const depth = level[n.id] || 0;
+      (byLevel[depth] = byLevel[depth] || []).push(n.id);
+    });
+    Object.entries(byLevel).forEach(([depth, ids]) => {
+      const column = parseInt(depth, 10);
+      ids.forEach((id, row) => {
+        positions[id] = { x: 80 + column * COL_GAP, y: 120 + row * ROW_GAP };
+      });
+    });
+    return positions;
+  }
 
-            // Hide the canvas temporarily to prevent visual jump/flicker
-            svg.style('opacity', '0');
+  function ensurePositions() {
+    if (!current) return;
+    const missing = current.nodes.filter((n) => !n.position || typeof n.position.x !== "number");
+    if (!missing.length) return;
+    const derived = autoLayout(current.nodes, current.edges || []);
+    current.nodes.forEach((n) => {
+      if (!n.position || typeof n.position.x !== "number") {
+        n.position = derived[n.id] || { x: 120, y: 160 };
+      }
+    });
+  }
 
-            const g = svg.append('g');
+  function tidyLayout() {
+    if (!current) return;
+    const derived = autoLayout(current.nodes.filter((n) => !isDecorative(n)), current.edges || []);
+    current.nodes.forEach((n) => { if (derived[n.id]) n.position = derived[n.id]; });
+    markDirty();
+    renderGraph();
+  }
 
-            // Zoom
-            currentZoom = GraphBoot.makeZoom({
-                scaleExtent: [0.3, 3],
-                target: g,
-                onZoom: (event) => { transform = event.transform; },
-            });
-            svg.call(currentZoom);
+  // ── edges ────────────────────────────────────────────────────────────────
+  function rebuildEdges() {
+    if (!current) return;
+    const ids = new Set(current.nodes.map((n) => n.id));
+    const edges = [];
+    current.nodes.forEach((node) => {
+      (node.depends_on || []).forEach((dep) => {
+        if (ids.has(dep)) edges.push({ source: dep, target: node.id, type: "depends_on" });
+      });
+      if (node.loop_to && ids.has(node.loop_to)) {
+        edges.push({ source: node.id, target: node.loop_to, type: "loop_to" });
+      }
+      if (node.fallback_to && ids.has(node.fallback_to)) {
+        edges.push({ source: node.id, target: node.fallback_to, type: "fallback_to" });
+      }
+    });
+    current.edges = edges;
+  }
 
-            // Compute center transform synchronously
-            if (nodes.length > 0) {
-                const minX = Math.min(...nodes.map(n => n._layout.x));
-                const minY = Math.min(...nodes.map(n => n._layout.y));
-                const maxX = Math.max(...nodes.map(n => n._layout.x + NODE_W));
-                const maxY = Math.max(...nodes.map(n => n._layout.y + NODE_H));
+  function edgeKey(edge) { return `${edge.source}->${edge.target}:${edge.type || "depends_on"}`; }
 
-                const graphW = maxX - minX;
-                const graphH = maxY - minY;
-                const scale = Math.min(width / (graphW + 120), height / (graphH + 120), 1.2);
-                const tx = (width - graphW * scale) / 2 - minX * scale;
-                const ty = (height - graphH * scale) / 2 - minY * scale;
+  function edgePath(source, target) {
+    const x1 = source.position.x + NODE_W;
+    const y1 = source.position.y + NODE_H / 2;
+    const x2 = target.position.x;
+    const y2 = target.position.y + NODE_H / 2;
+    const distance = Math.hypot(x2 - x1, y2 - y1);
+    const curve = Math.min(Math.max(distance * 0.35, 30), 110);
+    return `M ${x1} ${y1} C ${x1 + curve} ${y1}, ${x2 - curve} ${y2}, ${x2} ${y2}`;
+  }
 
-                // Apply zoom transform instantly (no transition)
-                svg.call(currentZoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
-            }
+  // ── canvas render ────────────────────────────────────────────────────────
+  function renderGraph() {
+    const svg = d3.select("#canvas");
+    svg.selectAll("*").remove();
+    if (!current) { clearCanvas(); return; }
 
-            // Grid
-            const defs = svg.append('defs');
-            const pattern = defs.append('pattern')
-                .attr('id', 'grid')
-                .attr('width', 40).attr('height', 40)
-                .attr('patternUnits', 'userSpaceOnUse');
-            pattern.append('path')
-                .attr('d', 'M 40 0 L 0 0 0 40')
-                .attr('fill', 'none')
-                .attr('stroke', 'var(--dimmer)')
-                .attr('stroke-width', 0.5)
-                .attr('opacity', 0.5);
-            g.append('rect')
-                .attr('x', -2000).attr('y', -2000)
-                .attr('width', 6000).attr('height', 6000)
-                .attr('fill', 'url(#grid)');
+    rebuildEdges();
+    ensurePositions();
 
-            // Draw edges
-            const edgeGroup = g.append('g').attr('class', 'edges');
-            const arrowMarkers = {};
-            ['depends', 'loop', 'fallback'].forEach(type => {
-                const color = type === 'loop' ? 'var(--pink)' : type === 'fallback' ? '#e8843a' : 'var(--dim)';
-                defs.append('marker')
-                    .attr('id', `arrow-${type}`)
-                    .attr('viewBox', '0 0 10 10')
-                    .attr('refX', 8).attr('refY', 5)
-                    .attr('markerWidth', 6).attr('markerHeight', 6)
-                    .attr('orient', 'auto')
-                    .append('path')
-                    .attr('d', 'M 0 1 L 10 5 L 0 9 Z')
-                    .attr('fill', color);
-            });
+    const area = $("canvas-area");
+    const width = area.clientWidth || 1200;
+    const height = area.clientHeight || 800;
+    svg.attr("viewBox", `0 0 ${width} ${height}`);
+    svgRoot = svg;
 
-            // Edge hover tooltip container
-            const tooltip = document.getElementById('tooltip');
+    if (!current.nodes.length) {
+      svg.append("text")
+        .attr("x", width / 2).attr("y", height / 2)
+        .attr("text-anchor", "middle").attr("fill", "var(--dim)")
+        .attr("font-size", "14px")
+        .text("Empty workflow — pick a node from the palette and press Add Node");
+      $("graph-info").textContent = "0 nodes";
+      return;
+    }
 
-            edges.forEach(edge => {
-                const srcId = typeof edge.source === 'string' ? edge.source : edge.source?.id;
-                const tgtId = typeof edge.target === 'string' ? edge.target : edge.target?.id;
-                const src = nodes.find(n => n.id === srcId);
-                const tgt = nodes.find(n => n.id === tgtId);
-                if (!src || !tgt) return;
+    const defs = svg.append("defs");
+    ["depends", "loop", "fallback"].forEach((kind) => {
+      const color = kind === "loop" ? "var(--pink)" : kind === "fallback" ? "var(--amber)" : "var(--dim)";
+      defs.append("marker")
+        .attr("id", `arrow-${kind}`).attr("viewBox", "0 0 10 10")
+        .attr("refX", 9).attr("refY", 5)
+        .attr("markerWidth", 6).attr("markerHeight", 6).attr("orient", "auto")
+        .append("path").attr("d", "M 0 1 L 10 5 L 0 9 Z").attr("fill", color);
+    });
+    const grid = defs.append("pattern")
+      .attr("id", "grid").attr("width", 40).attr("height", 40)
+      .attr("patternUnits", "userSpaceOnUse");
+    grid.append("path").attr("d", "M 40 0 L 0 0 0 40")
+      .attr("fill", "none").attr("stroke", "var(--dimmer)")
+      .attr("stroke-width", 0.5).attr("opacity", 0.5);
 
-                const sPos = src._layout;
-                const tPos = tgt._layout;
-                const x1 = sPos.x + NODE_W;
-                const y1 = sPos.y + NODE_H / 2;
-                const x2 = tPos.x;
-                const y2 = tPos.y + NODE_H / 2;
+    const g = svg.append("g");
+    viewport = g;
+    g.append("rect")
+      .attr("x", -4000).attr("y", -4000).attr("width", 12000).attr("height", 12000)
+      .attr("fill", "url(#grid)")
+      .on("click", () => { hideDetails(); renderGraph(); });
 
-                const edgeType = edge.type || 'depends_on';
-                let edgeClass = 'edge-depends';
-                let marker = 'url(#arrow-depends)';
-                if (edgeType === 'fallback_to') {
-                    edgeClass = 'edge-fallback';
-                    marker = 'url(#arrow-fallback)';
-                } else if (edgeType === 'loop_to') {
-                    edgeClass = 'edge-loop';
-                    marker = 'url(#arrow-loop)';
-                }
+    zoom = Boot.makeZoom({ scaleExtent: [0.25, 2.5], target: g, onZoom: () => {} });
+    svg.call(zoom);
 
-                const midX = (x1 + x2) / 2;
-                const midY = (y1 + y2) / 2;
-                const dx = x2 - x1;
-                const dy = y2 - y1;
-                const dist = Math.sqrt(dx * dx + dy * dy);
-                const curvature = Math.min(dist * 0.15, 40);
+    const edgeLayer = g.append("g").attr("class", "edges");
+    const nodeLayer = g.append("g").attr("class", "nodes");
+    const nodeById = {};
+    current.nodes.forEach((n) => { nodeById[n.id] = n; });
+    const tooltip = $("tooltip");
 
-                const pathD = `M ${x1} ${y1} C ${x1 + curvature} ${y1}, ${x2 - curvature} ${y2}, ${x2} ${y2}`;
+    // edges
+    (current.edges || []).forEach((edge) => {
+      const source = nodeById[edge.source];
+      const target = nodeById[edge.target];
+      if (!source || !target) return;
+      const type = edge.type || "depends_on";
+      const cls = type === "loop_to" ? "edge-loop" : type === "fallback_to" ? "edge-fallback" : "edge-depends";
+      const marker = type === "loop_to" ? "url(#arrow-loop)"
+        : type === "fallback_to" ? "url(#arrow-fallback)" : "url(#arrow-depends)";
+      const path = edgePath(source, target);
+      const key = edgeKey(edge);
 
-                const path = edgeGroup.append('path')
-                    .attr('d', pathD)
-                    .attr('class', edgeClass)
-                    .attr('marker-end', marker)
-                    .attr('data-source', srcId)
-                    .attr('data-target', tgtId)
-                    .attr('data-edge-type', edgeType)
-                    .style('cursor', 'pointer')
-                    .on('click', (event) => {
-                        event.stopPropagation();
-                        selectedEdgeId = `${srcId}->${tgtId}`;
-                        showEdgeDetails(edge, src, tgt);
-                    })
-                     .on('mouseenter', (event) => {
-                         tooltip.textContent = `${srcId} → ${tgtId}${edgeType === 'loop_to' ? ' [loop]' : edgeType === 'fallback_to' ? ' [fallback]' : ''}`;
-                         tooltip.style.left = (event.offsetX + 12) + 'px';
-                         tooltip.style.top = (event.offsetY - 20) + 'px';
-                         tooltip.classList.add('visible');
-                         d3.select(event.target).classed('edge-highlight', true);
-                     })
-                     .on('mouseleave', () => {
-                         tooltip.classList.remove('visible');
-                         d3.select(event.target).classed('edge-highlight', false);
-                     });
-            });
+      edgeLayer.append("path")
+        .attr("class", "edge-hit").attr("d", path)
+        .attr("data-edge", key)
+        .on("click", (event) => {
+          event.stopPropagation();
+          selectedEdgeKey = key;
+          selectedNodeId = null;
+          showEdgeDetails(edge);
+        })
+        .on("mouseenter", (event) => {
+          tooltip.textContent = `${edge.source} → ${edge.target} · ${type}`;
+          tooltip.style.left = `${event.offsetX + 12}px`;
+          tooltip.style.top = `${event.offsetY - 22}px`;
+          tooltip.classList.add("visible");
+        })
+        .on("mouseleave", () => tooltip.classList.remove("visible"));
 
-            // Draw nodes
-            const nodeGroup = g.append('g').attr('class', 'nodes');
+      edgeLayer.append("path")
+        .attr("class", cls + (selectedEdgeKey === key ? " edge-highlight" : ""))
+        .attr("d", path).attr("marker-end", marker)
+        .attr("data-edge-line", key)
+        .style("pointer-events", "none");
+    });
 
-            nodes.forEach(node => {
-                const pos = node._layout;
-                const ng = nodeGroup.append('g')
-                    .attr('transform', `translate(${pos.x}, ${pos.y})`)
-                    .style('cursor', 'pointer');
+    // nodes
+    current.nodes.forEach((node) => {
+      const group = nodeLayer.append("g")
+        .attr("class", "node-group")
+        .attr("data-node", node.id)
+        .attr("transform", `translate(${node.position.x}, ${node.position.y})`);
 
-                // Shadow
-                ng.append('rect')
-                    .attr('x', 1).attr('y', 1)
-                    .attr('width', NODE_W).attr('height', NODE_H)
-                    .attr('rx', 8).attr('ry', 8)
-                    .attr('fill', 'rgba(0,0,0,0.25)');
+      if (isDecorative(node)) {
+        renderSticky(group, node);
+      } else {
+        renderNode(group, node, tooltip);
+      }
 
-                // Main card
-                ng.append('rect')
-                    .attr('class', 'node-card' + (selectedNodeId === node.id ? ' selected' : ''))
-                    .attr('width', NODE_W).attr('height', NODE_H)
-                    .attr('rx', 8).attr('ry', 8)
-                    .on('click', (event) => {
-                        event.stopPropagation();
-                        selectedNodeId = node.id;
-                        selectedEdgeId = null;
-                        renderGraph(playbook);
-                        showNodeDetails(node);
-                    })
-                    .on('mouseenter', (event) => {
-                        const toolName = node.tool ? node.tool.split('.').pop() : node.id;
-                        tooltip.textContent = `${node.id}: ${toolName}`;
-                        tooltip.style.left = '0px';
-                        tooltip.style.top = '-32px';
-                        tooltip.classList.add('visible');
-                    })
-                    .on('mouseleave', () => {
-                        tooltip.classList.remove('visible');
-                    });
+      group.call(d3.drag()
+        .filter((event) => !event.target.classList.contains("port-hit"))
+        .on("start", () => { dragging = { id: node.id, moved: false }; })
+        .on("drag", (event) => {
+          node.position.x += event.dx;
+          node.position.y += event.dy;
+          dragging.moved = true;
+          group.attr("transform", `translate(${node.position.x}, ${node.position.y})`);
+          refreshEdgesFor(node.id, nodeById);
+        })
+        .on("end", () => {
+          if (dragging && dragging.moved) {
+            node.position.x = Math.round(node.position.x);
+            node.position.y = Math.round(node.position.y);
+            markDirty();
+          }
+          dragging = null;
+        }));
+    });
 
-                // Inner highlight (top edge sheen)
-                ng.append('rect')
-                    .attr('x', 1).attr('y', 1)
-                    .attr('width', NODE_W - 2).attr('height', 1)
-                    .attr('rx', 1)
-                    .attr('fill', 'rgba(168,136,232,0.08)')
-                    .style('pointer-events', 'none');
+    const runnable = current.nodes.filter((n) => !isDecorative(n)).length;
+    $("graph-info").textContent =
+      `${runnable} nodes · ${(current.edges || []).length} connections`;
+    fitToView();
+  }
 
-                const isEntry = !(node.depends_on && node.depends_on.length > 0);
-                const hasOutgoing = selectedPlaybook?.edges?.some(
-                    e => (typeof e.source === 'string' ? e.source : e.source?.id) === node.id
-                );
-                const isTerminal = !hasOutgoing;
+  function renderNode(group, node, tooltip) {
+    const meta = nodeMeta(node.tool);
+    const color = categoryColor(meta.category);
+    const disabled = !!node.disabled;
 
-                // Entry badge (top-left)
-                if (isEntry) {
-                    ng.append('rect')
-                        .attr('class', 'node-badge entry')
-                        .attr('x', 4).attr('y', 3)
-                        .attr('width', 44).attr('height', 14)
-                        .attr('rx', 2);
-                    ng.append('text')
-                        .attr('x', 26).attr('y', 13)
-                        .attr('text-anchor', 'middle')
-                        .attr('font-size', '7px')
-                        .attr('font-family', 'sans-serif')
-                        .attr('fill', 'var(--cyan)')
-                        .attr('font-weight', '600')
-                        .attr('letter-spacing', '0.05em')
-                        .text('ENTRY')
-                        .style('pointer-events', 'none');
-                }
+    group.append("rect")
+      .attr("x", 2).attr("y", 3).attr("width", NODE_W).attr("height", NODE_H)
+      .attr("rx", 9).attr("fill", "rgba(0,0,0,0.3)");
 
-                // Terminal badge (top-right)
-                if (isTerminal) {
-                    ng.append('rect')
-                        .attr('class', 'node-badge terminal')
-                        .attr('x', NODE_W - 48).attr('y', 3)
-                        .attr('width', 44).attr('height', 14)
-                        .attr('rx', 2);
-                    ng.append('text')
-                        .attr('x', NODE_W - 26).attr('y', 13)
-                        .attr('text-anchor', 'middle')
-                        .attr('font-size', '7px')
-                        .attr('font-family', 'sans-serif')
-                        .attr('fill', 'var(--pink)')
-                        .attr('font-weight', '600')
-                        .attr('letter-spacing', '0.05em')
-                        .text('TERMINAL')
-                        .style('pointer-events', 'none');
-                }
+    group.append("rect")
+      .attr("class", "node-card" + (selectedNodeId === node.id ? " selected" : "") + (disabled ? " disabled" : ""))
+      .attr("width", NODE_W).attr("height", NODE_H).attr("rx", 9)
+      .on("click", (event) => {
+        event.stopPropagation();
+        selectedNodeId = node.id;
+        selectedEdgeKey = null;
+        renderGraph();
+        showNodeDetails(node);
+      })
+      .on("mouseenter", (event) => {
+        tooltip.innerHTML = `<b>${esc(meta.label)}</b><br>${esc(meta.summary || node.tool)}`;
+        tooltip.style.left = `${event.offsetX + 14}px`;
+        tooltip.style.top = `${event.offsetY - 10}px`;
+        tooltip.classList.add("visible");
+      })
+      .on("mouseleave", () => tooltip.classList.remove("visible"));
 
-                // Status dot
-                ng.append('circle')
-                    .attr('class', 'node-status-dot')
-                    .attr('cx', isEntry ? NODE_W - 12 : (isTerminal ? NODE_W - 56 : NODE_W - 12))
-                    .attr('cy', 12)
-                    .attr('r', 3.5)
-                    .attr('fill', 'var(--cyan)');
+    group.append("rect")
+      .attr("class", "node-accent")
+      .attr("x", 0).attr("y", 10).attr("width", 4).attr("height", NODE_H - 20)
+      .attr("rx", 2).attr("fill", color).attr("opacity", disabled ? 0.4 : 1);
 
-                // Tool label (line 1)
-                const toolName = node.tool ? node.tool.split('.').pop() : node.id;
-                ng.append('text')
-                    .attr('class', 'node-tool-label')
-                    .attr('x', NODE_W / 2).attr('y', NODE_H / 2 - 6)
-                    .text(toolName.length > 22 ? toolName.substring(0, 20) + '…' : toolName);
+    group.append("text")
+      .attr("x", 18).attr("y", NODE_H / 2 - 7)
+      .attr("font-size", "13px").attr("fill", color)
+      .style("pointer-events", "none")
+      .text(meta.icon || "◆");
 
-                // ID label (line 2)
-                ng.append('text')
-                    .attr('class', 'node-id-label')
-                    .attr('x', NODE_W / 2).attr('y', NODE_H / 2 + 14)
-                    .text(node.id);
+    const label = node.label || meta.label || node.tool;
+    group.append("text")
+      .attr("class", "node-tool-label")
+      .attr("x", 40).attr("y", NODE_H / 2 - 6)
+      .text(label.length > 20 ? `${label.slice(0, 19)}…` : label);
 
-                // Ports — input (left)
-                ng.append('circle')
-                    .attr('class', 'port-circle port-input')
-                    .attr('cx', 0).attr('cy', NODE_H / 2)
-                    .attr('r', PORT_R);
-                ng.append('circle')
-                    .attr('cx', 0).attr('cy', NODE_H / 2)
-                    .attr('r', PORT_HIT_R)
-                    .attr('fill', 'transparent')
-                    .attr('data-target-id', node.id)
-                    .style('cursor', 'crosshair');
+    group.append("text")
+      .attr("class", "node-id-label")
+      .attr("x", 40).attr("y", NODE_H / 2 + 13)
+      .text(node.id.length > 24 ? `${node.id.slice(0, 23)}…` : node.id);
 
-                // Ports — output (right)
-                ng.append('circle')
-                    .attr('class', 'port-circle port-output')
-                    .attr('cx', NODE_W).attr('cy', NODE_H / 2)
-                    .attr('r', PORT_R);
-                ng.append('circle')
-                    .attr('cx', NODE_W).attr('cy', NODE_H / 2)
-                    .attr('r', PORT_HIT_R)
-                    .attr('fill', 'transparent')
-                    .attr('data-source-id', node.id)
-                    .style('cursor', 'crosshair')
-                    .call(d3.drag()
-                        .on("start", function(event) {
-                            const srcId = d3.select(this).attr("data-source-id");
-                            const srcNode = nodes.find(n => n.id === srcId);
-                            const sPos = srcNode._layout;
-                            draggingEdge = {
-                                srcId: srcId,
-                                startX: sPos.x + NODE_W,
-                                startY: sPos.y + NODE_H / 2
-                            };
-                        })
-                        .on("drag", function(event) {
-                            if (!draggingEdge) return;
-                            let tempPath = svg.select("#temp-drag-edge");
-                            if (tempPath.empty()) {
-                                tempPath = edgeGroup.append("path")
-                                    .attr("id", "temp-drag-edge")
-                                    .attr("class", "edge-depends")
-                                    .style("pointer-events", "none");
-                            }
-                            const pt = d3.pointer(event, g.node());
-                            const x1 = draggingEdge.startX;
-                            const y1 = draggingEdge.startY;
-                            const x2 = pt[0];
-                            const y2 = pt[1];
-                            const dx = x2 - x1;
-                            const dy = y2 - y1;
-                            const dist = Math.sqrt(dx * dx + dy * dy);
-                            const curvature = Math.min(dist * 0.15, 40);
-                            tempPath.attr("d", `M ${x1} ${y1} C ${x1 + curvature} ${y1}, ${x2 - curvature} ${y2}, ${x2} ${y2}`);
-                        })
-                        .on("end", function(event) {
-                            svg.select("#temp-drag-edge").remove();
-                            if (!draggingEdge) return;
-                            const mousePt = d3.pointer(event, g.node());
-                            let bestTarget = null;
-                            let bestDist = 20;
-                            svg.selectAll('.port-input + circle').each(function() {
-                                const tgtId = d3.select(this).attr('data-target-id');
-                                const tgtNode = nodes.find(n => n.id === tgtId);
-                                if (tgtNode) {
-                                    const tPos = tgtNode._layout;
-                                    const tx = tPos.x;
-                                    const ty = tPos.y + NODE_H / 2;
-                                    const d = Math.hypot(mousePt[0] - tx, mousePt[1] - ty);
-                                    if (d < bestDist && tgtId !== draggingEdge.srcId) {
-                                        bestDist = d;
-                                        bestTarget = tgtId;
-                                    }
-                                }
-                            });
-                            if (bestTarget) {
-                                if (!selectedPlaybook.edges) selectedPlaybook.edges = [];
-                                const exists = selectedPlaybook.edges.find(e => 
-                                    (typeof e.source === 'string' ? e.source : e.source?.id) === draggingEdge.srcId && 
-                                    (typeof e.target === 'string' ? e.target : e.target?.id) === bestTarget
-                                );
-                                if (!exists) {
-                                    selectedPlaybook.edges.push({
-                                        source: draggingEdge.srcId,
-                                        target: bestTarget,
-                                        type: "depends_on"
-                                    });
-                                    renderGraph(selectedPlaybook);
-                                }
-                            }
-                            draggingEdge = null;
-                        })
-                    );
-            });
+    // badges (right edge, top row)
+    const badges = [];
+    if (!(node.depends_on || []).length) badges.push({ text: "ENTRY", color: "var(--cyan)" });
+    if (node.loop_to) badges.push({ text: `LOOP ×${node.max_visits || 1}`, color: "var(--pink)" });
+    if (node.pinned_data) badges.push({ text: "PINNED", color: "var(--amber)" });
+    if (node.needs_approval) badges.push({ text: "🔒", color: "var(--amber)" });
+    if (disabled) badges.push({ text: "OFF", color: "var(--dim)" });
+    let badgeX = NODE_W - 8;
+    badges.slice(0, 3).forEach((badge) => {
+      const node_text = group.append("text")
+        .attr("class", "node-badge-text")
+        .attr("x", badgeX).attr("y", 15)
+        .attr("text-anchor", "end")
+        .attr("fill", badge.color)
+        .text(badge.text);
+      badgeX -= badge.text.length * 5 + 10;
+      return node_text;
+    });
 
-            document.getElementById('graph-info').textContent =
-                `${nodes.length} nodes, ${edges.length} edges`;
-            const statusEl = document.getElementById('header-status');
-            if (statusEl) {
-                statusEl.textContent = `${nodes.length}n · ${edges.length}e`;
-            }
+    // run status dot
+    const result = lastRun && lastRun.byId && lastRun.byId[node.id];
+    if (result) {
+      group.append("circle")
+        .attr("class", result.ok ? "status-ok" : "status-fail")
+        .attr("cx", NODE_W - 11).attr("cy", NODE_H - 12).attr("r", 4);
+    }
 
-            // Restore canvas opacity now that it is centered correctly
-            svg.style('opacity', '1');
-        }
+    // ports
+    group.append("circle").attr("class", "port-circle port-input")
+      .attr("cx", 0).attr("cy", NODE_H / 2).attr("r", PORT_R);
+    group.append("circle")
+      .attr("class", "port-hit")
+      .attr("cx", 0).attr("cy", NODE_H / 2).attr("r", PORT_HIT_R)
+      .attr("fill", "transparent").attr("data-target-id", node.id)
+      .style("cursor", "crosshair");
 
-        function showNodeDetails(node) {
-            const panel = document.getElementById('details-panel');
-            const content = document.getElementById('details-content');
-            panel.style.display = 'block';
-            const deps = selectedPlaybook?.edges?.filter(e => {
-                const tid = typeof e.target === 'string' ? e.target : e.target?.id;
-                return tid === node.id;
-            }) || [];
-            const dependents = selectedPlaybook?.edges?.filter(e => {
-                const sid = typeof e.source === 'string' ? e.source : e.source?.id;
-                return sid === node.id;
-            }) || [];
-            content.innerHTML = `
-                <div class="details-panel-header"><h3>Node Spec</h3><button class="details-close" onclick="document.getElementById('details-panel').style.display='none'">×</button></div>
-                <div class="detail-row"><div class="detail-label">ID</div><input class="detail-input" id="edit-node-id" value="${escapeHTML(node.id)}"></div>
-                <div class="detail-row"><div class="detail-label">Tool</div><input class="detail-input" id="edit-node-tool" value="${escapeHTML(node.tool || '')}"></div>
-                <div class="detail-row"><div class="detail-label">Args (JSON)</div><textarea class="detail-textarea" id="edit-node-args">${escapeHTML(JSON.stringify(node.args || {}, null, 2))}</textarea></div>
-                <div class="detail-row"><div class="detail-label">Run If (JSON)</div><textarea class="detail-textarea" id="edit-node-runif" placeholder="optional condition">${escapeHTML(node.run_if ? JSON.stringify(node.run_if, null, 2) : '')}</textarea></div>
-                <div class="detail-row"><div class="detail-label">When (JSON)</div><textarea class="detail-textarea" id="edit-node-when" placeholder="optional condition">${escapeHTML(node.when ? JSON.stringify(node.when, null, 2) : '')}</textarea></div>
-                <div class="detail-row"><div class="detail-label">Loop To</div><input class="detail-input" id="edit-node-loop" value="${escapeHTML(node.loop_to || '')}"></div>
-                <div class="detail-row"><div class="detail-label">Loop Condition</div><textarea class="detail-textarea" id="edit-node-loopcondition" placeholder="optional condition">${escapeHTML(node.loop_condition ? JSON.stringify(node.loop_condition, null, 2) : '')}</textarea></div>
-                <div class="detail-row"><div class="detail-label">Fallback To</div><input class="detail-input" id="edit-node-fallback" value="${escapeHTML(node.fallback_to || '')}"></div>
-                <div class="detail-row"><div class="detail-label">Max Visits</div><input class="detail-input" id="edit-node-maxvisits" type="number" min="1" value="${node.max_visits ?? ''}"></div>
-                <div class="detail-row"><div class="detail-label">Timeout (s)</div><input class="detail-input" id="edit-node-timeout" type="number" min="0" step="0.1" value="${node.timeout_seconds ?? ''}"></div>
-                <div class="detail-row"><div class="detail-label">Max Retries</div><input class="detail-input" id="edit-node-retries" type="number" min="0" value="${node.max_retries ?? 0}"></div>
-                <div class="detail-row"><div class="detail-label">Backoff (s)</div><input class="detail-input" id="edit-node-backoff" type="number" min="0" step="0.1" value="${node.retry_backoff_seconds ?? 1}"></div>
-                <div class="detail-row"><div class="detail-label">Interrupt</div><input id="edit-node-interrupt" type="checkbox" ${node.interrupt ? 'checked' : ''}></div>
-                <div class="detail-row"><div class="detail-label">Needs Approval</div><input id="edit-node-approval" type="checkbox" ${node.needs_approval ? 'checked' : ''}></div>
-                <div style="display:flex;gap:6px;margin-top:12px"><button class="btn btn-primary" onclick="saveNodeChanges('${escapeHTML(node.id)}')">Apply</button></div>
-                <div class="detail-row"><div class="detail-label">Inputs (${deps.length})</div><div class="detail-value">${deps.map(d => `<code>${escapeHTML(typeof d.source === 'string' ? d.source : d.source?.id)}</code>`).join(', ') || '—'}</div></div>
-                <div class="detail-row"><div class="detail-label">Outputs (${dependents.length})</div><div class="detail-value">${dependents.map(d => `<code>${escapeHTML(typeof d.target === 'string' ? d.target : d.target?.id)}</code>`).join(', ') || '—'}</div></div>
-            `;
-        }
+    group.append("circle").attr("class", "port-circle port-output")
+      .attr("cx", NODE_W).attr("cy", NODE_H / 2).attr("r", PORT_R);
+    group.append("circle")
+      .attr("class", "port-hit")
+      .attr("cx", NODE_W).attr("cy", NODE_H / 2).attr("r", PORT_HIT_R)
+      .attr("fill", "transparent").attr("data-source-id", node.id)
+      .style("cursor", "crosshair")
+      .call(d3.drag()
+        .on("start", () => {
+          dragging = { connectFrom: node.id };
+        })
+        .on("drag", (event) => {
+          if (!dragging || !dragging.connectFrom) return;
+          let temp = svgRoot.select("#temp-edge");
+          if (temp.empty()) {
+            temp = viewport.append("path").attr("id", "temp-edge")
+              .attr("class", "edge-depends").style("pointer-events", "none");
+          }
+          const point = d3.pointer(event, viewport.node());
+          const x1 = node.position.x + NODE_W;
+          const y1 = node.position.y + NODE_H / 2;
+          const curve = Math.min(Math.max(Math.hypot(point[0] - x1, point[1] - y1) * 0.35, 30), 110);
+          temp.attr("d", `M ${x1} ${y1} C ${x1 + curve} ${y1}, ${point[0] - curve} ${point[1]}, ${point[0]} ${point[1]}`);
+        })
+        .on("end", (event) => {
+          svgRoot.select("#temp-edge").remove();
+          if (!dragging || !dragging.connectFrom) return;
+          const point = d3.pointer(event, viewport.node());
+          const target = current.nodes.find((candidate) => {
+            if (candidate.id === node.id || isDecorative(candidate)) return false;
+            const cx = candidate.position.x;
+            const cy = candidate.position.y + NODE_H / 2;
+            return Math.hypot(point[0] - cx, point[1] - cy) < 34;
+          });
+          if (target) connectNodes(node.id, target.id);
+          dragging = null;
+        }));
+  }
 
-        function parseOptionalJSON(id, label) {
-            const value = document.getElementById(id).value.trim();
-            if (!value) return null;
-            try { return JSON.parse(value); } catch { throw new Error(`Invalid JSON in ${label}`); }
-        }
+  function renderSticky(group, node) {
+    group.append("rect")
+      .attr("class", "sticky-card")
+      .attr("width", STICKY_W).attr("height", STICKY_H).attr("rx", 6)
+      .on("click", (event) => {
+        event.stopPropagation();
+        selectedNodeId = node.id;
+        selectedEdgeKey = null;
+        renderGraph();
+        showNodeDetails(node);
+      });
+    const text = String((node.args && node.args.content) || "Note");
+    const lines = [];
+    text.split("\n").forEach((raw) => {
+      let line = raw;
+      while (line.length > 30) { lines.push(line.slice(0, 30)); line = line.slice(30); }
+      lines.push(line);
+    });
+    lines.slice(0, 6).forEach((line, index) => {
+      group.append("text").attr("class", "sticky-text")
+        .attr("x", 12).attr("y", 22 + index * 14)
+        .text(line);
+    });
+  }
 
-        function saveNodeChanges(oldId) {
-            const node = selectedPlaybook.nodes.find(n => n.id === oldId);
-            if (!node) return;
-            const newId = document.getElementById('edit-node-id').value.trim();
-            if (!newId || (!node.id && !newId)) return alert('Node ID is required');
-            if (newId !== oldId && selectedPlaybook.nodes.some(n => n.id === newId)) return alert('Node ID already exists');
-            try {
-                node.tool = document.getElementById('edit-node-tool').value.trim();
-                if (!node.tool) throw new Error('Tool is required');
-                node.args = JSON.parse(document.getElementById('edit-node-args').value || '{}');
-                const runIf = parseOptionalJSON('edit-node-runif', 'Run If');
-                const when = parseOptionalJSON('edit-node-when', 'When');
-                const loopCondition = parseOptionalJSON('edit-node-loopcondition', 'Loop Condition');
-                if (runIf) node.run_if = runIf; else delete node.run_if;
-                if (when) node.when = when; else delete node.when;
-                if (loopCondition) node.loop_condition = loopCondition; else delete node.loop_condition;
-            } catch (err) { return alert(err.message || 'Invalid node spec'); }
-            if (newId !== oldId) {
-                selectedPlaybook.edges.forEach(e => {
-                    if (e.source === oldId) e.source = newId;
-                    if (e.target === oldId) e.target = newId;
-                });
-                node.id = newId;
-            }
-            const textFields = [['loop_to', 'edit-node-loop'], ['fallback_to', 'edit-node-fallback']];
-            textFields.forEach(([field, id]) => { const value = document.getElementById(id).value.trim(); if (value) node[field] = value; else delete node[field]; });
-            const numericFields = [['max_visits', 'edit-node-maxvisits', parseInt], ['timeout_seconds', 'edit-node-timeout', parseFloat], ['max_retries', 'edit-node-retries', parseInt], ['retry_backoff_seconds', 'edit-node-backoff', parseFloat]];
-            numericFields.forEach(([field, id, parser]) => { const value = document.getElementById(id).value.trim(); if (value) node[field] = parser(value); else delete node[field]; });
-            node.interrupt = document.getElementById('edit-node-interrupt').checked;
-            node.needs_approval = document.getElementById('edit-node-approval').checked;
-            selectedNodeId = node.id;
-            renderGraph(selectedPlaybook);
-            showNodeDetails(node);
-        }
+  function refreshEdgesFor(nodeId, nodeById) {
+    (current.edges || []).forEach((edge) => {
+      if (edge.source !== nodeId && edge.target !== nodeId) return;
+      const source = nodeById[edge.source];
+      const target = nodeById[edge.target];
+      if (!source || !target) return;
+      const path = edgePath(source, target);
+      const key = edgeKey(edge);
+      d3.selectAll(`[data-edge="${key}"]`).attr("d", path);
+      d3.selectAll(`[data-edge-line="${key}"]`).attr("d", path);
+    });
+  }
 
-        function showEdgeDetails(edge, src, tgt) {
-            const panel = document.getElementById('details-panel');
-            const content = document.getElementById('details-content');
-            panel.style.display = 'block';
+  function connectNodes(sourceId, targetId) {
+    const target = current.nodes.find((n) => n.id === targetId);
+    if (!target) return;
+    target.depends_on = target.depends_on || [];
+    if (target.depends_on.includes(sourceId)) return;
+    target.depends_on.push(sourceId);
+    markDirty();
+    renderGraph();
+  }
 
-            const type = edge.type || 'depends_on';
-            const typeColor = type === 'fallback_to' ? '#e8843a' : type === 'loop_to' ? 'var(--pink)' : 'var(--dim)';
-            const srcId = typeof edge.source === 'string' ? edge.source : edge.source?.id;
-            const tgtId = typeof edge.target === 'string' ? edge.target : edge.target?.id;
+  function fitToView() {
+    if (!current || !current.nodes.length || !zoom || !svgRoot) return;
+    const xs = current.nodes.map((n) => n.position.x);
+    const ys = current.nodes.map((n) => n.position.y);
+    const minX = Math.min(...xs);
+    const minY = Math.min(...ys);
+    const maxX = Math.max(...xs) + NODE_W;
+    const maxY = Math.max(...ys) + NODE_H;
+    const area = $("canvas-area");
+    const width = area.clientWidth || 1200;
+    const height = area.clientHeight || 800;
+    const scale = Math.min(width / (maxX - minX + 180), height / (maxY - minY + 180), 1.1);
+    const tx = (width - (maxX - minX) * scale) / 2 - minX * scale;
+    const ty = (height - (maxY - minY) * scale) / 2 - minY * scale;
+    svgRoot.call(zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
+  }
 
-            content.innerHTML = `
-                <div class="details-panel-header">
-                    <h3>Edge Details</h3>
-                    <button class="details-close" onclick="document.getElementById('details-panel').style.display='none'">×</button>
-                </div>
-                <div class="detail-row"><div class="detail-label">Type</div>
-                    <select class="detail-input" id="edit-edge-type">
-                        <option value="depends_on"${type === 'depends_on' ? ' selected' : ''}>depends_on (normal)</option>
-                        <option value="loop_to"${type === 'loop_to' ? ' selected' : ''}>loop_to (bounded loop)</option>
-                        <option value="fallback_to"${type === 'fallback_to' ? ' selected' : ''}>fallback_to (on failure)</option>
-                    </select></div>
-                <div class="detail-row"><div class="detail-label">From</div><div class="detail-value"><code>${escapeHTML(src?.id || '?')}</code></div></div>
-                <div class="detail-row"><div class="detail-label">To</div><div class="detail-value"><code>${escapeHTML(tgt?.id || '?')}</code></div></div>
-                <div style="display:flex;gap:6px;margin-top:10px">
-                    <button class="btn btn-primary" id="edge-apply-btn">Apply</button>
-                    <button class="btn" id="edge-delete-btn" style="color:var(--pink)">Delete edge</button>
-                </div>
-                ${edge.tool_call ? `<div class="detail-row" style="margin-top:8px"><div class="detail-label">Tool Call</div><div class="detail-value"><pre class="text-xs" style="max-height:80px;overflow:auto;background:rgba(255,255,255,0.03);padding:4px;border-radius:3px">${escapeHTML(JSON.stringify(edge.tool_call, null, 2))}</pre></div></div>` : ''}
-            `;
-            document.getElementById('edge-apply-btn').onclick = () => {
-                const nt = document.getElementById('edit-edge-type').value;
-                edge.type = nt;
-                syncEdgesToNodes();
-                renderGraph(selectedPlaybook);
-                showEdgeDetails(edge, src, tgt);
-            };
-            document.getElementById('edge-delete-btn').onclick = () => {
-                selectedPlaybook.edges = (selectedPlaybook.edges || []).filter(e => {
-                    const s = typeof e.source === 'string' ? e.source : e.source?.id;
-                    const t = typeof e.target === 'string' ? e.target : e.target?.id;
-                    return !(s === srcId && t === tgtId && (e.type || 'depends_on') === type);
-                });
-                selectedEdgeId = null;
-                hideDetails();
-                renderGraph(selectedPlaybook);
-            };
-        }
+  // ── details panel ────────────────────────────────────────────────────────
+  function hideDetails() {
+    $("details-panel").hidden = true;
+    selectedNodeId = null;
+    selectedEdgeKey = null;
+  }
 
-        function hideDetails() {
-            document.getElementById('details-panel').style.display = 'none';
-            selectedNodeId = null;
-            selectedEdgeId = null;
-        }
+  function showNodeDetails(node) {
+    const panel = $("details-panel");
+    const meta = nodeMeta(node.tool);
+    panel.hidden = false;
+    $("details-title").textContent = `${meta.icon || "◆"} ${meta.label || node.tool}`;
+    document.querySelectorAll("#details-tabs .tab").forEach((tab) => {
+      tab.classList.toggle("active", tab.dataset.tab === activeTab);
+    });
+    const body = $("details-content");
+    if (activeTab === "params") body.innerHTML = paramsForm(node, meta);
+    else if (activeTab === "settings") body.innerHTML = settingsForm(node);
+    else body.innerHTML = outputView(node);
+    wireDetailInputs(node, meta);
+  }
 
-        document.getElementById('canvas').addEventListener('click', () => {
-            hideDetails();
-            if (selectedPlaybook) renderGraph(selectedPlaybook);
+  function fieldId(name) { return `field_${name.replace(/[^A-Za-z0-9_]/g, "_")}`; }
+
+  function renderParam(param, value) {
+    const id = fieldId(param.name);
+    const label =
+      `<div class="detail-label"><span>${esc(param.label || param.name)}` +
+      `${param.required ? ' <span class="req">*</span>' : ""}</span>` +
+      `<span style="opacity:.55">${esc(param.name)}</span></div>`;
+    const help = param.help ? `<div class="detail-help">${esc(param.help)}</div>` : "";
+    let control = "";
+
+    if (param.type === "boolean") {
+      control =
+        `<div class="detail-check"><input type="checkbox" id="${id}" data-param="${esc(param.name)}" ` +
+        `data-type="boolean" ${value ? "checked" : ""}><span>${esc(param.label || param.name)}</span></div>`;
+      return `<div class="detail-row">${control}${help}</div>`;
+    }
+    if (param.type === "select") {
+      const options = (param.options || [])
+        .map((opt) => `<option value="${esc(opt)}"${String(value) === String(opt) ? " selected" : ""}>${esc(opt)}</option>`)
+        .join("");
+      control = `<select class="detail-input" id="${id}" data-param="${esc(param.name)}" data-type="select">${options}</select>`;
+    } else if (param.type === "number") {
+      control = `<input class="detail-input" type="number" id="${id}" data-param="${esc(param.name)}" data-type="number" value="${esc(value)}">`;
+    } else if (param.type === "json" || param.type === "code" || param.type === "textarea") {
+      const cls = param.type === "code" ? "detail-textarea code" : "detail-textarea";
+      const text = typeof value === "object" && value !== null ? JSON.stringify(value, null, 2) : value;
+      control = `<textarea class="${cls}" id="${id}" data-param="${esc(param.name)}" data-type="${param.type}">${esc(text)}</textarea>`;
+    } else {
+      control = `<input class="detail-input" id="${id}" data-param="${esc(param.name)}" data-type="string" value="${esc(value)}">`;
+    }
+    return `<div class="detail-row">${label}${control}${help}</div>`;
+  }
+
+  function paramsForm(node, meta) {
+    const args = node.args || {};
+    const params = meta.params || [];
+    const basic = params.filter((p) => !p.advanced);
+    const advanced = params.filter((p) => p.advanced);
+
+    let html = meta.summary ? `<div class="detail-help" style="margin-bottom:10px">${esc(meta.summary)}</div>` : "";
+    if (meta.outputs) {
+      html += `<div class="detail-row"><div class="detail-label"><span>Gate values</span></div>` +
+        `<div class="detail-value">${meta.outputs.map((o) => `<code>${esc(o)}</code>`).join(" ")}</div>` +
+        `<div class="detail-help">Gate a downstream node with run_if {"node":"${esc(node.id)}","equals":"…"}.</div></div>`;
+    }
+    if (!params.length) {
+      const raw = JSON.stringify(args, null, 2);
+      html += `<div class="detail-row"><div class="detail-label"><span>Args (JSON)</span></div>` +
+        `<textarea class="detail-textarea" id="raw-args" data-param="__raw__" data-type="rawargs">${esc(raw)}</textarea>` +
+        `<div class="detail-help">No form is registered for this tool — edit the arguments directly.</div></div>`;
+      return html;
+    }
+
+    basic.forEach((param) => {
+      const value = args[param.name] !== undefined ? args[param.name] : param.default;
+      html += renderParam(param, value === undefined || value === null ? "" : value);
+    });
+    if (advanced.length) {
+      html += `<button class="adv-toggle" id="adv-toggle">${showAdvanced ? "▾" : "▸"} Advanced (${advanced.length})</button>`;
+      if (showAdvanced) {
+        advanced.forEach((param) => {
+          const value = args[param.name] !== undefined ? args[param.name] : param.default;
+          html += renderParam(param, value === undefined || value === null ? "" : value);
         });
+      }
+    }
+    if (meta.loop_hint) {
+      html += `<div class="panel-actions"><button class="btn" id="apply-loop">Make this a loop node</button></div>`;
+    }
+    return html;
+  }
 
-        document.getElementById('refresh-btn').addEventListener('click', fetchPlaybooks);
-        document.getElementById('save-btn').addEventListener('click', savePlaybook);
+  function settingsForm(node) {
+    const jsonField = (key, label, help) => {
+      const value = node[key] ? JSON.stringify(node[key], null, 2) : "";
+      return `<div class="detail-row"><div class="detail-label"><span>${esc(label)}</span></div>` +
+        `<textarea class="detail-textarea" data-setting="${key}" data-type="json">${esc(value)}</textarea>` +
+        (help ? `<div class="detail-help">${esc(help)}</div>` : "") + `</div>`;
+    };
+    const textField = (key, label, help, type) =>
+      `<div class="detail-row"><div class="detail-label"><span>${esc(label)}</span></div>` +
+      `<input class="detail-input" data-setting="${key}" data-type="${type || "string"}" ` +
+      `value="${esc(node[key] === undefined || node[key] === null ? "" : node[key])}">` +
+      (help ? `<div class="detail-help">${esc(help)}</div>` : "") + `</div>`;
+    const checkField = (key, label) =>
+      `<div class="detail-row"><div class="detail-check"><input type="checkbox" data-setting="${key}" ` +
+      `data-type="boolean" ${node[key] ? "checked" : ""}><span>${esc(label)}</span></div></div>`;
 
-        function syncEdgesToNodes() {
-            selectedPlaybook.nodes.forEach(node => { node.depends_on = []; delete node.loop_to; delete node.fallback_to; });
-            (selectedPlaybook.edges || []).forEach(edge => {
-                const source = typeof edge.source === 'string' ? edge.source : edge.source?.id;
-                const target = typeof edge.target === 'string' ? edge.target : edge.target?.id;
-                const targetNode = selectedPlaybook.nodes.find(node => node.id === target);
-                const sourceNode = selectedPlaybook.nodes.find(node => node.id === source);
-                if (!targetNode || !sourceNode) return;
-                if ((edge.type || 'depends_on') === 'depends_on') targetNode.depends_on.push(source);
-                if (edge.type === 'loop_to') sourceNode.loop_to = target;
-                if (edge.type === 'fallback_to') sourceNode.fallback_to = target;
-            });
+    return (
+      textField("id", "Node id", "Used by depends_on, run_if and $result references.") +
+      textField("tool", "Tool", "Swap the underlying tool — parameters re-render on apply.") +
+      textField("label", "Display label", "Optional. Overrides the catalog label on the canvas.") +
+      checkField("disabled", "Disabled (skipped at run time, dependants rewired)") +
+      jsonField("run_if", "Run if", 'e.g. {"node":"check","equals":"true"}') +
+      jsonField("when", "When (state gate)", 'e.g. {"state":"kp_index","gte":5}') +
+      textField("loop_to", "Loop to", "Node id to jump back to when the loop condition holds.") +
+      jsonField("loop_condition", "Loop condition", 'e.g. {"not":{"contains":"\\"done\\": true"}}') +
+      textField("max_visits", "Max visits", "Hard cap on loop passes.", "number") +
+      textField("fallback_to", "Fallback to", "Node to run when this one fails outright.") +
+      textField("timeout_seconds", "Timeout (s)", "", "number") +
+      textField("max_retries", "Max retries", "", "number") +
+      textField("retry_backoff_seconds", "Retry backoff (s)", "", "number") +
+      checkField("interrupt", "Interrupt (pause the run here for input)") +
+      checkField("needs_approval", "Require approval before running") +
+      `<div class="detail-row"><div class="detail-label"><span>Pinned data</span></div>` +
+      `<textarea class="detail-textarea" data-setting="pinned_data" data-type="raw">${esc(node.pinned_data || "")}</textarea>` +
+      `<div class="detail-help">JSON items to use instead of running this node — iterate downstream without re-hitting an API.</div></div>` +
+      `<div class="detail-row"><div class="detail-label"><span>Notes</span></div>` +
+      `<textarea class="detail-textarea" data-setting="notes" data-type="raw">${esc(node.notes || "")}</textarea></div>` +
+      `<div class="panel-actions"><button class="btn btn-primary" id="apply-settings">Apply</button>` +
+      `<button class="btn" id="run-from-here">▶ Run from here</button></div>`
+    );
+  }
+
+  function outputView(node) {
+    const result = lastRun && lastRun.byId && lastRun.byId[node.id];
+    if (!result) {
+      return `<div class="detail-help">No run output yet. Press <b>▶ Run</b>, or use <b>Run from here</b> in Settings.</div>`;
+    }
+    const verdict = result.ok
+      ? '<span class="run-ok">✓ ok</span>'
+      : `<span class="run-fail">✗ ${esc(result.error || "failed")}</span>`;
+    let pretty = result.content || "";
+    try { pretty = JSON.stringify(JSON.parse(pretty), null, 2); } catch (_) { /* plain text */ }
+    return `<div class="detail-row"><div class="detail-label"><span>Status</span></div>` +
+      `<div class="detail-value">${verdict}</div></div>` +
+      `<div class="detail-row"><div class="detail-label"><span>Output</span></div>` +
+      `<pre class="out">${esc(pretty)}</pre></div>` +
+      `<div class="panel-actions"><button class="btn" id="pin-output">📌 Pin this output</button></div>`;
+  }
+
+  function parseValue(element) {
+    const type = element.dataset.type;
+    if (type === "boolean") return element.checked;
+    const raw = element.value;
+    if (type === "number") {
+      if (raw === "") return undefined;
+      const parsed = Number(raw);
+      return Number.isNaN(parsed) ? undefined : parsed;
+    }
+    if (type === "json") {
+      if (!raw.trim()) return undefined;
+      try {
+        const parsed = JSON.parse(raw);
+        element.classList.remove("invalid");
+        return parsed;
+      } catch (_) {
+        element.classList.add("invalid");
+        return raw; // keep the text so the user can fix it
+      }
+    }
+    return raw;
+  }
+
+  function wireDetailInputs(node, meta) {
+    const panel = $("details-content");
+
+    panel.querySelectorAll("[data-param]").forEach((element) => {
+      const handler = () => {
+        const name = element.dataset.param;
+        if (name === "__raw__") {
+          try {
+            node.args = JSON.parse(element.value || "{}");
+            element.classList.remove("invalid");
+            markDirty();
+          } catch (_) { element.classList.add("invalid"); }
+          return;
         }
-
-        async function savePlaybook() {
-            if (!selectedPlaybook) return;
-            syncEdgesToNodes();
-            try {
-                const resp = await fetch(`${API_BASE}/playbooks/${encodeURIComponent(selectedPlaybook.id)}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(selectedPlaybook) });
-                const data = await resp.json();
-                if (!resp.ok) throw new Error(data.detail || resp.statusText);
-                selectedPlaybook = data.playbook;
-                document.getElementById('header-status').textContent = 'Saved';
-                renderGraph(selectedPlaybook);
-                const node = selectedPlaybook.nodes.find(n => n.id === selectedNodeId);
-                if (node) showNodeDetails(node);
-            } catch (err) { alert(`Could not save playbook: ${err.message || err}`); }
+        const type = element.dataset.type;
+        node.args = node.args || {};
+        if (type === "json") {
+          // JSON params are stored as strings: the Python side json.loads them.
+          const raw = element.value;
+          try { JSON.parse(raw || "{}"); element.classList.remove("invalid"); }
+          catch (_) { element.classList.add("invalid"); }
+          node.args[name] = raw;
+        } else {
+          const value = parseValue(element);
+          if (value === undefined || value === "") delete node.args[name];
+          else node.args[name] = value;
         }
-        document.getElementById('export-btn').addEventListener('click', () => {
-            if (!selectedPlaybook) return;
-            const pb = currentPlaybooks.find(p => p.id === selectedPlaybook.id);
-            if (!pb) return;
-            const data = JSON.stringify(pb, null, 2);
-            const blob = new Blob([data], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url; a.download = `${selectedPlaybook.id}.json`;
-            document.body.appendChild(a); a.click(); document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-        });
+        markDirty();
+      };
+      element.addEventListener("input", handler);
+      element.addEventListener("change", handler);
+    });
 
-        document.getElementById('zoom-in').addEventListener('click', () => {
-            if (currentZoom) d3.select('#canvas').transition().duration(300).call(currentZoom.scaleBy, 1.3);
-        });
-        document.getElementById('zoom-out').addEventListener('click', () => {
-            if (currentZoom) d3.select('#canvas').transition().duration(300).call(currentZoom.scaleBy, 0.7);
-        });
-        document.getElementById('zoom-fit').addEventListener('click', () => {
-            if (!selectedPlaybook?.nodes?.length || !currentZoom) return;
-            const positions = selectedPlaybook.nodes.map(n => (n._layout || { x: 0, y: 0 }));
-            const minX = Math.min(...positions.map(p => p.x));
-            const minY = Math.min(...positions.map(p => p.y));
-            const maxX = Math.max(...positions.map(p => p.x + NODE_W));
-            const maxY = Math.max(...positions.map(p => p.y + NODE_H));
-            const container = document.getElementById('canvas-area');
-            const w = container.clientWidth || 1200;
-            const h = container.clientHeight || 800;
-            const scale = Math.min(w / (maxX - minX + 160), h / (maxY - minY + 160), 2);
-            const tx = (w - (maxX + minX) * scale) / 2;
-            const ty = (h - (maxY + minY) * scale) / 2;
-            d3.select('#canvas').transition().duration(500).call(
-                currentZoom.transform,
-                d3.zoomIdentity.translate(tx, ty).scale(scale)
-            );
-        });
+    const advToggle = $("adv-toggle");
+    if (advToggle) advToggle.onclick = () => { showAdvanced = !showAdvanced; showNodeDetails(node); };
 
-        // ── n8n-style: tool palette ──────────────────────────────────
-        let toolGroups = {};
-        let selectedTool = null;
+    const applyLoop = $("apply-loop");
+    if (applyLoop) applyLoop.onclick = () => {
+      const hint = meta.loop_hint || {};
+      node.loop_to = hint.loop_to === "self" ? node.id : hint.loop_to;
+      node.loop_condition = hint.loop_condition;
+      node.max_visits = hint.max_visits || 25;
+      markDirty();
+      renderGraph();
+      showNodeDetails(node);
+    };
 
-        async function fetchTools() {
-            try {
-                const resp = await fetch(`${API_BASE}/tools`);
-                const data = await resp.json();
-                toolGroups = data.groups || {};
-                renderPalette('');
-            } catch (err) {
-                console.error('Failed to fetch tools:', err);
-            }
+    const applySettings = $("apply-settings");
+    if (applySettings) applySettings.onclick = () => applyNodeSettings(node);
+
+    const runFromHere = $("run-from-here");
+    if (runFromHere) runFromHere.onclick = () => runWorkflow(node.id);
+
+    const pinOutput = $("pin-output");
+    if (pinOutput) pinOutput.onclick = () => {
+      const result = lastRun && lastRun.byId && lastRun.byId[node.id];
+      if (!result) return;
+      node.pinned_data = result.content || "";
+      markDirty();
+      renderGraph();
+      activeTab = "settings";
+      showNodeDetails(node);
+    };
+  }
+
+  function applyNodeSettings(node) {
+    const panel = $("details-content");
+    const oldId = node.id;
+    let newId = oldId;
+    let failed = null;
+
+    panel.querySelectorAll("[data-setting]").forEach((element) => {
+      const key = element.dataset.setting;
+      const type = element.dataset.type;
+      let value;
+      if (type === "boolean") value = element.checked;
+      else if (type === "number") value = element.value === "" ? undefined : Number(element.value);
+      else if (type === "json") {
+        const raw = element.value.trim();
+        if (!raw) value = undefined;
+        else {
+          try { value = JSON.parse(raw); element.classList.remove("invalid"); }
+          catch (err) { element.classList.add("invalid"); failed = `${key}: ${err.message}`; return; }
         }
+      } else value = element.value;
 
-        function renderPalette(filter) {
-            const container = document.getElementById('tool-palette');
-            if (!container) return;
-            container.innerHTML = '';
-            const q = (filter || '').toLowerCase();
-            Object.entries(toolGroups).forEach(([domain, tools]) => {
-                const shown = tools.filter(t => !q || t.name.toLowerCase().includes(q) || (t.description || '').toLowerCase().includes(q));
-                if (!shown.length) return;
-                const h = document.createElement('div');
-                h.style.cssText = 'font-size:10px;color:var(--pink);letter-spacing:0.12em;text-transform:uppercase;margin:8px 0 4px';
-                h.textContent = domain;
-                container.appendChild(h);
-                shown.slice(0, 30).forEach(t => {
-                    const b = document.createElement('button');
-                    b.className = 'playbook-item' + (selectedTool === t.name ? ' active' : '');
-                    b.innerHTML = `<div class="pb-name" style="font-size:12px">${escapeHTML(t.name)}${t.needs_approval ? ' 🔒' : ''}</div><div class="pb-id">${escapeHTML((t.description || '').slice(0, 90))}</div>`;
-                    b.title = t.description || t.name;
-                    b.onclick = () => { selectedTool = t.name; renderPalette(document.getElementById('palette-search')?.value || ''); };
-                    b.ondblclick = () => { selectedTool = t.name; addNodeFromPalette(); };
-                    container.appendChild(b);
-                });
-            });
-        }
+      if (key === "id") { newId = String(value || "").trim() || oldId; return; }
+      if (value === undefined || value === "" || value === false) delete node[key];
+      else node[key] = value;
+    });
 
-        const paletteSearch = document.getElementById('palette-search');
-        if (paletteSearch) paletteSearch.addEventListener('input', (e) => renderPalette(e.target.value));
+    if (failed) { window.alert(`Invalid JSON — ${failed}`); return; }
 
-        function defaultArgsFor(toolName) {
-            // Sensible n8n-style defaults so a fresh node is runnable.
-            if (toolName === 'make_plan') return { goal: '$prompt', max_steps: 5 };
-            if (toolName === 'synthesize_report') return { evidence: '', prompt: '$prompt', style: 'plain' };
-            if (toolName === 'write_report') return { title: '$title', content: '', report_dir: 'reports' };
-            if (toolName === 'save_note') return { title: '$title', content: '$prompt', folder: 'notes' };
-            if (toolName === 'combine_evidence') return { parts: [] };
-            if (toolName === 'log_triage') return { log_file: 'logs/aiko.log', lines: 150 };
-            if (toolName === 'sys_health') return {};
-            if (toolName === 'text_summarize') return { text: '$prompt', max_sentences: 5 };
-            if (toolName === 'text_translate') return { text: '$prompt', target: 'Japanese' };
-            if (toolName === 'code_plan') return { goal: '$prompt' };
-            if (toolName === 'needle_team_run') return { task: '$prompt' };
-            return {};
-        }
-
-        function addNodeFromPalette() {
-            if (!selectedPlaybook) return alert('Select a workflow first');
-            if (!selectedPlaybook.nodes) selectedPlaybook.nodes = [];
-            const tool = selectedTool || 'synthesize_report';
-            const base = tool.split('.').pop().replace(/[^A-Za-z0-9]+/g, '_').toLowerCase().slice(0, 24) || 'node';
-            let nid = base, k = 1;
-            const ids = new Set(selectedPlaybook.nodes.map(n => n.id));
-            while (ids.has(nid)) nid = `${base}_${++k}`;
-            const newNode = { id: nid, tool, args: defaultArgsFor(tool) };
-            selectedPlaybook.nodes.push(newNode);
-            selectedNodeId = nid; selectedEdgeId = null;
-            renderGraph(selectedPlaybook);
-            showNodeDetails(newNode);
-        }
-
-        document.getElementById('add-node-btn').addEventListener('click', addNodeFromPalette);
-
-        document.getElementById('delete-selected-btn').addEventListener('click', () => {
-            if (!selectedPlaybook) return;
-            if (selectedNodeId) {
-                if (confirm(`Delete node ${selectedNodeId}?`)) {
-                    selectedPlaybook.nodes = selectedPlaybook.nodes.filter(n => n.id !== selectedNodeId);
-                    if (selectedPlaybook.edges) {
-                        selectedPlaybook.edges = selectedPlaybook.edges.filter(e => {
-                            const sid = typeof e.source === 'string' ? e.source : e.source?.id;
-                            const tid = typeof e.target === 'string' ? e.target : e.target?.id;
-                            return sid !== selectedNodeId && tid !== selectedNodeId;
-                        });
-                    }
-                    selectedNodeId = null;
-                    hideDetails();
-                    renderGraph(selectedPlaybook);
-                }
-            } else if (selectedEdgeId) {
-                if (confirm(`Delete edge ${selectedEdgeId}?`)) {
-                    const [sId, tId] = selectedEdgeId.split('->');
-                    if (selectedPlaybook.edges) {
-                        selectedPlaybook.edges = selectedPlaybook.edges.filter(e => {
-                            const sid = typeof e.source === 'string' ? e.source : e.source?.id;
-                            const tid = typeof e.target === 'string' ? e.target : e.target?.id;
-                            return !(sid === sId && tid === tId);
-                        });
-                    }
-                    selectedEdgeId = null;
-                    hideDetails();
-                    renderGraph(selectedPlaybook);
-                }
-            } else {
-                alert("Select a node or edge to delete");
-            }
+    if (newId !== oldId) {
+      if (current.nodes.some((n) => n.id === newId)) { window.alert("That node id already exists"); return; }
+      current.nodes.forEach((other) => {
+        other.depends_on = (other.depends_on || []).map((dep) => (dep === oldId ? newId : dep));
+        if (other.loop_to === oldId) other.loop_to = newId;
+        if (other.fallback_to === oldId) other.fallback_to = newId;
+        Object.entries(other.args || {}).forEach(([key, value]) => {
+          if (typeof value === "string" && value === `$result:${oldId}`) other.args[key] = `$result:${newId}`;
         });
+        if (other.run_if && other.run_if.node === oldId) other.run_if.node = newId;
+      });
+      node.id = newId;
+      selectedNodeId = newId;
+    }
+    markDirty();
+    renderGraph();
+    showNodeDetails(node);
+  }
 
-        fetchPlaybooks();
-        fetchTools();
-        setInterval(fetchPlaybooks, 30000);
+  function showEdgeDetails(edge) {
+    const panel = $("details-panel");
+    panel.hidden = false;
+    $("details-title").textContent = "Connection";
+    document.querySelectorAll("#details-tabs .tab").forEach((tab) => tab.classList.remove("active"));
+    const type = edge.type || "depends_on";
+    $("details-content").innerHTML =
+      `<div class="detail-row"><div class="detail-label"><span>Type</span></div>` +
+      `<select class="detail-input" id="edge-type">` +
+      ["depends_on", "loop_to", "fallback_to"].map((option) =>
+        `<option value="${option}"${option === type ? " selected" : ""}>${option}</option>`).join("") +
+      `</select></div>` +
+      `<div class="detail-row"><div class="detail-label"><span>From</span></div>` +
+      `<div class="detail-value"><code>${esc(edge.source)}</code></div></div>` +
+      `<div class="detail-row"><div class="detail-label"><span>To</span></div>` +
+      `<div class="detail-value"><code>${esc(edge.target)}</code></div></div>` +
+      `<div class="panel-actions"><button class="btn btn-primary" id="edge-apply">Apply</button>` +
+      `<button class="btn btn-danger" id="edge-delete">Delete</button></div>`;
 
-        // ── n8n-style: graph CRUD + validate + run + import ──────────
-        function showRunPanel(html) {
-            const p = document.getElementById('run-panel');
-            document.getElementById('run-content').innerHTML = html;
-            p.style.display = 'block';
-        }
+    $("edge-apply").onclick = () => {
+      const newType = $("edge-type").value;
+      removeEdge(edge);
+      const source = current.nodes.find((n) => n.id === edge.source);
+      const target = current.nodes.find((n) => n.id === edge.target);
+      if (newType === "depends_on" && target) {
+        target.depends_on = target.depends_on || [];
+        if (!target.depends_on.includes(edge.source)) target.depends_on.push(edge.source);
+      } else if (newType === "loop_to" && source) {
+        source.loop_to = edge.target;
+        source.loop_condition = source.loop_condition || { not: { contains: '"done": true' } };
+        source.max_visits = source.max_visits || 25;
+      } else if (newType === "fallback_to" && source) {
+        source.fallback_to = edge.target;
+      }
+      markDirty();
+      renderGraph();
+      hideDetails();
+    };
+    $("edge-delete").onclick = () => { removeEdge(edge); markDirty(); renderGraph(); hideDetails(); };
+  }
 
-        document.getElementById('new-graph-btn')?.addEventListener('click', async () => {
-            const id = prompt('New workflow id (letters, numbers, _ -):', 'my_workflow');
-            if (!id) return;
-            const name = prompt('Display name:', id) || id;
-            try {
-                const resp = await fetch(`${API_BASE}/playbooks`, { method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ id: id.trim(), name, goal: name, triggers: [], nodes: [{ id: 'start', tool: 'make_plan', args: { goal: '$prompt', max_steps: 5 } }] }) });
-                const data = await resp.json();
-                if (!resp.ok) throw new Error(data.detail || resp.statusText);
-                await fetchPlaybooks();
-                const found = currentPlaybooks.find(p => p.id === data.playbook.id);
-                if (found) selectPlaybook(found);
-            } catch (err) { alert(`Could not create graph: ${err.message || err}`); }
+  function removeEdge(edge) {
+    const type = edge.type || "depends_on";
+    const source = current.nodes.find((n) => n.id === edge.source);
+    const target = current.nodes.find((n) => n.id === edge.target);
+    if (type === "depends_on" && target) {
+      target.depends_on = (target.depends_on || []).filter((dep) => dep !== edge.source);
+    } else if (type === "loop_to" && source) {
+      delete source.loop_to; delete source.loop_condition;
+    } else if (type === "fallback_to" && source) {
+      delete source.fallback_to;
+    }
+  }
+
+  // ── palette ──────────────────────────────────────────────────────────────
+  async function fetchCatalog() {
+    try {
+      catalog = await api("/nodes");
+    } catch (err) {
+      console.error("node catalog failed", err);
+      catalog = { categories: [], groups: {}, nodes: {}, featured: [] };
+    }
+    renderPalette("");
+  }
+
+  function renderPalette(filter) {
+    const container = $("tool-palette");
+    if (!container) return;
+    container.innerHTML = "";
+    const query = (filter || "").toLowerCase();
+
+    const addChip = (entry) => {
+      const button = document.createElement("button");
+      button.className = "playbook-item" + (selectedTool === entry.name ? " active" : "");
+      button.title = entry.summary || entry.name;
+      button.innerHTML =
+        `<div class="node-chip">` +
+        `<span class="chip-icon" style="color:${categoryColor(entry.category)}">${esc(entry.icon || "◆")}</span>` +
+        `<span class="chip-text"><span class="chip-name">${esc(entry.label)}` +
+        `${entry.needs_approval ? " 🔒" : ""}</span>` +
+        `<span class="chip-desc">${esc(entry.summary || entry.name)}</span></span></div>`;
+      button.onclick = () => { selectedTool = entry.name; renderPalette($("palette-search").value); };
+      button.ondblclick = () => { selectedTool = entry.name; addNode(); };
+      container.appendChild(button);
+    };
+
+    if (!query && (catalog.featured || []).length) {
+      const head = document.createElement("div");
+      head.className = "cat-head";
+      head.style.color = "var(--mauve)";
+      head.innerHTML = `<span class="cat-dot" style="background:var(--mauve)"></span>Common`;
+      container.appendChild(head);
+      catalog.featured.forEach((name) => {
+        const entry = catalog.nodes[name];
+        if (entry) addChip(entry);
+      });
+    }
+
+    (catalog.categories || []).forEach((category) => {
+      const entries = (catalog.groups[category.id] || []).filter((entry) =>
+        !query ||
+        entry.name.toLowerCase().includes(query) ||
+        (entry.label || "").toLowerCase().includes(query) ||
+        (entry.summary || "").toLowerCase().includes(query));
+      if (!entries.length) return;
+      const head = document.createElement("div");
+      head.className = "cat-head";
+      head.style.color = category.color;
+      head.innerHTML = `<span class="cat-dot" style="background:${category.color}"></span>${esc(category.label)}`;
+      container.appendChild(head);
+      entries.slice(0, query ? 40 : 24).forEach(addChip);
+    });
+  }
+
+  function addNode() {
+    if (!current) { window.alert("Select or create a workflow first"); return; }
+    const toolName = selectedTool || "set_fields";
+    const meta = nodeMeta(toolName);
+    const base = toolName.replace(/[^A-Za-z0-9]+/g, "_").toLowerCase().slice(0, 24) || "node";
+    let id = base;
+    let suffix = 1;
+    const taken = new Set(current.nodes.map((n) => n.id));
+    while (taken.has(id)) { suffix += 1; id = `${base}_${suffix}`; }
+
+    const last = current.nodes[current.nodes.length - 1];
+    const position = last && last.position
+      ? { x: last.position.x + COL_GAP, y: last.position.y }
+      : { x: 120, y: 160 };
+
+    const node = {
+      id,
+      tool: toolName,
+      args: JSON.parse(JSON.stringify(meta.defaults || {})),
+      depends_on: selectedNodeId && selectedNodeId !== id ? [selectedNodeId] : [],
+      position,
+    };
+    current.nodes.push(node);
+    selectedNodeId = id;
+    activeTab = "params";
+    markDirty();
+    renderGraph();
+    showNodeDetails(node);
+  }
+
+  function deleteSelected() {
+    if (!current) return;
+    if (selectedNodeId) {
+      if (!window.confirm(`Delete node ${selectedNodeId}?`)) return;
+      current.nodes = current.nodes.filter((n) => n.id !== selectedNodeId);
+      current.nodes.forEach((node) => {
+        node.depends_on = (node.depends_on || []).filter((dep) => dep !== selectedNodeId);
+        if (node.loop_to === selectedNodeId) delete node.loop_to;
+        if (node.fallback_to === selectedNodeId) delete node.fallback_to;
+      });
+      selectedNodeId = null;
+      markDirty();
+      hideDetails();
+      renderGraph();
+      return;
+    }
+    if (selectedEdgeKey) {
+      const edge = (current.edges || []).find((candidate) => edgeKey(candidate) === selectedEdgeKey);
+      if (edge) { removeEdge(edge); markDirty(); renderGraph(); }
+      hideDetails();
+      return;
+    }
+    window.alert("Select a node or a connection first");
+  }
+
+  // ── persistence ──────────────────────────────────────────────────────────
+  async function savePlaybook() {
+    if (!current) return;
+    if (current.readonly) {
+      window.alert("This is a Spec-generated graph. Duplicate it first, then edit the copy.");
+      return;
+    }
+    rebuildEdges();
+    try {
+      const payload = JSON.parse(JSON.stringify(current));
+      delete payload.edges;
+      const data = await api(`/playbooks/${encodeURIComponent(current.id)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      current = Object.assign(current, data.playbook);
+      dirty = false;
+      status((data.warnings || []).length ? `Saved · ${data.warnings.length} warning(s)` : "Saved", "good");
+      if ((data.warnings || []).length) showRunPanel("Save warnings",
+        data.warnings.map((w) => `<div class="run-dim">⚠ ${esc(w)}</div>`).join(""));
+      await fetchPlaybooks(false);
+      renderPlaybookList();
+    } catch (err) {
+      window.alert(`Could not save: ${err.message}`);
+      status("Save failed", "bad");
+    }
+  }
+
+  // ── validate / run ───────────────────────────────────────────────────────
+  function showRunPanel(title, html) {
+    $("run-title").textContent = title;
+    $("run-content").innerHTML = html;
+    $("run-panel").hidden = false;
+  }
+
+  async function validateWorkflow() {
+    if (!current) return;
+    if (dirty) await savePlaybook();
+    try {
+      const data = await api(`/playbooks/${encodeURIComponent(current.id)}/validate`, { method: "POST" });
+      const head = data.ok
+        ? '<div class="run-ok">✓ Valid</div>'
+        : `<div class="run-fail">✗ ${esc((data.errors || []).join("; "))}</div>`;
+      const warnings = (data.warnings || [])
+        .map((warning) => `<div class="run-dim">⚠ ${esc(warning)}</div>`).join("");
+      showRunPanel("Validation",
+        `${head}${warnings}<div class="run-dim" style="margin-top:6px">` +
+        `${data.runnable_nodes} runnable node(s) · entries: ${esc((data.entry_points || []).join(", ") || "—")}</div>`);
+      status(data.ok ? "Valid" : "Invalid", data.ok ? "good" : "bad");
+    } catch (err) {
+      window.alert(`Validate failed: ${err.message}`);
+    }
+  }
+
+  async function runWorkflow(startNode) {
+    if (!current) return;
+    if (dirty) await savePlaybook();
+    const promptText = window.prompt("Dry-run prompt (substituted for $prompt):",
+      current.goal || `Studio dry-run of ${current.id}`);
+    if (promptText === null) return;
+
+    showRunPanel("Run", '<div class="run-dim">Running… (bounded, 1 worker)</div>');
+    status("Running…");
+    try {
+      const data = await api(`/playbooks/${encodeURIComponent(current.id)}/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: promptText, timeout_s: 90, start_node: startNode || "" }),
+      });
+      lastRun = { byId: {}, raw: data };
+      (data.nodes || []).forEach((result) => { lastRun.byId[result.id] = result; });
+
+      const rows = (data.nodes || []).map((result) => {
+        const mark = result.ok ? '<span class="rn-mark run-ok">✓</span>' : '<span class="rn-mark run-fail">✗</span>';
+        const body = esc((result.content || result.error || "").slice(0, 120)).replace(/\n/g, " ");
+        return `<div class="run-node-row" data-run-node="${esc(result.id)}">${mark}` +
+          `<span class="rn-id">${esc(result.id)}</span>` +
+          `<span class="rn-tool">${esc(result.tool)}</span>` +
+          `<span class="rn-body">${body}</span></div>`;
+      }).join("");
+
+      const failed = (data.nodes || []).filter((n) => !n.ok).length;
+      showRunPanel("Run result",
+        `<div class="${failed ? "run-fail" : "run-ok"}">${failed ? `✗ ${failed} node(s) failed` : "✓ All nodes ok"}` +
+        ` · goal score ${data.goal_score === null || data.goal_score === undefined ? "—" : data.goal_score}</div>` +
+        `<div class="run-dim" style="margin:5px 0">state keys: ${esc((data.state_keys || []).join(", ") || "—")}</div>` +
+        rows +
+        `<pre class="out">${esc((data.final_answer || "").slice(0, 1500))}</pre>`);
+
+      document.querySelectorAll("[data-run-node]").forEach((row) => {
+        row.onclick = () => {
+          const node = current.nodes.find((n) => n.id === row.dataset.runNode);
+          if (!node) return;
+          selectedNodeId = node.id;
+          activeTab = "output";
+          renderGraph();
+          showNodeDetails(node);
+        };
+      });
+      status(failed ? "Run: failures" : "Run ok", failed ? "bad" : "good");
+      renderGraph();
+    } catch (err) {
+      showRunPanel("Run failed", `<div class="run-fail">${esc(err.message)}</div>`);
+      status("Run failed", "bad");
+    }
+  }
+
+  // ── templates ────────────────────────────────────────────────────────────
+  async function openTemplates() {
+    $("template-modal").hidden = false;
+    const list = $("template-list");
+    list.innerHTML = '<div class="hint">Loading…</div>';
+    try {
+      const data = await api("/templates");
+      templates = data.templates || [];
+    } catch (err) {
+      list.innerHTML = `<div class="run-fail">${esc(err.message)}</div>`;
+      return;
+    }
+    list.innerHTML = "";
+    templates.forEach((template) => {
+      const card = document.createElement("button");
+      card.className = "template-card";
+      card.innerHTML =
+        `<div class="tpl-cat">${esc(template.category)}</div>` +
+        `<div class="tpl-name">${esc(template.name)}</div>` +
+        `<div class="tpl-desc">${esc(template.description)}</div>` +
+        `<div class="tpl-meta">${template.node_count} nodes · ${esc(template.tools.slice(0, 4).join(", "))}</div>`;
+      card.onclick = () => createFromTemplate(template);
+      list.appendChild(card);
+    });
+  }
+
+  async function createFromTemplate(template) {
+    const suggested = template.id.replace(/^tpl_/, "") + "_1";
+    const id = window.prompt("New workflow id:", suggested);
+    if (!id) return;
+    try {
+      const data = await api(`/templates/${encodeURIComponent(template.id)}/create`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: id.trim(), name: template.name }),
+      });
+      $("template-modal").hidden = true;
+      await fetchPlaybooks(false);
+      const created = playbooks.find((p) => p.id === data.playbook.id);
+      if (created) selectPlaybook(created);
+    } catch (err) {
+      window.alert(`Could not create workflow: ${err.message}`);
+    }
+  }
+
+  // ── header wiring ────────────────────────────────────────────────────────
+  function wireHeader() {
+    $("back-btn").onclick = (event) => {
+      event.preventDefault();
+      if (window.history.length > 1) window.history.back();
+      else window.location.href = "/";
+    };
+    $("refresh-btn").onclick = () => fetchPlaybooks(true);
+    $("save-btn").onclick = savePlaybook;
+    $("validate-btn").onclick = validateWorkflow;
+    $("run-btn").onclick = () => runWorkflow("");
+    $("add-node-btn").onclick = addNode;
+    $("delete-selected-btn").onclick = deleteSelected;
+    $("tidy-btn").onclick = tidyLayout;
+    $("template-btn").onclick = openTemplates;
+    $("template-close").onclick = () => { $("template-modal").hidden = true; };
+    $("details-close").onclick = hideDetails;
+    $("run-close").onclick = () => { $("run-panel").hidden = true; };
+
+    document.querySelectorAll("#details-tabs .tab").forEach((tab) => {
+      tab.onclick = () => {
+        activeTab = tab.dataset.tab;
+        const node = current && current.nodes.find((n) => n.id === selectedNodeId);
+        if (node) showNodeDetails(node);
+      };
+    });
+
+    $("palette-search").addEventListener("input", (event) => renderPalette(event.target.value));
+
+    $("new-graph-btn").onclick = async () => {
+      const id = window.prompt("New workflow id (letters, numbers, _ -):", "my_workflow");
+      if (!id) return;
+      const name = window.prompt("Display name:", id) || id;
+      try {
+        const data = await api("/playbooks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: id.trim(), name, goal: name }),
         });
+        await fetchPlaybooks(false);
+        const created = playbooks.find((p) => p.id === data.playbook.id);
+        if (created) selectPlaybook(created);
+      } catch (err) {
+        window.alert(`Could not create workflow: ${err.message}`);
+      }
+    };
 
-        document.getElementById('duplicate-graph-btn')?.addEventListener('click', async () => {
-            if (!selectedPlaybook) return alert('Select a workflow first');
-            const nid = prompt('New id for the copy:', `${selectedPlaybook.id}_copy`);
-            if (!nid) return;
-            try {
-                const resp = await fetch(`${API_BASE}/playbooks/${encodeURIComponent(selectedPlaybook.id)}/duplicate`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ new_id: nid.trim() }) });
-                const data = await resp.json();
-                if (!resp.ok) throw new Error(data.detail || resp.statusText);
-                await fetchPlaybooks();
-                const found = currentPlaybooks.find(p => p.id === data.playbook.id);
-                if (found) selectPlaybook(found);
-            } catch (err) { alert(`Could not duplicate: ${err.message || err}`); }
+    $("duplicate-graph-btn").onclick = async () => {
+      if (!current) { window.alert("Select a workflow first"); return; }
+      const newId = window.prompt("New id for the copy:", `${current.id}_copy`);
+      if (!newId) return;
+      try {
+        const data = await api(`/playbooks/${encodeURIComponent(current.id)}/duplicate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ new_id: newId.trim() }),
         });
+        await fetchPlaybooks(false);
+        const created = playbooks.find((p) => p.id === data.playbook.id);
+        if (created) selectPlaybook(created);
+      } catch (err) {
+        window.alert(`Could not duplicate: ${err.message}`);
+      }
+    };
 
-        document.getElementById('delete-graph-btn')?.addEventListener('click', async () => {
-            if (!selectedPlaybook) return;
-            if (!confirm(`Delete workflow ${selectedPlaybook.id}? Built-ins are protected.`)) return;
-            try {
-                const resp = await fetch(`${API_BASE}/playbooks/${encodeURIComponent(selectedPlaybook.id)}`, { method: 'DELETE' });
-                const data = await resp.json();
-                if (!resp.ok) throw new Error(data.detail || resp.statusText);
-                selectedPlaybook = null; selectedNodeId = null; selectedEdgeId = null;
-                hideDetails();
-                await fetchPlaybooks();
-                d3.select('#canvas').selectAll('*').remove();
-            } catch (err) { alert(`Could not delete: ${err.message || err}`); }
-        });
+    $("delete-graph-btn").onclick = async () => {
+      if (!current) return;
+      if (!window.confirm(`Delete workflow ${current.id}? Built-ins are protected.`)) return;
+      try {
+        await api(`/playbooks/${encodeURIComponent(current.id)}`, { method: "DELETE" });
+        current = null;
+        dirty = false;
+        hideDetails();
+        clearCanvas();
+        await fetchPlaybooks(false);
+      } catch (err) {
+        window.alert(`Could not delete: ${err.message}`);
+      }
+    };
 
-        document.getElementById('validate-btn')?.addEventListener('click', async () => {
-            if (!selectedPlaybook) return;
-            try {
-                const resp = await fetch(`${API_BASE}/playbooks/${encodeURIComponent(selectedPlaybook.id)}/validate`, { method: 'POST' });
-                const data = await resp.json();
-                const cls = data.ok ? 'color:var(--cyan)' : 'color:var(--pink)';
-                showRunPanel(`<div style="${cls};font-size:12px">${data.ok ? '✓ Valid' : '✗ ' + escapeHTML((data.errors || []).join('; '))}</div>
-                    ${(data.warnings || []).map(w => `<div style="color:var(--dim);font-size:11px">⚠ ${escapeHTML(w)}</div>`).join('')}
-                    <div style="color:var(--dim);font-size:11px;margin-top:6px">${data.nodes} nodes · entries: ${escapeHTML((data.entry_points || []).join(', ') || '—')}</div>`);
-                document.getElementById('header-status').textContent = data.ok ? 'Valid' : 'Invalid';
-            } catch (err) { alert(`Validate failed: ${err.message || err}`); }
-        });
+    $("export-btn").onclick = () => {
+      if (!current) return;
+      rebuildEdges();
+      const payload = JSON.parse(JSON.stringify(current));
+      delete payload.edges;
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${current.id}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
+    };
 
-        document.getElementById('run-btn')?.addEventListener('click', async () => {
-            if (!selectedPlaybook) return;
-            const prompt = prompt('Dry-run prompt ($prompt):', 'Studio dry-run: describe what to check');
-            if (prompt === null) return;
-            showRunPanel('<div style="color:var(--dim);font-size:12px">Running… (bounded 60s, 2 workers)</div>');
-            try {
-                const resp = await fetch(`${API_BASE}/playbooks/${encodeURIComponent(selectedPlaybook.id)}/run`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ prompt, timeout_s: 60 }) });
-                const data = await resp.json();
-                if (!resp.ok) throw new Error(data.detail || resp.statusText);
-                showRunPanel(`<div style="color:var(--cyan);font-size:12px">✓ Done · score ${data.goal_score ?? '—'}</div>
-                    <div style="font-size:11px;margin:6px 0;white-space:pre-wrap;max-height:120px;overflow:auto">${escapeHTML((data.final_answer || '').slice(0, 1200))}</div>
-                    ${(data.nodes || []).map(n => `<div style="font-size:11px;color:${n.ok ? 'var(--text)' : 'var(--pink)'}">${n.ok ? '✓' : '✗'} <code>${escapeHTML(n.id)}</code> ${escapeHTML(n.tool)} — ${escapeHTML((n.content || n.error || '').slice(0, 160))}</div>`).join('')}`);
-            } catch (err) { showRunPanel(`<div style="color:var(--pink);font-size:12px">Run failed: ${escapeHTML(err.message || err)}</div>`); }
+    $("import-btn").onclick = () => $("import-file").click();
+    $("import-file").addEventListener("change", async (event) => {
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+      try {
+        const parsed = JSON.parse(await file.text());
+        const payload = Array.isArray(parsed) ? parsed[0] : (parsed.playbook || parsed);
+        if (!payload || !payload.id) throw new Error("JSON must contain a workflow object with an id");
+        const data = await api("/playbooks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
         });
+        await fetchPlaybooks(false);
+        const created = playbooks.find((p) => p.id === data.playbook.id);
+        if (created) selectPlaybook(created);
+      } catch (err) {
+        window.alert(`Import failed: ${err.message}`);
+      }
+      event.target.value = "";
+    });
 
-        document.getElementById('import-btn')?.addEventListener('click', () => document.getElementById('import-file')?.click());
-        document.getElementById('import-file')?.addEventListener('change', async (e) => {
-            const f = e.target.files?.[0];
-            if (!f) return;
-            try {
-                const text = await f.text();
-                const obj = JSON.parse(text);
-                const payload = Array.isArray(obj) ? obj[0] : (obj.playbook || obj);
-                if (!payload || !payload.id) throw new Error('JSON must contain a playbook object with an id');
-                const resp = await fetch(`${API_BASE}/playbooks`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
-                const data = await resp.json();
-                if (!resp.ok) throw new Error(data.detail || resp.statusText);
-                await fetchPlaybooks();
-            } catch (err) { alert(`Import failed: ${err.message || err}`); }
-            e.target.value = '';
-        });
+    $("zoom-in").onclick = () => svgRoot && svgRoot.transition().duration(250).call(zoom.scaleBy, 1.3);
+    $("zoom-out").onclick = () => svgRoot && svgRoot.transition().duration(250).call(zoom.scaleBy, 0.75);
+    $("zoom-fit").onclick = fitToView;
+
+    document.addEventListener("keydown", (event) => {
+      const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName);
+      if (event.key === "Escape") {
+        $("template-modal").hidden = true;
+        hideDetails();
+        return;
+      }
+      if (typing) return;
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+        event.preventDefault(); savePlaybook(); return;
+      }
+      if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); deleteSelected(); return; }
+      if (event.key === "n" || event.key === "N") addNode();
+    });
+
+    window.addEventListener("beforeunload", (event) => {
+      if (!dirty) return;
+      event.preventDefault();
+      event.returnValue = "";
+    });
+
+    window.addEventListener("resize", () => { if (current) renderGraph(); });
+  }
+
+  // ── boot ─────────────────────────────────────────────────────────────────
+  wireHeader();
+  fetchCatalog().then(() => fetchPlaybooks(false));
+})();

@@ -113,13 +113,18 @@ def gate_speak(*, draft: str, user_input: str = "", llm_client=None, embedder=No
             embedder=embedder,
             surface="chat",
         )
-        if verdict.decision in (REFUSE, ESCALATE):
-            if verdict.decision == ESCALATE and verdict.escalation_id:
-                return (
-                    (verdict.pastoral_note or "I'd rather check with you before saying that.")
-                    + f" (reply 'approve ccc-{verdict.escalation_id}' or "
-                    + f"'deny ccc-{verdict.escalation_id}')"
-                )
+        if verdict.decision == ESCALATE:
+            # An uncertain outbound draft is not worth interrupting speech
+            # for. The inbound respond gate already passed this turn, so the
+            # speak backstop replaces clear refusals only; doubt lets the
+            # draft through (logged) instead of swapping the reply for an
+            # approval question that no persisted invocation could satisfy.
+            log.info(
+                "[ccc-hooks] speak escalate keeps draft: %s",
+                (verdict.reasons[0] if verdict.reasons else "")[:160],
+            )
+            return None
+        if verdict.decision == REFUSE:
             if verdict.pastoral_note:
                 return verdict.pastoral_note
             return "I should hold that thought."

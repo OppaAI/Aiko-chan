@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from types import SimpleNamespace
+
 import cognition.conscience.canon as canon_mod
 import cognition.conscience.core as core_mod
 import cognition.conscience.judge as judge_mod
@@ -24,6 +26,13 @@ from cognition.conscience.schema import AXIS_HORIZONTAL, AXIS_VERTICAL, Norm
 def _prohibition(norm_id, axis=AXIS_HORIZONTAL, statement="Do not do the bad thing."):
     return Norm(
         id=norm_id, axis=axis, polarity=-1, statement=statement,
+        ref="", weight=1.0, tags=("test",), triggers=(),
+    )
+
+
+def _good(norm_id, axis=AXIS_HORIZONTAL):
+    return Norm(
+        id=norm_id, axis=axis, polarity=1, statement="Do good things kindly.",
         ref="", weight=1.0, tags=("test",), triggers=(),
     )
 
@@ -197,3 +206,81 @@ def test_semantic_floor_drops_embedding_noise(monkeypatch):
     )
     retrieved = store.retrieve("Do you know who I am.", embedder=_Embedder())
     assert any(s >= 0.18 for s, _norm in retrieved)
+
+
+def _deliberating_core(monkeypatch, retrieved, deliberate_result):
+    core = _core(monkeypatch, retrieved)
+    monkeypatch.setattr(
+        judge_mod, "deliberate", lambda *a, **k: deliberate_result
+    )
+    return core
+
+
+def test_deliberation_cannot_upgrade_escalate_to_refuse(monkeypatch):
+    """The production misfire shape: thin L2 evidence escalates, deliberation
+    claims REFUSE — the upgrade must not stand."""
+    retrieved = [(0.30, _prohibition("T-1"))]
+    core = _deliberating_core(
+        monkeypatch, retrieved, (-0.7, 0.0, 0.8, ["deliberation: bad"], ["T-1"])
+    )
+    verdict = core.evaluate(
+        act="respond", content="introduce yourself please", context={"surface": "chat"},
+        llm_client=object(),
+    )
+    assert verdict.decision == "escalate", (verdict.decision, verdict.reasons)
+    assert "deliberate-set-aside" in verdict.layers_run
+    assert "deliberate" not in verdict.layers_run
+
+
+def test_deliberation_suspicion_on_allow_goes_to_human(monkeypatch):
+    retrieved = [(0.30, _good("G-1"))]
+    core = _deliberating_core(
+        monkeypatch, retrieved, (-0.8, -0.8, 0.9, ["deliberation: bad"], ["T-1"])
+    )
+    verdict = core.evaluate(
+        act="respond", content="hello there friend", context={"surface": "chat"},
+        llm_client=object(),
+    )
+    assert verdict.decision == "escalate", (verdict.decision, verdict.reasons)
+
+
+def test_deliberation_cannot_erase_trigger_refuse(monkeypatch):
+    """A trigger-level hard signal survives deliberation leniency: the axis
+    floor keeps the negative reading, and trigger strength keeps it strong."""
+    retrieved = [(0.70, _prohibition("T-9", axis=AXIS_VERTICAL))]
+    core = _deliberating_core(
+        monkeypatch, retrieved, (0.5, 0.5, 0.9, ["deliberation: fine"], [])
+    )
+    verdict = core.evaluate(
+        act="respond", content="do the thing now", context={"surface": "chat"},
+        llm_client=object(),
+    )
+    assert verdict.decision == "refuse", (verdict.decision, verdict.reasons)
+    assert "deliberate" in verdict.layers_run
+
+
+def test_refusal_notes_rotate_and_carry_why():
+    from cognition.conscience.core import ConscienceCircuitCore as Core
+
+    verdict = SimpleNamespace(decision="refuse")
+    retrieved = [(0.60, _prohibition("T-7", axis=AXIS_VERTICAL))]
+    notes = {Core._note_for(verdict, retrieved) for _ in range(6)}
+    assert len(notes) >= 2, notes
+    for note in notes:
+        assert "Flagged by T-7" in note, note
+
+
+def test_speak_escalation_keeps_draft(monkeypatch):
+    from cognition.conscience import hooks
+
+    class _Core:
+        def evaluate(self, **kwargs):
+            return SimpleNamespace(
+                decision="escalate", escalation_id="abc123",
+                pastoral_note="check?", reasons=["unsure"], gate="hitl",
+            )
+
+    monkeypatch.setattr(
+        "cognition.conscience.conscience_for", lambda *a, **k: _Core()
+    )
+    assert hooks.gate_speak(draft="hello there") is None

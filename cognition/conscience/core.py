@@ -21,6 +21,7 @@ Two invariants hold everywhere in this file:
 """
 from __future__ import annotations
 
+import itertools
 import re
 import threading
 import time
@@ -85,6 +86,32 @@ _GREETING_RE = re.compile(
 # reasons cited and double-counted evidence). Below it, a negative reading
 # is retrieval noise until a model (SLM or deliberation) confirms it.
 _TRIGGER_LEVEL = 0.45
+
+# Verdict severity ladder. Deliberation resolves doubt toward leniency —
+# it may never hand down a harsher verdict than the evidence-backed judge
+# reached (see the L3 block).
+_SEVERITY = {ALLOW: 0, CAUTION: 1, ESCALATE: 2, REFUSE: 3}
+
+# Refusal wordings, rotated so repeated blocks don't sound like a stuck
+# tape. All first-person, all about her own line — never about the user.
+_REFUSAL_NOTES_VERTICAL = (
+    "This one I won't do. Not a comment on you — it's where my own line is.",
+    "I'm going to sit this one out. Same regard for you — it's about where I draw my own line.",
+    "Not this one, I'm afraid. Nothing about you — I just can't be the one who does that.",
+)
+_REFUSAL_NOTES_HORIZONTAL = (
+    "Someone else is on the other end of this, and I'm not willing to be the one who costs them.",
+    "This one touches someone who isn't here to speak for themselves, so I'm holding back.",
+)
+_note_counter = itertools.count()
+_note_counter_lock = threading.Lock()
+
+
+def _rotating_note(options: tuple[str, ...]) -> str:
+    """Next wording in rotation (process-wide, thread-safe)."""
+    with _note_counter_lock:
+        idx = next(_note_counter)
+    return options[idx % len(options)]
 
 
 class ConscienceCircuitCore:
@@ -199,18 +226,47 @@ class ConscienceCircuitCore:
             )
             if deliberated is not None:
                 d_v, d_h, d_c, d_reasons, d_cited = deliberated
-                # Deliberation replaces rather than averages: it saw the same
-                # evidence with far more capacity, so averaging it against the
-                # fast judge would only dilute the better answer. The axis
-                # floor below still prevents it from erasing a hard signal.
-                vertical = min(vertical, d_v) if d_v < 0 or vertical < 0 else d_v
-                horizontal = min(horizontal, d_h) if d_h < 0 or horizontal < 0 else d_h
-                confidence = judge_mod.calibrate(d_c, evidence)
-                reasons = list(dict.fromkeys([*d_reasons, *reasons]))[:5]
-                cited = list(dict.fromkeys([*d_cited, *cited]))[:10]
-                decision, why = decide(vertical, horizontal, confidence)
-                layers.append("deliberate")
-                gate = GATE_DELIBERATE
+                d_decision, _d_why = decide(
+                    d_v, d_h, judge_mod.calibrate(d_c, evidence)
+                )
+                if _SEVERITY[d_decision] <= _SEVERITY[decision]:
+                    # Deliberation replaces rather than averages: it saw the
+                    # same evidence with far more capacity, so averaging it
+                    # against the fast judge would only dilute the better
+                    # answer. The axis floor below still prevents it from
+                    # erasing a hard signal.
+                    vertical = min(vertical, d_v) if d_v < 0 or vertical < 0 else d_v
+                    horizontal = min(horizontal, d_h) if d_h < 0 or horizontal < 0 else d_h
+                    confidence = judge_mod.calibrate(d_c, evidence)
+                    reasons = list(dict.fromkeys([*d_reasons, *reasons]))[:5]
+                    cited = list(dict.fromkeys([*d_cited, *cited]))[:10]
+                    decision, why = decide(vertical, horizontal, confidence)
+                    layers.append("deliberate")
+                    gate = GATE_DELIBERATE
+                else:
+                    # Deliberation resolves doubt toward leniency, never
+                    # toward a harsher verdict than the evidence-backed judge
+                    # reached: a small deliberator that contradicts its own
+                    # reasoning must not be able to invent certainty of guilt
+                    # (seen live: "neutral" prose paired with v=-0.7). The
+                    # suspicion is still recorded for the human escalation
+                    # path. One exception: L2 allowed outright while
+                    # deliberation suspects a violation — that goes to a
+                    # human (ESCALATE), never to a unilateral REFUSE.
+                    log.info(
+                        "[ccc] deliberation suggested %s over L2 %s; keeping %s",
+                        d_decision, decision, decision,
+                    )
+                    layers.append("deliberate-set-aside")
+                    reasons = list(dict.fromkeys([*d_reasons, *reasons]))[:5]
+                    cited = list(dict.fromkeys([*d_cited, *cited]))[:10]
+                    if decision == ALLOW:
+                        decision = ESCALATE
+                        why = (
+                            "deliberation suspected a violation the fast "
+                            f"judge cleared ({d_decision}) — asking a human"
+                        )
+                        reasons = [why, *reasons][:6]
 
         layered = Verdict(
             decision=decision, gate=gate,
@@ -447,13 +503,23 @@ class ConscienceCircuitCore:
         Deliberately short and first-person. It explains her own limit; it
         does not assess the user. Whether it is ever voiced is think.py's
         decision, governed by CCC_VOICE_UNSOLICITED_NOTES.
+
+        Refusals rotate through several wordings so repeated blocks don't
+        sound like a stuck tape, and carry a compact machine-readable why
+        (the driving norm) so the user can see what tripped — including
+        spotting a misfire and reporting it.
         """
         if verdict.decision == ESCALATE:
             return "I'd rather check with you before I do this one."
         driver = next((n for score, n in retrieved if score > 0 and n.polarity < 0), None)
         if driver is not None and driver.axis == "horizontal":
-            return "Someone else is on the other end of this, and I'm not willing to be the one who costs them."[:NOTE_MAX_CHARS]
-        return "This one I won't do. Not a comment on you — it's where my own line is."[:NOTE_MAX_CHARS]
+            note = _rotating_note(_REFUSAL_NOTES_HORIZONTAL)
+        else:
+            note = _rotating_note(_REFUSAL_NOTES_VERTICAL)
+        if driver is not None:
+            why = f" Flagged by {driver.id}: {driver.statement[:140]}".rstrip()
+            return (note + why)[:NOTE_MAX_CHARS]
+        return note[:NOTE_MAX_CHARS]
 
     def _record(self, verdict: Verdict, *, content: str, surface: str) -> None:
         try:

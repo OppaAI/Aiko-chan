@@ -4,7 +4,7 @@ Tests for extracting spoken dialogue from Aiko messages containing emoji headers
 """
 
 import unittest
-from sensory.speak import extract_dialogue_for_tts
+from sensory.speak import extract_dialogue_for_tts, format_for_display
 
 
 class TestDialogueExtraction(unittest.TestCase):
@@ -33,6 +33,20 @@ class TestDialogueExtraction(unittest.TestCase):
         text = "Hello, OppaAI!"
         result = extract_dialogue_for_tts(text)
         self.assertEqual(result, "Hello, OppaAI!")
+
+    def test_display_keeps_markdown_while_removing_structural_metadata(self):
+        text = (
+            "EMOTION: happy\n"
+            "ACTION: *waves*\n"
+            "Hello, *friend*! Read [the **guide**](https://example.com).\n"
+            "- Keep this list item."
+        )
+        result = format_for_display(text)
+        self.assertEqual(
+            result,
+            "Hello, *friend*! Read [the **guide**](https://example.com).\n"
+            "- Keep this list item.",
+        )
 
 
 if __name__ == "__main__":

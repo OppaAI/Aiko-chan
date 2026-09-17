@@ -231,6 +231,7 @@ _FEELING_BRACKET_RE = re.compile(r"\[[^\]]+\]")
 _STRUCTURED_SEP_RE = re.compile(r"\n\s*---\s*\n")
 _EMOTION_LINE_RE = re.compile(r"(?im)^\s*EMOTION\s*:\s*([A-Za-z_][A-Za-z0-9_\-]*)\s*$")
 _ACTION_LINE_RE = re.compile(r"(?im)^\s*ACTION\s*:\s*(.+?)\s*$")
+_DISPLAY_STRUCTURAL_LINE_RE = re.compile(r"(?im)^[ \t]*(?:EMOTION|ACTION)\s*:[^\r\n]*(?:\r?\n|$)")
 _ALLOWED_EMOTIONS = {
     "neutral", "happy", "shy", "sad", "annoyed", "surprised", "thinking",
 }
@@ -288,39 +289,18 @@ def extract_dialogue_for_tts(text: str) -> str:
     return sanitize_for_tts(parsed["dialogue"])
 
 
-def format_for_display(text: str) -> str:
-    """UI text: keep leading emoji, drop useless ACTION lines, keep dialogue as-is.
+def _parse_for_display(text: str) -> str:
+    """Remove response metadata without changing dialogue markup."""
+    if isinstance(text, (list, tuple)):
+        text = text[0] if text else ""
+    return _DISPLAY_STRUCTURAL_LINE_RE.sub("", str(text or "")).strip()
 
-    Karaoke / TUI should type this (or its dialogue body), not raw ``ACTION: none``.
-    Markdown in the dialogue is preserved — only structural chrome is trimmed.
-    """
+
+def format_for_display(text: str) -> str:
+    """UI text with only structural ``EMOTION:`` and ``ACTION:`` lines removed."""
     if not text:
         return ""
-    parsed = parse_aiko_response(text)
-    parts: list[str] = []
-    raw = str(text or "")
-    # Prefer the original leading emoji glyph when present (VRM/UI), not the
-    # mapped emotion name parse_aiko_response stores in emotion.
-    emoji_match = _EMOJI_LEADING_RE.match(raw.strip())
-    if emoji_match:
-        parts.append(emoji_match.group(1).strip())
-    action = (parsed.get("action") or "none").strip()
-    if action and action.lower() not in {"none", "n/a", "-", "—"}:
-        parts.append(f"ACTION: {action}")
-    dialogue = (parsed.get("dialogue") or "").strip()
-    if dialogue:
-        parts.append(dialogue)
-    if not parts:
-        # Fallback: unstructured reply — strip only ACTION: none lines
-        def _drop_none_action(m: re.Match) -> str:
-            val = (m.group(1) or "").strip().lower()
-            if val in {"none", "n/a", "-", "—", ""}:
-                return ""
-            return m.group(0)
-
-        cleaned = _ACTION_LINE_RE.sub(_drop_none_action, raw)
-        return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-    return "\n".join(parts)
+    return _parse_for_display(text)
 
 
 def dialogue_for_stream(text: str) -> str:

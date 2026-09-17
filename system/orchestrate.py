@@ -1411,13 +1411,18 @@ def run_session(ui, args) -> None:
 
                 think.chat(query, token_callback=_think_token_cb, deep_think=True)
 
-                assembled_full   = "".join(raw_chunks)
-                scratchpad_match = re.search(r"<think>(.*?)</think>", assembled_full, re.DOTALL)
-                if scratchpad_match:
-                    inner = scratchpad_match.group(1).strip()
-                    if inner:
-                        ui.add_message('sys',
-                            f'[scratchpad] {inner[:300]}{"…" if len(inner) > 300 else ""}')
+                # Prefer structured evidence summary over raw model CoT fragment.
+                summary = getattr(think, "last_deep_think_summary", None)
+                if summary:
+                    ui.add_message('sys', summary)
+                else:
+                    assembled_full   = "".join(raw_chunks)
+                    scratchpad_match = re.search(r"<think>(.*?)</think>", assembled_full, re.DOTALL)
+                    if scratchpad_match:
+                        inner = scratchpad_match.group(1).strip()
+                        if inner:
+                            ui.add_message('sys',
+                                f'[scratchpad] {inner[:300]}{"…" if len(inner) > 300 else ""}')
 
                 ui.stream_commit()
                 ui._draw()
@@ -1499,7 +1504,7 @@ def run_session(ui, args) -> None:
                     '/clear                   — wipe long-term memories',
                     '/remember                — pin last turn forever (decay-proof)',
                     '/memory                  — show stored memories',
-                    '/think <question>        — deep, thorough reasoning pass (wider recall + reasoning scaffold)',
+                    '/think <question>        — deep reasoning (wider recall, recency filter, evidence tags, scaffold)',
                     '/web <query>             — web search',
                     '/voice                   — toggle TTS on/off',
                     '/listen                  — toggle ASR on/off',

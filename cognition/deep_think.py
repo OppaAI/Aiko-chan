@@ -130,9 +130,9 @@ def _polarity_signature(text: str) -> set[str]:
     t = (text or "").lower()
     sig: set[str] = set()
     for a, b in _OPPOSE_PAIRS:
-        if a in t:
+        if re.search(rf"(?<![a-z0-9']){re.escape(a)}(?![a-z0-9'])", t):
             sig.add(f"+{a}")
-        if b in t:
+        if re.search(rf"(?<![a-z0-9']){re.escape(b)}(?![a-z0-9'])", t):
             sig.add(f"-{a}")
     return sig
 

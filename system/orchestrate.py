@@ -1409,10 +1409,14 @@ def run_session(ui, args) -> None:
                     ui.stream_token(token)
                     ui._draw(buf=[])
 
-                think.chat(query, token_callback=_think_token_cb, deep_think=True)
+                _, summary = think.chat(
+                    query,
+                    token_callback=_think_token_cb,
+                    deep_think=True,
+                    return_deep_think_summary=True,
+                )
 
                 # Prefer structured evidence summary over raw model CoT fragment.
-                summary = getattr(think, "last_deep_think_summary", None)
                 if summary:
                     ui.add_message('sys', summary)
                 else:

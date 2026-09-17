@@ -682,7 +682,6 @@ class AikoThink:
         # the token-budget scale (DEEP_THINK_TOKEN_SCALE vs _REASONING_SCALE).
         # See module docstring "Deep-think mode".
         self._deep_think = False
-        self.last_deep_think_summary: str | None = None  # structured UI summary for /think
         self.last_usage: dict = {}
         self.last_prompt_debug: dict = {}
         self._last_chat_time = time.time()
@@ -1895,7 +1894,8 @@ class AikoThink:
         websearch_net: bool = True,
         system_note: str | None = None,
         deep_think: bool = False,
-    ) -> str:
+        return_deep_think_summary: bool = False,
+    ) -> str | tuple[str, str | None]:
         """Standard chat: persona plus optional memory/KB context.
 
         deep_think — see module docstring "Deep-think mode". Sets
@@ -1904,6 +1904,8 @@ class AikoThink:
         recall to DEEP_THINK_MEMORY_LIMIT/DEEP_THINK_KNOWLEDGE_LIMIT when no
         mem_kb_future was already supplied, and injects _DEEP_THINK_GUIDE —
         a structured multi-angle reasoning scaffold — into the system prompt.
+        Set return_deep_think_summary for callers such as /think that need the
+        request-local evidence summary alongside the response.
         """
         speak = self._get_speak()
         if speak and speak.is_playing():
@@ -1918,6 +1920,7 @@ class AikoThink:
         # except llm_prompt uses the raw user text so the directive never
         # leaks into recall, history, cognitive state or memory writes.
         raw_input = _strip_style_directives(user_input)
+        deep_think_summary: str | None = None
 
         with _brain_trace.step("think.chat", layer="context",
                                inputs={"user_input": user_input, "raw_input": raw_input, "skip_memory": skip_memory,
@@ -1949,34 +1952,6 @@ class AikoThink:
                 deep_think_meta = {}
                 if deep_think:
                     memories, deep_think_meta = _deep_think_rerank(memories, raw_input)
-                    self.last_deep_think_summary = _deep_think_format_summary(
-                        query=raw_input,
-                        memories=memories,
-                        knowledge_block=knowledge_block or "",
-                        meta=deep_think_meta,
-                        web_present=False,
-                    )
-                    try:
-                        _brain_trace.record_step(
-                            "think.deep_think.evidence",
-                            layer="deep_think",
-                            inputs={"query": raw_input},
-                            outputs=_deep_think_trace_payload(
-                                query=raw_input,
-                                memories=memories,
-                                knowledge_block=knowledge_block or "",
-                                meta=deep_think_meta,
-                                web_present=False,
-                            ),
-                            factors=[
-                                f"rerank kept {deep_think_meta.get('kept_count')}/{deep_think_meta.get('input_count')}",
-                                f"contradictions={deep_think_meta.get('contradictions', 0)}",
-                            ],
-                        )
-                    except Exception:
-                        pass
-                else:
-                    self.last_deep_think_summary = None
                 memory_block = memorize.format_for_context(
                   memories, query=raw_input, query_vector=query_vec
                 ) if memorize is not None else ""
@@ -2027,6 +2002,7 @@ class AikoThink:
                 except Exception as e:
                     log.error("Local wiki-knowledge lookup failed: %s", e)
 
+            net_context = ""
             if (
                 not skip_memory
                 and websearch_net
@@ -2042,6 +2018,35 @@ class AikoThink:
                         f"{net_context}\n"
                         f"</search_results>"
                     )
+
+            web_present = bool(net_context)
+            if deep_think and not skip_memory:
+                deep_think_summary = _deep_think_format_summary(
+                    query=raw_input,
+                    memories=memories,
+                    knowledge_block=knowledge_block or "",
+                    meta=deep_think_meta,
+                    web_present=web_present,
+                )
+                try:
+                    _brain_trace.record_step(
+                        "think.deep_think.evidence",
+                        layer="deep_think",
+                        inputs={"query": raw_input},
+                        outputs=_deep_think_trace_payload(
+                            query=raw_input,
+                            memories=memories,
+                            knowledge_block=knowledge_block or "",
+                            meta=deep_think_meta,
+                            web_present=web_present,
+                        ),
+                        factors=[
+                            f"rerank kept {deep_think_meta.get('kept_count')}/{deep_think_meta.get('input_count')}",
+                            f"contradictions={deep_think_meta.get('contradictions', 0)}",
+                        ],
+                    )
+                except Exception:
+                    pass
 
             _wm_mem = self._get_memorize()
             if _wm_mem is not None:
@@ -2059,11 +2064,7 @@ class AikoThink:
                     + _deep_think_evidence_preamble(
                         memories if not skip_memory else [],
                         knowledge_block if not skip_memory else "",
-                        web_present=bool(
-                            not skip_memory and websearch_net
-                            and _CHAT_WEBSEARCH_NET_ENABLED
-                            and _WEBSEARCH_HINT_RE.search(raw_input)
-                        ),
+                        web_present=web_present,
                     )
                 )
                 _tool_hint = _deep_think_tool_hint(
@@ -2149,6 +2150,8 @@ class AikoThink:
             self._deep_think = False
             ctx.set(outputs={"reply_chars": len(raw_response or "")},
                     factors=[f"LLM stream done; reply {len(raw_response or '')} chars"])
+            if return_deep_think_summary:
+                return raw_response, deep_think_summary
             return raw_response
 
     def web_search(self, query: str, token_callback=None) -> str:

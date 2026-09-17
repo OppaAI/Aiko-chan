@@ -2442,7 +2442,6 @@ class AikoThink:
             token_callback(display)
 
         stream_body = dialogue or display
-        stream_body = dialogue or display
         speak.start_speech_stream(token_callback)
         sentences, remainder = split_stream_sentences(stream_body)
         for sentence in sentences:

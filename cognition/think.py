@@ -34,10 +34,11 @@ Deep-think mode:
   it layers on top of localchat rather than competing with agentic/webchat
   as a fifth semantic label. Deep-think mode widens memory/knowledge recall
   (DEEP_THINK_MEMORY_LIMIT/DEEP_THINK_KNOWLEDGE_LIMIT), multiplies the token
-  budget further than ordinary reasoning mode (DEEP_THINK_TOKEN_SCALE), and
-  injects a structured multi-angle reasoning scaffold (_DEEP_THINK_GUIDE)
-  into the prompt so the model actually works the question instead of just
-  writing more words about its first answer.
+  budget (DEEP_THINK_TOKEN_SCALE), injects the structured scaffold from
+  cognition.deep_think (understand → evidence → filter → deliberate →
+  verify → self-check → synthesize), reranks recall with stricter recency
+  and contradiction flags, and exposes a short structured summary for the
+  UI instead of raw chain-of-thought.
 """
 
 from __future__ import annotations
@@ -587,38 +588,15 @@ def _is_deep_think_request(text: str) -> bool:
     return bool(_DEEP_THINK_RE.search(text or ""))
 
 
-# Structured multi-angle reasoning scaffold injected only for deep-think
-# turns. Distinct from (and stacked on top of) the lightweight always-on
-# reasoning_guide built in _current_system_prompt_parts — that one is a
-# cheap nudge paid every turn; this one is the real thing, paid only when
-# asked for.
-_DEEP_THINK_GUIDE = (
-    "<deep_thinking_mode>\n"
-    "The user explicitly asked for careful, thorough thinking on this turn — "
-    "treat it the way a person stops and really works through a hard "
-    "question, rather than answering with the first plausible idea. Work "
-    "through these stages internally before answering (never show the "
-    "stages themselves, and never pad the reply just to look thorough):\n"
-    "1. Restate the real question — what is actually being asked, and what "
-    "would count as a genuinely good answer?\n"
-    "2. Recall what you already know that bears on it — from this "
-    "conversation, from memory, from knowledge context — and note honestly "
-    "what you don't know or are unsure of.\n"
-    "3. Generate at least two meaningfully different angles, "
-    "interpretations, or candidate answers. Do not just elaborate on the "
-    "first idea that came to mind.\n"
-    "4. Pressure-test each one: what evidence supports it, what would prove "
-    "it wrong, where does it conflict with something already established?\n"
-    "5. Check for contradictions with what you or the user have already "
-    "said, in this conversation or in memory.\n"
-    "6. Synthesize the strongest answer, then re-read your own draft once "
-    "for overreach, unsupported claims, or a gap you glossed over.\n"
-    "The reply itself should read as a well-organized, considered answer — "
-    "not a transcript of these steps.\n"
-    "</deep_thinking_mode>"
+# Deep-think scaffold + evidence helpers live in cognition.deep_think.
+from cognition.deep_think import (
+    DEEP_THINK_GUIDE as _DEEP_THINK_GUIDE,
+    evidence_preamble as _deep_think_evidence_preamble,
+    format_summary as _deep_think_format_summary,
+    rerank_for_deep_think as _deep_think_rerank,
+    tool_need_hint as _deep_think_tool_hint,
+    trace_payload as _deep_think_trace_payload,
 )
-
-
 # Matches our own injected "[Style only — never quote this. ...]" control
 # blocks (see cognition.attention.soft_user_prompt). The LLM prompt keeps
 # them, but recall queries, history, cognitive-state recording and memory
@@ -704,6 +682,7 @@ class AikoThink:
         # the token-budget scale (DEEP_THINK_TOKEN_SCALE vs _REASONING_SCALE).
         # See module docstring "Deep-think mode".
         self._deep_think = False
+        self.last_deep_think_summary: str | None = None  # structured UI summary for /think
         self.last_usage: dict = {}
         self.last_prompt_debug: dict = {}
         self._last_chat_time = time.time()
@@ -1967,6 +1946,37 @@ class AikoThink:
                 else:
                     memories, knowledge_block = self._resolve_mem_kb(raw_input, mem_kb_future)
                 memories = for_identity(current_user_id()).prioritize_memories(raw_input, memories)
+                deep_think_meta = {}
+                if deep_think:
+                    memories, deep_think_meta = _deep_think_rerank(memories, raw_input)
+                    self.last_deep_think_summary = _deep_think_format_summary(
+                        query=raw_input,
+                        memories=memories,
+                        knowledge_block=knowledge_block or "",
+                        meta=deep_think_meta,
+                        web_present=False,
+                    )
+                    try:
+                        _brain_trace.record_step(
+                            "think.deep_think.evidence",
+                            layer="deep_think",
+                            inputs={"query": raw_input},
+                            outputs=_deep_think_trace_payload(
+                                query=raw_input,
+                                memories=memories,
+                                knowledge_block=knowledge_block or "",
+                                meta=deep_think_meta,
+                                web_present=False,
+                            ),
+                            factors=[
+                                f"rerank kept {deep_think_meta.get('kept_count')}/{deep_think_meta.get('input_count')}",
+                                f"contradictions={deep_think_meta.get('contradictions', 0)}",
+                            ],
+                        )
+                    except Exception:
+                        pass
+                else:
+                    self.last_deep_think_summary = None
                 memory_block = memorize.format_for_context(
                   memories, query=raw_input, query_vector=query_vec
                 ) if memorize is not None else ""
@@ -2044,6 +2054,25 @@ class AikoThink:
 
             if deep_think:
                 volatile_system = f"{volatile_system}\n\n{_DEEP_THINK_GUIDE}"
+                volatile_system = (
+                    f"{volatile_system}\n\n"
+                    + _deep_think_evidence_preamble(
+                        memories if not skip_memory else [],
+                        knowledge_block if not skip_memory else "",
+                        web_present=bool(
+                            not skip_memory and websearch_net
+                            and _CHAT_WEBSEARCH_NET_ENABLED
+                            and _WEBSEARCH_HINT_RE.search(raw_input)
+                        ),
+                    )
+                )
+                _tool_hint = _deep_think_tool_hint(
+                    raw_input,
+                    memories if not skip_memory else [],
+                    knowledge_block if not skip_memory else "",
+                )
+                if _tool_hint:
+                    volatile_system = f"{volatile_system}\n\n{_tool_hint}"
 
             volatile_system = f"{volatile_system}\n\n{bioclock.current_datetime_block()}".strip()
             notices_block = _format_system_notices(system_note)

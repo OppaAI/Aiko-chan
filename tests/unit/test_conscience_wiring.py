@@ -43,6 +43,7 @@ def test_dispatch_tool_checked_does_not_dispatch_when_gate_is_unavailable(monkey
 
     result = dispatch_tool_checked("save_note", {"title": "x", "content": "y"})
 
+    assert isinstance(result, agentic.ToolResult)
     assert result.error_type == "conscience_unavailable"
     assert dispatched == []
 
@@ -138,6 +139,69 @@ def test_ccc_denial_removes_persisted_call(monkeypatch, tmp_path):
     assert "Leaving" in reply
     assert calls == []
     assert not pending_path.exists()
+
+
+def test_ccc_persistence_failure_denies_escalation_and_records_result(monkeypatch):
+    resolutions = []
+    core = SimpleNamespace(
+        resolve_escalation=lambda escalation_id, approved, note="": resolutions.append(
+            (escalation_id, approved, note)
+        ) or True
+    )
+    monkeypatch.setattr("cognition.conscience.conscience_for", lambda user_id=None: core)
+    monkeypatch.setattr(agentic, "_preference_requires_approval", lambda _name: False)
+    monkeypatch.setattr(
+        agentic,
+        "_gate_tool_call",
+        lambda *args, **kwargs: {
+            "status": "waiting_for_approval",
+            "tool": "ccc_persistence_test",
+            "decision": "escalate",
+            "gate": "hitl",
+            "escalation_id": "abcdef123456",
+            "as_trace": {"decision": "escalate"},
+        },
+    )
+    monkeypatch.setattr(
+        agentic,
+        "_persist_ccc_approval",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    state = TaskState(goal="persist safely")
+
+    result = execute_tool_with_policy(
+        "ccc_persistence_test",
+        {},
+        state,
+        ctx=AgentContext(user_id="user-1"),
+        guards=[],
+    )
+
+    assert result.error_type == "conscience_unavailable"
+    assert result.ok is False
+    assert json.loads(result.content)["status"] == "conscience_unavailable"
+    assert state.steps[0]["error_type"] == "conscience_unavailable"
+    assert state.failures == [result]
+    assert resolutions == [
+        ("abcdef123456", False, "tool approval persistence failed closed")
+    ]
+
+    core.resolve_escalation = lambda *args, **kwargs: (_ for _ in ()).throw(
+        RuntimeError("ledger unavailable")
+    )
+    fallback_state = TaskState(goal="persist safely without ledger")
+
+    fallback_result = execute_tool_with_policy(
+        "ccc_persistence_test",
+        {},
+        fallback_state,
+        ctx=AgentContext(user_id="user-1"),
+        guards=[],
+    )
+
+    assert isinstance(fallback_result, agentic.ToolResult)
+    assert fallback_result.error_type == "conscience_unavailable"
+    assert fallback_state.failures == [fallback_result]
 
 
 def test_streaming_waits_for_final_gate_and_emits_only_replacement(monkeypatch):

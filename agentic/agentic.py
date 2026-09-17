@@ -1295,7 +1295,35 @@ def execute_tool_with_policy(name: str, args: dict, state: TaskState, owner=None
         if blocked is not None:
             escalation_id = blocked.get("escalation_id")
             if blocked.get("decision") == "escalate" and escalation_id:
-                _persist_ccc_approval(ctx, str(escalation_id), name, args, state)
+                try:
+                    _persist_ccc_approval(ctx, str(escalation_id), name, args, state)
+                except Exception as exc:
+                    log.warning("[agentic] failed to persist CCC approval: %s", exc)
+                    try:
+                        from cognition.conscience import conscience_for
+
+                        conscience_for(ctx.user_id).resolve_escalation(
+                            str(escalation_id),
+                            False,
+                            note="tool approval persistence failed closed",
+                        )
+                    except Exception as resolve_exc:
+                        log.warning(
+                            "[agentic] failed to deny unpersisted CCC escalation: %s",
+                            resolve_exc,
+                        )
+                    blocked = {
+                        "status": "conscience_unavailable",
+                        "tool": name,
+                        "decision": "error",
+                        "gate": "error",
+                        "reasons": ["CCC approval persistence was unavailable"],
+                        "as_trace": {
+                            "decision": "error",
+                            "gate": "error",
+                            "fail_mode": type(exc).__name__,
+                        },
+                    }
             result = _tool_gate_result(name, args, blocked)
             state.record(result)
             _append_step_trace(ctx, "conscience_gate", blocked)

@@ -88,8 +88,9 @@ _original_os_exit = os._exit         # capture BEFORE the patch — calling os._
                                      # capture must happen first
 
 _FALLBACK_VERSION = "0.0.0+unknown"  # PEP 440 sentinel when metadata is missing; 0.0.0 sorts below any real release
-                                     # NOTE: +unknown is a PEP 440 "local version" — valid, not semver
+                                      # NOTE: +unknown is a PEP 440 "local version" — valid, not semver
 _CONFIRM_PHRASE = "Clear All Aiko's Memories."       # exact string the user types to arm the wipe
+_FACTORY_RESET_PHRASE_TMPL = "Factory Reset {uid}."  # formatted with the resolved user id — reset wipes the whole user dir
 
 
 __all__ = ["parse_args", "main", "_apply_debug_trace_env", "_console_enabled"]     # public surface: entry point + CLI parser; _ names are internal
@@ -238,6 +239,98 @@ def _handle_clear_mem(log: logging.Logger) -> int:
     return 0                                          # success
 
 
+def _handle_backup(log: logging.Logger, args) -> int:
+    """Handle --backup branch: snapshot, verify, transport, exit.
+
+    Non-destructive, so no confirmation gates — but fail-closed: any
+    snapshot/verify/transport error returns 1 with the cause in aiko.log.
+    Exit codes: 0 = verified backup written; 1 = failed.
+    """
+    from system.backup import BackupError, run_backup
+
+    dests = [d for d in str(getattr(args, "backup_dest", "usb") or "usb").split(",")]
+    try:
+        manifest = run_backup(
+            getattr(args, "backup_type", "settings") or "settings",
+            dests,
+            user_id=getattr(args, "user", "") or "",
+            dry_run=bool(getattr(args, "dry_run", False)),
+        )
+    except BackupError as e:
+        log.error("[main] backup failed: %s", e)
+        if not _console_enabled():
+            print(f"ERROR: backup failed — {e}")
+        return 1
+    except Exception:
+        log.exception("[main] backup failed unexpectedly")
+        if not _console_enabled():
+            print("ERROR: backup failed — see aiko.log for details.")
+        return 1
+    summary = (f"Backup {manifest.backup_type} for {manifest.user_id}: "
+               f"{len(manifest.files)} files, {manifest.total_bytes // 1024} KiB, "
+               f"verified={manifest.verified}")
+    log.info("[main] %s dests=%s", summary, manifest.dests)
+    if not _console_enabled():
+        print(summary)
+        for line in manifest.dests:
+            print(f"  {line}")
+    return 0
+
+
+def _handle_factory_reset(log: logging.Logger, args) -> int:
+    """Handle --factory-reset branch: guard on fresh verified backup, two gates, wipe, exit.
+
+    The manifest guard lives in system.backup.perform_factory_reset (fails
+    closed without a verified backup <24h old). The human gates mirror
+    --clear-mem: explicit Yes plus a typed phrase naming the user, so shell
+    history can never re-run a reset unattended.
+    Exit codes: 0 = wiped or aborted at a gate; 1 = guard failed or wipe failed.
+    """
+    from system.backup import BackupError, perform_factory_reset, resolve_user_id
+
+    try:
+        uid = resolve_user_id(getattr(args, "user", "") or "")
+    except BackupError as e:
+        log.error("[main] factory reset refused: %s", e)
+        if not _console_enabled():
+            print(f"ERROR: {e}")
+        return 1
+    phrase = _FACTORY_RESET_PHRASE_TMPL.format(uid=uid)
+    try:
+        confirm = input(f"WARNING: This will PERMANENTLY erase ALL state for '{uid}'. Continue? [Yes/No]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\nAborted.")
+        return 0
+    if confirm not in ("y", "yes"):
+        print("Aborted factory reset.")
+        return 0
+    try:
+        typed = input(f'To confirm, type exactly: "{phrase}"\n> ').strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\nAborted.")
+        return 0
+    if typed != phrase:
+        print("Confirmation phrase did not match. Aborted factory reset.")
+        return 0
+    try:
+        report = perform_factory_reset(uid)
+    except BackupError as e:
+        log.error("[main] factory reset refused: %s", e)
+        if not _console_enabled():
+            print(f"ERROR: {e}")
+        return 1
+    except Exception:
+        log.exception("[main] factory reset failed unexpectedly")
+        if not _console_enabled():
+            print("ERROR: factory reset failed — see aiko.log for details.")
+        return 1
+    log.info("[main] factory reset for %s: %s", uid, report)
+    if not _console_enabled():
+        print(f"Factory reset complete for '{uid}' ({report['removed_files']} files, "
+              f"backed by {report['backup_id']} @ {report['backup_utc']}).")
+    return 0
+
+
 def _handle_logout(log: logging.Logger) -> int:
     """Handle --logout branch: clear stored CLI auth token and exit.
 
@@ -262,7 +355,7 @@ def parse_args() -> argparse.Namespace:
     """Parse CLI flags. Values validated here in ONE place — front ends never re-check."""
     p = argparse.ArgumentParser(
         prog="main.py",
-        description="Aiko-chan — local assistant. Front ends: WebUI (default) or CLI (--cli); maintenance: --clear-mem, --logout.",
+        description="Aiko-chan — local assistant. Front ends: WebUI (default) or CLI (--cli); maintenance: --clear-mem, --logout, --backup, --factory-reset.",
         epilog=("Exit codes: 0 = success or user-declined · 1 = operation failed.\n"
                 "Diagnostics — level and destination are independent:\n"
                 "  --trace                 clean brain signal (no DEBUG spam)\n"
@@ -292,6 +385,18 @@ def parse_args() -> argparse.Namespace:
                              help="wipe learned state: memories, knowledge, experience, dream scratch (two-gate confirm, then exit)")
     maintenance.add_argument("--logout",    action="store_true",
                              help="clear the stored CLI auth token and exit")
+    maintenance.add_argument("--backup",    action="store_true",
+                             help="snapshot user state (--backup-type settings|full) to --backup-dest, verify, then exit")
+    maintenance.add_argument("--factory-reset", action="store_true",
+                             help="wipe the whole <USER_SPACE_ROOT>/<uid> dir AFTER a verified fresh backup exists (two-gate confirm, then exit)")
+    p.add_argument("--backup-type", choices=("settings", "full"), default="settings",
+                   help="with --backup: 'settings' snapshots <USER_SPACE_ROOT>/<uid>/ only (~130M, hourly-safe); 'full' adds the codebase minus models/.venv/build/logs/.git (daily)")
+    p.add_argument("--backup-dest", default="usb",
+                   help="with --backup: comma-separated dests usb|microsd|nas|cloud|pc|dir:<path> (default: usb). microsd takes code only, never DBs.")
+    p.add_argument("--user", default="",
+                   help="with --backup/--factory-reset: user id (default: owner autodetect, else AIKO_USER_ID)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="with --backup: plan + snapshot + verify, skip transport, delete staging")
 
     # ---- Debug / diagnostics ---------------------------------------------------
     p.add_argument("--debug", action="store_true",
@@ -374,6 +479,12 @@ def main() -> int:
 
     if args.logout:                                     # if logout argument set
         return _handle_logout(log)
+
+    if getattr(args, "backup", False):
+        return _handle_backup(log, args)
+
+    if getattr(args, "factory_reset", False):
+        return _handle_factory_reset(log, args)
 
     try:                                                # one shared fatal-error trap for both front ends:
         if args.cli:                                    # SystemExit in the main thread exits SILENTLY (no traceback),

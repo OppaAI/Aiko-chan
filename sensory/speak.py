@@ -231,6 +231,7 @@ _FEELING_BRACKET_RE = re.compile(r"\[[^\]]+\]")
 _STRUCTURED_SEP_RE = re.compile(r"\n\s*---\s*\n")
 _EMOTION_LINE_RE = re.compile(r"(?im)^\s*EMOTION\s*:\s*([A-Za-z_][A-Za-z0-9_\-]*)\s*$")
 _ACTION_LINE_RE = re.compile(r"(?im)^\s*ACTION\s*:\s*(.+?)\s*$")
+_DISPLAY_STRUCTURAL_LINE_RE = re.compile(r"(?im)^[ \t]*(?:EMOTION|ACTION)\s*:[^\r\n]*(?:\r?\n|$)")
 _ALLOWED_EMOTIONS = {
     "neutral", "happy", "shy", "sad", "annoyed", "surprised", "thinking",
 }
@@ -286,6 +287,27 @@ def extract_dialogue_for_tts(text: str) -> str:
         return ""
     parsed = parse_aiko_response(text)
     return sanitize_for_tts(parsed["dialogue"])
+
+
+def _parse_for_display(text: str) -> str:
+    """Remove response metadata without changing dialogue markup."""
+    if isinstance(text, (list, tuple)):
+        text = text[0] if text else ""
+    return _DISPLAY_STRUCTURAL_LINE_RE.sub("", str(text or "")).strip()
+
+
+def format_for_display(text: str) -> str:
+    """UI text with only structural ``EMOTION:`` and ``ACTION:`` lines removed."""
+    if not text:
+        return ""
+    return _parse_for_display(text)
+
+
+def dialogue_for_stream(text: str) -> str:
+    """Plain dialogue for karaoke sentence-splitting (no emoji / ACTION chrome)."""
+    if not text:
+        return ""
+    return (parse_aiko_response(text).get("dialogue") or "").strip()
 
 
 # ── speak ─────────────────────────────────────────────────────────────────────
@@ -681,10 +703,10 @@ class AikoSpeak:
                 chunk = chunk_queue.get()
                 if chunk is None:
                     break
+                # Chunk may be a lone ACTION/emoji line after sentence split —
+                # never fall back to typing/speaking the raw structured chrome.
                 clean = extract_dialogue_for_tts(chunk)
                 if not clean:
-                    if on_word:
-                        self._emit_words_timed(chunk, 0.0, on_word)
                     continue
                 pieces = list(self._chunk_text(clean))
                 next_synth = None  # (thread, result_container)
@@ -969,17 +991,24 @@ class AikoSpeak:
             self._stream_thread.start()
 
     def feed_speech_stream(self, text: str) -> None:
-        """Queue a completed streamed sentence/chunk for immediate TTS."""
+        """Queue a completed streamed sentence/chunk for immediate TTS.
+
+        Prefer dialogue-only text from the caller; still re-extract here so a
+        stray ACTION/emoji line never reaches synthesis.
+        """
         if not text:
+            return
+        clean = extract_dialogue_for_tts(text)
+        if not clean:
             return
         with self._lock:
             if self._streaming_active:
-                self._stream_chunks.append(text)
+                self._stream_chunks.append(clean)
                 total = sum(len(c) for c in self._stream_chunks)
                 while total > 4000 and len(self._stream_chunks) > 1:
                     total -= len(self._stream_chunks.pop(0))
                 if self._stream_queue is not None:
-                    self._stream_queue.put(text)
+                    self._stream_queue.put(clean)
 
     def stop_speech_stream(self) -> None:
         """Finish the current sentence-level TTS stream."""

@@ -2386,21 +2386,32 @@ class AikoThink:
         if not text:
             return
 
-        # Always drive the TUI callback directly, regardless of TTS
+        # Display: emoji kept, ACTION: none dropped, dialogue preserved (markdown ok).
+        # TTS: dialogue-only via extract_dialogue_for_tts inside speak.feed/play_async.
+        try:
+            from sensory.speak import format_for_display
+            display = format_for_display(text) or text
+        except Exception:
+            display = text
+
         if token_callback:
-            words = text.split(" ")
+            words = display.split(" ")
             for i, word in enumerate(words):
                 token_callback(word if i == 0 else " " + word)
                 time.sleep(float(os.getenv("EMIT_DELAY", 0.005)))
 
-        # TTS runs independently
         speak = self._get_speak()
         if speak:
-            speak.feed(text)
+            speak.feed(text)  # extract_dialogue_for_tts runs inside play_async
             speak.play_async()
 
     def _emit_finalized_response(self, text: str, token_callback=None) -> None:
-        """Emit only text that has completed review and conscience gating."""
+        """Emit only text that has completed review and conscience gating.
+
+        Karaoke typewriter stays on: words are paced to TTS, but only the
+        dialogue body is streamed (leading emoji is shown once up front;
+        ACTION: none is never typed or spoken).
+        """
         if not text:
             return
         speak = self._get_speak()
@@ -2414,8 +2425,25 @@ class AikoThink:
             self._emit(text, token_callback=token_callback)
             return
 
+        try:
+            from sensory.speak import format_for_display, dialogue_for_stream
+            display = format_for_display(text) or text
+            dialogue = dialogue_for_stream(text)
+        except Exception:
+            display, dialogue = text, text
+
+        # Show emoji / real ACTION immediately; karaoke only the dialogue body
+        # so typewriter and TTS stay on the same speakable text.
+        if dialogue and display.endswith(dialogue):
+            prefix = display[: len(display) - len(dialogue)].rstrip()
+            if prefix:
+                token_callback(prefix + "\n")
+        elif display and not dialogue:
+            token_callback(display)
+
+        stream_body = dialogue or display
         speak.start_speech_stream(token_callback)
-        sentences, remainder = split_stream_sentences(text)
+        sentences, remainder = split_stream_sentences(stream_body)
         for sentence in sentences:
             speak.feed_speech_stream(sentence)
         if remainder.strip():

@@ -491,6 +491,7 @@ class AgentContext:
     workspace: Path | None = None
     run_id: str | None = None
     approval_bypass: frozenset[str] = frozenset()
+    conscience_bypass: frozenset[str] = frozenset()
 
 
 def _agent_context(owner=None, *, run_id: str | None = None) -> AgentContext:
@@ -593,6 +594,92 @@ def _pending_approval_path(ctx: AgentContext) -> Path:
 def _persist_pending_approval(ctx: AgentContext, tool: str, args: dict[str, Any], state: "TaskState") -> None:
     payload = {"run_id": ctx.run_id, "tool": tool, "args": args, "checkpoint": json.loads(state.summary()), "created_at": time.time()}
     _pending_approval_path(ctx).write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+
+_CCC_APPROVAL_LOCK = threading.Lock()
+
+
+def _ccc_pending_approval_path(user_id: str | None, escalation_id: str, *, create_parent: bool = False) -> Path:
+    root = user_state_dir(user_id) / "agentic" / "pending_ccc_approvals"
+    if create_parent:
+        root.mkdir(parents=True, exist_ok=True)
+    return root / f"{escalation_id}.json"
+
+
+def _persist_ccc_approval(
+    ctx: AgentContext,
+    escalation_id: str,
+    tool: str,
+    args: dict[str, Any],
+    state: "TaskState",
+) -> None:
+    """Persist everything needed to execute one CCC-approved call later."""
+    payload = {
+        "escalation_id": escalation_id,
+        "tool": tool,
+        "args": args,
+        "checkpoint": json.loads(state.summary()),
+        "context": {
+            "user_id": ctx.user_id,
+            "workspace": str(ctx.workspace) if ctx.workspace is not None else None,
+            "run_id": ctx.run_id,
+            "llm_model": ctx.llm_model,
+            "approval_bypass": sorted(ctx.approval_bypass),
+        },
+        "created_at": time.time(),
+    }
+    path = _ccc_pending_approval_path(ctx.user_id, escalation_id, create_parent=True)
+    temp_path = path.with_suffix(".tmp")
+    with _CCC_APPROVAL_LOCK:
+        temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        temp_path.replace(path)
+
+
+def _discard_ccc_approval(user_id: str | None, escalation_id: str) -> None:
+    """Remove a denied CCC tool invocation, if this escalation owns one."""
+    path = _ccc_pending_approval_path(user_id, escalation_id)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _resume_ccc_approval(owner, escalation_id: str) -> str | None:
+    """Consume and execute a CCC-approved tool invocation at most once."""
+    base_ctx = _agent_context(owner)
+    path = _ccc_pending_approval_path(base_ctx.user_id, escalation_id)
+    with _CCC_APPROVAL_LOCK:
+        try:
+            serialized = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        # Consume before dispatch.  A duplicate approval cannot execute the
+        # same external action twice, even if the tool reports an error.
+        path.unlink()
+    data = json.loads(serialized)
+
+    tool_name = str(data.get("tool") or "")
+    args = dict(data.get("args") or {})
+    saved_context = dict(data.get("context") or {})
+    checkpoint = dict(data.get("checkpoint") or {})
+    saved_user_id = saved_context.get("user_id") or base_ctx.user_id
+    if saved_user_id != base_ctx.user_id:
+        log.warning("agentic: refused CCC resume for a different user")
+        return None
+    saved_workspace = saved_context.get("workspace")
+    resume_ctx = AgentContext(
+        client=base_ctx.client,
+        llm_model=saved_context.get("llm_model") or base_ctx.llm_model,
+        embedder=base_ctx.embedder,
+        user_id=saved_user_id,
+        workspace=Path(saved_workspace) if saved_workspace else base_ctx.workspace,
+        run_id=saved_context.get("run_id") or base_ctx.run_id,
+        approval_bypass=frozenset(saved_context.get("approval_bypass") or ()),
+        conscience_bypass=frozenset({tool_name}),
+    )
+    state = TaskState(goal=str(checkpoint.get("goal") or f"resume CCC approval {escalation_id}"))
+    _append_step_trace(resume_ctx, "conscience_approval_resume", {"tool": tool_name, "escalation_id": escalation_id})
+    return execute_tool_with_policy(tool_name, args, state, ctx=resume_ctx).observation()
 
 
 _APPROVAL_REJECT_RE = re.compile(
@@ -1068,8 +1155,60 @@ def dispatch_tool(name: str, args: dict, owner=None) -> str:
         pass
     return result
 
-def dispatch_tool_checked(name: str, args: dict, owner=None) -> ToolResult:
-    """Run a tool and return a structured result, catching unexpected exceptions."""
+def _gate_tool_call(name: str, args: dict, owner=None) -> dict | None:
+    """Return a blocking CCC payload, including explicit integration failures."""
+    try:
+        from cognition.conscience.hooks import gate_tool
+        return gate_tool(
+            name=name,
+            args=args,
+            llm_client=_context_attr(owner, "client"),
+            embedder=_context_embedder(owner),
+            social_post_tools=_SOCIAL_POST_TOOLS,
+        )
+    except Exception as exc:
+        log.warning("[agentic] conscience tool integration failed closed: %s", exc)
+        return {
+            "status": "conscience_unavailable",
+            "tool": name,
+            "decision": "error",
+            "gate": "error",
+            "reasons": ["complete tool argument evaluation was unavailable"],
+            "as_trace": {"decision": "error", "gate": "error", "fail_mode": type(exc).__name__},
+        }
+
+
+def _tool_gate_result(name: str, args: dict, blocked: dict) -> ToolResult:
+    decision = blocked.get("decision")
+    trace = blocked.get("as_trace")
+    return ToolResult(
+        ok=False,
+        tool=name,
+        args=args,
+        content=json.dumps({key: value for key, value in blocked.items() if key != "as_trace"}, ensure_ascii=False),
+        error_type=(
+            "conscience_refuse"
+            if decision == "refuse"
+            else "needs_approval"
+            if decision == "escalate"
+            else "conscience_unavailable"
+        ),
+        retryable=False,
+        metadata={"ccc": trace or {}},
+    )
+
+
+def dispatch_tool_checked(name: str, args: dict, owner=None, *, conscience_checked: bool = False) -> ToolResult:
+    """Run a gated tool and return a structured result.
+
+    Direct callers must obtain a successful complete-argument CCC evaluation;
+    execute_tool_with_policy can pass ``conscience_checked`` after doing the
+    same gate itself so it can persist an escalation before returning.
+    """
+    if not conscience_checked:
+        blocked = _gate_tool_call(name, args, owner=owner)
+        if blocked is not None:
+            return _tool_gate_result(name, args, blocked)
     try:
         content = dispatch_tool(name, args, owner=owner)
     except Exception as e:
@@ -1151,58 +1290,23 @@ def execute_tool_with_policy(name: str, args: dict, state: TaskState, owner=None
         _append_step_trace(ctx, "tool_result", {"tool": name, "ok": False, "error_type": "needs_approval"})
         return result
 
-    try:
-        from cognition.conscience.hooks import gate_tool
-        owner_client = getattr(owner, "_client", None) if owner is not None else None
-        if owner_client is None and owner is not None:
-            owner_client = getattr(getattr(owner, "owner", None), "_client", None)
-        embedder = None
-        try:
-            memorize = None
-            if owner is not None and hasattr(owner, "_get_memorize"):
-                memorize = owner._get_memorize()
-            if memorize is None and owner is not None:
-                memorize = getattr(owner, "_memorize", None) or getattr(
-                    getattr(owner, "owner", None), "_memorize", None
-                )
-            mem_inner = getattr(memorize, "_mem", None) if memorize is not None else None
-            embedder = getattr(mem_inner, "_embedder", None)
-        except Exception:
-            embedder = None
-        blocked = gate_tool(
-            name=name,
-            args=args,
-            llm_client=owner_client,
-            embedder=embedder,
-            social_post_tools=_SOCIAL_POST_TOOLS,
-        )
+    if name not in ctx.conscience_bypass:
+        blocked = _gate_tool_call(name, args, owner=owner or ctx)
         if blocked is not None:
-            trace = blocked.pop("as_trace", None)
-            result = ToolResult(
-                ok=False,
-                tool=name,
-                args=args,
-                content=json.dumps(blocked, ensure_ascii=False),
-                error_type=(
-                    "conscience_refuse"
-                    if blocked.get("decision") == "refuse"
-                    else "needs_approval"
-                ),
-                retryable=False,
-                metadata={"ccc": trace or {}},
-            )
+            escalation_id = blocked.get("escalation_id")
+            if blocked.get("decision") == "escalate" and escalation_id:
+                _persist_ccc_approval(ctx, str(escalation_id), name, args, state)
+            result = _tool_gate_result(name, args, blocked)
             state.record(result)
             _append_step_trace(ctx, "conscience_gate", blocked)
             _append_step_trace(
                 ctx, "tool_result", {"tool": name, "ok": False, "error_type": result.error_type}
             )
             return result
-    except Exception as exc:
-        log.debug("[agentic] conscience tool gate skipped: %s", exc)
 
     last = ToolResult(ok=False, tool=name, args=args, content="[tool did not run]", error_type="not_run")
     for attempt in range(1, _max_attempts_for(name) + 1):
-        last = dispatch_tool_checked(name, dict(args), owner=ctx)
+        last = dispatch_tool_checked(name, dict(args), owner=ctx, conscience_checked=True)
         last.attempts = attempt
         if last.ok or not last.retryable:
             break

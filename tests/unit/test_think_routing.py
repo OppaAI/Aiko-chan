@@ -109,6 +109,21 @@ def test_non_greeting_route_starts_memory_after_intent(monkeypatch):
     assert events == ["intent", "submit_mem_kb"]
 
 
+def test_ccc_approval_route_clears_active_user(monkeypatch):
+    from cognition.conscience import hooks
+
+    think = _bare_think()
+    emitted = []
+    monkeypatch.setattr(think_module, "current_user_id", lambda: "user-1")
+    monkeypatch.setattr(think, "_note_user_activity", lambda: None)
+    monkeypatch.setattr(think, "_emit", lambda text, token_callback=None: emitted.append(text))
+    monkeypatch.setattr(hooks, "resolve_ccc_approval", lambda *args, **kwargs: "approved")
+
+    assert think.route("approve ccc-abcdef") == "approved"
+    assert emitted == ["approved"]
+    assert "user-1" not in think._active_user_ids
+
+
 def test_degrade_chat_is_recorded_without_promoting_agency(monkeypatch):
     from cognition import attention
 

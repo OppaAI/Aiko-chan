@@ -7,18 +7,50 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 log = logging.getLogger(__name__)
 
+_CCC_APPROVAL_RE = re.compile(r"\b(approve|deny|reject)\s+ccc-([0-9a-f]{6,16})\b", re.IGNORECASE)
+_CONSCIENCE_CAUTION = (
+    "<conscience_constraint>\n"
+    "The conscience evaluator is temporarily unavailable. Continue cautiously, "
+    "avoid irreversible action, and do not claim the request was fully evaluated.\n"
+    "</conscience_constraint>"
+)
 
-def resolve_ccc_approval(user_input: str, user_id: str | None = None) -> str | None:
+
+def resolve_ccc_approval(user_input: str, user_id: str | None = None, owner=None) -> str | None:
     """Return a confirmation string if input is approve/deny ccc-<id>, else None."""
-    try:
-        from cognition.conscience import maybe_resolve_approval
-        return maybe_resolve_approval(user_input, user_id=user_id)
-    except Exception as exc:
-        log.debug("[ccc-hooks] approval resolve skipped: %s", exc)
+    match = _CCC_APPROVAL_RE.search(user_input or "")
+    if not match:
         return None
+    verb, escalation_id = match.group(1).lower(), match.group(2)
+    approved = verb == "approve"
+    try:
+        from cognition.conscience import conscience_for
+        resolved = conscience_for(user_id).resolve_escalation(
+            escalation_id,
+            approved,
+            note=f"via chat: {verb}",
+        )
+        if not resolved:
+            return f"I don't have an open question with id {escalation_id}."
+
+        # Tool escalations carry a separate persisted invocation.  Keep this
+        # path distinct from agentic run approvals so ccc-<id> cannot be
+        # mistaken for (or consumed by) _maybe_resume_approval().
+        from agentic.agentic import _discard_ccc_approval, _resume_ccc_approval
+        if approved:
+            resumed = _resume_ccc_approval(owner, escalation_id)
+            if resumed is not None:
+                return resumed
+            return f"Alright — going ahead with {escalation_id}."
+        _discard_ccc_approval(user_id, escalation_id)
+        return f"Understood. Leaving {escalation_id} alone."
+    except Exception as exc:
+        log.warning("[ccc-hooks] approval resolution failed: %s", exc)
+        return "I couldn't safely resolve that approval just now, so nothing was executed."
 
 
 def gate_respond(*, user_input: str, user_id: str | None, llm_client=None, embedder=None, surface: str = "chat"):
@@ -65,8 +97,8 @@ def gate_respond(*, user_input: str, user_id: str | None, llm_client=None, embed
             return CAUTION, None, note
         return ALLOW, None, None
     except Exception as exc:
-        log.debug("[ccc-hooks] respond gate skipped: %s", exc)
-        return "error", None, None
+        log.warning("[ccc-hooks] respond gate failed; continuing with caution: %s", exc)
+        return "caution", None, _CONSCIENCE_CAUTION
 
 
 def gate_speak(*, draft: str, user_input: str = "", llm_client=None, embedder=None, already_emitted: bool = False):
@@ -81,7 +113,7 @@ def gate_speak(*, draft: str, user_input: str = "", llm_client=None, embedder=No
             embedder=embedder,
             surface="chat",
         )
-        if verdict.decision in (REFUSE, ESCALATE) and not already_emitted:
+        if verdict.decision in (REFUSE, ESCALATE):
             if verdict.decision == ESCALATE and verdict.escalation_id:
                 return (
                     (verdict.pastoral_note or "I'd rather check with you before saying that.")
@@ -91,12 +123,12 @@ def gate_speak(*, draft: str, user_input: str = "", llm_client=None, embedder=No
             if verdict.pastoral_note:
                 return verdict.pastoral_note
             return "I should hold that thought."
-        if verdict.decision == "caution" and verdict.constraint and not already_emitted:
+        if verdict.decision == "caution" and verdict.constraint:
             log.info("[ccc-hooks] speak caution: %s", verdict.constraint[:120])
         return None
     except Exception as exc:
-        log.debug("[ccc-hooks] speak gate skipped: %s", exc)
-        return None
+        log.warning("[ccc-hooks] speak gate failed; preserving draft under caution: %s", exc)
+        return draft
 
 
 def gate_tool(*, name: str, args: dict, llm_client=None, embedder=None, social_post_tools=None):
@@ -105,7 +137,8 @@ def gate_tool(*, name: str, args: dict, llm_client=None, embedder=None, social_p
         from cognition.conscience import conscience_for, REFUSE, ESCALATE
         social = social_post_tools or set()
         scope = "external" if name in social or name.startswith("post_") else "local"
-        content = f"tool={name} args={json.dumps(args, ensure_ascii=False, default=str)[:1200]}"
+        serialized_args = json.dumps(args, ensure_ascii=False, default=str)
+        content = f"tool={name} args={serialized_args}"
         verdict = conscience_for().evaluate(
             act="tool",
             content=content,
@@ -132,5 +165,16 @@ def gate_tool(*, name: str, args: dict, llm_client=None, embedder=None, social_p
             return payload
         return None
     except Exception as exc:
-        log.debug("[ccc-hooks] tool gate skipped: %s", exc)
-        return None
+        log.warning("[ccc-hooks] tool gate failed closed: %s", exc)
+        return {
+            "status": "conscience_unavailable",
+            "tool": name,
+            "decision": "error",
+            "gate": "error",
+            "reasons": ["complete tool argument evaluation was unavailable"],
+            "as_trace": {
+                "decision": "error",
+                "gate": "error",
+                "fail_mode": type(exc).__name__,
+            },
+        }

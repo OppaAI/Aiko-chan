@@ -875,6 +875,13 @@ class AikoThink:
         user_id = current_user_id()
         with self._active_users_lock:
             self._active_user_ids.add(user_id)
+
+        def _finish_route_tracking() -> None:
+            with self._active_users_lock:
+                self._active_user_ids.discard(user_id)
+                if not self._active_user_ids:
+                    self._last_chat_time = time.time()
+
         self._note_user_activity()
         _route_t0 = time.monotonic()
         # Approval commands ("approve run-<id>", "yes") must be handled
@@ -890,6 +897,7 @@ class AikoThink:
                     for_identity(user_id).record_turn_latency(time.monotonic() - _route_t0)
                 except Exception:
                     pass
+                _finish_route_tracking()
                 return resumed
         except Exception as exc:
             log.debug("[route] approval resume pre-check skipped: %s", exc)
@@ -897,7 +905,7 @@ class AikoThink:
         # Conscience HITL: "approve ccc-<id>" / "deny ccc-<id>"
         try:
             from cognition.conscience.hooks import resolve_ccc_approval
-            ccc_reply = resolve_ccc_approval(user_input, user_id=user_id)
+            ccc_reply = resolve_ccc_approval(user_input, user_id=user_id, owner=self)
             if ccc_reply is not None:
                 self._emit(ccc_reply, token_callback=token_callback)
                 try:
@@ -905,9 +913,15 @@ class AikoThink:
                     for_identity(user_id).record_turn_latency(time.monotonic() - _route_t0)
                 except Exception:
                     pass
+                _finish_route_tracking()
                 return ccc_reply
         except Exception as exc:
-            log.debug("[route] conscience approval pre-check skipped: %s", exc)
+            log.warning("[route] conscience approval pre-check failed: %s", exc)
+            if re.search(r"\b(?:approve|deny|reject)\s+ccc-[0-9a-f]{6,16}\b", user_input or "", re.I):
+                ccc_reply = "I couldn't safely resolve that approval just now, so nothing was executed."
+                self._emit(ccc_reply, token_callback=token_callback)
+                _finish_route_tracking()
+                return ccc_reply
 
         # Self-assessment *before* quaternary routing so localchat/webchat
         # also get executable soft outcomes (defer / clarify / degrade_chat).
@@ -935,9 +949,11 @@ class AikoThink:
             )
             if not ok:
                 log.info("[route] should_attempt action=%s reason=%s", action, reason)
-                return self._soft_gate_reply(
+                reply = self._soft_gate_reply(
                     user_input, action, reason, token_callback=token_callback,
                 )
+                _finish_route_tracking()
+                return reply
         except Exception as exc:
             log.debug("[route] should_attempt skipped: %s", exc)
             gate_result = (True, "gate unavailable", "proceed")
@@ -965,15 +981,17 @@ class AikoThink:
                     for_identity(user_id).record_turn_latency(time.monotonic() - _route_t0)
                 except Exception:
                     pass
-                with self._active_users_lock:
-                    self._active_user_ids.discard(user_id)
-                    if not self._active_user_ids:
-                        self._last_chat_time = time.time()
+                _finish_route_tracking()
                 return reply
             if decision == "caution" and note:
                 system_note = (f"{system_note}" + "\n" + note).strip() if system_note else note
         except Exception as exc:
-            log.debug("[route] conscience gate skipped: %s", exc)
+            log.warning("[route] conscience gate failed; continuing with caution: %s", exc)
+            fallback_note = (
+                "<conscience_constraint>Conscience evaluation is temporarily unavailable. "
+                "Proceed cautiously and take no irreversible action.</conscience_constraint>"
+            )
+            system_note = (f"{system_note}\n{fallback_note}").strip() if system_note else fallback_note
 
         try:
             # ── deep-think fast path ────────────────────────────────────────
@@ -1069,10 +1087,7 @@ class AikoThink:
                 for_identity(user_id).record_turn_latency(time.monotonic() - _route_t0)
             except Exception:
                 pass
-            with self._active_users_lock:
-                self._active_user_ids.discard(user_id)
-                if not self._active_user_ids:
-                    self._last_chat_time = time.time()
+            _finish_route_tracking()
 
     def _recall_query(self, user_input: str) -> str:
         """Recall query enriched with the tail of recent conversation.
@@ -1807,8 +1822,8 @@ class AikoThink:
             log.debug("Meta-cognitive self-check skipped (no error in response)")
 
         # Stream response
-        raw_response = self._stream_response(trimmed, system=system, token_callback=token_callback, emit=_CHAT_STREAM_EMIT)
-        raw_response = self._finalize_response(user_input, raw_response, token_callback, already_emitted=_CHAT_STREAM_EMIT)
+        raw_response = self._stream_response(trimmed, system=system, token_callback=token_callback, emit=False)
+        raw_response = self._finalize_response(user_input, raw_response, token_callback, already_emitted=False)
 
         # Store in history
         with self._history_lock:
@@ -2092,9 +2107,9 @@ class AikoThink:
                 system=core_system,
                 system_tail=volatile_system,
                 token_callback=token_callback,
-                emit=_CHAT_STREAM_EMIT,
+                emit=False,
             )
-            raw_response = self._finalize_response(raw_input, raw_response, token_callback, already_emitted=_CHAT_STREAM_EMIT)
+            raw_response = self._finalize_response(raw_input, raw_response, token_callback, already_emitted=False)
 
             with self._history_lock:
                 self._history.append({"role": "assistant", "content": raw_response})
@@ -2293,6 +2308,29 @@ class AikoThink:
             speak.feed(text)
             speak.play_async()
 
+    def _emit_finalized_response(self, text: str, token_callback=None) -> None:
+        """Emit only text that has completed review and conscience gating."""
+        if not text:
+            return
+        speak = self._get_speak()
+        karaoke_text = bool(
+            speak
+            and token_callback
+            and getattr(speak, "karaoke_text", False)
+            and not self._reasoning
+        )
+        if not karaoke_text:
+            self._emit(text, token_callback=token_callback)
+            return
+
+        speak.start_speech_stream(token_callback)
+        sentences, remainder = split_stream_sentences(text)
+        for sentence in sentences:
+            speak.feed_speech_stream(sentence)
+        if remainder.strip():
+            speak.feed_speech_stream(remainder)
+        speak.stop_speech_stream()
+
     @staticmethod
     def _messages_without_system(all_messages: list[dict]) -> list[dict]:
         """Fallback for chat templates that reject `system` role (Jinja: Only user, assistant and tool roles are supported).
@@ -2343,7 +2381,13 @@ class AikoThink:
             or "raise_exception" in msg and "system" in msg
         )
 
-    def _stream_response(self, messages: list[dict], system: str = "", token_callback=None, emit: bool = True, system_tail: str = "") -> str:
+    def _stream_response(self, messages: list[dict], system: str = "", token_callback=None, emit: bool = False, system_tail: str = "") -> str:
+        """Collect a complete model response without exposing it to UI or TTS.
+
+        ``emit`` remains as a compatibility argument for callers and tests, but
+        final output is deliberately deferred to _finalize_response so the
+        complete draft passes gate_speak before any token or audio is emitted.
+        """
         full_response = []
         if self._reasoning:
             # Deep-think mode gets its own, much larger scale than ordinary
@@ -2375,21 +2419,7 @@ class AikoThink:
             "total_tokens": None,
         }
 
-        speak = self._get_speak()   # single snapshot for this call — avoids a toggle mid-stream
-                                     # producing inconsistent behavior across the checks below
-
-        karaoke_text = bool(
-            emit and speak and token_callback and getattr(speak, "karaoke_text", False)
-            and not self._reasoning
-        )
-        if speak and emit:
-            speak.start_speech_stream(token_callback if karaoke_text else None)
-
-        sentence_buffer = ""
         stream_success = False
-        # Buffer tokens/sentences until stream success to prevent partial emission on failure
-        token_buffer = []
-        tts_sentence_buffer = []
         reasoning_buffer: list[str] = []
 
         try:
@@ -2438,26 +2468,7 @@ class AikoThink:
                 if reason_part:
                     reasoning_buffer.append(reason_part)
 
-                # Buffer tokens for emission only after stream success
-                if emit and token_callback and token and not karaoke_text:
-                    token_buffer.append(token)
-
                 full_response.append(token)
-
-                if emit and speak and token:
-                    sentence_buffer += token
-                    sentences, sentence_buffer = split_stream_sentences(sentence_buffer)
-                    if karaoke_text:
-                        # Karaoke: feed sentences to TTS immediately so voice
-                        # starts while the LLM is still streaming (overlap
-                        # hides TTS synth latency). Worker paces on_word
-                        # callbacks to real audio duration.
-                        for sentence in sentences:
-                            speak.feed_speech_stream(sentence)
-                    else:
-                        # Non-karaoke: buffer TTS sentences for feeding only
-                        # after stream success (avoid partial audio on failure).
-                        tts_sentence_buffer.extend(sentences)
 
             text = "".join(full_response).strip()
             reasoning_text = "".join(reasoning_buffer).strip()
@@ -2489,16 +2500,6 @@ class AikoThink:
             if text:
                 self.last_usage["completion_text"] = text
                 stream_success = True
-                if emit and speak and sentence_buffer.strip():
-                    tts_sentence_buffer.append(sentence_buffer)
-
-                # Stream succeeded: now emit buffered tokens and TTS sentences
-                if emit and token_callback and token_buffer:
-                    for buffered_token in token_buffer:
-                        token_callback(buffered_token)
-                if emit and speak and tts_sentence_buffer:
-                    for sentence in tts_sentence_buffer:
-                        speak.feed_speech_stream(sentence)
         except Exception as e:
             if self._is_system_role_error(e):
                 log.warning(f"LLM stream system-role rejected (will retry without system): {e}")
@@ -2521,59 +2522,29 @@ class AikoThink:
                         extra_body=_llm_extra_body(),
                     )
                     full_response = []
-                    token_buffer = []
-                    tts_sentence_buffer = []
-                    sentence_buffer = ""
                     for chunk in stream2:
                         delta = chunk.choices[0].delta if chunk.choices else None
                         token = (delta.content or "") if delta else ""
-                        if emit and token_callback and token and not karaoke_text:
-                            token_buffer.append(token)
                         full_response.append(token)
-                        if emit and speak and token:
-                            sentence_buffer += token
-                            sentences, sentence_buffer = split_stream_sentences(sentence_buffer)
-                            if karaoke_text:
-                                for sentence in sentences:
-                                    speak.feed_speech_stream(sentence)
-                            else:
-                                tts_sentence_buffer.extend(sentences)
                     text2 = "".join(full_response).strip()
                     if text2:
                         self.last_usage["completion_text"] = text2
-                        if emit and speak and sentence_buffer.strip():
-                            tts_sentence_buffer.append(sentence_buffer)
-                        if emit and token_callback and token_buffer:
-                            for bt in token_buffer:
-                                token_callback(bt)
-                        if emit and speak and tts_sentence_buffer:
-                            for s in tts_sentence_buffer:
-                                speak.feed_speech_stream(s)
                         stream_success = True
                         text = text2
                         # Mark success so we skip fallback
                         log.info("LLM stream retry without system role succeeded")
                 except Exception as e2:
                     log.error(f"LLM stream retry without system also failed: {e2}")
-        finally:
-            if speak and emit:
-                speak.stop_speech_stream()
-
         if stream_success:
             return text
 
-        # Stream failed: buffers were never emitted, so no partial output exists.
-        # Send replacement signal before emitting fallback to ensure clean state.
+        # Stream failed: no partial output exists.  The fallback is also held
+        # for final review and conscience gating by the caller.
         fallback_text = self._fallback_completion(
             all_messages,
             max_tokens,
             "LLM stream failed or completed without content",
         )
-        if emit:
-            # Signal replacement before emitting fallback
-            if token_callback and hasattr(token_callback, "reset"):
-                token_callback.reset()
-            self._emit(fallback_text, token_callback=token_callback)
         return fallback_text
 
     def _fallback_completion(self, messages: list[dict], max_tokens: int, reason: str) -> str:
@@ -2692,18 +2663,20 @@ class AikoThink:
             memorize = self._get_memorize()
             mem_inner = getattr(memorize, "_mem", None) if memorize is not None else None
             embedder = getattr(mem_inner, "_embedder", None)
+            gated_draft = response or draft
             replaced = gate_speak(
-                draft=response or draft,
+                draft=gated_draft,
                 user_input=user_input,
                 llm_client=getattr(self, "_client", None),
                 embedder=embedder,
-                already_emitted=already_emitted,
+                already_emitted=False,
             )
             if replaced is not None:
                 response = replaced
-                log.info("[finalize] conscience replaced outbound draft")
+                if response != gated_draft:
+                    log.info("[finalize] conscience replaced outbound draft")
         except Exception as exc:
-            log.debug("[finalize] conscience speak gate skipped: %s", exc)
+            log.warning("[finalize] conscience speak gate failed; preserving draft under caution: %s", exc)
         try:
             from cognition.attention import for_identity
             speak = self._get_speak()
@@ -2717,20 +2690,14 @@ class AikoThink:
                 speak.set_speech_rate(for_identity(current_user_id()).adaptive_tts_rate())
         except Exception:
             pass
-        # Live stream already drove typewriter + karaoke TTS. CLI/WebUI/adapters
-        # do not implement replacement, and TTS cannot retract audio already played.
-        # After a live stream: never re-emit to UI/TTS, but DO persist the corrected
-        # response to chat/webchat history so the stored turn reflects the correction.
-        if already_emitted:
-            if response != draft:
-                log.info(
-                    "[finalize] soft-correction applied to persisted turn after live stream "
-                    "(UI/TTS kept draft; persisting corrected len=%d draft len=%d)",
-                    len(response or ""),
-                    len(draft or ""),
-                )
+        # Compatibility for any out-of-tree caller that already emitted an
+        # accepted draft.  A refusal/escalation replacement must still be sent;
+        # current in-tree streaming callers always arrive with no prior output.
+        if already_emitted and response == draft:
             return response
-        self._emit(response, token_callback=token_callback)
+        if already_emitted and token_callback and hasattr(token_callback, "reset"):
+            token_callback.reset()
+        self._emit_finalized_response(response, token_callback=token_callback)
         return response
 
     def _correct_response(self, user_input: str, draft: str, review: dict | None) -> str:

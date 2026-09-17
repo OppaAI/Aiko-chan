@@ -326,7 +326,8 @@ class TestDispatchTool:
 class TestDispatchToolChecked:
     """Tests for dispatch_tool_checked structured results."""
 
-    def test_returns_toolresult_on_success(self):
+    def test_returns_toolresult_on_success(self, monkeypatch):
+        monkeypatch.setattr("agentic.agentic._gate_tool_call", lambda *args, **kwargs: None)
         owner = MockOwner()
         owner._client = MockLLMClient("Success")
         result = dispatch_tool_checked("deep_research", {"query": "test"}, owner=owner)
@@ -334,7 +335,8 @@ class TestDispatchToolChecked:
         assert result.ok is True
         assert result.tool == "deep_research"
 
-    def test_catches_exception_returns_failed(self):
+    def test_catches_exception_returns_failed(self, monkeypatch):
+        monkeypatch.setattr("agentic.agentic._gate_tool_call", lambda *args, **kwargs: None)
         owner = MockOwner()
         owner._client = MockLLMClient()
         with patch("agentic.agentic.deep_research", side_effect=Exception("boom")):
@@ -683,6 +685,7 @@ def test_resume_approval_runs_pending_tool(monkeypatch, tmp_path):
         return "posted"
 
     registry.register("resume_approval_test", "approval test", handler=handler, needs_approval=True, react=True)
+    monkeypatch.setattr("agentic.agentic._gate_tool_call", lambda *args, **kwargs: None)
     monkeypatch.setattr("agentic.agentic.user_state_dir", lambda user_id=None: tmp_path)
     monkeypatch.setattr("agentic.agentic.user_workspace_root", lambda user_id=None: tmp_path / "workspace")
     owner = MockOwner()

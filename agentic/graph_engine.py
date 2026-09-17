@@ -1893,6 +1893,19 @@ def _execute_graph_inner(graph: PlanGraph, embedder=None, llm_client=None,
     extras = getattr(graph, "_extras", {}) or {}
     reducers = getattr(graph, "reducers", {}) or {}
 
+    # Nodes that exist ONLY as somebody's fallback_to target never run in the
+    # normal schedule — they execute inline when (and only when) the primary
+    # fails (see the fallback block below). Without this, a mirror/backup node
+    # with no dependencies would fire on every run alongside the primary,
+    # doubling API calls. A target that is ALSO a normal dependency of another
+    # node keeps its normal scheduling (it is not fallback-only).
+    _fallback_only = {
+        fid
+        for fid in {n.fallback_to for n in nodes_by_id.values() if n.fallback_to}
+        if fid in nodes_by_id
+        and not any(fid in n.depends_on for n in nodes_by_id.values())
+    }
+
     state = GraphState(reducers=reducers)
     visit_counts: dict[str, int] = {}
 
@@ -1920,9 +1933,17 @@ def _execute_graph_inner(graph: PlanGraph, embedder=None, llm_client=None,
 
     with ThreadPoolExecutor(max_workers=graph_max_workers) as pool:
         while pending:
-            ready = [node for node in pending.values() if all(dep in results for dep in node.depends_on)]
+            ready = [node for node in pending.values()
+                     if node.id not in _fallback_only
+                     and all(dep in results for dep in node.depends_on)]
             if not ready:
-                stuck = ", ".join(sorted(pending))
+                remaining = sorted(pid for pid in pending if pid not in _fallback_only)
+                if not remaining:
+                    # Only unneeded fallback mirrors left — drop them, the run
+                    # is complete. They execute inline if ever required.
+                    pending.clear()
+                    break
+                stuck = ", ".join(remaining)
                 nr = NodeResult("graph", "graph_executor", False, f"dependency cycle or missing dependency among: {stuck}", error_type="dependency_error")
                 ordered.append(nr)
                 if _yield:
@@ -1959,10 +1980,14 @@ def _execute_graph_inner(graph: PlanGraph, embedder=None, llm_client=None,
             # Propagate ContextVars (current_user_id, display_name, etc.) to worker threads.
             # ThreadPoolExecutor does not copy contextvars automatically, so without this
             # per-user state (e.g. job_hunt config path) falls back to "guest".
-            ctx = contextvars.copy_context()
+            # NOTE: the context is copied per node, not once for the batch — a
+            # Context object cannot be entered concurrently, so sharing one ctx
+            # across parallel submissions fails with "cannot enter context:
+            # already entered" on every node after the first.
             future_map = {}
             for node in runnable:
-                future_map[pool.submit(ctx.run, _run_node, node, graph.goal, results, embedder, llm_client, llm_model, extras, state, run_id)] = node
+                node_ctx = contextvars.copy_context()
+                future_map[pool.submit(node_ctx.run, _run_node, node, graph.goal, results, embedder, llm_client, llm_model, extras, state, run_id)] = node
             for fut in as_completed(future_map):
                 node = future_map[fut]
                 try:
@@ -2026,10 +2051,21 @@ def _execute_graph_inner(graph: PlanGraph, embedder=None, llm_client=None,
                                     pending.pop(fallback_node.id, None)
                                     if run_id:
                                         save_node_result(run_id, seq, fallback_result, state_json=_state_json(state)); seq += 1
-                                    save_graph_state(run_id, _safe_state_dict(state))
+                                        save_graph_state(run_id, _safe_state_dict(state))
                                     if _yield:
                                         _yield(fallback_result)
                                     log.info("Fallback node %s succeeded", fallback_node.id)
+                                    # The fallback stands in for the failed node so its
+                                    # dependants can proceed instead of being marked
+                                    # dependency_failed. The run history (ordered) keeps
+                                    # both the failed primary and the successful
+                                    # fallback for an honest run panel.
+                                    results[node.id] = NodeResult(
+                                        node.id, node.tool, True,
+                                        fallback_result.content,
+                                        args=dict(result.args),
+                                        usage=fallback_result.usage,
+                                    )
                                 except Exception as exc:
                                     log.exception("Fallback node %s failed", fallback_node.id)
                             else:

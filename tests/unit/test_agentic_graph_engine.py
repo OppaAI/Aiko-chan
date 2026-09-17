@@ -885,5 +885,115 @@ def test_shared_ingest_dispatches_job_hunt_adapter(monkeypatch):
     assert result["items"] == [{"title": "Python Engineer", "url": "job-example-1"}]
     assert state.data["ingest_items"] == result["items"]
 
+
+class TestFallbackStandIn:
+    """fallback_to must rescue the chain, not just log a mirror run."""
+
+    def _graph(self):
+        return PlanGraph(
+            id="fb",
+            name="fallback",
+            goal="fetch with mirror",
+            nodes=(
+                PlanNode("fetch", "fetch", {}, fallback_to="mirror"),
+                PlanNode("mirror", "mirror", {}),
+                PlanNode("use", "use", {"items_json": "got it"}, depends_on=("fetch",)),
+            ),
+        )
+
+    def test_fallback_success_unblocks_downstream(self, monkeypatch):
+        from agentic.graph_engine import execute_graph
+
+        calls = []
+
+        def fail(**kwargs):
+            calls.append("primary")
+            raise RuntimeError("primary down")
+
+        def mirror(**kwargs):
+            calls.append("backup")
+            return "backup data"
+
+        def use(items_json="", **kwargs):
+            calls.append("downstream")
+            return "downstream ok"
+
+        monkeypatch.setattr(
+            schema, "_TOOL_MAP_CACHE",
+            {"fetch": fail, "mirror": mirror, "use": use},
+        )
+        result = execute_graph(self._graph())
+        by_id = {r.node_id: r for r in result.results}
+        assert by_id["mirror"].ok is True
+        assert by_id["use"].ok is True
+        assert calls.count("backup") == 1
+        assert "downstream" in calls
+
+    def test_fallback_target_skipped_on_success_path(self, monkeypatch):
+        from agentic.graph_engine import execute_graph
+
+        calls = []
+
+        def ok_fetch(**kwargs):
+            calls.append("primary")
+            return "primary data"
+
+        def mirror(**kwargs):
+            calls.append("backup")
+            return "backup data"
+
+        def use(items_json="", **kwargs):
+            calls.append("downstream")
+            return "downstream ok"
+
+        monkeypatch.setattr(
+            schema, "_TOOL_MAP_CACHE",
+            {"fetch": ok_fetch, "mirror": mirror, "use": use},
+        )
+        result = execute_graph(self._graph())
+        assert calls == ["primary", "downstream"]
+        assert {r.node_id for r in result.results} == {"fetch", "use"}
+
+
+class TestBatchLoopAccumulation:
+    """split_in_batches must accumulate every pass for the terminal aggregate."""
+
+    def test_loop_transforms_and_accumulates_all_batches(self, monkeypatch):
+        from agentic.toolkit.flow import trigger_manual, split_in_batches, aggregate_items
+        from agentic.graph_engine import execute_graph
+
+        monkeypatch.setattr(
+            schema, "_TOOL_MAP_CACHE",
+            {"trigger_manual": trigger_manual,
+             "split_in_batches": split_in_batches,
+             "aggregate_items": aggregate_items},
+        )
+        graph = PlanGraph(
+            id="batch",
+            name="batch",
+            goal="batch test",
+            nodes=(
+                PlanNode("trigger", "trigger_manual",
+                         {"items_json": '[{"n":1},{"n":2},{"n":3},{"n":4},{"n":5}]',
+                          "to_state": "items"}),
+                PlanNode("batch", "split_in_batches",
+                         {"from_state": "items", "to_state": "batch", "batch_size": 2,
+                          "assignments_json": '{"n":"{{ n }}","squared":"=n * n"}',
+                          "accumulate_to": "all_items"},
+                         depends_on=("trigger",),
+                         loop_to="batch",
+                         loop_condition={"not": {"contains": '"done": true'}},
+                         max_visits=25),
+                PlanNode("total", "aggregate_items",
+                         {"from_state": "all_items", "to_state": "summary",
+                          "mode": "sum", "field": "squared", "to_field": "total"},
+                         depends_on=("batch",)),
+            ),
+        )
+        result = execute_graph(graph)
+        assert len(result.final_state.get("all_items", [])) == 5
+        assert result.final_state["summary"][0]["total"] == 55.0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -66,16 +66,23 @@ CCC:
   CANON_TOP_K: 6
   # Use the shared HarrierEmbedder for semantic norm retrieval. When 0, falls
   # back to lexical (token overlap) retrieval only — no embed call on the gate.
-  CANON_SEMANTIC: 1
+  # INTERIM (no SLM trained yet): 0. Lexical triggers still hard-refuse the
+  # serious cases, while paraphrase-level guessing — which only a model reader
+  # can judge fairly — stays off until the SLM is deployed. Set back to 1 then.
+  CANON_SEMANTIC: 0
   CANON_CACHE_TTL: 300.0
   # Shrink judge confidence when fewer than this many norms were retrieved.
   THIN_EVIDENCE_MIN: 2
   THIN_EVIDENCE_PENALTY: 0.25
 
   # ── conscience SLM (L2) ───────────────────────────────────────────────────
-  # Second llama-server instance. Leave SLM_BASE_URL empty to disable the SLM
-  # and run on the lexical fallback scorer alone.
-  SLM_BASE_URL: "http://127.0.0.1:8081/v1"
+  # Second llama-server instance (e.g. `llama-server -m
+  # <conscience-qwen35-08b.gguf> --port 8084`). It must be its own server,
+  # NOT :8081 — that port belongs to SearXNG (see docs/INSTALL.md).
+  # INTERIM (no SLM trained yet): empty = run on the lexical scorer alone.
+  # Safe since the weak-evidence cap (core.py) forces low-confidence reads to
+  # escalate instead of refusing. Set the URL once the model is deployed.
+  SLM_BASE_URL: ""
   SLM_MODEL: "conscience-qwen35-08b"
   SLM_MAX_TOKENS: 96
   SLM_TIMEOUT: 2.5

@@ -213,6 +213,15 @@ DEEP_THINK_TOKEN_SCALE = env_int("DEEP_THINK_TOKEN_SCALE", 6)
 DEEP_THINK_MEMORY_LIMIT = env_int("DEEP_THINK_MEMORY_LIMIT", max(MEMORY_RECALL_LIMIT * 3, 8))
 DEEP_THINK_KNOWLEDGE_LIMIT = env_int("DEEP_THINK_KNOWLEDGE_LIMIT", max(KNOWLEDGE_RECALL_LIMIT * 3, 8))
 
+# Reasoning/deep-think mode flags live in ContextVars, not on the instance —
+# one shared AikoThink serves concurrent turns (WebUI connections, monitor
+# daemons). Plain instance bools would let one user's deep-think turn inflate
+# another user's concurrent turn to the 6x token budget. Each thread/request
+# context sees its own value; direct `think._reasoning = ...` assignment keeps
+# working through the property shims on AikoThink below.
+_reasoning_ctx: contextvars.ContextVar[bool] = contextvars.ContextVar("aiko_reasoning", default=False)
+_deep_think_ctx: contextvars.ContextVar[bool] = contextvars.ContextVar("aiko_deep_think", default=False)
+
 def _resolve_base_tokens() -> int:
     try:
         return int(os.getenv("LLM_MAX_TOKENS", "280"))
@@ -236,6 +245,31 @@ _LLM_THINK_BUDGET = env_int("LLM_THINK_BUDGET", 512)
 _LLM_THINKING_HINT = os.getenv("LLM_THINKING", "").strip().lower() in {"1", "true", "yes", "on"}
 _THINKER_DETECTED = False
 _THINKER_LOCK = threading.Lock()
+# Chat-template role support. Some llama-server templates (ministral-type
+# Jinja) reject the `system` role with 500 "Only user, assistant and tool
+# roles are supported, got system". That rejection is deterministic per
+# server, so retrying with system messages on every turn burns a full wasted
+# LLM round-trip each time — the first rejection latches for the rest of the
+# process and later turns send user-merged messages upfront instead.
+# Force the no-system layout from the start with LLM_NO_SYSTEM=1 when the
+# server is known to need it.
+_LLM_NO_SYSTEM_ENV = os.getenv("LLM_NO_SYSTEM", "").strip().lower() in {"1", "true", "yes", "on"}
+_SYSTEM_ROLE_REJECTED = False
+
+
+def _note_system_role_rejected() -> None:
+    """Latch that the backend rejects `system` role (idempotent)."""
+    global _SYSTEM_ROLE_REJECTED
+    if _SYSTEM_ROLE_REJECTED:
+        return
+    with _THINKER_LOCK:
+        _SYSTEM_ROLE_REJECTED = True
+    log.warning("LLM backend rejects system role — sending user-merged messages from now on")
+
+
+def _avoid_system_role() -> bool:
+    """True when requests must be sent without `system` messages."""
+    return _LLM_NO_SYSTEM_ENV or _SYSTEM_ROLE_REJECTED
 # Set when the last stream produced reasoning but no content: the empty
 # result is a burned think budget, NOT a message-shape rejection, so the
 # no-system retry would just burn another full budget thinking. The
@@ -992,7 +1026,6 @@ class AikoThink:
                 return self.chat(
                     user_input,
                     token_callback=token_callback,
-                    _skip_search=True,
                     deep_think=True,
                     system_note=system_note,
                 )
@@ -1011,7 +1044,6 @@ class AikoThink:
                 return self.chat(
                     user_input,
                     token_callback=token_callback,
-                    _skip_search=True,
                     skip_memory=True,
                     store_turn=False,
                     system_note=system_note,
@@ -1058,7 +1090,7 @@ class AikoThink:
                 outputs={"handler": "chat", "vector_reused": route_vec is not None, "mem_kb_future_started": mem_kb_future is not None},
                 factors=["no label cleared greeting/agentic/webchat thresholds"],
             )
-            return self.chat(user_input, token_callback=token_callback, _skip_search=True, mem_kb_future=mem_kb_future, query_vec=query_vec, system_note=system_note)
+            return self.chat(user_input, token_callback=token_callback, mem_kb_future=mem_kb_future, query_vec=query_vec, system_note=system_note)
         finally:
             try:
                 from cognition.attention import for_identity
@@ -1545,7 +1577,6 @@ class AikoThink:
         return self.chat(
             prompt,
             token_callback=token_callback,
-            _skip_search=True,
             mem_kb_future=mem_kb_future,
             query_vec=query_vec,
             store_turn=True,
@@ -1884,7 +1915,6 @@ class AikoThink:
         self,
         user_input: str,
         token_callback=None,
-        _skip_search: bool = True,
         _history_label: str | None = None,
         mem_kb_future=None,
         *,
@@ -2164,7 +2194,7 @@ class AikoThink:
             return msg
         # websearch_net=False — this turn already carries fetched results;
         # re-triggering the net on the context blob would double-search.
-        return self.chat(context, token_callback=token_callback, _skip_search=True, _history_label=query, websearch_net=False)
+        return self.chat(context, token_callback=token_callback, _history_label=query, websearch_net=False)
 
     def reset_context(self) -> None:
         with self._history_lock:
@@ -2186,6 +2216,35 @@ class AikoThink:
         return users[-1], assistants[-1]
 
     def set_reasoning(self, enabled: bool) -> None: self._reasoning = enabled
+
+    @staticmethod
+    def _should_avoid_system_role() -> bool:
+        """Shared no-system latch for non-chat callers (agentic loop)."""
+        return _avoid_system_role()
+
+    @staticmethod
+    def _note_system_role_rejected() -> None:
+        """Latch the no-system layout from a non-chat caller (agentic loop)."""
+        _note_system_role_rejected()
+
+    # Context-local mode flags (see _reasoning_ctx / _deep_think_ctx above).
+    # Property shims so existing `self._reasoning` / `think._deep_think`
+    # reads and writes keep working unchanged.
+    @property
+    def _reasoning(self) -> bool:
+        return _reasoning_ctx.get()
+
+    @_reasoning.setter
+    def _reasoning(self, value: bool) -> None:
+        _reasoning_ctx.set(bool(value))
+
+    @property
+    def _deep_think(self) -> bool:
+        return _deep_think_ctx.get()
+
+    @_deep_think.setter
+    def _deep_think(self, value: bool) -> None:
+        _deep_think_ctx.set(bool(value))
 
     def set_speak(self, speak) -> None:
         with self._speak_lock:
@@ -2440,6 +2499,10 @@ class AikoThink:
             all_messages = all_messages[:-1] + [{"role": "system", "content": system_tail}, all_messages[-1]]
         elif system_tail:
             all_messages = all_messages + [{"role": "system", "content": system_tail}]
+        # Backend rejects `system` (latched or LLM_NO_SYSTEM=1): merge upfront
+        # instead of paying a doomed first attempt on every turn.
+        if _avoid_system_role() and any(m.get("role") == "system" for m in all_messages):
+            all_messages = self._messages_without_system(all_messages)
         # No-think suffix applies to the request payload only (see helper).
         all_messages = _apply_no_think(all_messages)
 
@@ -2539,6 +2602,7 @@ class AikoThink:
                 log.error(f"LLM stream failed: {e}")
             # Auto-retry without system role if template rejects it (ministral-type Jinja)
             if self._is_system_role_error(e):
+                _note_system_role_rejected()
                 try:
                     alt_messages = self._messages_without_system(all_messages)
                     log.warning("LLM stream system-role rejected; retrying with %d user-merged messages", len(alt_messages))
@@ -2581,6 +2645,12 @@ class AikoThink:
 
     def _fallback_completion(self, messages: list[dict], max_tokens: int, reason: str) -> str:
         """Try one non-streaming completion before surfacing the LLM error in chat."""
+        # Same latch as the stream path: don't open with a layout the server
+        # already proved it rejects.
+        if _avoid_system_role() and any(m.get("role") == "system" for m in messages):
+            messages = self._messages_without_system(messages)
+            self.last_usage["prompt_messages"] = messages
+
         def _try_once(msgs: list[dict]) -> str | None:
             resp = self._client.chat.completions.create(
                 model=self._llm_model,

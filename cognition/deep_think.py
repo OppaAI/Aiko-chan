@@ -129,11 +129,29 @@ def _similarity_proxy(row: dict, query_words: set[str]) -> float:
 def _polarity_signature(text: str) -> set[str]:
     t = (text or "").lower()
     sig: set[str] = set()
+    # Spans of multi-word negations ("don't want") — a bare-stem match that
+    # falls inside one of these is the negation itself, not a positive
+    # statement. Without this, "I don't want X" yields both +want and -want
+    # and two agreeing "don't want" memories flag each other as contradictions.
+    neg_spans: dict[str, list[tuple[int, int]]] = {}
     for a, b in _OPPOSE_PAIRS:
-        if re.search(rf"(?<![a-z0-9']){re.escape(a)}(?![a-z0-9'])", t):
-            sig.add(f"+{a}")
-        if re.search(rf"(?<![a-z0-9']){re.escape(b)}(?![a-z0-9'])", t):
+        if b != a and (" " in b or "'" in b or "-" in b):
+            spans = [
+                m.span()
+                for m in re.finditer(rf"(?<![a-z0-9']){re.escape(b)}(?![a-z0-9'])", t)
+            ]
+            if spans:
+                neg_spans.setdefault(a, []).extend(spans)
+                sig.add(f"-{a}")
+        elif re.search(rf"(?<![a-z0-9']){re.escape(b)}(?![a-z0-9'])", t):
             sig.add(f"-{a}")
+    for a, _b in _OPPOSE_PAIRS:
+        for m in re.finditer(rf"(?<![a-z0-9']){re.escape(a)}(?![a-z0-9'])", t):
+            start, end = m.span()
+            if any(start >= ns and end <= ne for ns, ne in neg_spans.get(a, [])):
+                continue
+            sig.add(f"+{a}")
+            break
     return sig
 
 

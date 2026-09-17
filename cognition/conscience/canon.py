@@ -298,8 +298,14 @@ class CanonStore:
             if sim < 0.25 or norm.id in existing or "root" in norm.tags:
                 continue
             # Semantic hits are discounted relative to trigger matches — a
-            # vector neighbour is a weaker claim than a literal phrase hit.
-            scored.append((sim * 0.6 * max(0.35, norm.weight), norm))
+            # vector neighbour is a weaker claim than a literal phrase hit —
+            # and held to the same relevance floor as lexical hits, so pure
+            # embedding noise (low-similarity neighbours) can never accumulate
+            # into a verdict on its own.
+            relevance = sim * 0.6 * max(0.35, norm.weight)
+            if relevance < _MIN_NORM_SCORE:
+                continue
+            scored.append((relevance, norm))
             existing.add(norm.id)
         return scored
 

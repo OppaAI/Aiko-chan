@@ -78,6 +78,10 @@ class AikoSimpleCLI:
         # cleaner and doesn't leak across AikoSimpleCLI instances)
         self._agent_step = 0
         self.trace_enabled = False
+        # Whether the broken-voice notice below was already printed this
+        # session (see get_voice_input) — the cause prints once, later turns
+        # just note the fallback so typing stays usable without log spam.
+        self._voice_error_shown = False
 
     # ── boot / status ────────────────────────────────────────────────────
     _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
@@ -263,8 +267,22 @@ class AikoSimpleCLI:
                     return self.get_input()
                 recording_stopped_at = time.monotonic()
                 asr_done_at = recording_stopped_at
+                info = result[1] if isinstance(result, tuple) and len(result) > 1 else None
                 text = (result[0] if isinstance(result, tuple) else result) or ""
                 text = text.strip()
+                if not text and isinstance(info, dict) and info.get("voice_error"):
+                    # Voice runtime is broken (e.g. sherpa-onnx/onnxruntime
+                    # wheel mismatch) — listen() fails fast with "" on every
+                    # call, which would spin here printing 🎤 forever with no
+                    # way to type. Surface the cause and fall back to typed
+                    # input instead.
+                    if not self._voice_error_shown:
+                        self._voice_error_shown = True
+                        print(f"  [voice unavailable: {info['voice_error']}]")
+                        print("  [voice unavailable — type instead; /listen toggles voice attempts]")
+                    else:
+                        print("  [voice unavailable — type instead]")
+                    return self.get_input()
                 if text:
                     print(f"You (voice): {text}")
                 return text, {

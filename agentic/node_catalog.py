@@ -242,6 +242,12 @@ NODE_SPECS: dict[str, dict[str, Any]] = {
             _p("batch_size", "Batch size", "number", 10),
             _p("from_state", "Read state key", "string", "items"),
             _p("to_state", "Batch state key", "string", "batch"),
+            _p("assignments_json", "Per-batch transform", "json", "{}",
+               "Set-fields syntax, applied to each chunk as it passes. "
+               "Only the loop node runs per pass, so the transform must live here, not downstream."),
+            _p("accumulate_to", "Accumulate every pass into", "string", "",
+               "State key collecting all transformed batches, e.g. all_items. "
+               "A terminal Aggregate node should read this key — without it, downstream only ever sees the last batch."),
             _p("items_json", "Items (upstream)", "string", "", advanced=True),
             _p("reset", "Reset cursor", "boolean", False, advanced=True),
         ],

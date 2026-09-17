@@ -486,7 +486,17 @@ def evaluate(expression: str, env: dict[str, Any]) -> Any:
     except SyntaxError as exc:
         raise ExpressionError(f"syntax error: {exc.msg}") from exc
     _check_ast(tree)
-    return _Evaluator(dict(env)).visit(tree)
+    # The tree-walk itself can still raise builtin errors on hostile but
+    # syntactically valid input (unhashable set/dict keys, BinOp type
+    # mismatches, ...). Normalize everything to ExpressionError so callers
+    # (resolve_value, code_transform) degrade to a clean refusal instead of
+    # crashing the node with an execution_error.
+    try:
+        return _Evaluator(dict(env)).visit(tree)
+    except ExpressionError:
+        raise
+    except Exception as exc:
+        raise ExpressionError(f"evaluation failed: {exc}") from exc
 
 
 _TEMPLATE_RE = re.compile(r"\{\{(.+?)\}\}", re.DOTALL)
@@ -945,9 +955,20 @@ def split_in_batches(
     from_state: str = "items",
     to_state: str = "batch",
     reset: bool = False,
+    assignments_json: str = "{}",
+    accumulate_to: str = "",
     *,
     state=None,
 ) -> str:
+    """Walk one slice per pass. The engine only re-runs the loop-carrying
+    node each pass — downstream nodes run ONCE after the loop exits — so a
+    per-batch transform cannot live in a downstream node. Instead:
+      - ``assignments_json`` (set_fields syntax) transforms each batch
+        in place before it is stored;
+      - ``accumulate_to`` appends every pass's transformed batch to a named
+        state key, so a terminal node (e.g. Aggregate) sees ALL batches,
+        not just the last one.
+    """
     if state is None or not isinstance(getattr(state, "data", None), dict):
         return _dumps({"done": True, "reason": "no_state"})
     pool_key = f"_batch_pool_{to_state}"
@@ -966,9 +987,25 @@ def split_in_batches(
     cursor = int(state.data.get(cursor_key) or 0)
     batch = pool[cursor:cursor + size]
     state.data[cursor_key] = cursor + len(batch)
-    state.data[to_state] = batch
+    transformed = batch
+    raw_assignments = (assignments_json or "").strip()
+    if raw_assignments not in ("", "{}"):
+        assignments = _loads(assignments_json, {}) or {}
+        if isinstance(assignments, dict) and assignments:
+            transformed = apply_assignments(batch, assignments, state=state)
+    state.data[to_state] = transformed
     state.data[f"{to_state}_index"] = cursor // size
     done = state.data[cursor_key] >= len(pool)
+    accumulated = len(transformed)
+    if (accumulate_to or "").strip():
+        acc = state.data.get(accumulate_to)
+        if not isinstance(acc, list):
+            acc = []
+            state.data[accumulate_to] = acc
+        acc.extend(transformed)
+        if len(acc) > FLOW_MAX_ITEMS:
+            del acc[FLOW_MAX_ITEMS:]
+        accumulated = len(acc)
 
     log.info("[flow.batch] %d-%d of %d (done=%s)", cursor, cursor + len(batch), len(pool), done)
     return _dumps({
@@ -978,13 +1015,37 @@ def split_in_batches(
         "processed": state.data[cursor_key],
         "total": len(pool),
         "state_key": to_state,
-        "batch": batch[:FLOW_INLINE_ITEMS],
+        "accumulated": accumulated,
+        "accumulate_key": (accumulate_to or "").strip() or None,
+        "batch": transformed[:FLOW_INLINE_ITEMS],
     })
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TRANSFORM
 # ═════════════════════════════════════════════════════════════════════════════
+
+def apply_assignments(
+    items: list[dict[str, Any]],
+    assignments: dict[str, Any] | None,
+    *,
+    keep_only_set: bool = False,
+    state: Any = None,
+) -> list[dict[str, Any]]:
+    """set_fields core, shared with split_in_batches' per-pass transform.
+
+    Values support ``{{ templates }}`` and ``=`` expressions (see
+    resolve_value). A lone ``{{ expr }}`` span returns its native value.
+    """
+    out: list[dict[str, Any]] = []
+    for index, item in enumerate(items or [{}]):
+        env = build_env(item, index, items, state)
+        row = {} if keep_only_set else dict(item)
+        for field, raw in (assignments or {}).items():
+            row[str(field)] = resolve_value(raw, env)
+        out.append(row)
+    return out
+
 
 @tool(
     _spec("set_fields", "Set/Edit Fields: add or overwrite fields on every item."),
@@ -1004,13 +1065,7 @@ def set_fields(
     assignments = _loads(assignments_json, {}) or {}
     if not isinstance(assignments, dict):
         assignments = {}
-    out: list[dict] = []
-    for index, item in enumerate(items or [{}]):
-        env = build_env(item, index, items, state)
-        row = {} if keep_only_set else dict(item)
-        for field, raw in assignments.items():
-            row[str(field)] = resolve_value(raw, env)
-        out.append(row)
+    out = apply_assignments(items, assignments, keep_only_set=bool(keep_only_set), state=state)
     return emit(out, state=state, to_state=to_state, fields=list(assignments.keys()))
 
 

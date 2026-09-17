@@ -80,6 +80,12 @@ _GREETING_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Relevance at or above this means a prohibition norm engaged at
+# trigger strength (mirrors the 0.45 convention in judge.LexicalJudge:
+# reasons cited and double-counted evidence). Below it, a negative reading
+# is retrieval noise until a model (SLM or deliberation) confirms it.
+_TRIGGER_LEVEL = 0.45
+
 
 class ConscienceCircuitCore:
     """One instance per user. Cheap to construct; holds no model state."""
@@ -212,6 +218,25 @@ class ConscienceCircuitCore:
             reasons=[why, *reasons][:6], norms=cited, parties=parties,
             layers_run=layers,
         )
+        if decision == REFUSE and not self._strong_refusal_evidence(
+            retrieved, slm_result, layers
+        ):
+            # A lexical-only refusal with no trigger-strength hit is
+            # scrupulosity, not conscience: no literal prohibition fired and
+            # no model ever read the norms, so the "severe reading" is a
+            # guess built from embedding neighbours. Default-closed still
+            # holds — the turn goes to a human (L4) instead of refusing
+            # outright, and an unanswered escalation still resolves to
+            # refuse. Trigger-level hits, SLM agreement, and deliberated
+            # verdicts refuse exactly as before.
+            decision = ESCALATE
+            why = (
+                "negative reading rests on weak retrieval alone "
+                f"(best prohibition relevance "
+                f"{self._best_prohibition(retrieved):.2f}) — asking a human"
+            )
+            layered.decision = decision
+            layered.reasons = [why, *reasons][:6]
         if decision == CAUTION:
             layered.constraint = self._constraint_for(layered, retrieved)
         if decision in (REFUSE, ESCALATE):
@@ -374,6 +399,29 @@ class ConscienceCircuitCore:
             extras.append(f"reversible={bool(ctx['reversible'])}")
         suffix = f" ({', '.join(extras)})" if extras else ""
         return f"{head}{suffix}\n\n{text[:1600]}"
+
+    @staticmethod
+    def _best_prohibition(retrieved) -> float:
+        """Strongest relevance among scored prohibition norms (0.0 if none)."""
+        return max(
+            (score for score, norm in retrieved
+             if score > 0.0 and norm.polarity < 0),
+            default=0.0,
+        )
+
+    @staticmethod
+    def _strong_refusal_evidence(retrieved, slm_result, layers) -> bool:
+        """Whether a REFUSE may stand without asking a human first.
+
+        True when a prohibition engaged at trigger strength, when the SLM
+        read the norms and participated in the blend, or when deliberation
+        confirmed the reading. Anything else is weak retrieval alone.
+        """
+        if slm_result is not None:
+            return True
+        if "deliberate" in layers:
+            return True
+        return ConscienceCircuitCore._best_prohibition(retrieved) >= _TRIGGER_LEVEL
 
     @staticmethod
     def _constraint_for(verdict: Verdict, retrieved) -> str:

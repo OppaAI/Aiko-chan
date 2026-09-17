@@ -634,7 +634,6 @@ class _MemoryBackend:
             ext_vals.append(json.dumps(list(schema_sources), ensure_ascii=False))
         if MEMORY_STATE_TAGS_ENABLED and "state_json" in cols:
             try:
-                import json
                 hour = bioclock.local_now().hour
                 state_json = json.dumps({"local_hour": int(hour)}, ensure_ascii=False)
                 ext_cols.append("state_json")

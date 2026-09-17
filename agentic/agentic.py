@@ -1658,10 +1658,40 @@ def _needle_multi_agent_message(messages, tools, token_callback):
     return msg, usage
 
 
+def _agent_messages_sendable(owner, messages: list[dict]) -> list[dict]:
+    """Apply the shared no-system latch to one agentic request.
+
+    Some llama-server templates reject the `system` role (500). The chat path
+    latches that rejection process-wide; the agentic loop honors the same
+    latch here so task turns don't pay a doomed first attempt either.
+    Duck-typed (getattr) so lightweight test owners keep working.
+    """
+    avoid = getattr(owner, "_should_avoid_system_role", None)
+    merge = getattr(owner, "_messages_without_system", None)
+    try:
+        if (callable(avoid) and avoid() and callable(merge)
+                and any(isinstance(m, dict) and m.get("role") == "system" for m in messages)):
+            return merge(list(messages))
+    except Exception:
+        log.debug("agentic: no-system merge skipped", exc_info=True)
+    return messages
+
+
+def _is_agent_system_role_error(owner, exc: Exception) -> bool:
+    check = getattr(owner, "_is_system_role_error", None)
+    if not callable(check):
+        return False
+    try:
+        return bool(check(exc))
+    except Exception:
+        return False
+
+
 def _stream_agent_message(owner, messages, tools, token_callback):
     """Stream an agentic LLM call, feeding text tokens to token_callback.
     Returns (SimpleNamespace, usage) matching the non-streaming shape.
     """
+    send_messages = _agent_messages_sendable(owner, messages)
     if AGENT_REACT_BACKEND in {"needle", "needle_multi"}:
         try:
             if AGENT_REACT_BACKEND == "needle_multi":
@@ -1674,11 +1704,29 @@ def _stream_agent_message(owner, messages, tools, token_callback):
     elif AGENT_REACT_BACKEND != "openai":
         log.warning("[agentic] unknown AGENT_REACT_BACKEND=%r; using openai", AGENT_REACT_BACKEND)
 
-    stream = owner._client.chat.completions.create(
-        model=owner._llm_model, messages=messages, tools=tools,
-        tool_choice="auto", stream=True, max_tokens=AGENT_MAX_TOKENS,
-        temperature=0.3,
-    )
+    try:
+        stream = owner._client.chat.completions.create(
+            model=owner._llm_model, messages=send_messages, tools=tools,
+            tool_choice="auto", stream=True, max_tokens=AGENT_MAX_TOKENS,
+            temperature=0.3,
+        )
+    except Exception as exc:
+        # Same template rejection the chat path handles: retry once with the
+        # system block merged into user turns, and latch it process-wide.
+        merge = getattr(owner, "_messages_without_system", None)
+        note = getattr(owner, "_note_system_role_rejected", None)
+        if (callable(merge) and callable(note) and _is_agent_system_role_error(owner, exc)
+                and any(isinstance(m, dict) and m.get("role") == "system" for m in send_messages)):
+            note()
+            log.warning("agentic: system role rejected; retrying step without system messages")
+            send_messages = merge(list(send_messages))
+            stream = owner._client.chat.completions.create(
+                model=owner._llm_model, messages=send_messages, tools=tools,
+                tool_choice="auto", stream=True, max_tokens=AGENT_MAX_TOKENS,
+                temperature=0.3,
+            )
+        else:
+            raise
     content_parts = []
     tc_deltas = {}
     usage = None

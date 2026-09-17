@@ -1432,46 +1432,6 @@ def run_session(ui, args) -> None:
                 ui._draw()
                 continue
 
-                think.set_reasoning(True)
-                ui.add_message('you', f'[think] {query}')
-                ui.turn_start()
-                ui._draw()
-
-                raw_chunks     = []
-                in_think_block = False
-                think_closed   = False
-
-                def _think_token_cb(token):
-                    nonlocal in_think_block, think_closed
-                    raw_chunks.append(token)
-                    assembled = "".join(raw_chunks)
-
-                    if not think_closed:
-                        if "<think>" in assembled and not in_think_block:
-                            in_think_block = True
-                        if in_think_block:
-                            if "</think>" in assembled:
-                                in_think_block = False
-                                think_closed   = True
-                            return
-
-                    ui.stream_token(token)
-                    ui._draw(buf=[])
-
-                think.chat(query, token_callback=_think_token_cb)
-
-                assembled_full   = "".join(raw_chunks)
-                scratchpad_match = re.search(r"<think>(.*?)</think>", assembled_full, re.DOTALL)
-                if scratchpad_match:
-                    inner = scratchpad_match.group(1).strip()
-                    if inner:
-                        ui.add_message('sys',
-                            f'[scratchpad] {inner[:300]}{"…" if len(inner) > 300 else ""}')
-
-                ui.stream_commit()
-                ui._draw()
-                continue
-
             elif cmd == '/voice':
                 if speak is None:
                     ui.add_message('sys', 'TTS unavailable — voice subsystem did not load.')

@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aiko · Fly Circuit Studio</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background: #0d0a12; color: #e8e0f0; }
+    header { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid #2a2038; }
+    h1 { font-size: 1.1rem; margin: 0; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; padding: 16px; }
+    .card { background: #16101f; border: 1px solid #2a2038; border-radius: 10px; padding: 12px; }
+    .card .k { font-size: 11px; color: #9a8bb0; text-transform: uppercase; }
+    .card .v { font-size: 1.35rem; font-weight: 600; margin-top: 4px; }
+    pre { margin: 16px; background: #120e18; border-radius: 8px; padding: 12px; overflow: auto; font-size: 12px; }
+    .modes { padding: 0 16px; font-size: 13px; color: #b0a0c8; }
+  </style>
+</head>
+<body>
+  <header>
+    <a href="/" style="color:#c4a0ff;text-decoration:none">←</a>
+    <h1>Fly Circuit Studio</h1>
+    <button id="refresh" style="margin-left:auto">Refresh</button>
+  </header>
+  <div class="modes" id="modes"></div>
+  <div class="grid" id="grid"></div>
+  <pre id="raw"></pre>
+  <script>
+    const KEYS = [
+      ["valence","Valence"],["approach","Approach"],["avoidance","Avoid"],
+      ["focus_heading","Heading°"],["focus_sharpness","Sharpness"],
+      ["decisiveness","Decisiveness"],["sleep_pressure","Sleep"],
+      ["urgency","Urgency"],["context_familiarity","Familiarity"],
+      ["action_drive","Drive"],["motor_vigor","Vigor"],["circadian_phase","Circadian"]
+    ];
+    async function load() {
+      const r = await fetch("/studio/fly/api/state");
+      const j = await r.json();
+      const st = j.neural_state || {};
+      const g = document.getElementById("grid");
+      g.innerHTML = KEYS.map(([k,label]) => {
+        let v = st[k];
+        if (typeof v === "number") v = (Math.round(v*1000)/1000);
+        return `<div class="card"><div class="k">${label}</div><div class="v">${v ?? "—"}</div></div>`;
+      }).join("");
+      document.getElementById("modes").textContent = "modes: " + JSON.stringify(j.modes || {});
+      document.getElementById("raw").textContent = JSON.stringify(j, null, 2);
+    }
+    document.getElementById("refresh").onclick = load;
+    load();
+    setInterval(load, 2000);
+  </script>
+</body>
+</html>

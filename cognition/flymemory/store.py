@@ -69,55 +69,60 @@ class PlasticityStore:
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.path))
-        conn.execute("PRAGMA journal_mode=WAL")
-        mb_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(mb_plastic)")
-        }
-        if mb_columns and "identity" not in mb_columns:
-            conn.execute("ALTER TABLE mb_plastic RENAME TO mb_plastic_v2")
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS mb_plastic
-               (identity TEXT NOT NULL, pre INTEGER NOT NULL,
-                post INTEGER NOT NULL, delta REAL NOT NULL,
-                updated_at TEXT NOT NULL, PRIMARY KEY (identity, pre, post))"""
-        )
-        if mb_columns and "identity" not in mb_columns:
-            conn.execute(
-                """INSERT INTO mb_plastic(identity, pre, post, delta, updated_at)
-                   SELECT ?, pre, post, delta, updated_at FROM mb_plastic_v2""",
-                (self.identity,),
-            )
-            conn.execute("DROP TABLE mb_plastic_v2")
-        cx_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(cx_state)")
-        }
-        if cx_columns and "identity" not in cx_columns:
-            conn.execute("ALTER TABLE cx_state RENAME TO cx_state_v2")
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS cx_state
-               (identity TEXT NOT NULL, key TEXT NOT NULL, value REAL NOT NULL,
-                updated_at TEXT NOT NULL, PRIMARY KEY (identity, key))"""
-        )
-        if cx_columns and "identity" not in cx_columns:
-            conn.execute(
-                """INSERT INTO cx_state(identity, key, value, updated_at)
-                   SELECT ?, key, value, updated_at FROM cx_state_v2""",
-                (self.identity,),
-            )
-            conn.execute("DROP TABLE cx_state_v2")
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS meta
-               (key TEXT PRIMARY KEY, value TEXT NOT NULL)"""
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
-            (str(SCHEMA_VERSION),),
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
-            (f"identity:{self.identity}", self.identity),
-        )
-        conn.commit()
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            with conn:
+                # Serialize schema inspection with migration so another process
+                # cannot change the table after we inspect its columns.
+                conn.execute("BEGIN IMMEDIATE")
+                mb_columns = {
+                    row[1] for row in conn.execute("PRAGMA table_info(mb_plastic)")
+                }
+                if mb_columns and "identity" not in mb_columns:
+                    # Legacy rows have no trustworthy owner. Preserve them for
+                    # administrator-led recovery without exposing them to the
+                    # identity that happened to open the store first.
+                    conn.execute(
+                        "ALTER TABLE mb_plastic "
+                        "RENAME TO mb_plastic_legacy_unowned"
+                    )
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS mb_plastic
+                       (identity TEXT NOT NULL, pre INTEGER NOT NULL,
+                        post INTEGER NOT NULL, delta REAL NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (identity, pre, post))"""
+                )
+                cx_columns = {
+                    row[1] for row in conn.execute("PRAGMA table_info(cx_state)")
+                }
+                if cx_columns and "identity" not in cx_columns:
+                    conn.execute(
+                        "ALTER TABLE cx_state "
+                        "RENAME TO cx_state_legacy_unowned"
+                    )
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS cx_state
+                       (identity TEXT NOT NULL, key TEXT NOT NULL,
+                        value REAL NOT NULL, updated_at TEXT NOT NULL,
+                        PRIMARY KEY (identity, key))"""
+                )
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS meta
+                       (key TEXT PRIMARY KEY, value TEXT NOT NULL)"""
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) "
+                    "VALUES ('schema_version', ?)",
+                    (str(SCHEMA_VERSION),),
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                    (f"identity:{self.identity}", self.identity),
+                )
+        except BaseException:
+            conn.close()
+            raise
         return conn
 
     def save_mb(self, pre, post, delta) -> int:

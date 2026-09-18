@@ -4,6 +4,7 @@ from __future__ import annotations
 import sqlite3
 
 import numpy as np
+import pytest
 
 from cognition import fly_registry
 from cognition.flymemory.store import PlasticityStore
@@ -36,7 +37,7 @@ def test_norm_id_uses_complete_identity() -> None:
     assert fly_registry._norm_id(prefix + "a") != fly_registry._norm_id(prefix + "b")
 
 
-def test_exact_file_override_migrates_legacy_state(tmp_path, monkeypatch) -> None:
+def test_exact_file_override_quarantines_legacy_state(tmp_path, monkeypatch) -> None:
     legacy = tmp_path / "legacy.sqlite"
     _write_v2_database(legacy)
     monkeypatch.setenv("FLY_PLASTICITY_DB", str(legacy))
@@ -49,11 +50,22 @@ def test_exact_file_override_migrates_legacy_state(tmp_path, monkeypatch) -> Non
     assert target.exists()
     assert not legacy.exists()
     store = PlasticityStore(target, identity=fly_registry._norm_id(identity))
-    assert store.load_mb(10, 10) == {(1, 2): 0.25}
-    assert store.load_cx() == 0.75
+    assert store.load_mb(10, 10) == {}
+    assert store.load_cx() is None
+
+    with sqlite3.connect(target) as conn:
+        assert conn.execute(
+            "SELECT pre, post, delta, updated_at "
+            "FROM mb_plastic_legacy_unowned"
+        ).fetchall() == [(1, 2, 0.25, "now")]
+        assert conn.execute(
+            "SELECT key, value, updated_at FROM cx_state_legacy_unowned"
+        ).fetchall() == [("sleep_pressure", 0.75, "now")]
 
 
-def test_previous_normalized_path_migrates(tmp_path, monkeypatch) -> None:
+def test_previous_normalized_path_quarantines_legacy_state(
+    tmp_path, monkeypatch
+) -> None:
     identity = "github/user"
     legacy = tmp_path / f"fly_plasticity_{fly_registry._legacy_norm_id(identity)}.db"
     _write_v2_database(legacy)
@@ -65,7 +77,73 @@ def test_previous_normalized_path_migrates(tmp_path, monkeypatch) -> None:
     assert not legacy.exists()
     assert PlasticityStore(
         target, identity=fly_registry._norm_id(identity)
-    ).load_cx() == 0.75
+    ).load_cx() is None
+
+
+def test_schema_inspection_and_legacy_rename_share_immediate_transaction(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "legacy.sqlite"
+    _write_v2_database(path)
+    real_connect = sqlite3.connect
+    statements: list[tuple[str, bool]] = []
+
+    class TracedConnection:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, sql, parameters=()):
+            statements.append((" ".join(sql.split()), self._connection.in_transaction))
+            return self._connection.execute(sql, parameters)
+
+        def __enter__(self):
+            self._connection.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._connection.__exit__(*args)
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    monkeypatch.setattr(
+        "cognition.flymemory.store.sqlite3.connect",
+        lambda *args, **kwargs: TracedConnection(real_connect(*args, **kwargs)),
+    )
+
+    conn = PlasticityStore(path, identity="opener")._connect()
+    conn.close()
+
+    begin_index = next(
+        i for i, (sql, _) in enumerate(statements) if sql == "BEGIN IMMEDIATE"
+    )
+    schema_statements = [
+        (i, in_transaction)
+        for i, (sql, in_transaction) in enumerate(statements)
+        if sql.startswith("PRAGMA table_info(") or "RENAME TO" in sql
+    ]
+    assert schema_statements
+    assert all(i > begin_index and in_transaction for i, in_transaction in schema_statements)
+
+
+def test_failed_legacy_migration_rolls_back_all_schema_changes(tmp_path) -> None:
+    path = tmp_path / "conflicting-legacy.sqlite"
+    _write_v2_database(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE cx_state_legacy_unowned (key TEXT)")
+
+    with pytest.raises(sqlite3.OperationalError):
+        PlasticityStore(path, identity="opener")._connect()
+
+    with sqlite3.connect(path) as conn:
+        mb_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(mb_plastic)")
+        }
+        assert mb_columns == {"pre", "post", "delta", "updated_at"}
+        assert conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'mb_plastic_legacy_unowned'"
+        ).fetchone() is None
 
 
 def test_shared_store_scopes_every_mb_and_cx_row(tmp_path) -> None:

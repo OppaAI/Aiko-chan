@@ -53,6 +53,60 @@ GRASP_W_PRIMACY = env_float("GRASP_W_PRIMACY", 0.07)
 GRASP_RECENCY_HALF_LIFE = max(1.0, env_float("GRASP_RECENCY_HALF_LIFE", 4.0))
 GRASP_RECALL_FREQ_CAP = max(1, env_int("GRASP_RECALL_FREQ_CAP", 6))
 GRASP_PRIMACY_SPAN = max(1.0, env_float("GRASP_PRIMACY_SPAN", 6.0))
+
+# Fly mushroom-body biological layer (cognition/flymemory): opponent
+# approach/avoid bias from real MaleCNS connectivity. Modes: off (default,
+# zero overhead), shadow (bias computed + debug-logged, score untouched),
+# live (bias added to score with MEMORY_FLYMB_W; one reinforce() per fill).
+MEMORY_FLYMB_MODE = env_str("MEMORY_FLYMB_MODE", "off").strip().lower()
+MEMORY_FLYMB_W = env_float("MEMORY_FLYMB_W", 0.05)
+_FLYMB = None
+_FLYMB_OK = None
+
+
+def _flymb():
+    global _FLYMB, _FLYMB_OK
+    if _FLYMB_OK is None:
+        try:
+            from cognition.flymemory import FlyMB
+            _FLYMB = FlyMB()
+            _FLYMB_OK = True
+        except Exception as exc:  # missing data/numpy: stay silent, stay off
+            log.debug("flymb unavailable: %s", exc)
+            _FLYMB_OK = False
+    return _FLYMB if _FLYMB_OK else None
+
+
+def _flymb_features(turn: "GraspTurn", current_turn: int) -> list[float]:
+    return [
+        turn.emotion, turn.importance, turn.relevance, turn.novelty,
+        turn.question, turn.entity,
+        min(1.0, turn.recall_count / max(1, GRASP_RECALL_FREQ_CAP)),
+        score_recency(turn.created_turn, current_turn),
+    ]
+
+
+def flymb_bias_for_turn(turn: "GraspTurn", current_turn: int, *, learn: bool = False) -> float | None:
+    """Opponent MB bias for a turn, or None when disabled/unavailable.
+
+    Shadow mode is read-only (debug log only). Live mode learns once per
+    call when learn=True — callers must ensure once-per-turn semantics.
+    """
+    if MEMORY_FLYMB_MODE not in ("shadow", "live"):
+        return None
+    mb = _flymb()
+    if mb is None:
+        return None
+    try:
+        feats = _flymb_features(turn, current_turn)
+        if learn and MEMORY_FLYMB_MODE == "live":
+            mb.reinforce(mb.encode(feats), turn.emotion)
+        bias = mb.valence_bias(feats)
+    except Exception as exc:
+        log.debug("flymb scoring failed: %s", exc)
+        return None
+    log.debug("flymb mode=%s bias=%+.3f", MEMORY_FLYMB_MODE, bias)
+    return bias
 GRASP_JOURNAL_ENABLED = env_flag("GRASP_JOURNAL_ENABLED", "1")
 GRASP_JOURNAL_DIR = env_str("GRASP_JOURNAL_DIR", str(Path.home() / ".local" / "share" / "aiko" / "journal"))
 _CHARS_PER_TOKEN = 4.0
@@ -310,12 +364,19 @@ def compute_score(turn: "GraspTurn", current_turn: int) -> float:
     total_w = sum(weights.values())
     if total_w <= 0:
         return 0.0
-    return (
+    base = (
         weights["emotion"] * emo + weights["importance"] * turn.importance + weights["recency"] * rec
         + weights["relevance"] * turn.relevance + weights["novelty"] * turn.novelty
         + weights["question"] * turn.question + weights["entity"] * turn.entity
         + weights["recall_freq"] * rf + weights["primacy"] * pri
     ) / total_w
+    if MEMORY_FLYMB_MODE == "live":
+        bias = flymb_bias_for_turn(turn, current_turn)
+        if bias is not None:
+            base = base + MEMORY_FLYMB_W * bias
+    elif MEMORY_FLYMB_MODE == "shadow":
+        flymb_bias_for_turn(turn, current_turn)  # log-only, score untouched
+    return base
 
 class GraspBuffer:
     def __init__(self, *, miller_min: int = GRASP_MILLER_MIN, miller_max: int = GRASP_MILLER_MAX,
@@ -386,6 +447,9 @@ class GraspBuffer:
         )
         turn.novelty = score_novelty(token_set, [s._token_set for s in self._slots])
         turn.score = compute_score(turn, self._turn_counter)
+        if MEMORY_FLYMB_MODE == "live":
+            # Single DAN-like teaching event per accepted turn (shadow learns nothing).
+            flymb_bias_for_turn(turn, self._turn_counter, learn=True)
         self._slots.append(turn)
         self.journal.append_turn(turn, event="fill")
         self._rescore()

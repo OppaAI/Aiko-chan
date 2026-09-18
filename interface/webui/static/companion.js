@@ -2,6 +2,15 @@
    after a user gesture and sent once; no stream is retained or auto-started. */
 (function () {
   const $ = id => document.getElementById(id);
+  // Tauri shell detection runs first: the deferred vrm.js module reads
+  // window.aikoIsTauri to switch the 3D canvas to alpha mode, and the
+  // body.tauri-companion class below strips opaque page backgrounds so the
+  // native transparent window actually shows the desktop through.
+  const isTauri = !!(window.__TAURI_INTERNALS__ || window.__TAURI__);
+  if (isTauri) {
+    window.aikoIsTauri = true;
+    document.body.classList.add('tauri-companion');
+  }
   const screenBtn = $('screen-btn'), dialog = $('screen-consent-dialog'), consent = $('screen-consent-check');
   const confirmBtn = $('screen-consent-confirm'), indicator = $('screen-live-indicator'), stop = $('stop-screen-share');
   const focusButton = $('focus-toggle'), focusState = $('focus-state'), focusTime = $('focus-time');

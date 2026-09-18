@@ -182,6 +182,13 @@ DREAM_BOOST_AMOUNT: "1"  # Access-count boost for memories promoted during dream
 # Stored as memories.valence_score; valence_tag kept for legacy (pos/neg/neutral).
 # Intensity for forget = |score| / 2. Inference: emoji + lexicon + intensifiers (no LLM).
 # FORGET_INTENSITY_* still apply when only valence_tag is present (old rows).
+# -- Biological layer: fly mushroom body (cognition/flymemory) --
+# Opponent approach/avoid bias from real MaleCNS v1.0 MB connectivity.
+# off = zero overhead (default); shadow = bias computed + debug-logged, scores
+# untouched; live = bias added to grasp scores (weight below) + one DAN-like
+# teaching event per accepted turn (reward = turn emotion).
+MEMORY_FLYMB_MODE: "shadow"  # off | shadow | live.
+MEMORY_FLYMB_W: "0.05"  # Live-mode weight of the opponent bias added to grasp scores.
 # -- Search ranking and context budget --
 
 MEMORY_SEARCH_CACHE_SIZE: "128"  # Max number of memory search results cached in-process.

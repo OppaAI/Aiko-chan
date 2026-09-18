@@ -188,7 +188,7 @@ DREAM_BOOST_AMOUNT: "1"  # Access-count boost for memories promoted during dream
 # untouched; live = bias added to grasp scores (weight below) + one DAN-like
 # teaching event per accepted turn (reward = turn emotion).
 # State is identity-scoped via cognition.fly_registry (per-user SQLite).
-MEMORY_FLYMB_MODE: "live"  # off | shadow | live.
+MEMORY_FLYMB_MODE: "shadow"  # off | shadow | live.
 MEMORY_FLYMB_W: "0.05"  # Live-mode weight of the opponent bias added to grasp scores.
 MEMORY_FLYMB_PROMOTE_W: "0.1"  # Live-mode weight of the bias on journal-promotion scores.
 MEMORY_FLYMB_RECALL_W: "0.01"  # Live-mode KC-overlap bonus on episodic recall (RRF scale ~0.03).

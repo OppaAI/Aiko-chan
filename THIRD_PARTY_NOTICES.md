@@ -8,7 +8,7 @@ connectome releases. The full connectomes are **not** redistributed.
 - **Dataset:** MaleCNS v1.0 — complete adult male *Drosophila melanogaster*
   central nervous system (brain + ventral nerve cord)
 - **Portal:** https://male-cns.janelia.org/
-- **License:** Creative Commons Attribution 4.0 (CC BY 4.0)
+- **License:** Creative Commons Attribution 4.0 (CC BY 4.0), https://creativecommons.org/licenses/by/4.0/
 - **Citation:** Berg et al., *Sexual dimorphism in the complete connectome of
   the Drosophila male central nervous system*, Cell (2026).
   See also the bioRxiv preprint lineage and Janelia project page.

@@ -49,7 +49,7 @@ def _flycx_cadence(task: str, user_id: str | None = None) -> str:
     if mode not in ("shadow", "live"):
         return "parallel"
     try:
-        from cognition.fly_registry import get_flycx
+        from cognition.fly_registry import get_flycx, get_flycx_lock
         from cognition.flymemory import text_features
         if user_id is None:
             try:
@@ -60,7 +60,8 @@ def _flycx_cadence(task: str, user_id: str | None = None) -> str:
         cx = get_flycx(user_id)
         if cx is None:
             return "parallel"
-        out = cx.step(text_features(task or ""), fatigue=0.0)
+        with get_flycx_lock(user_id):
+            out = cx.step(text_features(task or ""), fatigue=0.0)
     except Exception as exc:
         log.debug("flycx cadence failed: %s", exc)
         return "parallel"

@@ -91,12 +91,17 @@ def test_routing_decisiveness_modes(monkeypatch):
 def test_orchestrator_cadence_modes(monkeypatch):
     # The orchestrator reads the mode per-call from the environment.
     from agentic.needle_orchestrator import _flycx_cadence
+    from cognition.fly_registry import get_flycx, get_flycx_lock
+    identity = "orchestrator-cadence-test"
     monkeypatch.setenv("MEMORY_FLYCX_MODE", "off")
-    assert _flycx_cadence("do research") == "parallel"
+    assert _flycx_cadence("do research", identity) == "parallel"
     monkeypatch.setenv("MEMORY_FLYCX_MODE", "shadow")
-    assert _flycx_cadence("do research") == "parallel"  # shadow never steers
+    assert _flycx_cadence("do research", identity) == "parallel"  # shadow never steers
     monkeypatch.setenv("MEMORY_FLYCX_MODE", "live")
-    assert _flycx_cadence("do research") in ("parallel", "sequential")
-    _flycx_cadence._cx.sleep_pressure = 0.9  # drowsy crew
-    assert _flycx_cadence("do research") == "sequential"
-    _flycx_cadence._cx.sleep_pressure = 0.0
+    assert _flycx_cadence("do research", identity) in ("parallel", "sequential")
+    cx = get_flycx(identity)
+    with get_flycx_lock(identity):
+        cx.sleep_pressure = 0.9  # drowsy crew
+    assert _flycx_cadence("do research", identity) == "sequential"
+    with get_flycx_lock(identity):
+        cx.sleep_pressure = 0.0

@@ -73,7 +73,7 @@ def flycx_state_for_record(state: "EdgeCognitiveState", user: str) -> dict | Non
     if MEMORY_FLYCX_MODE not in ("shadow", "live"):
         return None
     try:
-        from cognition.fly_registry import get_flycx, get_fly_store
+        from cognition.fly_registry import get_flycx, get_flycx_lock, get_fly_store
     except Exception as exc:
         log.debug("fly registry unavailable: %s", exc)
         return None
@@ -81,6 +81,8 @@ def flycx_state_for_record(state: "EdgeCognitiveState", user: str) -> dict | Non
     cx = get_flycx(identity)
     if cx is None:
         return None
+    cx_lock = get_flycx_lock(identity)
+    store = get_fly_store(identity)
     try:
         with state._lock:
             lat = list(state._turn_latencies)
@@ -94,13 +96,13 @@ def flycx_state_for_record(state: "EdgeCognitiveState", user: str) -> dict | Non
             ]
             fatigue = feats[7]
             pen = 0.5 * feats[5] + 0.3 * feats[6]
-        out = cx.step(feats, pen_drive=pen, fatigue=fatigue)
-        try:
-            store = get_fly_store(identity)
-            if store is not None:
-                store.save_if_due_cx(out["sleep_pressure"])
-        except Exception as exc:
-            log.debug("flycx persist skipped: %s", exc)
+        with cx_lock:
+            out = cx.step(feats, pen_drive=pen, fatigue=fatigue)
+            try:
+                if store is not None:
+                    store.save_if_due_cx(out["sleep_pressure"])
+            except Exception as exc:
+                log.debug("flycx persist skipped: %s", exc)
         if MEMORY_FLYCX_MODE == "live":
             with state._lock:
                 state._energy = max(0.0, min(1.0, state._energy - MEMORY_FLYCX_W * out["sleep_pressure"]))
@@ -124,24 +126,26 @@ def flycx_decisiveness_for_text(
     if MEMORY_FLYCX_MODE not in ("shadow", "live"):
         return None
     try:
-        from cognition.fly_registry import get_flycx
+        from cognition.fly_registry import get_flycx, get_flycx_lock
     except Exception as exc:
         log.debug("fly registry unavailable: %s", exc)
         return None
     cx = get_flycx(user_id)
     if cx is None:
         return None
+    cx_lock = get_flycx_lock(user_id)
     try:
         feats = [_affect(text), 0.5, max(0.0, min(1.0, float(uncertainty or 0.0))),
                  0.0, 0.0,
                  1.0 if _QUESTION_RE.search(text or "") else 0.0,
                  1.0 if _COMMITMENT_RE.search(text or "") else 0.0,
                  0.0]
-        bump, sleep = cx.bump.copy(), cx.sleep_pressure
-        try:
-            out = cx.step(feats, pen_drive=0.5 * feats[5] + 0.3 * feats[6], fatigue=0.0)
-        finally:
-            cx.bump, cx.sleep_pressure = bump, sleep
+        with cx_lock:
+            bump, sleep = cx.bump.copy(), cx.sleep_pressure
+            try:
+                out = cx.step(feats, pen_drive=0.5 * feats[5] + 0.3 * feats[6], fatigue=0.0)
+            finally:
+                cx.bump, cx.sleep_pressure = bump, sleep
     except Exception as exc:
         log.debug("flycx decisiveness failed: %s", exc)
         return None

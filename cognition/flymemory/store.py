@@ -25,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _DEFAULT_DB = Path(__file__).resolve().parents[2] / "data" / "fly_plasticity.db"
 
@@ -70,26 +70,52 @@ class PlasticityStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.path))
         conn.execute("PRAGMA journal_mode=WAL")
+        mb_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(mb_plastic)")
+        }
+        if mb_columns and "identity" not in mb_columns:
+            conn.execute("ALTER TABLE mb_plastic RENAME TO mb_plastic_v2")
         conn.execute(
             """CREATE TABLE IF NOT EXISTS mb_plastic
-               (pre INTEGER NOT NULL, post INTEGER NOT NULL, delta REAL NOT NULL,
-                updated_at TEXT NOT NULL, PRIMARY KEY (pre, post))"""
+               (identity TEXT NOT NULL, pre INTEGER NOT NULL,
+                post INTEGER NOT NULL, delta REAL NOT NULL,
+                updated_at TEXT NOT NULL, PRIMARY KEY (identity, pre, post))"""
         )
+        if mb_columns and "identity" not in mb_columns:
+            conn.execute(
+                """INSERT INTO mb_plastic(identity, pre, post, delta, updated_at)
+                   SELECT ?, pre, post, delta, updated_at FROM mb_plastic_v2""",
+                (self.identity,),
+            )
+            conn.execute("DROP TABLE mb_plastic_v2")
+        cx_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(cx_state)")
+        }
+        if cx_columns and "identity" not in cx_columns:
+            conn.execute("ALTER TABLE cx_state RENAME TO cx_state_v2")
         conn.execute(
             """CREATE TABLE IF NOT EXISTS cx_state
-               (key TEXT PRIMARY KEY, value REAL NOT NULL, updated_at TEXT NOT NULL)"""
+               (identity TEXT NOT NULL, key TEXT NOT NULL, value REAL NOT NULL,
+                updated_at TEXT NOT NULL, PRIMARY KEY (identity, key))"""
         )
+        if cx_columns and "identity" not in cx_columns:
+            conn.execute(
+                """INSERT INTO cx_state(identity, key, value, updated_at)
+                   SELECT ?, key, value, updated_at FROM cx_state_v2""",
+                (self.identity,),
+            )
+            conn.execute("DROP TABLE cx_state_v2")
         conn.execute(
             """CREATE TABLE IF NOT EXISTS meta
                (key TEXT PRIMARY KEY, value TEXT NOT NULL)"""
         )
         conn.execute(
-            "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
         conn.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES ('identity', ?)",
-            (self.identity,),
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            (f"identity:{self.identity}", self.identity),
         )
         conn.commit()
         return conn
@@ -101,16 +127,19 @@ class PlasticityStore:
         mask = np.abs(delta) > 1e-9
         now = _now()
         rows = [
-            (int(a), int(b), float(d), now)
+            (self.identity, int(a), int(b), float(d), now)
             for a, b, d in zip(
                 pre[mask].tolist(), post[mask].tolist(), delta[mask].tolist()
             )
         ]
         conn = self._connect()
         try:
-            conn.execute("DELETE FROM mb_plastic")
+            conn.execute("DELETE FROM mb_plastic WHERE identity = ?", (self.identity,))
             conn.executemany(
-                "INSERT INTO mb_plastic(pre, post, delta, updated_at) VALUES (?,?,?,?)",
+                """INSERT INTO mb_plastic(identity, pre, post, delta, updated_at)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(identity, pre, post) DO UPDATE SET
+                       delta=excluded.delta, updated_at=excluded.updated_at""",
                 rows,
             )
             conn.commit()
@@ -124,7 +153,10 @@ class PlasticityStore:
             return None
         conn = self._connect()
         try:
-            rows = conn.execute("SELECT pre, post, delta FROM mb_plastic").fetchall()
+            rows = conn.execute(
+                "SELECT pre, post, delta FROM mb_plastic WHERE identity = ?",
+                (self.identity,),
+            ).fetchall()
         finally:
             conn.close()
         out = {}
@@ -151,8 +183,11 @@ class PlasticityStore:
         conn = self._connect()
         try:
             conn.execute(
-                "INSERT OR REPLACE INTO cx_state(key, value, updated_at) VALUES ('sleep_pressure', ?, ?)",
-                (float(sleep_pressure), _now()),
+                """INSERT INTO cx_state(identity, key, value, updated_at)
+                   VALUES (?, 'sleep_pressure', ?, ?)
+                   ON CONFLICT(identity, key) DO UPDATE SET
+                       value=excluded.value, updated_at=excluded.updated_at""",
+                (self.identity, float(sleep_pressure), _now()),
             )
             conn.commit()
         finally:
@@ -165,7 +200,8 @@ class PlasticityStore:
         conn = self._connect()
         try:
             row = conn.execute(
-                "SELECT value FROM cx_state WHERE key='sleep_pressure'"
+                "SELECT value FROM cx_state WHERE identity = ? AND key='sleep_pressure'",
+                (self.identity,),
             ).fetchone()
         finally:
             conn.close()

@@ -38,9 +38,10 @@ from cognition.fly_registry import get_flycx, get_fly_store, flush_all
 def flycx_state_for_record(state, user: str):
     if MEMORY_FLYCX_MODE not in ("shadow", "live"):
         return None
-    cx = get_flycx(user)
+    identity = getattr(state, "_identity", None) or None
+    cx = get_flycx(identity)
     ...
-    store = get_fly_store(user)
+    store = get_fly_store(identity)
     if store is not None:
         store.save_if_due_cx(out["sleep_pressure"])
 ```

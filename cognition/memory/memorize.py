@@ -58,31 +58,26 @@ def _flymb_float(name: str, default: float) -> float:
         return default
 
 
-_FLYMB_MEM = None
-_FLYMB_MEM_OK = None
+def _flymb_bias_for_text(text: str, *, user_id: str | None = None) -> float | None:
+    """Opponent MB bias for a stored memory text (read-only, no learning).
 
-
-def _flymb_mem():
-    global _FLYMB_MEM, _FLYMB_MEM_OK
-    if _FLYMB_MEM_OK is None:
-        try:
-            from cognition.flymemory import FlyMB
-            _FLYMB_MEM = FlyMB()
-            _FLYMB_MEM_OK = True
-        except Exception as exc:
-            log.debug("flymb memory unavailable: %s", exc)
-            _FLYMB_MEM_OK = False
-    return _FLYMB_MEM if _FLYMB_MEM_OK else None
-
-
-def _flymb_bias_for_text(text: str) -> float | None:
-    """Opponent MB bias for a stored memory text (read-only, no learning)."""
-    mb = _flymb_mem()
-    if mb is None or not text:
+    Identity-scoped via fly_registry — no process-global FlyMB singleton.
+    """
+    if not text:
         return None
     try:
+        from cognition.fly_registry import get_flymb
         from cognition.flymemory import text_features
-        return mb.valence_bias(text_features(text))
+        mb = get_flymb(user_id)
+        if mb is None:
+            return None
+        bias = mb.valence_bias(text_features(text))
+        try:
+            from cognition.neural_state import get_neural_state
+            get_neural_state(user_id).publish_mb(float(bias), source="memory")
+        except Exception:
+            pass
+        return bias
     except Exception as exc:
         log.debug("flymb memory bias failed: %s", exc)
         return None
@@ -1577,7 +1572,7 @@ class _MemoryBackend:
                 _fly_mode = _flymb_mode()
                 if _fly_mode in ("shadow", "live"):
                     try:
-                        _b = _flymb_bias_for_text(row.get("memory") or "")
+                        _b = _flymb_bias_for_text(row.get("memory") or "", user_id=str(row.get("user_id") or "") or None)
                     except Exception as exc:
                         log.debug("flymb ltm rank skipped: %s", exc)
                         _b = None
@@ -3600,7 +3595,7 @@ class AikoMemorize:
             # the fly. Approach bias only (never suppresses replay).
             _fly_mode = _flymb_mode()
             if _fly_mode in ("shadow", "live"):
-                _b = _flymb_bias_for_text(text)
+                _b = _flymb_bias_for_text(text, user_id=str(m.get("user_id") or "") or None)
                 if _b is not None:
                     log.debug("flymb dream mode=%s bias=%+.3f", _fly_mode, _b)
                     if _fly_mode == "live":

@@ -38,21 +38,29 @@ def _flycx_mode() -> str:
         return "off"
 
 
-def _flycx_cadence(task: str) -> str:
+def _flycx_cadence(task: str, user_id: str | None = None) -> str:
     """parallel|sequential crew cadence from compass sleep pressure.
 
-    Same shared compass as attention: drowsy crews run sequentially (same
-    coverage, calmer cadence). Shadow only logs the would-be choice.
+    Shares the identity-scoped compass with cognition.attention via
+    fly_registry. Drowsy crews run sequentially (same coverage, calmer
+    cadence). Shadow only logs the would-be choice.
     """
-    from cognition.centralcomplex import FlyCompass
     mode = _flycx_mode()
     if mode not in ("shadow", "live"):
         return "parallel"
-    if not hasattr(_flycx_cadence, "_cx"):
-        _flycx_cadence._cx = FlyCompass()
     try:
+        from cognition.fly_registry import get_flycx
         from cognition.flymemory import text_features
-        out = _flycx_cadence._cx.step(text_features(task or ""), fatigue=0.0)
+        if user_id is None:
+            try:
+                from system.userspace import current_user_id
+                user_id = current_user_id() or None
+            except Exception:
+                user_id = None
+        cx = get_flycx(user_id)
+        if cx is None:
+            return "parallel"
+        out = cx.step(text_features(task or ""), fatigue=0.0)
     except Exception as exc:
         log.debug("flycx cadence failed: %s", exc)
         return "parallel"
@@ -75,100 +83,27 @@ class NeedleWorkerSpec:
 
 @dataclass(frozen=True)
 class NeedleWorkerResult:
-    """A worker response or a safe, serializable failure record."""
-
     worker_id: str
     role: str
     response: NeedleResponse | None = None
-    error: str = ""
-
-
-def load_needle_workers(
-    raw: str,
-    *,
-    default_timeout: float,
-    default_confidence_threshold: float,
-    max_workers: int = 4,
-) -> tuple[NeedleWorkerSpec, ...]:
-    """Parse ``NEEDLE_WORKERS`` JSON into validated, deterministic worker specs.
-
-    Empty configuration deliberately means no workers.  Each worker must name
-    its permitted tools, so a configuration typo cannot silently create an
-    unrestricted action worker.
-    """
-    if not raw.strip():
-        return ()
-    if max_workers < 1:
-        raise NeedleError("NEEDLE_MAX_WORKERS must be at least 1")
-    try:
-        items = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise NeedleError(f"NEEDLE_WORKERS must be a JSON array: {exc}") from exc
-    if not isinstance(items, list):
-        raise NeedleError("NEEDLE_WORKERS must be a JSON array")
-    if len(items) > max_workers:
-        raise NeedleError(f"NEEDLE_WORKERS exceeds configured worker limit ({max_workers})")
-
-    workers: list[NeedleWorkerSpec] = []
-    seen_ids: set[str] = set()
-    for index, item in enumerate(items):
-        if not isinstance(item, dict):
-            raise NeedleError(f"NEEDLE_WORKERS[{index}] must be an object")
-        worker_id = str(item.get("id") or "").strip()
-        role = str(item.get("role") or worker_id).strip()
-        base_url = str(item.get("base_url") or "").strip()
-        allowed_raw = item.get("allowed_tools")
-        if not worker_id or not role or not base_url:
-            raise NeedleError(f"NEEDLE_WORKERS[{index}] requires id, role, and base_url")
-        if worker_id in seen_ids:
-            raise NeedleError(f"NEEDLE_WORKERS contains duplicate worker id: {worker_id}")
-        if not isinstance(allowed_raw, list) or not allowed_raw or not all(isinstance(name, str) and name for name in allowed_raw):
-            raise NeedleError(f"NEEDLE_WORKERS[{index}].allowed_tools must be a non-empty string array")
-        try:
-            confidence_threshold = float(item.get("confidence_threshold", default_confidence_threshold))
-            timeout = float(item.get("timeout", default_timeout))
-        except (TypeError, ValueError) as exc:
-            raise NeedleError(f"NEEDLE_WORKERS[{index}] has an invalid timeout or confidence_threshold") from exc
-        if not math.isfinite(confidence_threshold) or not 0.0 <= confidence_threshold <= 1.0:
-            raise NeedleError(f"NEEDLE_WORKERS[{index}].confidence_threshold must be between 0 and 1")
-        if not math.isfinite(timeout) or timeout <= 0:
-            raise NeedleError(f"NEEDLE_WORKERS[{index}].timeout must be a positive finite number")
-        seen_ids.add(worker_id)
-        workers.append(NeedleWorkerSpec(
-            id=worker_id,
-            role=role,
-            base_url=base_url,
-            allowed_tools=tuple(dict.fromkeys(allowed_raw)),
-            confidence_threshold=confidence_threshold,
-            timeout=timeout,
-        ))
-    return tuple(workers)
+    error: str | None = None
 
 
 class NeedleOrchestrator:
-    """Fan out one task to configured Needle workers and merge valid calls.
-
-    The caller supplies the already capability-filtered schemas for the current
-    Aiko turn.  A worker gets the intersection of that set and its static
-    allow-list; the response is checked against that exact intersection again
-    by :class:`NeedleClient`.
-    """
+    """Fan-out independent Needle workers and collect constrained proposals."""
 
     def __init__(
         self,
-        workers: tuple[NeedleWorkerSpec, ...],
-        *,
-        client_factory: Callable[..., NeedleClient] = NeedleClient,
+        workers: tuple[NeedleWorkerSpec, ...] | list[NeedleWorkerSpec],
+        client_factory: Callable[..., NeedleClient] | None = None,
     ) -> None:
-        if not workers:
-            raise NeedleError("Needle multi-worker backend requires at least one configured worker")
-        self.workers = workers
-        self._client_factory = client_factory
+        self.workers = tuple(workers)
+        self._client_factory = client_factory or NeedleClient
 
     @staticmethod
     def _tools_for_worker(worker: NeedleWorkerSpec, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         allowed = set(worker.allowed_tools)
-        return [tool for tool in tools if str(tool.get("function", {}).get("name") or "") in allowed]
+        return [t for t in tools if (t.get("function", {}).get("name") or "") in allowed]
 
     @staticmethod
     def _worker_prompt(worker: NeedleWorkerSpec, task: str) -> str:

@@ -19,7 +19,7 @@ from agentic.needle import NeedleClient, NeedleError, NeedleResponse
 try:
     from system.log import get_logger as _get_logger
     log = _get_logger(__name__)
-except Exception:  # logging must never break orchestration
+except Exception:
     import logging as _logging
     log = _logging.getLogger("aiko.needle_orchestrator")
 
@@ -38,21 +38,30 @@ def _flycx_mode() -> str:
         return "off"
 
 
-def _flycx_cadence(task: str) -> str:
+def _flycx_cadence(task: str, user_id: str | None = None) -> str:
     """parallel|sequential crew cadence from compass sleep pressure.
 
-    Same shared compass as attention: drowsy crews run sequentially (same
-    coverage, calmer cadence). Shadow only logs the would-be choice.
+    Shares the identity-scoped compass with cognition.attention via
+    fly_registry. Drowsy crews run sequentially (same coverage, calmer
+    cadence). Shadow only logs the would-be choice.
     """
-    from cognition.centralcomplex import FlyCompass
     mode = _flycx_mode()
     if mode not in ("shadow", "live"):
         return "parallel"
-    if not hasattr(_flycx_cadence, "_cx"):
-        _flycx_cadence._cx = FlyCompass()
     try:
+        from cognition.fly_registry import get_flycx, get_flycx_lock
         from cognition.flymemory import text_features
-        out = _flycx_cadence._cx.step(text_features(task or ""), fatigue=0.0)
+        if user_id is None:
+            try:
+                from system.userspace import current_user_id
+                user_id = current_user_id() or None
+            except Exception:
+                user_id = None
+        cx = get_flycx(user_id)
+        if cx is None:
+            return "parallel"
+        with get_flycx_lock(user_id):
+            out = cx.step(text_features(task or ""), fatigue=0.0)
     except Exception as exc:
         log.debug("flycx cadence failed: %s", exc)
         return "parallel"
@@ -203,7 +212,7 @@ class NeedleOrchestrator:
                 worker = futures[future]
                 try:
                     results[worker.id] = future.result()
-                except Exception as exc:  # defensive: one worker cannot abort the team
+                except Exception as exc:
                     results[worker.id] = NeedleWorkerResult(worker.id, worker.role, error=str(exc))
         ordered = tuple(results[worker.id] for worker in self.workers)
         if not any(result.response is not None for result in ordered):

@@ -452,6 +452,21 @@ def _apply_debug_trace_env(args: argparse.Namespace) -> None:
                                                          # flag is the only write source; beats any shell export.
 
 
+
+def _flush_fly_plasticity(log) -> None:
+    """Best-effort write of pending fly MB/CX state on process exit."""
+    try:
+        from cognition.fly_registry import flush_everything
+        result = flush_everything()
+        if result:
+            log.debug("[main] fly plasticity flushed: %s", result)
+    except Exception as exc:
+        try:
+            log.debug("[main] fly plasticity flush skipped: %s", exc)
+        except Exception:
+            pass
+
+
 def main() -> int:
     """Primary entry point for the Aiko-chan application."""
     # Parse args FIRST — --debug needs to set LOG_CONSOLE/LOG_LEVEL in the
@@ -498,13 +513,17 @@ def main() -> int:
             log.exception("[main] SystemExit(%r) escaped the session loop", e.code)
         else:                                           # exit(0) or exit() = clean shutdown
             log.info("[main] clean exit")
+        _flush_fly_plasticity(log)
         raise                                           # preserve original exit behavior
     except KeyboardInterrupt:                           # graceful interrupt handling
+        _flush_fly_plasticity(log)
         log.info("[main] KeyboardInterrupt")
         raise
     except Exception:                                   # any other fatal error (not BaseException to avoid catching asyncio cancels)
+        _flush_fly_plasticity(log)
         log.exception("[main] fatal error escaped the session loop")  # full traceback to aiko.log
         raise                                           # re-raise after logging
+    _flush_fly_plasticity(log)
     return 0
 
 

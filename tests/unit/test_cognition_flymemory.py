@@ -91,18 +91,19 @@ def test_wiring_shadow_does_not_change_score(monkeypatch):
 
 def test_wiring_live_nudges_score_and_learns_once(monkeypatch):
     import cognition.memory.grasp as grasp
+    identity = "flymb-wiring-live"
     monkeypatch.setattr(grasp, "MEMORY_FLYMB_MODE", "off")
     t = _turn()
-    base = grasp.compute_score(t, 1)
+    base = grasp.compute_score(t, 1, user_id=identity)
     monkeypatch.setattr(grasp, "MEMORY_FLYMB_MODE", "live")
     monkeypatch.setattr(grasp, "MEMORY_FLYMB_W", 0.05)
-    live = grasp.compute_score(t, 1)
+    live = grasp.compute_score(t, 1, user_id=identity)
     assert live != base
     assert abs(live - base) <= 0.05 + 1e-9
-    buf = grasp.GraspBuffer(journal_enabled=False)
+    buf = grasp.GraspBuffer(journal_enabled=False, identity=identity)
     buf.fill("I loved this", "glad to hear it")
     from cognition.fly_registry import get_flymb
-    plastic = get_flymb(None)._plastic
+    plastic = get_flymb(identity)._plastic
     assert float(abs(plastic).sum()) > 0.0  # exactly one teaching event
 
 
@@ -110,21 +111,22 @@ def test_promote_wiring_modes(monkeypatch):
     # promote.py reads the mode per-call from the environment (unlike grasp's
     # import-time constant), so drive it via setenv like production does.
     import cognition.consolidate.promote as promo
+    identity = "flymb-promote-wiring"
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "off")
-    base = promo.score_journal_fragment("I love this wonderful result, thanks!")
+    base = promo.score_journal_fragment("I love this wonderful result, thanks!", user_id=identity)
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "shadow")
-    assert promo.score_journal_fragment("I love this wonderful result, thanks!") == base
+    assert promo.score_journal_fragment("I love this wonderful result, thanks!", user_id=identity) == base
     # Naive (unteached) biases are arbitrary-signed; meaning comes from DAN
     # teaching, so teach this exact pattern once before comparing.
     from cognition.fly_registry import get_flymb
     from cognition.flymemory import text_features
-    mb = get_flymb(None)
+    mb = get_flymb(identity)
     feats = text_features("I love this wonderful result, thanks!")
     for _ in range(5):
         mb.reinforce(mb.encode(feats), +1.0)
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "live")
-    assert promo.score_journal_fragment("I love this wonderful result, thanks!") > base
-    assert promo.score_journal_fragment("random filler words here ok") <= base + 0.11
+    assert promo.score_journal_fragment("I love this wonderful result, thanks!", user_id=identity) > base
+    assert promo.score_journal_fragment("random filler words here ok", user_id=identity) <= base + 0.11
 
 
 def test_promote_candidate_scoring_does_not_publish(monkeypatch):
@@ -243,24 +245,25 @@ def test_dream_boost_wiring_modes(monkeypatch):
 
 def test_forget_decay_wire(monkeypatch):
     import cognition.memory.forget as fg
+    identity = "flymb-forget-decay"
     kw = dict(access_count=3, last_accessed_iso="2026-01-01T00:00:00Z",
               valence_tag="pos", valence_score=2,
               memory_text="I love this wonderful result, thanks!")
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "off")
-    base = fg.compute_weighted_score(**kw)
+    base = fg.compute_weighted_score(**kw, user_id=identity)
     assert base > 0
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "shadow")
     import pytest as _pt
-    assert fg.compute_weighted_score(**kw) == _pt.approx(base)  # shadow never changes scores
+    assert fg.compute_weighted_score(**kw, user_id=identity) == _pt.approx(base)  # shadow never changes scores
     assert fg._flymb_mode() == "shadow"
     from cognition.flymemory import text_features as _tf
     from cognition.fly_registry import get_flymb
-    _mb = get_flymb(None)
+    _mb = get_flymb(identity)
     _f = _tf(kw["memory_text"])
     for _ in range(5):
         _mb.reinforce(_mb.encode(_f), +1.0)  # teach: praise predicts reward
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "live")
-    assert fg.compute_weighted_score(**kw) >= base  # approach lingers
+    assert fg.compute_weighted_score(**kw, user_id=identity) >= base  # approach lingers
 
 
 def test_plasticity_roundtrip(tmp_path, monkeypatch):

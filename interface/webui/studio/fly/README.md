@@ -1,14 +1,23 @@
 # Fly Circuit Studio
 
-Read-only observability for `NeuralState` and fly mode flags.
+Session-bound observability for fly-motif circuits and live `NeuralState`.
 
-Mount under `/studio/fly/` like other studios (session-bound).
+## What it looks like
 
-- `GET /studio/fly/api/state` — snapshot + modes
-- Frontend polls every 2s
+A **simplified neural-net / connectome motif** graph (not a full MaleCNS EM render):
 
-Does not enable live fly behavior; safe with all modes off/shadow.
+```
+Sensory → AL / T4-T5 → MB · LH · CX → GF → DN → Aiko
+```
 
-## Mount
+Nodes glow from live proxies (valence, focus, urgency, sleep, …). Edges brighten when both ends are active.
 
-Wire the FastAPI router from `backend/api.py` the same way other studios are mounted in `interface/webui/webui.py` (session binding via `studio/session_binding.py`).
+## Routes
+
+| Path | Role |
+|------|------|
+| `/studio/fly/` | Frontend |
+| `/studio/fly/api/state` | NeuralState + modes |
+| `/studio/fly/api/circuit` | Motif graph + activation |
+
+Mounted from `interface/webui/auth.py` like other studios. Safe with all fly modes off.

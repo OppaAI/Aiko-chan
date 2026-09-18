@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from interface.webui.studio.session_binding import bind_login_session
@@ -78,23 +78,28 @@ def _uid(request: Request) -> str | None:
 
 
 @app.get("/api/state")
-def fly_state(request: Request) -> dict:
+def fly_state(request: Request) -> JSONResponse:
     uid = _uid(request)
     try:
-        from cognition.neural_state import get_neural_state
-        snap = get_neural_state(uid).snapshot()
+        from cognition.neural_state import peek_neural_state
+        state = peek_neural_state(uid)
+        snap = state.snapshot() if state is not None else {}
     except Exception as exc:
         snap = {"error": str(exc)}
-    return {"user_id": uid, "neural_state": snap, "modes": _modes()}
+    return JSONResponse(
+        {"user_id": uid, "neural_state": snap, "modes": _modes()},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/circuit")
-def fly_circuit(request: Request) -> dict:
+def fly_circuit(request: Request) -> JSONResponse:
     """Motif graph + live activation proxies derived from NeuralState."""
     uid = _uid(request)
     try:
-        from cognition.neural_state import get_neural_state
-        st = get_neural_state(uid).snapshot()
+        from cognition.neural_state import peek_neural_state
+        state = peek_neural_state(uid)
+        st = state.snapshot() if state is not None else {}
     except Exception:
         st = {}
 
@@ -119,14 +124,17 @@ def fly_circuit(request: Request) -> dict:
         "dn": act("action_drive", "motor_vigor"),
         "out": act("action_drive", "motor_vigor", "approach"),
     }
-    return {
-        "user_id": uid,
-        "nodes": _CIRCUIT["nodes"],
-        "edges": _CIRCUIT["edges"],
-        "activation": activation,
-        "neural_state": st,
-        "modes": _modes(),
-    }
+    return JSONResponse(
+        {
+            "user_id": uid,
+            "nodes": _CIRCUIT["nodes"],
+            "edges": _CIRCUIT["edges"],
+            "activation": activation,
+            "neural_state": st,
+            "modes": _modes(),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/")

@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 
 from cognition.fly_behavior import lateral_horn
-from cognition.neural_state import NeuralState
+from cognition.neural_state import NeuralState, clear_neural_state, get_neural_state, peek_neural_state
 
 
 def test_lateral_horn_ignores_blank_identity(monkeypatch):
@@ -36,6 +36,16 @@ def test_neural_state_lock_is_per_instance_and_not_serialized():
     assert first._instance_lock is not second._instance_lock
     assert "_instance_lock" not in asdict(first)
     assert "_instance_lock" not in first.snapshot()
+
+
+def test_peek_neural_state_does_not_create_state():
+    user_id = "peek-only"
+    clear_neural_state(user_id)
+
+    assert peek_neural_state(user_id) is None
+
+    created = get_neural_state(user_id)
+    assert peek_neural_state(user_id) is created
 
 
 def test_neural_state_concurrent_publish_and_snapshot_remain_consistent():

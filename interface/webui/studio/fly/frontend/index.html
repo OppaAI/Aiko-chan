@@ -171,6 +171,10 @@
       try {
         const r = await fetch("/studio/fly/api/circuit");
         const j = await r.json();
+        if (!r.ok) {
+          const detail = j && j.detail;
+          throw new Error(detail ? String(detail) : `HTTP ${r.status}`);
+        }
         renderGraph(j);
         renderMeters(j.neural_state || {});
         document.getElementById("modes").textContent = JSON.stringify(j.modes || {});

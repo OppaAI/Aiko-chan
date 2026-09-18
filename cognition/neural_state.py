@@ -132,6 +132,13 @@ def get_neural_state(user_id: str | None = None) -> NeuralState:
         return st
 
 
+def peek_neural_state(user_id: str | None = None) -> NeuralState | None:
+    """Return an existing state without creating one for the identity."""
+    key = _key(user_id)
+    with _lock:
+        return _states.get(key)
+
+
 def clear_neural_state(user_id: str | None = None) -> None:
     key = _key(user_id)
     with _lock:

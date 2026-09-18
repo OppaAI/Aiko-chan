@@ -109,6 +109,13 @@ try:
 except ImportError as e:
     log.warning(f"Could not mount Log studio: {e}")
 
+# Fly Circuit Studio — NeuralState motif graph
+try:
+    from interface.webui.studio.fly.backend.api import app as fly_studio_app
+    app.mount("/studio/fly", fly_studio_app)
+except ImportError as e:
+    log.warning(f"Could not mount Fly studio: {e}")
+
 # Lingo Japanese Learning API (Android-app backend)
 try:
     from interface.android_app.lingo.router import router as lingo_router

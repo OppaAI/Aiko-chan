@@ -45,13 +45,18 @@ def _default_db_for(user_id: str) -> Path:
     """Prefer per-user state dir when present; fall back to repo data/."""
     override = (os.getenv("FLY_PLASTICITY_DB") or "").strip()
     if override:
+        # Explicit path: if it looks like a directory, nest by identity.
         p = Path(override).expanduser()
         if p.suffix.lower() in (".db", ".sqlite", ".sqlite3"):
+            # Single shared file requested — still namespace with a table key
+            # is handled by PlasticityStore identity column; path stays as-is
+            # only when FLY_PLASTICITY_SHARED=1.
             if (os.getenv("FLY_PLASTICITY_SHARED") or "").strip() in ("1", "true", "yes"):
                 return p
             return p.parent / f"fly_plasticity_{_norm_id(user_id)}.db"
         return p / f"fly_plasticity_{_norm_id(user_id)}.db"
 
+    # Prefer USER_STATE_ROOT / AIKO_USER_STATE_ROOT / ~/.aiko/<id>/
     for key in ("USER_STATE_ROOT", "AIKO_USER_STATE_ROOT", "USER_SPACE_ROOT"):
         root = (os.getenv(key) or "").strip()
         if root:
@@ -61,6 +66,7 @@ def _default_db_for(user_id: str) -> Path:
     if home.parent.parent.exists() or os.getenv("HOME"):
         return home
 
+    # Last resort: repo-relative (dev / single-user)
     return Path(__file__).resolve().parents[1] / "data" / f"fly_plasticity_{_norm_id(user_id)}.db"
 
 
@@ -101,7 +107,7 @@ def get_flymb(user_id: str | None = None):
                 _mbs[key] = mb
                 _mb_ok[key] = True
             except Exception as exc:
-                log.debug("flymb[%s] unavailable: %s", key, exp if False else exc)
+                log.debug("flymb[%s] unavailable: %s", key, exc)
                 _mbs[key] = None
                 _mb_ok[key] = False
         return _mbs.get(key) if _mb_ok.get(key) else None
@@ -159,7 +165,7 @@ def flush_all(user_id: str | None = None) -> dict[str, int | bool]:
                 store.flush_cx(float(getattr(cx, "sleep_pressure", 0.0)))
                 out["cx"] = True
         except Exception as exc:
-            log.debug("fly flush cx[%s] failed: %s", key, exp if False else exc)
+            log.debug("fly flush cx[%s] failed: %s", key, exc)
     return out
 
 

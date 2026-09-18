@@ -32,7 +32,9 @@ def context_prior(text: str, *, user_id: str | None = None) -> dict:
     mode = _mode()
     if mode not in ("shadow", "live"):
         return {"mode": mode, "familiarity": 0.5, "novel": False}
-    key = (user_id or "default").strip() or "default"
+    key = (user_id or "").strip()
+    if not key:
+        return {"mode": mode, "familiarity": 0.5, "novel": False}
     bucket = _seen.setdefault(key, set())
     fp = _tok_key(text)
     familiar = fp in bucket

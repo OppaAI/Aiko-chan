@@ -58,18 +58,25 @@ class NeuralState:
     updated_at: float = field(default_factory=time.time)
     sources: dict[str, str] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        # Kept outside the dataclass fields so asdict(self) never attempts to
+        # copy or serialize the lock itself.
+        self._instance_lock = threading.RLock()
+
     def snapshot(self) -> dict[str, Any]:
-        d = asdict(self)
-        d["updated_at"] = self.updated_at
-        return d
+        with self._instance_lock:
+            d = asdict(self)
+            d["updated_at"] = self.updated_at
+            return d
 
     def publish_mb(self, valence: float, *, source: str = "mb") -> None:
-        v = max(-1.0, min(1.0, float(valence)))
-        self.valence = v
-        self.approach = max(0.0, v)
-        self.avoidance = max(0.0, -v)
-        self.sources["mb"] = source
-        self.updated_at = time.time()
+        with self._instance_lock:
+            v = max(-1.0, min(1.0, float(valence)))
+            self.valence = v
+            self.approach = max(0.0, v)
+            self.avoidance = max(0.0, -v)
+            self.sources["mb"] = source
+            self.updated_at = time.time()
 
     def publish_cx(
         self,
@@ -80,34 +87,39 @@ class NeuralState:
         sleep_pressure: float = 0.0,
         source: str = "cx",
     ) -> None:
-        self.focus_heading = float(heading_deg) % 360.0
-        self.focus_sharpness = max(0.0, min(1.0, float(sharpness)))
-        self.decisiveness = max(0.0, min(1.0, float(decisiveness)))
-        self.sleep_pressure = max(0.0, min(1.0, float(sleep_pressure)))
-        self.sources["cx"] = source
-        self.updated_at = time.time()
+        with self._instance_lock:
+            self.focus_heading = float(heading_deg) % 360.0
+            self.focus_sharpness = max(0.0, min(1.0, float(sharpness)))
+            self.decisiveness = max(0.0, min(1.0, float(decisiveness)))
+            self.sleep_pressure = max(0.0, min(1.0, float(sleep_pressure)))
+            self.sources["cx"] = source
+            self.updated_at = time.time()
 
     def publish_dn(self, *, arousal: float = 0.5, rate_mult: float = 1.0, source: str = "dn") -> None:
-        self.action_drive = max(0.0, min(1.0, float(arousal)))
-        self.motor_vigor = max(0.5, min(1.5, float(rate_mult)))
-        self.sources["dn"] = source
-        self.updated_at = time.time()
+        with self._instance_lock:
+            self.action_drive = max(0.0, min(1.0, float(arousal)))
+            self.motor_vigor = max(0.5, min(1.5, float(rate_mult)))
+            self.sources["dn"] = source
+            self.updated_at = time.time()
 
     def publish_lh(self, familiarity: float, *, source: str = "lh") -> None:
-        self.context_familiarity = max(0.0, min(1.0, float(familiarity)))
-        self.sources["lh"] = source
-        self.updated_at = time.time()
+        with self._instance_lock:
+            self.context_familiarity = max(0.0, min(1.0, float(familiarity)))
+            self.sources["lh"] = source
+            self.updated_at = time.time()
 
     def publish_gf(self, urgency: float, interrupt: bool = False, *, source: str = "gf") -> None:
-        self.urgency = max(0.0, min(1.0, float(urgency)))
-        self.interrupt = bool(interrupt)
-        self.sources["gf"] = source
-        self.updated_at = time.time()
+        with self._instance_lock:
+            self.urgency = max(0.0, min(1.0, float(urgency)))
+            self.interrupt = bool(interrupt)
+            self.sources["gf"] = source
+            self.updated_at = time.time()
 
     def publish_circadian(self, phase: float, *, source: str = "clock") -> None:
-        self.circadian_phase = max(0.0, min(1.0, float(phase)))
-        self.sources["clock"] = source
-        self.updated_at = time.time()
+        with self._instance_lock:
+            self.circadian_phase = max(0.0, min(1.0, float(phase)))
+            self.sources["clock"] = source
+            self.updated_at = time.time()
 
 
 def get_neural_state(user_id: str | None = None) -> NeuralState:

@@ -48,6 +48,19 @@ def journal_fragment_lines(body: str) -> list[str]:
     return lines
 
 
+def _flymb_bias_for_text(text: str, *, user_id: str | None = None) -> float | None:
+    if _flymb_mode() not in ("shadow", "live"):
+        return None
+    try:
+        from cognition.flymemory import text_features
+        from cognition.fly_registry import get_flymb
+        mb = get_flymb(user_id)
+        return float(mb.valence_bias(text_features(text))) if mb is not None else None
+    except Exception as exc:
+        log.debug("flymb promote scoring failed: %s", exc)
+        return None
+
+
 def score_journal_fragment(text: str, *, user_id: str | None = None) -> float:
     """Cheap promote score: must_keep / salience / length (no LLM)."""
     score = 0.2
@@ -57,24 +70,11 @@ def score_journal_fragment(text: str, *, user_id: str | None = None) -> float:
         score += 0.3
     score += min(0.2, len(text) / 500.0)
     mode = _flymb_mode()
-    if mode in ("shadow", "live"):
-        try:
-            from cognition.flymemory import text_features
-            from cognition.fly_registry import get_flymb
-            mb = get_flymb(user_id)
-            bias = mb.valence_bias(text_features(text)) if mb is not None else None
-        except Exception as exc:
-            log.debug("flymb promote scoring failed: %s", exc)
-            bias = None
-        if bias is not None:
-            log.debug("flymb promote mode=%s bias=%+.3f", mode, bias)
-            if mode == "live":
-                score += MEMORY_FLYMB_PROMOTE_W * bias
-            try:
-                from cognition.neural_state import get_neural_state
-                get_neural_state(user_id).publish_mb(float(bias), source="promote")
-            except Exception:
-                pass
+    bias = _flymb_bias_for_text(text, user_id=user_id)
+    if bias is not None:
+        log.debug("flymb promote mode=%s bias=%+.3f", mode, bias)
+        if mode == "live":
+            score += MEMORY_FLYMB_PROMOTE_W * bias
     return score
 
 
@@ -118,6 +118,19 @@ def promote_journal_fragments(
 
     candidates.sort(key=lambda x: x[0], reverse=True)
     picked = candidates[:JOURNAL_PROMOTE_K]
+    picked_biases = [
+        bias
+        for _score, _day, line in picked
+        if (bias := _flymb_bias_for_text(line, user_id=user_id)) is not None
+    ]
+    if picked_biases:
+        try:
+            from cognition.neural_state import get_neural_state
+            get_neural_state(user_id).publish_mb(
+                sum(picked_biases) / len(picked_biases), source="promote"
+            )
+        except Exception:
+            pass
     new_rows: list[dict] = []
     for _sc, day, line in picked:
         tagged = f"[{day}] {line}"

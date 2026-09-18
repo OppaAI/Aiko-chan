@@ -223,6 +223,33 @@ def _bare_memo(backend, user_id: str = "u1"):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestRankAndScore:
+    def test_flymb_uses_enclosing_user_identity(self, backend, monkeypatch):
+        import importlib
+
+        memorize_mod = importlib.import_module("cognition.memory.memorize")
+
+        mem_id = "identity-scoped-rank"
+        _insert_row(
+            backend._conn,
+            mem_id,
+            "stored-row-user",
+            "A sufficiently distinctive memory for ranking",
+            datetime.now(timezone.utc).isoformat(),
+        )
+        backend._conn.commit()
+        seen_user_ids = []
+        monkeypatch.setattr(memorize_mod, "_flymb_mode", lambda: "shadow")
+        monkeypatch.setattr(
+            memorize_mod,
+            "_flymb_bias_for_text",
+            lambda _text, *, user_id=None: seen_user_ids.append(user_id) or 0.25,
+        )
+
+        backend._rank_and_score({mem_id: 1}, {}, user_id="resolved-user")
+
+        assert seen_user_ids
+        assert set(seen_user_ids) == {"resolved-user"}
+
     def test_pinned_is_tiebreaker_not_guarantee(self, backend):
         """A pinned memory with weak relevance should NOT outrank a highly
         relevant unpinned memory -- pinned bonus is meant to be a mild
@@ -868,6 +895,126 @@ class TestForgetValenceDecay:
         created = datetime.now(timezone.utc).isoformat()
         assert is_grace_protected(created) is True
         assert should_cleanup(0, "never", created, "neutral") is False
+
+    def test_cleanup_score_receives_memory_identity_and_text(self, monkeypatch, _reload_forget):
+        captured = {}
+
+        def fake_score(*_args, **kwargs):
+            captured.update(kwargs)
+            return 0.0
+
+        monkeypatch.setattr(_reload_forget, "compute_weighted_score", fake_score)
+        created = (datetime.now(timezone.utc) - timedelta(days=140)).isoformat()
+
+        assert _reload_forget.should_cleanup(
+            1,
+            created,
+            created,
+            memory_text="identity-scoped memory",
+            user_id="resolved-user",
+        )
+        assert captured["memory_text"] == "identity-scoped memory"
+        assert captured["user_id"] == "resolved-user"
+
+
+def test_cleanup_candidates_threads_resolved_identity_and_text(backend, monkeypatch):
+    import importlib
+
+    memorize_mod = importlib.import_module("cognition.memory.memorize")
+    memo = _bare_memo(backend, user_id="bound-user")
+    timestamp = (datetime.now(timezone.utc) - timedelta(days=140)).isoformat()
+    memo._batch_get_payloads = lambda _ids: {"candidate": (1, timestamp)}
+    calls = []
+
+    def fake_should_cleanup(*_args, **kwargs):
+        calls.append(("decision", kwargs))
+        return True
+
+    def fake_weighted_score(*_args, **kwargs):
+        calls.append(("diagnostic", kwargs))
+        return 0.0
+
+    monkeypatch.setattr(memorize_mod, "should_cleanup", fake_should_cleanup)
+    monkeypatch.setattr(memorize_mod, "compute_weighted_score", fake_weighted_score)
+    monkeypatch.setattr(memorize_mod, "resolve_ambient_valence", lambda _user_id: None)
+
+    _kept, candidates = memo._cleanup_candidates(
+        [{"id": "candidate", "memory": "identity-scoped memory", "created_at": timestamp}],
+        user_id="resolved-user",
+        _pinned_ids=set(),
+    )
+
+    assert len(candidates) == 1
+    assert [kind for kind, _kwargs in calls] == ["decision", "diagnostic"]
+    for _kind, kwargs in calls:
+        assert kwargs["memory_text"] == "identity-scoped memory"
+        assert kwargs["user_id"] == "resolved-user"
+
+
+def test_recall_publishes_final_top_result_for_resolved_identity(backend, monkeypatch):
+    import importlib
+
+    memorize_mod = importlib.import_module("cognition.memory.memorize")
+    from cognition.neural_state import clear_neural_state, get_neural_state
+
+    user_id = "resolved-recall-user"
+    clear_neural_state(user_id)
+    state = get_neural_state(user_id)
+    memo = _bare_memo(backend, user_id=user_id)
+
+    def fake_search_top(*_args, **_kwargs):
+        assert "mb" not in state.snapshot()["sources"]
+        return [
+            {"memory": "final top result"},
+            {"memory": "lower result"},
+        ]
+
+    seen = []
+    monkeypatch.setattr(memo, "_search_top", fake_search_top)
+    monkeypatch.setattr(memorize_mod, "_flymb_mode", lambda: "live")
+    monkeypatch.setattr(
+        memorize_mod,
+        "_flymb_bias_for_text",
+        lambda text, *, user_id=None: seen.append((text, user_id)) or 0.4,
+    )
+
+    results = memo.search("meaningful recall query", user_id=user_id)
+
+    assert results[0]["memory"] == "final top result"
+    assert seen == [("final top result", user_id)]
+    assert state.snapshot()["sources"]["mb"] == "recall"
+
+
+def test_dream_publishes_selected_bias_aggregate(backend, monkeypatch):
+    from cognition.neural_state import clear_neural_state, get_neural_state
+
+    user_id = "resolved-dream-user"
+    clear_neural_state(user_id)
+    state = get_neural_state(user_id)
+    memo = _bare_memo(backend, user_id=user_id)
+    memory = {"id": "dream-memory", "memory": "salient dream", "status": "active"}
+
+    monkeypatch.setattr(memo, "_iter_memory_batches", lambda _user_id: iter([[memory]]))
+    monkeypatch.setattr(memo, "_batch_get_payloads", lambda _ids: {})
+
+    def fake_dream_boost(_batch, _payloads, **kwargs):
+        assert kwargs["user_id"] == user_id
+        assert "mb" not in state.snapshot()["sources"]
+        kwargs["_selected_mb_biases"].extend([0.2, 0.6])
+        return 1
+
+    monkeypatch.setattr(memo, "_dream_boost", fake_dream_boost)
+    monkeypatch.setattr(memo, "_dream_merge", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(memo, "_dream_schema", lambda **_kwargs: 0)
+    monkeypatch.setattr(memo, "rebalance_pins", lambda *_args, **_kwargs: {"unpinned": 0})
+    monkeypatch.setattr(memo, "cleanup", lambda **_kwargs: {"deleted": 0})
+
+    result = memo.dream(user_id=user_id, dry_run=True)
+
+    snapshot = state.snapshot()
+    assert result["boosted"] == 1
+    assert snapshot["valence"] == pytest.approx(0.4)
+    assert snapshot["sources"]["mb"] == "dream"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -281,6 +281,8 @@ def should_cleanup(
     valence_score: int | float | None = None,
     query_valence: int | None = None,
     access_day_count: int | None = None,
+    memory_text: str | None = None,
+    user_id: str | None = None,
 ) -> bool:
     """Return True if a memory is a deletion candidate."""
     if is_grace_protected(created_at_iso):
@@ -293,6 +295,8 @@ def should_cleanup(
             valence_score=valence_score,
             query_valence=query_valence,
             access_day_count=access_day_count,
+            memory_text=memory_text,
+            user_id=user_id,
         )
         < CLEANUP_THRESHOLD
     )

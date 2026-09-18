@@ -28,6 +28,7 @@ const content = document.getElementById('content');
 const allOnline = document.getElementById('all-online');
 const input = document.getElementById('user-input');
 const cameraBtn = document.getElementById('camera-btn');
+const screenBtn = document.getElementById('screen-btn');
 const micBtn = document.getElementById('mic-btn');
 const sendBtn = document.getElementById('send-btn');
 const voiceSt = document.getElementById('voice-status');
@@ -957,6 +958,13 @@ micBtn.addEventListener('click', async () => {
 let ws = null;
 
 function wsReady() { return ws && ws.readyState === WebSocket.OPEN; }
+// Small public surface for companion.js. Keeping the socket itself private
+// prevents auxiliary UI modules from mutating its lifecycle.
+window.aikoSendWS = (payload) => {
+  if (!wsReady()) return false;
+  ws.send(JSON.stringify(payload));
+  return true;
+};
 
 function websocketURL() {
   const params = new URLSearchParams(location.search);
@@ -1007,7 +1015,8 @@ function connectWS() {
       case 'phase': if (msg.value === 'chat') switchToChat(); break;
       case 'chat': addMessage(msg.sender, msg.text); break;
       case 'vision':
-        if (msg.status === 'working') toolStatus.textContent = '  👁  analyzing camera image…';
+        window.aikoCompanionVision?.(msg);
+        if (msg.status === 'working') toolStatus.textContent = `  👁  analyzing ${msg.source === 'screen' ? 'screen' : 'camera'} image…`;
         else if (msg.status === 'done') { toolStatus.textContent = ''; cameraBtn.disabled = false; }
         else if (msg.status === 'error') { toolStatus.textContent = ''; cameraBtn.disabled = false; addMessage('sys', msg.message); }
         else if (msg.status === 'busy') addMessage('sys', msg.message);

@@ -213,6 +213,27 @@ def test_grasp_context_gist_line(monkeypatch):
     assert "[fly valence" in block and "advisory only" in block
 
 
+def test_grasp_fill_records_lateral_horn_fingerprint_once(monkeypatch):
+    import cognition.memory.grasp as grasp
+    from cognition.fly_behavior import lateral_horn
+
+    class CountingSet(set):
+        add_calls = 0
+
+        def add(self, value):
+            self.add_calls += 1
+            super().add(value)
+
+    identity = "grasp-lh-once"
+    bucket = CountingSet()
+    monkeypatch.setitem(lateral_horn._seen, identity, bucket)
+    monkeypatch.setattr(lateral_horn, "_mode", lambda: "live")
+
+    grasp.GraspBuffer(journal_enabled=False, identity=identity).fill("new context", "new response")
+
+    assert bucket.add_calls == 1
+
+
 def _teach_promote_mb(text, times=5):
     from cognition.fly_registry import get_flymb
     from cognition.flymemory import text_features

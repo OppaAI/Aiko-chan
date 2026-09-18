@@ -1017,6 +1017,23 @@ def test_dream_publishes_selected_bias_aggregate(backend, monkeypatch):
     assert snapshot["sources"]["mb"] == "dream"
 
 
+def test_dream_multiplier_fallback_replaces_stale_value(backend, monkeypatch):
+    from cognition.fly_behavior import sleep_sched
+
+    memo = _bare_memo(backend)
+    memo._fly_dream_mult = 1.5
+    monkeypatch.setattr(
+        sleep_sched,
+        "dream_boost_multiplier",
+        lambda _user_id: (_ for _ in ()).throw(RuntimeError("unavailable")),
+    )
+    monkeypatch.setattr(memo, "_iter_memory_batches", lambda _user_id: iter(()))
+
+    memo.dream(user_id="u1", dry_run=True)
+
+    assert memo._fly_dream_mult == 1.0
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 3 — entity importance I_e + supersession chain (cognition/memory/entity.py)
 # ─────────────────────────────────────────────────────────────────────────────

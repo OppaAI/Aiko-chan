@@ -3432,7 +3432,17 @@ class AikoMemorize:
         """
         user_id = self._resolve_user_id(user_id)
         t_start = time.perf_counter()
-        log.info(f"{'(dry-run) ' if dry_run else ''}Starting consolidation pass...")
+        _fly_dream_mult = 1.0
+        try:
+            from cognition.fly_behavior.sleep_sched import dream_boost_multiplier
+            _fly_dream_mult = float(dream_boost_multiplier(user_id))
+        except Exception:
+            _fly_dream_mult = 1.0
+        self._fly_dream_mult = _fly_dream_mult
+        log.info(
+            f"{'(dry-run) ' if dry_run else ''}Starting consolidation pass..."
+            + (f" flysleep_mult={_fly_dream_mult:.2f}" if _fly_dream_mult != 1.0 else "")
+        )
 
         mem_ids: list[str] = []
         all_batch_mems: list[dict] = []
@@ -3629,7 +3639,7 @@ class AikoMemorize:
                     mb_bias = float(_b)
                     log.debug("flymb dream mode=%s bias=%+.3f", _fly_mode, _b)
                     if _fly_mode == "live":
-                        s_score += _flymb_float("MEMORY_FLYMB_DREAM_W", 0.2) * max(0.0, _b)
+                        s_score += _flymb_float("MEMORY_FLYMB_DREAM_W", 0.2) * max(0.0, _b) * float(getattr(self, "_fly_dream_mult", 1.0) or 1.0)
 
             if s_score < 0.35:
                 continue

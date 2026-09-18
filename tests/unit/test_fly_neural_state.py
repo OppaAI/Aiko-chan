@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 
 from cognition.fly_behavior import lateral_horn
+from cognition.fly_behavior import sleep_sched
 from cognition.neural_state import NeuralState, clear_neural_state, get_neural_state, peek_neural_state
 
 
@@ -27,6 +28,29 @@ def test_lateral_horn_uses_trimmed_identity(monkeypatch):
     assert first["novel"] is True
     assert second["novel"] is False
     assert set(lateral_horn._seen) == {"alice"}
+
+
+def test_lateral_horn_read_only_lookup_does_not_record(monkeypatch):
+    monkeypatch.setattr(lateral_horn, "_mode", lambda: "live")
+    lateral_horn._seen.clear()
+
+    prior = lateral_horn.context_prior("unseen context", user_id="alice", record=False)
+
+    assert prior["novel"] is True
+    assert lateral_horn._seen == {}
+
+
+def test_shadow_maintenance_logs_pressure_prediction_without_acting(monkeypatch, caplog):
+    user_id = "sleep-shadow"
+    clear_neural_state(user_id)
+    get_neural_state(user_id).sleep_pressure = 0.8
+    monkeypatch.setattr(sleep_sched, "_mode", lambda: "shadow")
+    monkeypatch.setenv("MEMORY_FLYSLEEP_MODE", "shadow")
+
+    with caplog.at_level("DEBUG", logger="aiko.fly_behavior.sleep_sched"):
+        assert sleep_sched.should_prefer_maintenance(user_id) is False
+
+    assert "would=maintenance action_level=normal" in caplog.text
 
 
 def test_neural_state_lock_is_per_instance_and_not_serialized():

@@ -119,6 +119,61 @@
   }
   function stopScreenShare() { if (screenEndedHandler && screenStream) { try { screenStream.getVideoTracks()[0]?.removeEventListener('ended', screenEndedHandler); } catch (_) { /* already fired */ } } screenEndedHandler = null; if (screenStream) { screenStream.getTracks().forEach(track => { try { track.stop(); } catch (_) { /* already stopped */ } }); } screenStream = null; if (indicator) indicator.hidden = true; if (status) status.textContent = focusTicker ? 'focus session active' : 'settling in'; }
   stop?.addEventListener('click', stopScreenShare);
+  // ── T4/T5 motion reflex arc (JS mirror of cognition/flysense/motion.py) ──
+  // LPTC pooling gains baked from MaleCNS v1.0 (258,046 T4/T5->HS/VS synapses:
+  // HS<-T4a/T5a front-to-back, VS<-T4d/T5d downward): GH=0.34, GV=0.66.
+  // Runs entirely in-browser on 48px thumbnails; only a throttled presence
+  // LEVEL (0..1) ever leaves the page, and only on bin change. Like the fly's
+  // LPTC->motor reflex, reactions stay local; the server just gets arousal.
+  const MOTION_W = 48, MOTION_H = 36, MOTION_THR = 0.02, MOTION_CHANGE_THR = 0.10;
+  const MOTION_GH = 0.34, MOTION_GV = 0.66;
+  let motionPrev = null, motionLevel = 0, motionBin = -1, lastPresenceSent = 0;
+  window.aikoMotionEnergy = function (prev, curr) {
+    let hOn = 0, hOff = 0, vOn = 0, vOff = 0, change = 0;
+    const n = prev.length;
+    const W = MOTION_W;
+    for (let i = 0; i < n; i++) {
+      const c = curr[i], p = prev[i];
+      const onC = c > 0 ? c : 0, offC = c < 0 ? -c : 0;
+      const x = i % W;
+      const pR = x > 0 ? prev[i - 1] : p;
+      const pL = x < W - 1 ? prev[i + 1] : p;
+      const pU = i >= W ? prev[i - W] : p;
+      const pD = i + W < n ? prev[i + W] : p;
+      hOn += onC * pR; hOff += offC * pR;
+      hOn -= onC * pL; hOff -= offC * pL;
+      vOn += onC * pU - onC * pD; vOff += offC * pU - offC * pD;
+      change += Math.abs(c - p);
+    }
+    const h = (Math.abs(hOn) + Math.abs(hOff)) / n * MOTION_GH;
+    const v = (Math.abs(vOn) + Math.abs(vOff)) / n * MOTION_GV;
+    return { h, v, total: h + v, change: change / n };
+  };
+  function sampleMotionGray(video, canvas) {
+    canvas.width = MOTION_W; canvas.height = MOTION_H;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(video, 0, 0, MOTION_W, MOTION_H);
+    const d = ctx.getImageData(0, 0, MOTION_W, MOTION_H).data;
+    const g = new Float32Array(MOTION_W * MOTION_H);
+    let mean = 0;
+    for (let i = 0; i < g.length; i++) {
+      g[i] = (d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2]) / 765; // 0..1
+      mean += g[i];
+    }
+    mean /= g.length;
+    let peak = 0;
+    for (let i = 0; i < g.length; i++) { g[i] -= mean; const a = Math.abs(g[i]); if (a > peak) peak = a; }
+    if (peak > 0) for (let i = 0; i < g.length; i++) g[i] /= peak;
+    return g;
+  }
+  function presenceBin(level) { return level < 0.15 ? 0 : level < 0.5 ? 1 : 2; }
+  function reportPresence(level, force) {
+    const now = Date.now();
+    const bin = presenceBin(level);
+    if (!force && (bin === motionBin || now - lastPresenceSent < 10000)) return;
+    motionBin = bin; lastPresenceSent = now;
+    send({ type: 'presence', level: Math.round(level * 100) / 100 });
+  }
   async function toggleWebcam() {
     if (webcamStream) { stopWebcam(); return; }
     try {
@@ -131,10 +186,26 @@
       let detector = null;
       try { detector = 'FaceDetector' in window ? new window.FaceDetector({ fastMode: true, maxDetectedFaces: 1 }) : null; } catch (_) { detector = null; }
       let detecting = false;
-      webcamTimer = window.setInterval(async () => { if (!detector || !webcamStream || detecting) return; detecting = true; try { const faces = await detector.detect(video); window.aikoSetPose?.('lookAround', faces.length > 0); } catch (_) { /* detection is best effort */ } finally { detecting = false; } }, 1200);
+      const motionCanvas = document.createElement('canvas');
+      webcamTimer = window.setInterval(async () => {
+        if (!webcamStream) return;
+        // T4/T5 reflex arc: motion energy from 48px thumbnails (local only).
+        try {
+          const gray = sampleMotionGray(video, motionCanvas);
+          if (motionPrev) {
+            const e = window.aikoMotionEnergy(motionPrev, gray);
+            const moved = e.total >= MOTION_THR || e.change >= MOTION_CHANGE_THR;
+            motionLevel = motionLevel * 0.7 + Math.min(1, e.total * 8 + e.change) * 0.3;
+            if (moved && status) status.textContent = 'movement nearby…';
+            window.aikoSetPose?.('lookAround', moved);
+            reportPresence(motionLevel, false);
+          }
+          motionPrev = gray;
+        } catch (_) { /* motion is best effort; FaceDetector path below is independent */ }
+        if (!detector || detecting) return; detecting = true; try { const faces = await detector.detect(video); if (faces.length > 0) window.aikoSetPose?.('lookAround', true); } catch (_) { /* detection is best effort */ } finally { detecting = false; } }, 1200);
     } catch (_) { window.addMessage?.('sys', 'Webcam access was unavailable. Aiko will keep using her idle animations.'); stopWebcam(); }
   }
-  function stopWebcam() { if (webcamTimer) clearInterval(webcamTimer); webcamTimer = 0; if (webcamStream) webcamStream.getTracks().forEach(track => { try { track.stop(); } catch (_) { /* already stopped */ } }); webcamStream = null; if (webcamToggle) webcamToggle.textContent = 'Webcam off'; window.aikoSetPose?.('lookAround', false); }
+  function stopWebcam() { if (webcamTimer) clearInterval(webcamTimer); webcamTimer = 0; if (webcamStream) webcamStream.getTracks().forEach(track => { try { track.stop(); } catch (_) { /* already stopped */ } }); webcamStream = null; motionPrev = null; motionLevel = 0; motionBin = -1; reportPresence(0, true); if (webcamToggle) webcamToggle.textContent = 'Webcam off'; window.aikoSetPose?.('lookAround', false); }
   webcamToggle?.addEventListener('click', toggleWebcam);
   window.addEventListener('pagehide', () => { try { stopWebcam(); } catch (_) { /* teardown only */ } }, { once: true });
   loadState();

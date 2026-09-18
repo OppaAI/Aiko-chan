@@ -103,3 +103,104 @@ def test_wiring_live_nudges_score_and_learns_once(monkeypatch):
     buf.fill("I loved this", "glad to hear it")
     plastic = grasp._flymb()._plastic
     assert float(abs(plastic).sum()) > 0.0  # exactly one teaching event
+
+
+def test_promote_wiring_modes(monkeypatch):
+    # promote.py reads the mode per-call from the environment (unlike grasp's
+    # import-time constant), so drive it via setenv like production does.
+    import cognition.consolidate.promote as promo
+    monkeypatch.setenv("MEMORY_FLYMB_MODE", "off")
+    base = promo.score_journal_fragment("I love this wonderful result, thanks!")
+    monkeypatch.setenv("MEMORY_FLYMB_MODE", "shadow")
+    assert promo.score_journal_fragment("I love this wonderful result, thanks!") == base
+    # Naive (unteached) biases are arbitrary-signed; meaning comes from DAN
+    # teaching, so teach this exact pattern once before comparing.
+    from cognition.flymemory import FlyMB, text_features
+    mb = promo._flymb()
+    feats = text_features("I love this wonderful result, thanks!")
+    for _ in range(5):
+        mb.reinforce(mb.encode(feats), +1.0)
+    monkeypatch.setenv("MEMORY_FLYMB_MODE", "live")
+    assert promo.score_journal_fragment("I love this wonderful result, thanks!") > base
+    assert promo.score_journal_fragment("random filler words here ok") <= base + 0.11
+
+
+def test_recall_rerank_keeps_all_hits_and_orders(monkeypatch):
+    # episode.py also reads the mode per-call from the environment.
+    import cognition.memory.episode as ep
+    monkeypatch.setenv("MEMORY_FLYMB_MODE", "shadow")
+    hits = [
+        {"id": 1, "_recall_score": 0.03, "trace": "the cat sat on the mat"},
+        {"id": 2, "_recall_score": 0.02, "trace": "I love this wonderful birthday party, thanks!"},
+    ]
+    out = ep._flymb_rerank("wonderful birthday party love", hits)
+    assert [h["id"] for h in out] == [1, 2]  # shadow: order untouched
+    monkeypatch.setenv("MEMORY_FLYMB_MODE", "live")
+    out = ep._flymb_rerank("wonderful birthday party love", [dict(h) for h in hits])
+    assert sorted(h["id"] for h in out) == [1, 2]  # never drops hits
+    assert all("_flymb_overlap" in h for h in out)
+
+
+def test_grasp_context_gist_line(monkeypatch):
+    import cognition.memory.grasp as grasp
+    monkeypatch.setattr(grasp, "MEMORY_FLYMB_MODE", "off")
+    buf = grasp.GraspBuffer(journal_enabled=False)
+    buf.fill("I love this wonderful result", "great!")
+    assert "[fly valence" not in (buf.get_context_block(touch=False) or "")
+    monkeypatch.setattr(grasp, "MEMORY_FLYMB_MODE", "live")
+    buf2 = grasp.GraspBuffer(journal_enabled=False)
+    for _ in range(3):
+        buf2.fill("I love this wonderful result, thanks so much!", "wonderful!")
+    block = buf2.get_context_block(touch=False) or ""
+    assert "[fly valence" in block and "advisory only" in block
+
+
+def _teach_promote_mb(text, times=5):
+    import cognition.consolidate.promote as promo
+    from cognition.flymemory import text_features
+    mb = promo._flymb()
+    feats = text_features(text)
+    for _ in range(times):
+        mb.reinforce(mb.encode(feats), +1.0)
+    return mb
+
+
+def test_ltm_rank_helpers(monkeypatch):
+    # LTM rank/dream share one helper: bounded bias, None-safe, mode-aware.
+    import cognition.memory.memorize as mem
+    assert mem._flymb_bias_for_text("") is None
+    b = mem._flymb_bias_for_text("I love this wonderful result, thanks!")
+    assert b is not None and -1.0 <= b <= 1.0
+    monkeypatch.setenv("MEMORY_FLYMB_MODE", "off")
+    assert mem._flymb_mode() == "off"
+
+
+def test_dream_boost_wiring_modes(monkeypatch):
+    import cognition.memory.memorize as mem
+    monkeypatch.setenv("MEMORY_FLYMB_MODE", "shadow")
+    assert mem._flymb_mode() == "shadow"
+    monkeypatch.setenv("MEMORY_FLYMB_MODE", "live")
+    assert mem._flymb_mode() == "live"
+    assert mem._flymb_float("MEMORY_FLYMB_LTM_W", 0.01) == 0.01
+    assert mem._flymb_float("MEMORY_FLYMB_DREAM_W", 0.2) == 0.2
+
+
+def test_forget_decay_wire(monkeypatch):
+    import cognition.memory.forget as fg
+    kw = dict(access_count=3, last_accessed_iso="2026-01-01T00:00:00Z",
+              valence_tag="pos", valence_score=2,
+              memory_text="I love this wonderful result, thanks!")
+    monkeypatch.setenv("MEMORY_FLYMB_MODE", "off")
+    base = fg.compute_weighted_score(**kw)
+    assert base > 0
+    monkeypatch.setenv("MEMORY_FLYMB_MODE", "shadow")
+    import pytest as _pt
+    assert fg.compute_weighted_score(**kw) == _pt.approx(base)  # shadow never changes scores
+    assert fg._flymb_mode() == "shadow"
+    from cognition.flymemory import text_features as _tf
+    _mb = fg._flymb_fg()
+    _f = _tf(kw["memory_text"])
+    for _ in range(5):
+        _mb.reinforce(_mb.encode(_f), +1.0)  # teach: praise predicts reward
+    monkeypatch.setenv("MEMORY_FLYMB_MODE", "live")
+    assert fg.compute_weighted_score(**kw) >= base  # approach lingers

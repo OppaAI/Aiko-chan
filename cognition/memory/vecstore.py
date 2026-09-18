@@ -26,11 +26,38 @@ import numpy as np
 import requests
 
 from system.secure import connect_sqlite
-from system.config import env_float, env_int
+from system.config import env_float, env_int, env_str
 from system.userspace import current_user_id, user_state_path
 from system.log import get_logger
 
 log = get_logger(__name__)
+
+# Fly antennal-lobe layer: divisive normalization on every embedding.
+# Applied inside _embed_texts (the single funnel for store + query paths)
+# so geometry stays consistent. Modes off | shadow | live (default off);
+# shadow computes + logs gain stats and returns raw vectors.
+def _flyal_mode() -> str:
+    try:
+        return env_str("MEMORY_FLYAL_MODE", "off").strip().lower()
+    except Exception:
+        return "off"
+
+
+_FLYAL = None
+_FLYAL_OK = None
+
+
+def _flyal():
+    global _FLYAL, _FLYAL_OK
+    if _FLYAL_OK is None:
+        try:
+            from cognition.flysense import FlyAL
+            _FLYAL = FlyAL()
+            _FLYAL_OK = True
+        except Exception as exc:
+            log.debug(f"flyal unavailable: {exc}")
+            _FLYAL_OK = False
+    return _FLYAL if _FLYAL_OK else None
 
 
 
@@ -138,6 +165,10 @@ class HarrierEmbedder:
                     try:
                         entry = json.loads(line)
                         key = tuple(entry["texts"])
+                        # Entries written before the AL layer (or under another
+                        # mode) are skipped so geometry never mixes modes.
+                        if entry.get("flyal", "off") != _flyal_mode():
+                            continue
                         vec = np.asarray(entry["vector"], dtype=np.float32)
                         self._disk_cache[key] = vec
                     except Exception:
@@ -156,7 +187,7 @@ class HarrierEmbedder:
             return
         try:
             import json
-            entry = {"texts": list(key), "vector": vec.tolist()}
+            entry = {"texts": list(key), "vector": vec.tolist(), "flyal": _flyal_mode()}
             with open(self._disk_cache_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
             self._maybe_compact_disk_cache()
@@ -193,12 +224,25 @@ class HarrierEmbedder:
         """
         key = tuple(texts)
         now = time.monotonic()
+        mode = _flyal_mode()
+        if getattr(self, "_flyal_seen_mode", None) not in (None, mode):
+            # Mid-run flip: drop both caches so raw and gain-controlled
+            # geometry never mix (disk file keeps tagged lines for later boots).
+            with self._cache_lock:
+                self._cache.clear()
+            with self._disk_cache_lock:
+                self._disk_cache.clear()
+            log.info(f"flyal mode -> {mode}; embedding caches cleared for geometry consistency")
+        self._flyal_seen_mode = mode
+        # In-RAM cache is partitioned by AL mode so a mid-run flip can never
+        # serve geometry from another mode (disk entries carry their own tag).
+        mkey = (f"flyal={mode}",) + key
 
         # Check memory cache first
         with self._cache_lock:
-            cached = self._cache.get(key)
+            cached = self._cache.get(mkey)
             if cached is not None and now - cached[0] <= self._CACHE_TTL:
-                self._cache.move_to_end(key)
+                self._cache.move_to_end(mkey)
                 return cached[1]
 
         # Check disk cache
@@ -207,7 +251,7 @@ class HarrierEmbedder:
             if disk_cached is not None:
                 # Promote to memory cache
                 with self._cache_lock:
-                    self._cache[key] = (now, disk_cached)
+                    self._cache[mkey] = (now, disk_cached)
                     while len(self._cache) > self._CACHE_MAX:
                         self._cache.popitem(last=False)
                 return disk_cached
@@ -234,11 +278,23 @@ class HarrierEmbedder:
         norms = np.where(norms == 0, 1.0, norms)
         result = arr / norms
 
+        # Fly AL layer: divisive gain control (shadow logs, live replaces).
+        if mode in ("shadow", "live"):
+            try:
+                al = _flyal()
+                if al is not None:
+                    if mode == "live":
+                        result = al.normalize_batch(result).astype(np.float32)
+                    log.debug(f"flyal mode={mode} glomeruli={al.summary()['glomeruli']} "
+                              f"inh_med={al.summary()['inhibition_median']}")
+            except Exception as exc:
+                log.debug(f"flyal transform skipped: {exc}")
+
         # Store in both caches (both capped LRU-style). The disk-cache dict
         # mutation holds the lock; the file append below takes it again
         # briefly inside _maybe_compact_disk_cache, so it must run outside.
         with self._cache_lock:
-            self._cache[key] = (now, result)
+            self._cache[mkey] = (now, result)
             while len(self._cache) > self._CACHE_MAX:
                 self._cache.popitem(last=False)
 

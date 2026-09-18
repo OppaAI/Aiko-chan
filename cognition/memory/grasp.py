@@ -479,6 +479,17 @@ class GraspBuffer:
                 t.recall_count += 1
         if not lines:
             return ""
+        if MEMORY_FLYMB_MODE == "live" and included:
+            # Advisory gut-feeling line for the reasoner (read-only re-read;
+            # never stored, never authoritative, skipped when near-neutral).
+            try:
+                biases = [flymb_bias_for_turn(t, self._turn_counter) or 0.0 for t in included]
+                mean_b = sum(biases) / len(biases)
+                if abs(mean_b) >= 0.02:
+                    lean = "approach-leaning" if mean_b > 0 else "avoid-leaning"
+                    lines.append(f"[fly valence {mean_b:+.2f} {lean} — mushroom-body readout, advisory only]")
+            except Exception:
+                pass
         return "<grasp>\nCurrent conversational focus (most salient first):\n\n" + "\n\n".join(lines) + "\n</grasp>"
 
     def snapshot(self) -> list[GraspTurn]:

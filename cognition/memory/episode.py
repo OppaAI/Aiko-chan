@@ -43,7 +43,7 @@ from typing import Any
 
 import sqlite_vec
 
-from system.config import env_bool, env_float, env_int
+from system.config import env_bool, env_float, env_int, env_str
 from system.log import get_logger
 from system.userspace import current_user_id
 try:
@@ -138,6 +138,73 @@ EMC_RECALL_LIMIT = max(0, env_int("EMC_RECALL_LIMIT", 2))
 EMC_KNN_LIMIT = max(1, env_int("EMC_KNN_LIMIT", 12))
 EMC_FTS_LIMIT = max(1, env_int("EMC_FTS_LIMIT", 12))
 EMC_RRF_K = max(1, env_int("EMC_RRF_K", 60))
+
+# Fly mushroom-body layer: KC sparse codes (FlyHash-style) as an extra
+# recall key. Reuses the grasp MB master mode (off | shadow | live); shadow
+# only logs the top KC overlap, live adds a small RRF-scale bonus.
+MEMORY_FLYMB_RECALL_W = env_float("MEMORY_FLYMB_RECALL_W", 0.01)
+_FLYMB_EP = None
+_FLYMB_EP_OK = None
+
+
+def _flymb_ep():
+    global _FLYMB_EP, _FLYMB_EP_OK
+    if _FLYMB_EP_OK is None:
+        try:
+            from cognition.flymemory import FlyMB
+            _FLYMB_EP = FlyMB()
+            _FLYMB_EP_OK = True
+        except Exception as exc:
+            log.debug("flymb recall unavailable: %s", exc)
+            _FLYMB_EP_OK = False
+    return _FLYMB_EP if _FLYMB_EP_OK else None
+
+
+def _flymb_mode() -> str:
+    try:
+        return env_str("MEMORY_FLYMB_MODE", "off").strip().lower()
+    except Exception:
+        return "off"
+
+
+def _flymb_rerank(query: str, results: list[dict]) -> list[dict]:
+    """Reorder recall hits by KC-pattern overlap (FlyHash-style key).
+
+    Shadow: compute + debug-log, order untouched. Live: add a small bonus
+    to _recall_score and stable-resort. Never drops hits, only reorders.
+    """
+    mode = _flymb_mode()
+    if mode not in ("shadow", "live") or not results:
+        return results
+    mb = _flymb_ep()
+    if mb is None:
+        return results
+    try:
+        from cognition.flymemory import text_features
+        import numpy as np
+        qkc = mb.encode(text_features(query))
+        qn = float(np.linalg.norm(qkc))
+        scored = []
+        for r in results:
+            ckc = mb.encode(text_features(r.get("trace") or r.get("memory") or ""))
+            ov = float(qkc @ ckc / (qn * float(np.linalg.norm(ckc)) + 1e-9)) if qn > 0 else 0.0
+            scored.append((ov, r))
+        scored.sort(key=lambda t: t[0], reverse=True)
+        log.debug("flymb recall mode=%s top_overlap=%.3f hits=%d",
+                  mode, scored[0][0] if scored else 0.0, len(scored))
+        if mode != "live":
+            return results
+        out = []
+        for ov, r in scored:
+            r = dict(r)
+            r["_recall_score"] = float(r.get("_recall_score") or 0.0) + MEMORY_FLYMB_RECALL_W * ov
+            r["_flymb_overlap"] = round(ov, 4)
+            out.append(r)
+        out.sort(key=lambda r: r["_recall_score"], reverse=True)
+        return out
+    except Exception as exc:
+        log.debug("flymb recall rerank failed: %s", exc)
+        return results
 EMC_CONTEXT_CHARS = max(100, env_int("EMC_CONTEXT_CHARS", 600))
 EMC_CONTEXT_EPISODE_CHARS = max(40, env_int("EMC_CONTEXT_EPISODE_CHARS", 280))
 EMC_JOINT_BUDGET = env_bool("EMC_JOINT_BUDGET", "1")
@@ -933,7 +1000,9 @@ class EpisodicStore:
                     self._touch_episodes([r["id"] for r in hits])
                 except Exception:
                     pass
-                return hits
+                # Rerank AFTER cache read: cached order is the RRF base so
+                # evolving MB plasticity re-ranks fresh on every call.
+                return _flymb_rerank(q, hits)
             if cached:
                 self._recall_cache.pop(cache_key, None)
 
@@ -1056,10 +1125,11 @@ class EpisodicStore:
 
             self._touch_episodes([r["id"] for r in results])
             with self._recall_cache_lock:
+                # Cache the RRF base order; KC rerank applies per call above.
                 self._recall_cache[cache_key] = (now, [dict(r) for r in results])
                 while len(self._recall_cache) > EMC_RECALL_CACHE_SIZE:
                     self._recall_cache.popitem(last=False)
-            return results
+            return _flymb_rerank(q, results)
 
     def _touch_episodes(self, ids: list[int]) -> None:
         if not ids:

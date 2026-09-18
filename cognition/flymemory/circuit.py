@@ -36,6 +36,50 @@ def load_circuit(path: str | Path = DATA_PATH) -> dict:
         return {k: d[k] for k in d.files}
 
 
+_POS_WORDS = frozenset("love great thanks happy good excited wonderful glad pleased best".split())
+_NEG_WORDS = frozenset("hate sad angry bad frustrated worried stupid wrong terrible awful".split())
+
+
+def text_features(text: str) -> list[float]:
+    """Synthetic sensory hash: 8 text stats into the INPUT projection.
+
+    Used where only raw text exists (consolidation, recall). Lexicon is
+    deliberately tiny — this front-end is synthetic; everything downstream
+    of INPUT is real connectivity. Output roughly in [-1, 1] / [0, 1].
+    """
+    s = text or ""
+    low = s.lower()
+    words = low.split()
+    n = max(1, len(words))
+    def _hit(w: str) -> str:
+        w = w.strip(".,!?;:()\"'")
+        if w in _POS_WORDS:
+            return "pos"
+        if w in _NEG_WORDS:
+            return "neg"
+        if w.endswith("s") and len(w) > 3:  # crude plural
+            w = w[:-1]
+            if w in _POS_WORDS:
+                return "pos"
+            if w in _NEG_WORDS:
+                return "neg"
+        return ""
+    hits = [_hit(w) for w in words]
+    pos = sum(h == "pos" for h in hits)
+    neg = sum(h == "neg" for h in hits)
+    letters = [c for c in s if c.isalpha()]
+    return [
+        max(-1.0, min(1.0, (pos - neg) / max(1, pos + neg))),  # valence-ish
+        min(1.0, len(s) / 500.0),                               # length/salience
+        1.0 if "?" in s else 0.0,                               # question
+        min(1.0, s.count("!") / 3.0),                           # intensity
+        len(set(words)) / n,                                    # diversity
+        min(1.0, sum(c.isupper() for c in letters) / max(1, len(letters)) * 3.0),  # emphasis
+        min(1.0, sum(c.isdigit() for c in s) / 20.0),           # factuality hint
+        min(1.0, n / 60.0),                                     # verbosity
+    ]
+
+
 def _csr(pre: np.ndarray, post: np.ndarray, w: np.ndarray,
          n_pre: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Tiny CSR builder (pre-major). No scipy dependency."""

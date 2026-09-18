@@ -1,0 +1,351 @@
+{
+ "glomeruli": {
+  "D": {
+   "orn_syn": 9264,
+   "ln_syn": 5179,
+   "n_pn_types": 1,
+   "n_pn_bodies": 6,
+   "inhibition_ratio": 0.3586
+  },
+  "DA1": {
+   "orn_syn": 29386,
+   "ln_syn": 14440,
+   "n_pn_types": 1,
+   "n_pn_bodies": 13,
+   "inhibition_ratio": 0.3295
+  },
+  "DA2": {
+   "orn_syn": 4639,
+   "ln_syn": 1813,
+   "n_pn_types": 1,
+   "n_pn_bodies": 10,
+   "inhibition_ratio": 0.281
+  },
+  "DA3": {
+   "orn_syn": 998,
+   "ln_syn": 506,
+   "n_pn_types": 1,
+   "n_pn_bodies": 4,
+   "inhibition_ratio": 0.3364
+  },
+  "DA4l": {
+   "orn_syn": 2972,
+   "ln_syn": 1865,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.3856
+  },
+  "DA4m": {
+   "orn_syn": 6519,
+   "ln_syn": 3608,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.3563
+  },
+  "DC1": {
+   "orn_syn": 7696,
+   "ln_syn": 6942,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.4742
+  },
+  "DC2": {
+   "orn_syn": 6870,
+   "ln_syn": 5530,
+   "n_pn_types": 1,
+   "n_pn_bodies": 4,
+   "inhibition_ratio": 0.446
+  },
+  "DC3": {
+   "orn_syn": 8805,
+   "ln_syn": 5610,
+   "n_pn_types": 1,
+   "n_pn_bodies": 6,
+   "inhibition_ratio": 0.3892
+  },
+  "DC4": {
+   "orn_syn": 5715,
+   "ln_syn": 2387,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.2946
+  },
+  "DL1": {
+   "orn_syn": 13212,
+   "ln_syn": 6500,
+   "n_pn_types": 1,
+   "n_pn_bodies": 4,
+   "inhibition_ratio": 0.3297
+  },
+  "DL2d": {
+   "orn_syn": 9949,
+   "ln_syn": 5901,
+   "n_pn_types": 1,
+   "n_pn_bodies": 9,
+   "inhibition_ratio": 0.3723
+  },
+  "DL2v": {
+   "orn_syn": 11555,
+   "ln_syn": 9573,
+   "n_pn_types": 1,
+   "n_pn_bodies": 8,
+   "inhibition_ratio": 0.4531
+  },
+  "DL3": {
+   "orn_syn": 7065,
+   "ln_syn": 3729,
+   "n_pn_types": 1,
+   "n_pn_bodies": 11,
+   "inhibition_ratio": 0.3455
+  },
+  "DL4": {
+   "orn_syn": 2569,
+   "ln_syn": 1812,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.4136
+  },
+  "DL5": {
+   "orn_syn": 6944,
+   "ln_syn": 4315,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.3832
+  },
+  "DM1": {
+   "orn_syn": 13534,
+   "ln_syn": 7199,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.3472
+  },
+  "DM2": {
+   "orn_syn": 10582,
+   "ln_syn": 6106,
+   "n_pn_types": 1,
+   "n_pn_bodies": 4,
+   "inhibition_ratio": 0.3659
+  },
+  "DM3": {
+   "orn_syn": 4169,
+   "ln_syn": 2722,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.395
+  },
+  "DM4": {
+   "orn_syn": 5648,
+   "ln_syn": 4304,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.4325
+  },
+  "DM5": {
+   "orn_syn": 4314,
+   "ln_syn": 2085,
+   "n_pn_types": 1,
+   "n_pn_bodies": 7,
+   "inhibition_ratio": 0.3258
+  },
+  "DM6": {
+   "orn_syn": 9921,
+   "ln_syn": 3780,
+   "n_pn_types": 1,
+   "n_pn_bodies": 7,
+   "inhibition_ratio": 0.2759
+  },
+  "DP1l": {
+   "orn_syn": 7575,
+   "ln_syn": 8828,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.5382
+  },
+  "DP1m": {
+   "orn_syn": 15523,
+   "ln_syn": 11137,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.4177
+  },
+  "VA1d": {
+   "orn_syn": 9740,
+   "ln_syn": 6229,
+   "n_pn_types": 1,
+   "n_pn_bodies": 6,
+   "inhibition_ratio": 0.3901
+  },
+  "VA1v": {
+   "orn_syn": 11761,
+   "ln_syn": 4926,
+   "n_pn_types": 1,
+   "n_pn_bodies": 8,
+   "inhibition_ratio": 0.2952
+  },
+  "VA2": {
+   "orn_syn": 13098,
+   "ln_syn": 5710,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.3036
+  },
+  "VA3": {
+   "orn_syn": 5347,
+   "ln_syn": 5276,
+   "n_pn_types": 1,
+   "n_pn_bodies": 4,
+   "inhibition_ratio": 0.4967
+  },
+  "VA4": {
+   "orn_syn": 4966,
+   "ln_syn": 3140,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.3874
+  },
+  "VA5": {
+   "orn_syn": 4936,
+   "ln_syn": 3758,
+   "n_pn_types": 1,
+   "n_pn_bodies": 6,
+   "inhibition_ratio": 0.4323
+  },
+  "VA6": {
+   "orn_syn": 8297,
+   "ln_syn": 6704,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.4469
+  },
+  "VA7l": {
+   "orn_syn": 4324,
+   "ln_syn": 2851,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.3974
+  },
+  "VA7m": {
+   "orn_syn": 2835,
+   "ln_syn": 2418,
+   "n_pn_types": 1,
+   "n_pn_bodies": 6,
+   "inhibition_ratio": 0.4603
+  },
+  "VC1": {
+   "orn_syn": 7143,
+   "ln_syn": 4467,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.3848
+  },
+  "VC2": {
+   "orn_syn": 5265,
+   "ln_syn": 3162,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.3752
+  },
+  "VC3": {
+   "orn_syn": 9044,
+   "ln_syn": 6931,
+   "n_pn_types": 1,
+   "n_pn_bodies": 7,
+   "inhibition_ratio": 0.4339
+  },
+  "VC4": {
+   "orn_syn": 6828,
+   "ln_syn": 5008,
+   "n_pn_types": 1,
+   "n_pn_bodies": 6,
+   "inhibition_ratio": 0.4231
+  },
+  "VL2a": {
+   "orn_syn": 8913,
+   "ln_syn": 6017,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.403
+  },
+  "VL2p": {
+   "orn_syn": 6928,
+   "ln_syn": 8835,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.5605
+  },
+  "VM1": {
+   "orn_syn": 3373,
+   "ln_syn": 2851,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.4581
+  },
+  "VM2": {
+   "orn_syn": 4238,
+   "ln_syn": 2053,
+   "n_pn_types": 1,
+   "n_pn_bodies": 3,
+   "inhibition_ratio": 0.3263
+  },
+  "VM3": {
+   "orn_syn": 6218,
+   "ln_syn": 3832,
+   "n_pn_types": 1,
+   "n_pn_bodies": 4,
+   "inhibition_ratio": 0.3813
+  },
+  "VM4": {
+   "orn_syn": 2526,
+   "ln_syn": 1380,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.3533
+  },
+  "VM5d": {
+   "orn_syn": 17391,
+   "ln_syn": 6832,
+   "n_pn_types": 1,
+   "n_pn_bodies": 12,
+   "inhibition_ratio": 0.282
+  },
+  "VM5v": {
+   "orn_syn": 8775,
+   "ln_syn": 4654,
+   "n_pn_types": 1,
+   "n_pn_bodies": 5,
+   "inhibition_ratio": 0.3466
+  },
+  "VM6": {
+   "orn_syn": 5965,
+   "ln_syn": 6383,
+   "n_pn_types": 1,
+   "n_pn_bodies": 2,
+   "inhibition_ratio": 0.5169
+  },
+  "VM7d": {
+   "orn_syn": 10305,
+   "ln_syn": 5890,
+   "n_pn_types": 1,
+   "n_pn_bodies": 7,
+   "inhibition_ratio": 0.3637
+  },
+  "VM7v": {
+   "orn_syn": 5338,
+   "ln_syn": 2771,
+   "n_pn_types": 1,
+   "n_pn_bodies": 3,
+   "inhibition_ratio": 0.3417
+  },
+  "VP2": {
+   "orn_syn": 0,
+   "ln_syn": 3528,
+   "n_pn_types": 1,
+   "n_pn_bodies": 0,
+   "inhibition_ratio": 1.0
+  }
+ },
+ "n_orn": 2635,
+ "n_ln": 369,
+ "n_alpn": 227,
+ "provenance": "male-cns:v1.0 minconf-0.5 w>=5, CC-BY Berg et al. 2025"
+}

@@ -279,6 +279,24 @@ class SubliminalLayer:
         # Identity/care queries slightly calm
         ar -= 0.05 * cues.get("identity", 0.0)
         ar = max(0.0, min(1.0, 0.85 * ar + 0.05))
+        # Fly DN layer: descending arousal drive blends in (small, clamped).
+        try:
+            _dn_mode = (os.getenv("MEMORY_FLYDN_MODE", "off") or "off").strip().lower()
+        except Exception:
+            _dn_mode = "off"
+        if _dn_mode in ("shadow", "live"):
+            try:
+                from cognition.flysense import FlyDN as _FlyDN
+                _drv = _FlyDN().drive(energy=float(ar),
+                                      decisiveness=float(cues.get("action", 0.0)),
+                                      affect=float(v))
+            except Exception as exc:
+                log.debug("subliminal flydn skipped: %s", exc)
+                _drv = None
+            if _drv is not None:
+                log.debug("subliminal flydn mode=%s arousal=%.2f", _dn_mode, _drv["arousal"])
+                if _dn_mode == "live":
+                    ar = max(0.0, min(1.0, ar + 0.1 * (_drv["arousal"] - 0.5) * 2.0))
 
         # Dominance — agency grows when action cues are present, uncertainty shrinks it
         d = self._affect.dominance
@@ -390,6 +408,25 @@ class SubliminalLayer:
         emo, score = self.emotion()
         vrm_name, base_intensity = _EMOTION_TO_VRM.get(emo, ("neutral", 0.4))
         intensity = float(min(1.0, base_intensity * (0.5 + score)))
+        # Fly DN layer: vigor scales expression intensity (visible on avatar).
+        try:
+            _dn_mode = (os.getenv("MEMORY_FLYDN_MODE", "off") or "off").strip().lower()
+        except Exception:
+            _dn_mode = "off"
+        if _dn_mode in ("shadow", "live"):
+            try:
+                from cognition.flysense import FlyDN as _FlyDN
+                _drv = _FlyDN().drive(energy=float(self._affect.arousal),
+                                      decisiveness=float(self._affect.agency),
+                                      affect=float(self._affect.valence))
+            except Exception as exc:
+                log.debug("subliminal flydn vrm skipped: %s", exc)
+                _drv = None
+            if _drv is not None:
+                log.debug("subliminal flydn vrm mode=%s arousal=%.2f",
+                          _dn_mode, _drv["arousal"])
+                if _dn_mode == "live":
+                    intensity = float(min(1.0, intensity * (0.8 + 0.4 * _drv["arousal"])))
         return vrm_name, intensity
 
     def broadcast_vrm(self, force: bool = False) -> bool:

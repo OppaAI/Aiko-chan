@@ -513,6 +513,34 @@ class AikoWeb:
                         vision_tasks.add(task)
                         task.add_done_callback(vision_tasks.discard)
 
+                    elif mtype == "presence":
+                        # T4/T5 motion reflex arc: the browser sends only a
+                        # throttled presence LEVEL (0..1, on bin change, max
+                        # 1/10s) — never video. Shadow logs; live nudges
+                        # attention energy slightly upward on real presence.
+                        try:
+                            level = max(0.0, min(1.0, float(msg.get("level", 0.0))))
+                        except (TypeError, ValueError):
+                            continue
+                        store = getattr(self, "_presence_levels", None)
+                        if store is None:
+                            store = self._presence_levels = {}
+                        store[uid] = (level, time.time())
+                        try:
+                            pmode = (os.getenv("MEMORY_FLYCX_MODE", "off") or "off").strip().lower()
+                        except Exception:
+                            pmode = "off"
+                        log.debug("[aiko-web] presence uid=%s level=%.2f mode=%s", uid, level, pmode)
+                        if pmode == "live" and level >= 0.5:
+                            try:
+                                from cognition.attention import for_identity
+                                st = for_identity(uid)
+                                with st._lock:
+                                    st._energy = max(0.0, min(1.0, st._energy + 0.05 * (level - 0.5) * 2.0))
+                            except Exception as exc:
+                                log.debug("[aiko-web] presence nudge failed: %s", exc)
+                        continue
+
                     elif mtype == "vad":
                         event = msg.get("event")
                         if event == "start":

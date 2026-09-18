@@ -29,6 +29,43 @@ from datetime import datetime, timezone
 import math
 import os
 
+from system.log import get_logger
+
+log = get_logger(__name__)
+
+# Fly mushroom-body layer: approach-associated memories decay slower (their
+# half-life stretches). Never accelerates forgetting and never causes
+# deletion — survival decisions stay with the existing threshold logic.
+def _flymb_mode() -> str:
+    try:
+        return (os.getenv("MEMORY_FLYMB_MODE", "off") or "off").strip().lower()
+    except Exception:
+        return "off"
+
+
+def _flymb_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+_FLYMB_FG = None
+_FLYMB_FG_OK = None
+
+
+def _flymb_fg():
+    global _FLYMB_FG, _FLYMB_FG_OK
+    if _FLYMB_FG_OK is None:
+        try:
+            from cognition.flymemory import FlyMB
+            _FLYMB_FG = FlyMB()
+            _FLYMB_FG_OK = True
+        except Exception as exc:
+            log.debug("flymb forget unavailable: %s", exc)
+            _FLYMB_FG_OK = False
+    return _FLYMB_FG if _FLYMB_FG_OK else None
+
 # ── mood-dependent forgetting ──────────────────────────────────────────────
 FORGET_MOOD_MATCH_ENABLED = os.getenv("FORGET_MOOD_MATCH_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
 FORGET_MOOD_MATCH_SLOWDOWN = float(os.getenv("FORGET_MOOD_MATCH_SLOWDOWN", "1.3"))
@@ -151,6 +188,7 @@ def compute_weighted_score(
     valence_score: int | float | None = None,
     query_valence: int | None = None,
     access_day_count: int | None = None,
+    memory_text: str | None = None,
 ) -> float:
     """Compute exponential decay score for a memory entry.
 
@@ -196,6 +234,22 @@ def compute_weighted_score(
                 h_eff *= FORGET_MOOD_MATCH_SLOWDOWN
             elif mem_sign != 0 and q_sign != 0 and mem_sign != q_sign:
                 h_eff /= FORGET_MOOD_MISMATCH_ACCELERATION
+
+        # Fly MB layer: approach-associated memories linger (half-life
+        # stretch only — this term can never hasten forgetting).
+        _fly_mode = _flymb_mode()
+        if _fly_mode in ("shadow", "live") and memory_text:
+            try:
+                from cognition.flymemory import text_features
+                _mb = _flymb_fg()
+                _b = _mb.valence_bias(text_features(memory_text)) if _mb is not None else None
+            except Exception as exc:
+                log.debug("flymb forget skipped: %s", exc)
+                _b = None
+            if _b is not None:
+                log.debug("flymb forget mode=%s bias=%+.3f", _fly_mode, _b)
+                if _fly_mode == "live" and _b > 0:
+                    h_eff *= 1.0 + _flymb_float("MEMORY_FLYMB_DECAY_W", 0.5) * _b
 
         h_eff = max(h_eff, 1e-6)
         return float(strength) * (0.5 ** (days / h_eff))

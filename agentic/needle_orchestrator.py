@@ -16,6 +16,50 @@ from typing import Any
 
 from agentic.needle import NeedleClient, NeedleError, NeedleResponse
 
+try:
+    from system.log import get_logger as _get_logger
+    log = _get_logger(__name__)
+except Exception:  # logging must never break orchestration
+    import logging as _logging
+    log = _logging.getLogger("aiko.needle_orchestrator")
+
+try:
+    from system.config import env_str as _env_str
+except Exception:
+    _env_str = None
+
+
+def _flycx_mode() -> str:
+    try:
+        if _env_str is None:
+            return "off"
+        return _env_str("MEMORY_FLYCX_MODE", "off").strip().lower()
+    except Exception:
+        return "off"
+
+
+def _flycx_cadence(task: str) -> str:
+    """parallel|sequential crew cadence from compass sleep pressure.
+
+    Same shared compass as attention: drowsy crews run sequentially (same
+    coverage, calmer cadence). Shadow only logs the would-be choice.
+    """
+    from cognition.centralcomplex import FlyCompass
+    mode = _flycx_mode()
+    if mode not in ("shadow", "live"):
+        return "parallel"
+    if not hasattr(_flycx_cadence, "_cx"):
+        _flycx_cadence._cx = FlyCompass()
+    try:
+        from cognition.flymemory import text_features
+        out = _flycx_cadence._cx.step(text_features(task or ""), fatigue=0.0)
+    except Exception as exc:
+        log.debug("flycx cadence failed: %s", exc)
+        return "parallel"
+    choice = "sequential" if out["sleep_pressure"] > 0.5 else "parallel"
+    log.debug("flycx cadence mode=%s sleep=%.2f -> %s", mode, out["sleep_pressure"], choice)
+    return choice if mode == "live" else "parallel"
+
 
 @dataclass(frozen=True)
 class NeedleWorkerSpec:
@@ -149,9 +193,11 @@ class NeedleOrchestrator:
             return NeedleWorkerResult(worker.id, worker.role, error=str(exc))
 
     def complete(self, task: str, tools: list[dict[str, Any]]) -> tuple[NeedleWorkerResult, ...]:
-        """Run all workers concurrently, preserving configured worker order."""
+        """Run workers concurrently (or sequentially when drowsy), preserving configured order."""
+        cadence = _flycx_cadence(task)
+        max_workers = 1 if cadence == "sequential" else len(self.workers)
         results: dict[str, NeedleWorkerResult] = {}
-        with ThreadPoolExecutor(max_workers=len(self.workers), thread_name_prefix="needle-worker") as pool:
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="needle-worker") as pool:
             futures = {pool.submit(self._run_one, worker, task, tools): worker for worker in self.workers}
             for future in as_completed(futures):
                 worker = futures[future]

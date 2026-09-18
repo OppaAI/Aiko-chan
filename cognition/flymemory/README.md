@@ -41,3 +41,10 @@ the MB slice, and deletes the weights. Re-run to refresh from a new release.
 `FlyMB.valence_bias(features, reward)` returns opponent bias in [-1, 1].
 Grasp/consolidation integration lives behind `MEMORY_FLYMB_*` config flags
 (see `config/memory.yaml`) and starts in shadow (log-only) mode.
+
+## Naive readout is uncalibrated
+
+Before any `reinforce()` call, MBON biases are arbitrary-signed per pattern
+(the connectome gives topology, not meaning). Valence semantics enter only
+through DAN teaching — same as the fly, which must also learn what predicts
+reward. Downstream wires should treat untaught biases as weak priors.

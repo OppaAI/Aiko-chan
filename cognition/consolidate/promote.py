@@ -8,12 +8,39 @@ from __future__ import annotations
 import re
 
 from system.log import get_logger
+from system.config import env_float, env_str
 from cognition.memory.memorize import SALIENCE_POLICY_RE
 
 from .retention import is_must_keep
 from .schema import JOURNAL_PROMOTE, JOURNAL_PROMOTE_K
 
 log = get_logger(__name__)
+
+# Fly mushroom-body layer: opponent approach/avoid bias on promotion scores.
+# Reuses the grasp MB master mode (off | shadow | live); shadow is log-only.
+MEMORY_FLYMB_PROMOTE_W = env_float("MEMORY_FLYMB_PROMOTE_W", 0.1)
+_FLYMB = None
+_FLYMB_OK = None
+
+
+def _flymb():
+    global _FLYMB, _FLYMB_OK
+    if _FLYMB_OK is None:
+        try:
+            from cognition.flymemory import FlyMB
+            _FLYMB = FlyMB()
+            _FLYMB_OK = True
+        except Exception as exc:
+            log.debug("flymb promote unavailable: %s", exc)
+            _FLYMB_OK = False
+    return _FLYMB if _FLYMB_OK else None
+
+
+def _flymb_mode() -> str:
+    try:
+        return env_str("MEMORY_FLYMB_MODE", "off").strip().lower()
+    except Exception:
+        return "off"
 
 __all__ = ["journal_fragment_lines", "promote_journal_fragments", "score_journal_fragment"]
 
@@ -44,6 +71,20 @@ def score_journal_fragment(text: str) -> float:
     if SALIENCE_POLICY_RE.search(text or ""):
         score += 0.3
     score += min(0.2, len(text) / 500.0)
+    mode = _flymb_mode()
+    if mode in ("shadow", "live"):
+        # Approach-flavoured fragments consolidate stronger, like the fly.
+        try:
+            from cognition.flymemory import text_features
+            mb = _flymb()
+            bias = mb.valence_bias(text_features(text)) if mb is not None else None
+        except Exception as exc:
+            log.debug("flymb promote scoring failed: %s", exc)
+            bias = None
+        if bias is not None:
+            log.debug("flymb promote mode=%s bias=%+.3f", mode, bias)
+            if mode == "live":
+                score += MEMORY_FLYMB_PROMOTE_W * bias
     return score
 
 

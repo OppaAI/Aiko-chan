@@ -41,6 +41,52 @@ from cognition.memory.vecstore import HarrierEmbedder
 
 log = get_logger(__name__)
 
+# Fly mushroom-body layer (shared helper for LTM rank + dream replay).
+# Reuses the grasp MB master mode (off | shadow | live); shadow is log-only.
+# Weights read per-call so flips apply without restart.
+def _flymb_mode() -> str:
+    try:
+        return (os.getenv("MEMORY_FLYMB_MODE", "off") or "off").strip().lower()
+    except Exception:
+        return "off"
+
+
+def _flymb_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+_FLYMB_MEM = None
+_FLYMB_MEM_OK = None
+
+
+def _flymb_mem():
+    global _FLYMB_MEM, _FLYMB_MEM_OK
+    if _FLYMB_MEM_OK is None:
+        try:
+            from cognition.flymemory import FlyMB
+            _FLYMB_MEM = FlyMB()
+            _FLYMB_MEM_OK = True
+        except Exception as exc:
+            log.debug("flymb memory unavailable: %s", exc)
+            _FLYMB_MEM_OK = False
+    return _FLYMB_MEM if _FLYMB_MEM_OK else None
+
+
+def _flymb_bias_for_text(text: str) -> float | None:
+    """Opponent MB bias for a stored memory text (read-only, no learning)."""
+    mb = _flymb_mem()
+    if mb is None or not text:
+        return None
+    try:
+        from cognition.flymemory import text_features
+        return mb.valence_bias(text_features(text))
+    except Exception as exc:
+        log.debug("flymb memory bias failed: %s", exc)
+        return None
+
 # Stateless helpers (explicit re-exports; each source module mirrors its __all__).
 from .schema import (
     BOOT_LABELS,
@@ -1525,6 +1571,20 @@ class _MemoryBackend:
                     score += affective_boost
                 except Exception:
                     pass
+
+                # Fly MB layer: approach-flavoured memories surface slightly
+                # easier at recall (read-only; never learns on the recall path).
+                _fly_mode = _flymb_mode()
+                if _fly_mode in ("shadow", "live"):
+                    try:
+                        _b = _flymb_bias_for_text(row.get("memory") or "")
+                    except Exception as exc:
+                        log.debug("flymb ltm rank skipped: %s", exc)
+                        _b = None
+                    if _b is not None:
+                        log.debug("flymb ltm mode=%s bias=%+.3f", _fly_mode, _b)
+                        if _fly_mode == "live":
+                            score += _flymb_float("MEMORY_FLYMB_LTM_W", 0.01) * _b
 
                 # Phase 4: entity importance boost
                 if MEMORY_RANK_ENTITY_IMPORTANCE_WEIGHT > 0 and entity_importance_map:
@@ -3536,6 +3596,16 @@ class AikoMemorize:
             except Exception:
                 s_score = 1.0 if (stored_salient or emotional or bool(_SALIENCE_RE.search(text)) or ac >= 3 or is_recent) else 0.0
 
+            # Fly MB layer: rewarded experiences replay first in sleep, like
+            # the fly. Approach bias only (never suppresses replay).
+            _fly_mode = _flymb_mode()
+            if _fly_mode in ("shadow", "live"):
+                _b = _flymb_bias_for_text(text)
+                if _b is not None:
+                    log.debug("flymb dream mode=%s bias=%+.3f", _fly_mode, _b)
+                    if _fly_mode == "live":
+                        s_score += _flymb_float("MEMORY_FLYMB_DREAM_W", 0.2) * max(0.0, _b)
+
             if s_score < 0.35:
                 continue
 
@@ -4031,6 +4101,7 @@ class AikoMemorize:
                     valence_tag=v_tag, valence_score=v_score,
                     query_valence=ambient_valence,
                     access_day_count=day_n,
+                    memory_text=m.get("memory"),
                 )
                 candidates.append({
                     "id":               mem_id,

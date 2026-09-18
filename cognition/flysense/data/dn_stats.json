@@ -1,0 +1,27 @@
+{
+ "n_dn": 1342,
+ "n_dn_types": 484,
+ "top_dn_types": {
+  "DNg08": 23,
+  "DNpe008": 19,
+  "DNg106": 16,
+  "DNg07": 16,
+  "DNge091": 14,
+  "DNge094": 13,
+  "DNg03": 12,
+  "DNg06": 12,
+  "DNp17": 12,
+  "DNg10": 12,
+  "DNge019": 11,
+  "DNpe015": 11,
+  "DNg02_a": 10,
+  "DNES1": 10,
+  "DNg12_b": 10,
+  "DNge071": 10,
+  "DNg12_a": 8,
+  "DN1pA": 8,
+  "DNg12_c": 8,
+  "DNge115": 8
+ },
+ "provenance": "male-cns:v1.0 annotations, CC-BY Berg et al. 2025"
+}

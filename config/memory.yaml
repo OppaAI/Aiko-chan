@@ -187,8 +187,28 @@ DREAM_BOOST_AMOUNT: "1"  # Access-count boost for memories promoted during dream
 # off = zero overhead (default); shadow = bias computed + debug-logged, scores
 # untouched; live = bias added to grasp scores (weight below) + one DAN-like
 # teaching event per accepted turn (reward = turn emotion).
-MEMORY_FLYMB_MODE: "shadow"  # off | shadow | live.
+MEMORY_FLYMB_MODE: "live"  # off | shadow | live.
 MEMORY_FLYMB_W: "0.05"  # Live-mode weight of the opponent bias added to grasp scores.
+MEMORY_FLYMB_PROMOTE_W: "0.1"  # Live-mode weight of the bias on journal-promotion scores.
+MEMORY_FLYMB_RECALL_W: "0.01"  # Live-mode KC-overlap bonus on episodic recall (RRF scale ~0.03).
+MEMORY_FLYMB_LTM_W: "0.01"  # Live-mode approach-bias bonus on LTM recall ranking.
+MEMORY_FLYMB_DREAM_W: "0.2"  # Live-mode approach-replay bonus on dream-boost scores (threshold 0.35).
+MEMORY_FLYMB_DECAY_W: "0.5"  # Live-mode half-life stretch for approach-associated memories (slows decay only).
+# -- Biological layer II: fly central complex (cognition/centralcomplex) --
+# Ring-attractor focus heading + R5 sleep pressure from real MaleCNS v1.0
+# connectivity. off = zero overhead (default); shadow = readouts computed +
+# debug-logged per turn, state untouched; live = small drowsiness coupling
+# into attention _energy (weight below).
+MEMORY_FLYCX_MODE: "shadow"  # off | shadow | live.
+MEMORY_FLYCX_W: "0.05"  # Live-mode drowsiness coupling weight.
+MEMORY_FLYCX_ATTEMPT_W: "0.05"  # Live-mode PFL decisiveness nudge on attempt-gate confidence.
+# -- Sensory grafts (cognition/flysense) --
+# AL = antennal-lobe gain control on all embeddings (store+query consistent,
+# caches mode-partitioned). DN = descending-neuron prosody vigor on TTS.
+# Presence (webcam motion LEVEL 0..1, throttled) reuses MEMORY_FLYCX_MODE:
+# shadow logs, live nudges attention energy on real presence.
+MEMORY_FLYAL_MODE: "off"  # off | shadow | live.
+MEMORY_FLYDN_MODE: "off"  # off | shadow | live.
 # -- Search ranking and context budget --
 
 MEMORY_SEARCH_CACHE_SIZE: "128"  # Max number of memory search results cached in-process.

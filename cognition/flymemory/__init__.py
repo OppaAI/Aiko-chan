@@ -5,6 +5,6 @@ weight>=5) onto Aiko's valence system as opponent approach/avoid readouts.
 See README.md in this package for the biology, the mapping, and the
 honest limits (functional abstraction, not a simulation).
 """
-from .circuit import FlyMB, load_circuit
+from .circuit import FlyMB, load_circuit, text_features
 
-__all__ = ["FlyMB", "load_circuit"]
+__all__ = ["FlyMB", "load_circuit", "text_features"]

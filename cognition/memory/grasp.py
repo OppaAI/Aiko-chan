@@ -393,6 +393,12 @@ def compute_score(turn: "GraspTurn", current_turn: int, *, user_id: str | None =
             base = base + MEMORY_FLYMB_W * bias
     elif MEMORY_FLYMB_MODE == "shadow":
         flymb_bias_for_turn(turn, current_turn, user_id=user_id)  # log-only, score untouched
+    try:
+        from cognition.fly_behavior.lateral_horn import adjust_score
+        text = f"{getattr(turn, 'user', '') or ''} {getattr(turn, 'assistant', '') or ''}"
+        base = adjust_score(base, text, user_id=user_id)
+    except Exception as exc:
+        log.debug("flylh grasp skipped: %s", exc)
     return base
 
 

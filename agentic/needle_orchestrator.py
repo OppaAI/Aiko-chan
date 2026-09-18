@@ -19,7 +19,7 @@ from agentic.needle import NeedleClient, NeedleError, NeedleResponse
 try:
     from system.log import get_logger as _get_logger
     log = _get_logger(__name__)
-except Exception:  # logging must never break orchestration
+except Exception:
     import logging as _logging
     log = _logging.getLogger("aiko.needle_orchestrator")
 
@@ -136,7 +136,7 @@ def load_needle_workers(
             confidence_threshold = float(item.get("confidence_threshold", default_confidence_threshold))
             timeout = float(item.get("timeout", default_timeout))
         except (TypeError, ValueError) as exc:
-            raise NeedleError(f"NEEDLE_WORKERS[{index}] has an invalid timeout or confidence_threshold") from exp if False else exc
+            raise NeedleError(f"NEEDLE_WORKERS[{index}] has an invalid timeout or confidence_threshold") from exc
         if not math.isfinite(confidence_threshold) or not 0.0 <= confidence_threshold <= 1.0:
             raise NeedleError(f"NEEDLE_WORKERS[{index}].confidence_threshold must be between 0 and 1")
         if not math.isfinite(timeout) or timeout <= 0:
@@ -211,7 +211,7 @@ class NeedleOrchestrator:
                 worker = futures[future]
                 try:
                     results[worker.id] = future.result()
-                except Exception as exc:  # defensive: one worker cannot abort the team
+                except Exception as exc:
                     results[worker.id] = NeedleWorkerResult(worker.id, worker.role, error=str(exc))
         ordered = tuple(results[worker.id] for worker in self.workers)
         if not any(result.response is not None for result in ordered):

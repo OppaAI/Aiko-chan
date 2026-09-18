@@ -143,21 +143,6 @@ EMC_RRF_K = max(1, env_int("EMC_RRF_K", 60))
 # recall key. Reuses the grasp MB master mode (off | shadow | live); shadow
 # only logs the top KC overlap, live adds a small RRF-scale bonus.
 MEMORY_FLYMB_RECALL_W = env_float("MEMORY_FLYMB_RECALL_W", 0.01)
-_FLYMB_EP = None
-_FLYMB_EP_OK = None
-
-
-def _flymb_ep():
-    global _FLYMB_EP, _FLYMB_EP_OK
-    if _FLYMB_EP_OK is None:
-        try:
-            from cognition.flymemory import FlyMB
-            _FLYMB_EP = FlyMB()
-            _FLYMB_EP_OK = True
-        except Exception as exc:
-            log.debug("flymb recall unavailable: %s", exc)
-            _FLYMB_EP_OK = False
-    return _FLYMB_EP if _FLYMB_EP_OK else None
 
 
 def _flymb_mode() -> str:
@@ -167,16 +152,22 @@ def _flymb_mode() -> str:
         return "off"
 
 
-def _flymb_rerank(query: str, results: list[dict]) -> list[dict]:
+def _flymb_rerank(query: str, results: list[dict], *, user_id: str | None = None) -> list[dict]:
     """Reorder recall hits by KC-pattern overlap (FlyHash-style key).
 
     Shadow: compute + debug-log, order untouched. Live: add a small bonus
     to _recall_score and stable-resort. Never drops hits, only reorders.
+    Identity-scoped MB via fly_registry.
     """
     mode = _flymb_mode()
     if mode not in ("shadow", "live") or not results:
         return results
-    mb = _flymb_ep()
+    try:
+        from cognition.fly_registry import get_flymb
+        mb = get_flymb(user_id)
+    except Exception as exc:
+        log.debug("flymb recall unavailable: %s", exc)
+        return results
     if mb is None:
         return results
     try:
@@ -201,10 +192,18 @@ def _flymb_rerank(query: str, results: list[dict]) -> list[dict]:
             r["_flymb_overlap"] = round(ov, 4)
             out.append(r)
         out.sort(key=lambda r: r["_recall_score"], reverse=True)
+        try:
+            from cognition.neural_state import get_neural_state
+            top = scored[0][0] if scored else 0.0
+            get_neural_state(user_id).publish_mb(float(top) * 2 - 1, source="recall")
+        except Exception:
+            pass
         return out
     except Exception as exc:
         log.debug("flymb recall rerank failed: %s", exc)
         return results
+
+
 EMC_CONTEXT_CHARS = max(100, env_int("EMC_CONTEXT_CHARS", 600))
 EMC_CONTEXT_EPISODE_CHARS = max(40, env_int("EMC_CONTEXT_EPISODE_CHARS", 280))
 EMC_JOINT_BUDGET = env_bool("EMC_JOINT_BUDGET", "1")
@@ -1002,7 +1001,7 @@ class EpisodicStore:
                     pass
                 # Rerank AFTER cache read: cached order is the RRF base so
                 # evolving MB plasticity re-ranks fresh on every call.
-                return _flymb_rerank(q, hits)
+                return _flymb_rerank(q, hits, user_id=uid)
             if cached:
                 self._recall_cache.pop(cache_key, None)
 
@@ -1129,7 +1128,7 @@ class EpisodicStore:
                 self._recall_cache[cache_key] = (now, [dict(r) for r in results])
                 while len(self._recall_cache) > EMC_RECALL_CACHE_SIZE:
                     self._recall_cache.popitem(last=False)
-            return _flymb_rerank(q, results)
+            return _flymb_rerank(q, results, user_id=uid)
 
     def _touch_episodes(self, ids: list[int]) -> None:
         if not ids:

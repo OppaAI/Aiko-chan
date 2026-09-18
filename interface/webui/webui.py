@@ -491,6 +491,28 @@ class AikoWeb:
                         vision_tasks.add(task)
                         task.add_done_callback(vision_tasks.discard)
 
+                    elif mtype == "screen_input":
+                        # Screen frames are deliberately handled as one-shot vision
+                        # requests. The browser invokes the OS picker for each frame;
+                        # this bridge neither starts capture nor persists the image.
+                        image = _validate_image_data_uri(msg.get("image"))
+                        if image is None:
+                            await self._safe_send(ws, json.dumps({
+                                "type": "vision", "status": "error", "source": "screen",
+                                "message": "That shared screen image was invalid or too large.",
+                            }))
+                            continue
+                        if len(vision_tasks) >= WEBUI_VISION_MAX_IN_FLIGHT:
+                            await self._safe_send(ws, json.dumps({
+                                "type": "vision", "status": "busy", "source": "screen",
+                                "message": "A vision request is already being analyzed.",
+                            }))
+                            continue
+                        prompt = str(msg.get("text") or "").strip()
+                        task = asyncio.create_task(self._handle_image_input(image, prompt, uid, source="screen"))
+                        vision_tasks.add(task)
+                        task.add_done_callback(vision_tasks.discard)
+
                     elif mtype == "vad":
                         event = msg.get("event")
                         if event == "start":
@@ -562,14 +584,21 @@ class AikoWeb:
         )
 
     @staticmethod
-    def _infer_image(image: str, question: str) -> str:
-        """Ask the configured OpenAI-compatible vision model about a camera frame."""
+    def _infer_image(image: str, question: str, source: str = "camera") -> str:
+        """Ask the configured vision model about an explicitly shared image frame."""
         from openai import OpenAI
 
         model = os.getenv("WEBUI_VISION_MODEL", os.getenv("VISION_MODEL", "ministral"))
         base_url = _vision_base_url()
         timeout = float(os.getenv("WEBUI_VISION_TIMEOUT", "60"))
-        instruction = question or "Describe what you see in this camera image clearly and helpfully."
+        default_question = "Describe what you see in this image clearly and helpfully."
+        if source == "screen":
+            default_question = (
+                "This is a single, user-consented screenshot. Describe the visible "
+                "application and offer the next useful step. Do not infer or request "
+                "credentials, secrets, or information not visibly present."
+            )
+        instruction = question or default_question
         response = OpenAI(base_url=base_url, api_key=os.getenv("VISION_API_KEY", "") or os.getenv("LLM_API_KEY", "") or os.getenv("OPENAI_API_KEY", "") or "not-needed").chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": [
@@ -585,19 +614,20 @@ class AikoWeb:
             return "I couldn't interpret that image."
         return (choices[0].message.content or "I couldn't interpret that image.").strip()
 
-    async def _handle_image_input(self, image: str, question: str, uid: str) -> None:
+    async def _handle_image_input(self, image: str, question: str, uid: str, source: str = "camera") -> None:
         """Run vision off the socket loop and return its result to the requesting user."""
-        self._broadcast({"type": "vision", "status": "working"}, user_id=uid)
+        self._broadcast({"type": "vision", "status": "working", "source": source}, user_id=uid)
         try:
-            answer = await asyncio.to_thread(self._infer_image, image, question)
+            answer = await asyncio.to_thread(self._infer_image, image, question, source)
         except Exception:
             log.exception("webui: vision inference failed")
             self._broadcast({
                 "type": "vision", "status": "error",
-                "message": "I couldn't analyze that image. Check that the vision model is running.",
+                "message": f"I couldn't analyze that {source} image. Check that the vision model is running.",
+                "source": source,
             }, user_id=uid)
             return
-        self._broadcast({"type": "vision", "status": "done"}, user_id=uid)
+        self._broadcast({"type": "vision", "status": "done", "source": source}, user_id=uid)
         self._broadcast({"type": "chat", "sender": "aiko", "text": answer}, user_id=uid)
 
     def broadcast_audio_bytes(self, wav_bytes: bytes) -> None:

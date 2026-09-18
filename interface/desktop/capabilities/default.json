@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default desktop capabilities for Aiko Companion.",
+  "windows": ["companion"],
+  "permissions": ["core:default"]
+}

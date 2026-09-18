@@ -11,6 +11,7 @@
        saved choice before first paint to avoid a flash of the wrong theme. -->
   <link rel="stylesheet" href="./style-dark.css" id="theme-style-dark">
   <link rel="stylesheet" href="./style.css" id="theme-style-light">
+  <link rel="stylesheet" href="./companion.css">
   <script>
     (function () {
       var dark = false;
@@ -143,6 +144,35 @@
         <div class="dot" id="vad-dot"></div><span id="vad-status">vad loading…</span>
       </div>
     </div>
+
+    <section id="companion-hud" aria-label="Aiko companion controls">
+      <div class="companion-wordmark"><span class="companion-signal"></span> AIKO / PRESENCE</div>
+      <div class="companion-status" id="companion-status">settling in</div>
+      <div class="focus-readout"><span id="focus-state">READY</span><strong id="focus-time">00:00</strong></div>
+      <label class="companion-work-label" for="companion-routine">MODE</label>
+      <select id="companion-routine" class="companion-select" aria-label="Companion routine">
+        <option value="coding">Coding</option><option value="study">Study</option><option value="writing">Writing</option><option value="gaming">Gaming</option><option value="quiet">Quiet company</option>
+      </select>
+      <input id="companion-working-on" class="companion-work-input" maxlength="120" placeholder="What are we working on?" aria-label="Currently working on">
+      <div class="companion-actions">
+        <button type="button" id="focus-toggle" class="companion-btn">Start focus</button>
+        <button type="button" id="companion-toggle" class="companion-btn ghost">Compact</button>
+      </div>
+      <div class="companion-actions companion-secondary-actions">
+        <button type="button" id="task-toggle" class="companion-btn ghost">Tasks</button>
+        <button type="button" id="webcam-toggle" class="companion-btn ghost">Webcam off</button>
+      </div>
+      <div id="companion-task-panel" hidden>
+        <form id="companion-task-form"><input id="companion-task-input" maxlength="140" placeholder="Add a task…" aria-label="Add task"><button type="submit" class="companion-btn">+</button></form>
+        <ul id="companion-task-list" aria-label="Local task list"></ul>
+        <details id="companion-summary-panel"><summary>Local focus summaries</summary><ul id="companion-summary-list" aria-label="Local focus summaries"></ul></details>
+        <button type="button" id="clear-companion-data" class="companion-text-btn">Delete local companion history</button>
+      </div>
+    </section>
+
+    <div id="screen-live-indicator" role="status" aria-live="polite" hidden>
+      <span></span> Screen frame shared <button type="button" id="stop-screen-share">Dismiss</button>
+    </div>
   </div>
 
   <!-- ── right panel ──────────────────────────────────────────────────────── -->
@@ -213,6 +243,7 @@
       <span id="prompt-label">❯</span>
       <input id="user-input" type="text" autocomplete="off" spellcheck="false" placeholder="type a message to Aiko-chan…">
       <button id="camera-btn" class="input-btn" title="Take a picture and ask Aiko's vision model" aria-label="Take a picture">📷</button>
+      <button id="screen-btn" class="input-btn" title="Share one screen frame with Aiko" aria-label="Share screen with Aiko">▣</button>
       <button id="mic-btn" class="input-btn" title="Microphone auto-starts when available">🎤</button>
       <button id="send-btn" class="input-btn">send</button>
     </div>
@@ -226,6 +257,21 @@
     </div>
 
   </div><!-- #panel -->
+
+  <dialog id="screen-consent-dialog" class="companion-dialog">
+    <form method="dialog">
+      <div class="dialog-kicker">PRIVATE BY DEFAULT</div>
+      <h2>Let Aiko see your screen?</h2>
+      <p>Aiko only receives a single screenshot after you choose a display or window in your browser’s picker. Nothing is recorded, saved, or captured in the background.</p>
+      <ul>
+        <li>Use this for on-demand help, not continuous monitoring.</li>
+        <li>Do not share passwords, banking, private messages, or other sensitive windows.</li>
+        <li>A bright confirmation indicator remains visible until you dismiss it.</li>
+      </ul>
+      <label class="companion-check"><input id="screen-consent-check" type="checkbox"> I understand and want to choose a screen/window.</label>
+      <div class="dialog-actions"><button value="cancel" class="companion-btn ghost">Cancel</button><button value="share" id="screen-consent-confirm" class="companion-btn" disabled>Choose screen</button></div>
+    </form>
+  </dialog>
 
   <!-- ── Energy VAD processor (backend Silero is authoritative) ─────────── -->
   <script src="./vad.js"></script>
@@ -245,6 +291,7 @@
 
   <!-- ── Chat UI + WebSocket ─────────────────────────────────────────────── -->
   <script src="./script.js"></script>
+  <script src="./companion.js"></script>
 
 </body>
 

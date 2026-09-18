@@ -772,6 +772,20 @@ def cancel_schedule_record(job_id: str, user_id: str | None = None) -> bool:
     return changed
 
 
+def restore_schedule_record(record: dict, user_id: str | None = None) -> bool:
+    """Restore an existing scheduled job from a previously read snapshot."""
+    job_id = record.get("id")
+    if not job_id:
+        return False
+    jobs = _read_all(user_id=user_id)
+    for index, job in enumerate(jobs):
+        if job.get("id") == job_id:
+            jobs[index] = dict(record)
+            _write_all(jobs, user_id=user_id)
+            return True
+    return False
+
+
 # Backwards-compatible reminder names used by older tools/tests.
 def schedule_reminder_record(title: str, message: str, time_of_day: str, repeat: str = "daily", timezone: str | None = None, user_id: str | None = None) -> dict:
     """Compatibility wrapper: schedule a reminder as a scheduled job."""

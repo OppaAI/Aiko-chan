@@ -66,6 +66,14 @@ try:
 except ImportError as e:
     log.warning(f"Could not mount DAG studio: {e}")
 
+# Calendar Studio — local-first chief-of-staff workspace for appointments,
+# tasks, drafts, reminders, and scheduled workflows.
+try:
+    from interface.webui.studio.calendar.backend.api import app as calendar_studio_app
+    app.mount("/studio/calendar", calendar_studio_app)
+except ImportError as e:
+    log.warning(f"Could not mount Calendar studio: {e}")
+
 # KB Storage Viewer Studio
 try:
     from interface.webui.studio.memory.kb.backend.api import app as kb_studio_app

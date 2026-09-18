@@ -5,50 +5,183 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Aiko · Fly Circuit Studio</title>
   <style>
-    body { font-family: system-ui, sans-serif; margin: 0; background: #0d0a12; color: #e8e0f0; }
-    header { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid #2a2038; }
-    h1 { font-size: 1.1rem; margin: 0; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; padding: 16px; }
-    .card { background: #16101f; border: 1px solid #2a2038; border-radius: 10px; padding: 12px; }
-    .card .k { font-size: 11px; color: #9a8bb0; text-transform: uppercase; }
-    .card .v { font-size: 1.35rem; font-weight: 600; margin-top: 4px; }
-    pre { margin: 16px; background: #120e18; border-radius: 8px; padding: 12px; overflow: auto; font-size: 12px; }
-    .modes { padding: 0 16px; font-size: 13px; color: #b0a0c8; }
+    :root {
+      --bg: #0a0810;
+      --panel: #12101a;
+      --line: #2a2038;
+      --text: #e8e0f0;
+      --muted: #9a8bb0;
+      --accent: #c4a0ff;
+      --glow: #7c5cff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: "Segoe UI", system-ui, sans-serif;
+      background: radial-gradient(ellipse at 30% 20%, #1a1230 0%, var(--bg) 55%);
+      color: var(--text); min-height: 100vh;
+    }
+    header {
+      display: flex; align-items: center; gap: 14px;
+      padding: 12px 18px; border-bottom: 1px solid var(--line);
+      background: rgba(10,8,16,0.85); backdrop-filter: blur(8px);
+      position: sticky; top: 0; z-index: 2;
+    }
+    h1 { font-size: 1.05rem; margin: 0; font-weight: 600; letter-spacing: 0.02em; }
+    .sub { color: var(--muted); font-size: 12px; }
+    a.back { color: var(--accent); text-decoration: none; font-size: 14px; }
+    button {
+      margin-left: auto; background: #1c1528; color: var(--text);
+      border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    .layout {
+      display: grid; grid-template-columns: 1fr 280px; gap: 0;
+      min-height: calc(100vh - 52px);
+    }
+    @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+    .canvas-wrap { padding: 16px; overflow: auto; }
+    svg#net {
+      width: 100%; max-width: 920px; height: auto;
+      background: linear-gradient(180deg, #0e0b16 0%, #0a0810 100%);
+      border: 1px solid var(--line); border-radius: 14px;
+      display: block; margin: 0 auto;
+    }
+    .edge { stroke: #3a2f52; stroke-width: 1.5; fill: none; opacity: 0.55; }
+    .edge.on { stroke: var(--glow); opacity: 0.9; stroke-width: 2.2;
+      filter: drop-shadow(0 0 4px rgba(124,92,255,0.45)); }
+    .node-label {
+      fill: var(--text); font-size: 11px; text-anchor: middle;
+      pointer-events: none; font-weight: 600;
+    }
+    .node-val {
+      fill: var(--muted); font-size: 9px; text-anchor: middle;
+      pointer-events: none;
+    }
+    .side {
+      border-left: 1px solid var(--line); padding: 14px 16px;
+      background: var(--panel); overflow: auto;
+    }
+    .side h2 { font-size: 12px; text-transform: uppercase; color: var(--muted);
+      letter-spacing: 0.06em; margin: 0 0 10px; }
+    .meter { margin-bottom: 10px; }
+    .meter .row { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 3px; }
+    .bar { height: 6px; border-radius: 3px; background: #1a1424; overflow: hidden; }
+    .bar > i {
+      display: block; height: 100%; width: 0%;
+      background: linear-gradient(90deg, var(--glow), var(--accent));
+      transition: width 0.35s ease;
+    }
+    .modes { font-size: 11px; color: var(--muted); line-height: 1.5; margin-top: 8px; word-break: break-all; }
+    .legend { font-size: 11px; color: var(--muted); margin-top: 12px; line-height: 1.45; }
+    .pulse { animation: pulse 1.2s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
   </style>
 </head>
 <body>
   <header>
-    <a href="/" style="color:#c4a0ff;text-decoration:none">←</a>
-    <h1>Fly Circuit Studio</h1>
-    <button id="refresh" style="margin-left:auto">Refresh</button>
+    <a class="back" href="/">← Chat</a>
+    <div>
+      <h1>Fly Circuit Studio</h1>
+      <div class="sub">Connectome-derived motifs · live NeuralState (not a full spike sim)</div>
+    </div>
+    <button id="refresh" type="button">Refresh</button>
   </header>
-  <div class="modes" id="modes"></div>
-  <div class="grid" id="grid"></div>
-  <pre id="raw"></pre>
+  <div class="layout">
+    <div class="canvas-wrap">
+      <svg id="net" viewBox="0 0 900 420" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <filter id="glow"><feGaussianBlur stdDeviation="3.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+          <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#5a4a78"/>
+          </marker>
+        </defs>
+        <g id="edges"></g>
+        <g id="nodes"></g>
+      </svg>
+      <p class="legend">
+        Nodes light up from NeuralState proxies (MB valence, CX focus/sleep, LH familiarity, GF urgency, DN drive).
+        Edges brighten when both ends are active — a <em>motif</em> view of signal flow, not a biological EM reconstruction.
+      </p>
+    </div>
+    <aside class="side">
+      <h2>Live meters</h2>
+      <div id="meters"></div>
+      <h2>Modes</h2>
+      <div class="modes" id="modes">—</div>
+      <h2>User</h2>
+      <div class="modes" id="uid">—</div>
+    </aside>
+  </div>
   <script>
-    const KEYS = [
+    const METERS = [
       ["valence","Valence"],["approach","Approach"],["avoidance","Avoid"],
       ["focus_heading","Heading°"],["focus_sharpness","Sharpness"],
       ["decisiveness","Decisiveness"],["sleep_pressure","Sleep"],
       ["urgency","Urgency"],["context_familiarity","Familiarity"],
       ["action_drive","Drive"],["motor_vigor","Vigor"],["circadian_phase","Circadian"]
     ];
-    async function load() {
-      const r = await fetch("/studio/fly/api/state");
-      const j = await r.json();
-      const st = j.neural_state || {};
-      const g = document.getElementById("grid");
-      g.innerHTML = KEYS.map(([k,label]) => {
+    const GROUP_COLOR = {
+      in: "#a0a8c0", sensory: "#8ab4ff", core: "#c4a0ff",
+      interrupt: "#ffb84d", out: "#ff7a9a"
+    };
+    function clamp01(x) {
+      x = Number(x); if (!isFinite(x)) return 0;
+      return Math.max(0, Math.min(1, x));
+    }
+    function renderMeters(st) {
+      const el = document.getElementById("meters");
+      el.innerHTML = METERS.map(([k, label]) => {
         let v = st[k];
-        if (typeof v === "number") v = (Math.round(v*1000)/1000);
-        return `<div class="card"><div class="k">${label}</div><div class="v">${v ?? "—"}</div></div>`;
+        if (typeof v !== "number") v = 0;
+        const show = (Math.round(v * 1000) / 1000);
+        const w = clamp01(Math.abs(v)) * 100;
+        return `<div class="meter"><div class="row"><span>${label}</span><span>${show}</span></div>
+          <div class="bar"><i style="width:${w}%"></i></div></div>`;
       }).join("");
-      document.getElementById("modes").textContent = "modes: " + JSON.stringify(j.modes || {});
-      document.getElementById("raw").textContent = JSON.stringify(j, null, 2);
+    }
+    function renderGraph(data) {
+      const nodes = data.nodes || [];
+      const edges = data.edges || [];
+      const act = data.activation || {};
+      const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
+      const eg = document.getElementById("edges");
+      const ng = document.getElementById("nodes");
+      eg.innerHTML = edges.map(e => {
+        const a = byId[e.from], b = byId[e.to];
+        if (!a || !b) return "";
+        const aa = clamp01(act[e.from]), bb = clamp01(act[e.to]);
+        const on = (aa > 0.35 && bb > 0.35) ? " on" : "";
+        return `<line class="edge${on}" x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" marker-end="url(#arrow)"/>`;
+      }).join("");
+      ng.innerHTML = nodes.map(n => {
+        const a = clamp01(act[n.id] ?? 0.15);
+        const r = 18 + a * 14;
+        const fill = GROUP_COLOR[n.group] || "#888";
+        const opacity = 0.25 + a * 0.75;
+        const pulse = a > 0.7 ? " pulse" : "";
+        return `<g class="node-g${pulse}" transform="translate(${n.x},${n.y})">
+          <circle r="${r}" fill="${fill}" fill-opacity="${opacity}" stroke="#3a2f52" stroke-width="1.5"
+            ${a > 0.55 ? 'filter="url(#glow)"' : ""}/>
+          <text class="node-label" y="4">${n.label}</text>
+          <text class="node-val" y="28">${a.toFixed(2)}</text>
+        </g>`;
+      }).join("");
+    }
+    async function load() {
+      try {
+        const r = await fetch("/studio/fly/api/circuit");
+        const j = await r.json();
+        renderGraph(j);
+        renderMeters(j.neural_state || {});
+        document.getElementById("modes").textContent = JSON.stringify(j.modes || {});
+        document.getElementById("uid").textContent = j.user_id || "—";
+      } catch (err) {
+        document.getElementById("modes").textContent = String(err);
+      }
     }
     document.getElementById("refresh").onclick = load;
     load();
-    setInterval(load, 2000);
+    setInterval(load, 1500);
   </script>
 </body>
 </html>

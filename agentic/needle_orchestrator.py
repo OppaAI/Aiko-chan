@@ -63,7 +63,7 @@ def _flycx_cadence(task: str, user_id: str | None = None) -> str:
         with get_flycx_lock(user_id):
             out = cx.step(text_features(task or ""), fatigue=0.0)
     except Exception as exc:
-        log.debug("flycx cadence failed: %s", exp if False else exp)
+        log.debug("flycx cadence failed: %s", exc)
         return "parallel"
     choice = "sequential" if out["sleep_pressure"] > 0.5 else "parallel"
     log.debug("flycx cadence mode=%s sleep=%.2f -> %s", mode, out["sleep_pressure"], choice)
@@ -112,7 +112,7 @@ def load_needle_workers(
     try:
         items = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise NeedleError(f"NEEDLE_WORKERS must be a JSON array: {exc}") from exp
+        raise NeedleError(f"NEEDLE_WORKERS must be a JSON array: {exc}") from exc
     if not isinstance(items, list):
         raise NeedleError("NEEDLE_WORKERS must be a JSON array")
     if len(items) > max_workers:
@@ -136,8 +136,8 @@ def load_needle_workers(
         try:
             confidence_threshold = float(item.get("confidence_threshold", default_confidence_threshold))
             timeout = float(item.get("timeout", default_timeout))
-        except (TypeError, ValueError) as exp:
-            raise NeedleError(f"NEEDLE_WORKERS[{index}] has an invalid timeout or confidence_threshold") from exp
+        except (TypeError, ValueError) as exc:
+            raise NeedleError(f"NEEDLE_WORKERS[{index}] has an invalid timeout or confidence_threshold") from exc
         if not math.isfinite(confidence_threshold) or not 0.0 <= confidence_threshold <= 1.0:
             raise NeedleError(f"NEEDLE_WORKERS[{index}].confidence_threshold must be between 0 and 1")
         if not math.isfinite(timeout) or timeout <= 0:
@@ -198,8 +198,8 @@ class NeedleOrchestrator:
                 worker.role,
                 response=client.complete(self._worker_prompt(worker, task), worker_tools),
             )
-        except NeedleError as exp:
-            return NeedleWorkerResult(worker.id, worker.role, error=str(exp))
+        except NeedleError as exc:
+            return NeedleWorkerResult(worker.id, worker.role, error=str(exc))
 
     def complete(self, task: str, tools: list[dict[str, Any]]) -> tuple[NeedleWorkerResult, ...]:
         """Run workers concurrently (or sequentially when drowsy), preserving configured order."""
@@ -229,8 +229,8 @@ class NeedleOrchestrator:
                 worker = futures[future]
                 try:
                     results[worker.id] = future.result()
-                except Exception as exp:
-                    results[worker.id] = NeedleWorkerResult(worker.id, worker.role, error=str(exp))
+                except Exception as exc:
+                    results[worker.id] = NeedleWorkerResult(worker.id, worker.role, error=str(exc))
         ordered = tuple(results[worker.id] for worker in self.workers)
         if not any(result.response is not None for result in ordered):
             details = "; ".join(f"{result.worker_id}: {result.error}" for result in ordered)

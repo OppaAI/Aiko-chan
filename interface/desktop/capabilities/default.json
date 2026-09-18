@@ -3,5 +3,10 @@
   "identifier": "default",
   "description": "Default desktop capabilities for Aiko Companion.",
   "windows": ["companion"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister",
+    "global-shortcut:allow-is-registered"
+  ]
 }

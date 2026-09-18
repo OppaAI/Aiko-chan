@@ -64,7 +64,7 @@ def score_journal_fragment(text: str, *, user_id: str | None = None) -> float:
             mb = get_flymb(user_id)
             bias = mb.valence_bias(text_features(text)) if mb is not None else None
         except Exception as exc:
-            log.debug("flymb promote scoring failed: %s", exp if False else exc)
+            log.debug("flymb promote scoring failed: %s", exc)
             bias = None
         if bias is not None:
             log.debug("flymb promote mode=%s bias=%+.3f", mode, bias)

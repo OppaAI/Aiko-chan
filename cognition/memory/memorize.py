@@ -58,30 +58,19 @@ def _flymb_float(name: str, default: float) -> float:
         return default
 
 
-_FLYMB_MEM = None
-_FLYMB_MEM_OK = None
+def _flymb_bias_for_text(text: str, *, user_id: str | None = None) -> float | None:
+    """Opponent MB bias for a stored memory text (read-only, no learning).
 
-
-def _flymb_mem():
-    global _FLYMB_MEM, _FLYMB_MEM_OK
-    if _FLYMB_MEM_OK is None:
-        try:
-            from cognition.flymemory import FlyMB
-            _FLYMB_MEM = FlyMB()
-            _FLYMB_MEM_OK = True
-        except Exception as exc:
-            log.debug("flymb memory unavailable: %s", exc)
-            _FLYMB_MEM_OK = False
-    return _FLYMB_MEM if _FLYMB_MEM_OK else None
-
-
-def _flymb_bias_for_text(text: str) -> float | None:
-    """Opponent MB bias for a stored memory text (read-only, no learning)."""
-    mb = _flymb_mem()
-    if mb is None or not text:
+    Identity-scoped via fly_registry — no process-global FlyMB singleton.
+    """
+    if not text:
         return None
     try:
+        from cognition.fly_registry import get_flymb
         from cognition.flymemory import text_features
+        mb = get_flymb(user_id)
+        if mb is None:
+            return None
         return mb.valence_bias(text_features(text))
     except Exception as exc:
         log.debug("flymb memory bias failed: %s", exc)
@@ -1410,6 +1399,7 @@ class _MemoryBackend:
         entity_importance_map: dict | None = None,
         query_context: tuple[int, int] | None = None,
         row_by_id: dict | None = None,
+        user_id: str | None = None,
     ) -> tuple[list[str], dict, dict]:
         """
         Dedup + score one candidate pool (from either the quick or wide pass).
@@ -1577,7 +1567,7 @@ class _MemoryBackend:
                 _fly_mode = _flymb_mode()
                 if _fly_mode in ("shadow", "live"):
                     try:
-                        _b = _flymb_bias_for_text(row.get("memory") or "")
+                        _b = _flymb_bias_for_text(row["memory"] or "", user_id=user_id)
                     except Exception as exc:
                         log.debug("flymb ltm rank skipped: %s", exc)
                         _b = None
@@ -1765,6 +1755,7 @@ class _MemoryBackend:
             entity_importance_map=entity_importance_map,
             query_context=query_context,
             row_by_id=quick_row_by_id,
+            user_id=user_id,
         )
 
         confident = (
@@ -1793,6 +1784,7 @@ class _MemoryBackend:
                 entity_importance_map=entity_importance_map,
                 query_context=query_context,
                 row_by_id=wide_row_by_id,
+                user_id=user_id,
             )
 
         ordered_ids = self._apply_recency_rerank(scored_ids, scores, row_by_id)
@@ -1945,6 +1937,7 @@ class _MemoryBackend:
             entity_importance_map=entity_importance_map,
             query_context=query_context,
             row_by_id=quick_row_by_id,
+            user_id=user_id,
         )
 
         confident = (
@@ -1978,6 +1971,7 @@ class _MemoryBackend:
                 entity_importance_map=entity_importance_map,
                 query_context=query_context,
                 row_by_id=wide_row_by_id,
+                user_id=user_id,
             )
             ctx.add_extra(wide_pass={"knn": len(rank_knn_w), "fts": len(rank_fts_w),
                                     "graph": len(rank_graph_w), "scored": len(scored_ids)})
@@ -2865,11 +2859,21 @@ class AikoMemorize:
         _MemoryBackend._graph_pass / _rank_and_score) — this method no
         longer does a separate post-hoc entity rerank pass.
         """
+        resolved_user_id = self._resolve_user_id(user_id)
         with _brain_trace.step("AikoMemorize.search", layer="recall",
                                inputs={"query": query, "limit": limit,
-                                       "user_id": user_id,
+                                       "user_id": resolved_user_id,
                                        "vector_supplied": query_vector is not None}) as ctx:
-            return self._search_top(query, user_id, limit, query_vector, include_history, ctx)
+            results = self._search_top(query, resolved_user_id, limit, query_vector, include_history, ctx)
+        if results and _flymb_mode() in ("shadow", "live"):
+            bias = _flymb_bias_for_text(results[0].get("memory") or "", user_id=resolved_user_id)
+            if bias is not None:
+                try:
+                    from cognition.neural_state import get_neural_state
+                    get_neural_state(resolved_user_id).publish_mb(float(bias), source="recall")
+                except Exception:
+                    pass
+        return results
 
     # ── L2 scene expansion ─────────────────────────────────────────────────────
     # After RRF returns a set, re-link episode structure so yes the scene row
@@ -3433,6 +3437,7 @@ class AikoMemorize:
         mem_ids: list[str] = []
         all_batch_mems: list[dict] = []
         boosted = 0
+        dream_mb_biases: list[float] = []
 
         for batch in self._iter_memory_batches(user_id):
             batch_ids = [str(m.get("id", "")) for m in batch if m.get("id")]
@@ -3458,7 +3463,22 @@ class AikoMemorize:
             payload_map = self._batch_get_payloads(batch_ids)
             with self._mem._db_lock:
                 pinned_ids = _sqlite_pinned_ids(self._conn, batch_ids)
-            boosted += self._dream_boost(batch, payload_map, pinned_ids=pinned_ids, dry_run=dry_run)
+            boosted += self._dream_boost(
+                batch,
+                payload_map,
+                pinned_ids=pinned_ids,
+                dry_run=dry_run,
+                user_id=user_id,
+                _selected_mb_biases=dream_mb_biases,
+            )
+
+        if dream_mb_biases:
+            dream_mb_aggregate = sum(dream_mb_biases) / len(dream_mb_biases)
+            try:
+                from cognition.neural_state import get_neural_state
+                get_neural_state(user_id).publish_mb(dream_mb_aggregate, source="dream")
+            except Exception:
+                pass
 
         if not mem_ids:
             log.info("No memories found — nothing to do.")
@@ -3501,6 +3521,8 @@ class AikoMemorize:
         payload_map: dict,
         pinned_ids:  set[str] | None = None,
         dry_run:     bool = False,
+        user_id:     str | None = None,
+        _selected_mb_biases: list[float] | None = None,
     ) -> int:
         """
         Increment access_count on memories matching salience heuristics.
@@ -3513,6 +3535,7 @@ class AikoMemorize:
         """
         now     = datetime.now(timezone.utc)
         boost_ids: list[str] = []
+        selected_mb_biases: list[float] = []
         pinned_ids = pinned_ids or set()
 
         # Optional day-count map so spaced-repetition signal reaches salience_score.
@@ -3598,10 +3621,12 @@ class AikoMemorize:
 
             # Fly MB layer: rewarded experiences replay first in sleep, like
             # the fly. Approach bias only (never suppresses replay).
+            mb_bias = None
             _fly_mode = _flymb_mode()
             if _fly_mode in ("shadow", "live"):
-                _b = _flymb_bias_for_text(text)
+                _b = _flymb_bias_for_text(text, user_id=user_id)
                 if _b is not None:
+                    mb_bias = float(_b)
                     log.debug("flymb dream mode=%s bias=%+.3f", _fly_mode, _b)
                     if _fly_mode == "live":
                         s_score += _flymb_float("MEMORY_FLYMB_DREAM_W", 0.2) * max(0.0, _b)
@@ -3610,6 +3635,8 @@ class AikoMemorize:
                 continue
 
             boost_ids.append(mem_id)
+            if mb_bias is not None:
+                selected_mb_biases.append(mb_bias)
 
         if boost_ids and not dry_run:
             with self._mem._db_lock:
@@ -3629,6 +3656,8 @@ class AikoMemorize:
                     self._conn.rollback()
                     return 0
 
+        if _selected_mb_biases is not None:
+            _selected_mb_biases.extend(selected_mb_biases)
         boosted = len(boost_ids)
         if boosted:
             log.info(f"{'(dry-run) ' if dry_run else ''}Boosted {boosted} memories.")
@@ -3983,6 +4012,7 @@ class AikoMemorize:
             saw_any = True
             batch_kept, candidates = self._cleanup_candidates(
                 batch,
+                user_id=user_id,
                 _pinned_ids=_pinned_ids,
             )
             kept += batch_kept
@@ -4027,6 +4057,7 @@ class AikoMemorize:
     def _cleanup_candidates(
         self,
         all_mems: list[dict],
+        user_id: str,
         _pinned_ids: set[str] | None = None,
     ) -> tuple[int, list[dict]]:
         mem_ids     = [str(m.get("id", "")) for m in all_mems if m.get("id")]
@@ -4050,7 +4081,7 @@ class AikoMemorize:
         # Ambient mood for offline cleanup so mood-dependent forgetting is live.
         ambient_valence = None
         try:
-            ambient_valence = resolve_ambient_valence(self.get_user_id())
+            ambient_valence = resolve_ambient_valence(user_id)
         except Exception:
             ambient_valence = None
 
@@ -4084,6 +4115,7 @@ class AikoMemorize:
 
             v_tag = m.get("valence_tag")
             v_score = m.get("valence_score")
+            memory_text = m.get("memory")
             day_n = day_map.get(mem_id)
             if day_n is None:
                 try:
@@ -4095,13 +4127,16 @@ class AikoMemorize:
                 valence_tag=v_tag, valence_score=v_score,
                 query_valence=ambient_valence,
                 access_day_count=day_n,
+                memory_text=memory_text,
+                user_id=user_id,
             ):
                 w = compute_weighted_score(
                     ac, la,
                     valence_tag=v_tag, valence_score=v_score,
                     query_valence=ambient_valence,
                     access_day_count=day_n,
-                    memory_text=m.get("memory"),
+                    memory_text=memory_text,
+                    user_id=user_id,
                 )
                 candidates.append({
                     "id":               mem_id,
@@ -4403,4 +4438,3 @@ __all__ = [
     "upsert_co_mentions",
     "vacuum_memory_db",
 ]
-

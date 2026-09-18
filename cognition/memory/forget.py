@@ -50,21 +50,21 @@ def _flymb_float(name: str, default: float) -> float:
         return default
 
 
-_FLYMB_FG = None
-_FLYMB_FG_OK = None
+def _flymb_bias_for_forget(text: str, *, user_id: str | None = None) -> float | None:
+    """Identity-scoped MB bias for decay stretch (read-only)."""
+    if not text:
+        return None
+    try:
+        from cognition.fly_registry import get_flymb
+        from cognition.flymemory import text_features
+        mb = get_flymb(user_id)
+        if mb is None:
+            return None
+        return mb.valence_bias(text_features(text))
+    except Exception as exc:
+        log.debug("flymb forget unavailable: %s", exc)
+        return None
 
-
-def _flymb_fg():
-    global _FLYMB_FG, _FLYMB_FG_OK
-    if _FLYMB_FG_OK is None:
-        try:
-            from cognition.flymemory import FlyMB
-            _FLYMB_FG = FlyMB()
-            _FLYMB_FG_OK = True
-        except Exception as exc:
-            log.debug("flymb forget unavailable: %s", exc)
-            _FLYMB_FG_OK = False
-    return _FLYMB_FG if _FLYMB_FG_OK else None
 
 # ── mood-dependent forgetting ──────────────────────────────────────────────
 FORGET_MOOD_MATCH_ENABLED = os.getenv("FORGET_MOOD_MATCH_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
@@ -189,6 +189,7 @@ def compute_weighted_score(
     query_valence: int | None = None,
     access_day_count: int | None = None,
     memory_text: str | None = None,
+    user_id: str | None = None,
 ) -> float:
     """Compute exponential decay score for a memory entry.
 
@@ -240,9 +241,7 @@ def compute_weighted_score(
         _fly_mode = _flymb_mode()
         if _fly_mode in ("shadow", "live") and memory_text:
             try:
-                from cognition.flymemory import text_features
-                _mb = _flymb_fg()
-                _b = _mb.valence_bias(text_features(memory_text)) if _mb is not None else None
+                _b = _flymb_bias_for_forget(memory_text, user_id=user_id)
             except Exception as exc:
                 log.debug("flymb forget skipped: %s", exc)
                 _b = None
@@ -282,6 +281,8 @@ def should_cleanup(
     valence_score: int | float | None = None,
     query_valence: int | None = None,
     access_day_count: int | None = None,
+    memory_text: str | None = None,
+    user_id: str | None = None,
 ) -> bool:
     """Return True if a memory is a deletion candidate."""
     if is_grace_protected(created_at_iso):
@@ -294,6 +295,8 @@ def should_cleanup(
             valence_score=valence_score,
             query_valence=query_valence,
             access_day_count=access_day_count,
+            memory_text=memory_text,
+            user_id=user_id,
         )
         < CLEANUP_THRESHOLD
     )

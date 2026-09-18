@@ -91,17 +91,19 @@ def test_wiring_shadow_does_not_change_score(monkeypatch):
 
 def test_wiring_live_nudges_score_and_learns_once(monkeypatch):
     import cognition.memory.grasp as grasp
+    identity = "flymb-wiring-live"
     monkeypatch.setattr(grasp, "MEMORY_FLYMB_MODE", "off")
     t = _turn()
-    base = grasp.compute_score(t, 1)
+    base = grasp.compute_score(t, 1, user_id=identity)
     monkeypatch.setattr(grasp, "MEMORY_FLYMB_MODE", "live")
     monkeypatch.setattr(grasp, "MEMORY_FLYMB_W", 0.05)
-    live = grasp.compute_score(t, 1)
+    live = grasp.compute_score(t, 1, user_id=identity)
     assert live != base
     assert abs(live - base) <= 0.05 + 1e-9
-    buf = grasp.GraspBuffer(journal_enabled=False)
+    buf = grasp.GraspBuffer(journal_enabled=False, identity=identity)
     buf.fill("I loved this", "glad to hear it")
-    plastic = grasp._flymb()._plastic
+    from cognition.fly_registry import get_flymb
+    plastic = get_flymb(identity)._plastic
     assert float(abs(plastic).sum()) > 0.0  # exactly one teaching event
 
 
@@ -109,20 +111,76 @@ def test_promote_wiring_modes(monkeypatch):
     # promote.py reads the mode per-call from the environment (unlike grasp's
     # import-time constant), so drive it via setenv like production does.
     import cognition.consolidate.promote as promo
+    identity = "flymb-promote-wiring"
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "off")
-    base = promo.score_journal_fragment("I love this wonderful result, thanks!")
+    base = promo.score_journal_fragment("I love this wonderful result, thanks!", user_id=identity)
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "shadow")
-    assert promo.score_journal_fragment("I love this wonderful result, thanks!") == base
+    assert promo.score_journal_fragment("I love this wonderful result, thanks!", user_id=identity) == base
     # Naive (unteached) biases are arbitrary-signed; meaning comes from DAN
     # teaching, so teach this exact pattern once before comparing.
-    from cognition.flymemory import FlyMB, text_features
-    mb = promo._flymb()
+    from cognition.fly_registry import get_flymb
+    from cognition.flymemory import text_features
+    mb = get_flymb(identity)
     feats = text_features("I love this wonderful result, thanks!")
     for _ in range(5):
         mb.reinforce(mb.encode(feats), +1.0)
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "live")
-    assert promo.score_journal_fragment("I love this wonderful result, thanks!") > base
-    assert promo.score_journal_fragment("random filler words here ok") <= base + 0.11
+    assert promo.score_journal_fragment("I love this wonderful result, thanks!", user_id=identity) > base
+    assert promo.score_journal_fragment("random filler words here ok", user_id=identity) <= base + 0.11
+
+
+def test_promote_candidate_scoring_does_not_publish(monkeypatch):
+    import cognition.consolidate.promote as promo
+    from cognition.neural_state import clear_neural_state, get_neural_state
+
+    user_id = "candidate-score-user"
+    clear_neural_state(user_id)
+    monkeypatch.setenv("MEMORY_FLYMB_MODE", "shadow")
+
+    promo.score_journal_fragment(
+        "A sufficiently long journal candidate to score independently.",
+        user_id=user_id,
+    )
+
+    assert "mb" not in get_neural_state(user_id).snapshot()["sources"]
+
+
+def test_promote_publishes_only_after_candidates_are_picked(monkeypatch):
+    import cognition.consolidate.promote as promo
+    from cognition.neural_state import clear_neural_state, get_neural_state
+
+    user_id = "promotion-user"
+    clear_neural_state(user_id)
+    state = get_neural_state(user_id)
+
+    def fake_score(text, *, user_id=None):
+        assert "mb" not in state.snapshot()["sources"]
+        return 1.0 if "selected" in text else 0.5
+
+    class FakeMemorize:
+        def add_raw(self, _text, *, user_id, pinned):
+            return "promoted-id"
+
+    monkeypatch.setattr(promo, "JOURNAL_PROMOTE", True)
+    monkeypatch.setattr(promo, "JOURNAL_PROMOTE_K", 1)
+    monkeypatch.setattr(promo, "score_journal_fragment", fake_score)
+    monkeypatch.setattr(
+        promo,
+        "_flymb_bias_for_text",
+        lambda text, *, user_id=None: 0.75 if "selected" in text else -0.5,
+    )
+    rows, count = promo.promote_journal_fragments(
+        FakeMemorize(),
+        user_id,
+        "2026-09",
+        [{"_text": "[2026-09-18]\nThe selected journal candidate is long enough.\nAnother ordinary candidate is also long enough."}],
+        [],
+    )
+
+    snapshot = state.snapshot()
+    assert count == len(rows) == 1
+    assert snapshot["valence"] == pytest.approx(0.75)
+    assert snapshot["sources"]["mb"] == "promote"
 
 
 def test_recall_rerank_keeps_all_hits_and_orders(monkeypatch):
@@ -156,9 +214,9 @@ def test_grasp_context_gist_line(monkeypatch):
 
 
 def _teach_promote_mb(text, times=5):
-    import cognition.consolidate.promote as promo
+    from cognition.fly_registry import get_flymb
     from cognition.flymemory import text_features
-    mb = promo._flymb()
+    mb = get_flymb(None)
     feats = text_features(text)
     for _ in range(times):
         mb.reinforce(mb.encode(feats), +1.0)
@@ -187,23 +245,25 @@ def test_dream_boost_wiring_modes(monkeypatch):
 
 def test_forget_decay_wire(monkeypatch):
     import cognition.memory.forget as fg
+    identity = "flymb-forget-decay"
     kw = dict(access_count=3, last_accessed_iso="2026-01-01T00:00:00Z",
               valence_tag="pos", valence_score=2,
               memory_text="I love this wonderful result, thanks!")
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "off")
-    base = fg.compute_weighted_score(**kw)
+    base = fg.compute_weighted_score(**kw, user_id=identity)
     assert base > 0
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "shadow")
     import pytest as _pt
-    assert fg.compute_weighted_score(**kw) == _pt.approx(base)  # shadow never changes scores
+    assert fg.compute_weighted_score(**kw, user_id=identity) == _pt.approx(base)  # shadow never changes scores
     assert fg._flymb_mode() == "shadow"
     from cognition.flymemory import text_features as _tf
-    _mb = fg._flymb_fg()
+    from cognition.fly_registry import get_flymb
+    _mb = get_flymb(identity)
     _f = _tf(kw["memory_text"])
     for _ in range(5):
         _mb.reinforce(_mb.encode(_f), +1.0)  # teach: praise predicts reward
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "live")
-    assert fg.compute_weighted_score(**kw) >= base  # approach lingers
+    assert fg.compute_weighted_score(**kw, user_id=identity) >= base  # approach lingers
 
 
 def test_plasticity_roundtrip(tmp_path, monkeypatch):

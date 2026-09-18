@@ -224,6 +224,14 @@ MEMORY_FLYAL_MODE: "off"  # off | shadow | live.
 MEMORY_FLYDN_MODE: "off"  # off | shadow | live.
 # -- Search ranking and context budget --
 
+# -- Behavioral priors (functional MaleCNS motifs; not full circuits) --
+# Lateral horn: session context familiarity prior (not a second memory store).
+MEMORY_FLYLH_MODE: "off"  # off | shadow | live
+MEMORY_FLYLH_W: "0.05"  # Live-mode weight on context familiarity bias
+# Giant fiber: fast interrupt prior (STOP / urgent / system error).
+MEMORY_FLYGF_MODE: "off"  # off | shadow | live
+
+
 MEMORY_SEARCH_CACHE_SIZE: "128"  # Max number of memory search results cached in-process.
 MEMORY_SEARCH_CACHE_TTL: "20.0"  # Seconds before cached memory search result expires.
 MEMORY_RANK_RECENCY_WEIGHT: "0.004"  # Small retrieval boost for recent memories (continuous blending, applies to every candidate).

@@ -112,6 +112,17 @@ def flycx_state_for_record(state: "EdgeCognitiveState", user: str) -> dict | Non
     log.debug("flycx mode=%s id=%s heading=%.0f sharp=%.2f decis=%.2f sleep=%.2f",
               MEMORY_FLYCX_MODE, identity or "default", out["heading_deg"], out["sharpness"],
               out["decisiveness"], out["sleep_pressure"])
+    try:
+        from cognition.neural_state import get_neural_state
+        get_neural_state(identity).publish_cx(
+            heading_deg=out["heading_deg"],
+            sharpness=out["sharpness"],
+            decisiveness=out["decisiveness"],
+            sleep_pressure=out["sleep_pressure"],
+            source="attention",
+        )
+    except Exception:
+        pass
     return out
 
 

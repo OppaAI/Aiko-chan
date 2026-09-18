@@ -85,7 +85,7 @@ def apply_turn_priors(
             bits.append("late/early hours — softer volume of commitment")
         out["tone_bits"] = bits
     except Exception as exc:
-        log.debug("fly turn priors skipped: %s", exp)
+        log.debug("fly turn priors skipped: %s", exc)
     return out
 
 

@@ -59,3 +59,17 @@ def test_scheduler_lock_is_released_after_critical_section(monkeypatch, tmp_path
             assert not contender
     with schedule._scheduler_run_lock("github_alice", "jobs") as acquired_after_release:
         assert acquired_after_release
+
+
+def test_restore_schedule_record_replaces_cancelled_record(monkeypatch):
+    import system.schedule as schedule
+
+    jobs = [{"id": "job-1", "enabled": False, "title": "Changed"}]
+    written = []
+    monkeypatch.setattr(schedule, "_read_all", lambda user_id=None: jobs)
+    monkeypatch.setattr(schedule, "_write_all", lambda records, user_id=None: written.append(records.copy()))
+
+    restored = {"id": "job-1", "enabled": True, "title": "Original"}
+    assert schedule.restore_schedule_record(restored)
+    assert jobs == [restored]
+    assert written == [[restored]]

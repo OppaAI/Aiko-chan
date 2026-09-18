@@ -204,3 +204,42 @@ def test_forget_decay_wire(monkeypatch):
         _mb.reinforce(_mb.encode(_f), +1.0)  # teach: praise predicts reward
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "live")
     assert fg.compute_weighted_score(**kw) >= base  # approach lingers
+
+
+def test_plasticity_roundtrip(tmp_path, monkeypatch):
+    import numpy as np
+    from cognition.flymemory import FlyMB
+    from cognition.flymemory.store import PlasticityStore, apply_mb
+    db = tmp_path / "fly.db"
+    store = PlasticityStore(db)
+    assert store.load_mb(4064, 97) is None  # nothing stored yet
+    assert store.load_cx() is None
+    mb = FlyMB()
+    feats = [0.5, -1.0, 0.3, 0.0, 1.0, -0.4, 0.2, 0.8]
+    for _ in range(3):
+        mb.reinforce(mb.encode(feats), +1.0)
+    ind, idx, _ = mb._kcm
+    import numpy as _np
+    counts = _np.diff(ind).astype(_np.int64)
+    pre = _np.repeat(_np.arange(len(ind) - 1, dtype=_np.int64), counts)
+    rows = store.save_mb(pre, idx, mb._plastic)
+    assert rows > 0
+    store.save_cx(0.42)
+    assert store.load_cx() == 0.42
+    mb2 = FlyMB()
+    assert mb2.valence_bias(feats) != mb.valence_bias(feats)  # taught vs naive differ
+    n = apply_mb(mb2, store.load_mb(4064, 97))
+    assert n == rows
+    assert mb2.valence_bias(feats) == mb.valence_bias(feats)  # restored exactly
+    # Shape mismatch refuses force-fit instead of corrupting.
+    assert store.load_mb(10, 10) is None
+
+
+def test_plasticity_debounce_and_env(tmp_path, monkeypatch):
+    from cognition.flymemory.store import PlasticityStore
+    monkeypatch.setenv("FLY_PLASTICITY_EVERY", "3")
+    store = PlasticityStore(tmp_path / "fly.db")
+    assert store.save_if_due_cx(0.1) is False
+    assert store.save_if_due_cx(0.2) is False
+    assert store.save_if_due_cx(0.3) is True
+    assert store.load_cx() == 0.3

@@ -48,3 +48,14 @@ Before any `reinforce()` call, MBON biases are arbitrary-signed per pattern
 (the connectome gives topology, not meaning). Valence semantics enter only
 through DAN teaching — same as the fly, which must also learn what predicts
 reward. Downstream wires should treat untaught biases as weak priors.
+
+## Persistence (learning survives restarts)
+
+`store.py` keeps the living tissue in SQLite (`data/fly_plasticity.db`,
+gitignored, override via `FLY_PLASTICITY_DB`):
+- MB KC→MBON plastic deltas (nonzero only), debounced every
+  `FLY_PLASTICITY_EVERY` teaching events (default 25).
+- Compass sleep pressure (homeostatic, like the fly). The compass bump is
+  deliberately NOT stored — attention starts fresh each boot.
+- Shape-checked on load: if the shipped connectome changes, stored deltas
+  are ignored, never force-fit. Provenance: base weights stay read-only.

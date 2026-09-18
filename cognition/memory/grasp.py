@@ -62,6 +62,19 @@ MEMORY_FLYMB_MODE = env_str("MEMORY_FLYMB_MODE", "off").strip().lower()
 MEMORY_FLYMB_W = env_float("MEMORY_FLYMB_W", 0.05)
 _FLYMB = None
 _FLYMB_OK = None
+_FLY_STORE = None
+
+
+def _fly_store():
+    global _FLY_STORE
+    if _FLY_STORE is None:
+        try:
+            from cognition.flymemory.store import PlasticityStore
+            _FLY_STORE = PlasticityStore()
+        except Exception as exc:
+            log.debug("fly plasticity store unavailable: %s", exc)
+            _FLY_STORE = False
+    return _FLY_STORE or None
 
 
 def _flymb():
@@ -69,7 +82,19 @@ def _flymb():
     if _FLYMB_OK is None:
         try:
             from cognition.flymemory import FlyMB
+            from cognition.flymemory.store import apply_mb
             _FLYMB = FlyMB()
+            # Persisted teaching survives restarts (only when the layer is on).
+            if MEMORY_FLYMB_MODE in ("shadow", "live"):
+                try:
+                    store = _fly_store()
+                    if store is not None:
+                        ind, _, _ = _FLYMB._kcm
+                        n = apply_mb(_FLYMB, store.load_mb(len(ind) - 1, _FLYMB.n_mbon))
+                        if n:
+                            log.debug("flymb restored %d plastic deltas", n)
+                except Exception as exc:
+                    log.debug("flymb restore skipped: %s", exc)
             _FLYMB_OK = True
         except Exception as exc:  # missing data/numpy: stay silent, stay off
             log.debug("flymb unavailable: %s", exc)
@@ -449,7 +474,16 @@ class GraspBuffer:
         turn.score = compute_score(turn, self._turn_counter)
         if MEMORY_FLYMB_MODE == "live":
             # Single DAN-like teaching event per accepted turn (shadow learns nothing).
-            flymb_bias_for_turn(turn, self._turn_counter, learn=True)
+            mb = _flymb()
+            if mb is not None:
+                try:
+                    feats = _flymb_features(turn, self._turn_counter)
+                    mb.reinforce(mb.encode(feats), turn.emotion)
+                    store = _fly_store()
+                    if store is not None:
+                        store.save_if_due_mb(mb)
+                except Exception as exc:
+                    log.debug("flymb teaching failed: %s", exc)
         self._slots.append(turn)
         self.journal.append_turn(turn, event="fill")
         self._rescore()

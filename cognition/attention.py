@@ -61,6 +61,19 @@ MEMORY_FLYCX_W = env_float("MEMORY_FLYCX_W", 0.05)
 MEMORY_FLYCX_ATTEMPT_W = env_float("MEMORY_FLYCX_ATTEMPT_W", 0.05)
 _FLYCX = None
 _FLYCX_OK = None
+_FLY_STORE = None
+
+
+def _fly_store():
+    global _FLY_STORE
+    if _FLY_STORE is None:
+        try:
+            from cognition.flymemory.store import PlasticityStore
+            _FLY_STORE = PlasticityStore()
+        except Exception as exc:
+            log.debug("fly plasticity store unavailable: %s", exc)
+            _FLY_STORE = False
+    return _FLY_STORE or None
 
 
 def _flycx():
@@ -69,6 +82,17 @@ def _flycx():
         try:
             from cognition.centralcomplex import FlyCompass
             _FLYCX = FlyCompass()
+            # Sleep need persists across restarts (when the layer is on).
+            if MEMORY_FLYCX_MODE in ("shadow", "live"):
+                try:
+                    store = _fly_store()
+                    if store is not None:
+                        saved = store.load_cx()
+                        if saved is not None:
+                            _FLYCX.sleep_pressure = max(0.0, min(1.0, saved))
+                            log.debug("flycx restored sleep_pressure=%.3f", _FLYCX.sleep_pressure)
+                except Exception as exc:
+                    log.debug("flycx restore skipped: %s", exc)
             _FLYCX_OK = True
         except Exception as exc:  # missing data/numpy: stay silent, stay off
             log.debug("flycx unavailable: %s", exc)
@@ -98,6 +122,12 @@ def flycx_state_for_record(state: "EdgeCognitiveState", user: str) -> dict | Non
             fatigue = feats[7]
             pen = 0.5 * feats[5] + 0.3 * feats[6]
         out = cx.step(feats, pen_drive=pen, fatigue=fatigue)
+        try:
+            store = _fly_store()
+            if store is not None:
+                store.save_if_due_cx(out["sleep_pressure"])
+        except Exception as exc:
+            log.debug("flycx persist skipped: %s", exc)
         if MEMORY_FLYCX_MODE == "live":
             with state._lock:
                 state._energy = max(0.0, min(1.0, state._energy - MEMORY_FLYCX_W * out["sleep_pressure"]))

@@ -194,6 +194,15 @@ MEMORY_FLYMB_RECALL_W: "0.01"  # Live-mode KC-overlap bonus on episodic recall (
 MEMORY_FLYMB_LTM_W: "0.01"  # Live-mode approach-bias bonus on LTM recall ranking.
 MEMORY_FLYMB_DREAM_W: "0.2"  # Live-mode approach-replay bonus on dream-boost scores (threshold 0.35).
 MEMORY_FLYMB_DECAY_W: "0.5"  # Live-mode half-life stretch for approach-associated memories (slows decay only).
+# -- Biological persistence (cognition/flymemory/store.py) --
+# Learned KC->MBON deltas + compass sleep pressure survive restarts via
+# SQLite (default data/fly_plasticity.db). The compass bump itself is NOT
+# stored (fresh attention each boot). Base connectome stays read-only.
+# Writes are debounced: one tiny write per FLY_PLASTICITY_EVERY events.
+# Applies in shadow AND live whenever the layer runs (observation persists;
+# only scores/decisions stay mode-gated).
+FLY_PLASTICITY_DB: ""  # Empty = default path; set to override.
+FLY_PLASTICITY_EVERY: "25"  # Teaching/step events between writes.
 # -- Biological layer II: fly central complex (cognition/centralcomplex) --
 # Ring-attractor focus heading + R5 sleep pressure from real MaleCNS v1.0
 # connectivity. off = zero overhead (default); shadow = readouts computed +

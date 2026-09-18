@@ -89,6 +89,14 @@ def apply_turn_priors(
     return out
 
 
+def _maintenance_level_from_pressure(sleep_pressure: float) -> str:
+    if sleep_pressure >= 0.75:
+        return "maintenance"
+    if sleep_pressure >= 0.45:
+        return "reduced"
+    return "normal"
+
+
 def maintenance_level(user_id: str | None = None) -> str:
     """Map sleep_pressure → normal | reduced | maintenance.
 
@@ -101,12 +109,7 @@ def maintenance_level(user_id: str | None = None) -> str:
         if mode not in ("shadow", "live"):
             return "normal"
         sp = float(get_neural_state(user_id).sleep_pressure or 0.0)
-        if sp >= 0.75:
-            level = "maintenance"
-        elif sp >= 0.45:
-            level = "reduced"
-        else:
-            level = "normal"
+        level = _maintenance_level_from_pressure(sp)
         if mode == "shadow":
             log.debug("flysleep mode=shadow sleep=%.2f would_level=%s", sp, level)
             return "normal"

@@ -44,10 +44,23 @@ def should_prefer_maintenance(user_id: str | None = None) -> bool:
         return False
     try:
         from cognition.fly_behavior.turn import maintenance_level
+
         level = maintenance_level(user_id)
+        predicted_level = level
+        if mode == "shadow":
+            from cognition.fly_behavior.turn import _maintenance_level_from_pressure
+            from cognition.neural_state import get_neural_state
+
+            sleep_pressure = float(get_neural_state(user_id).sleep_pressure or 0.0)
+            predicted_level = _maintenance_level_from_pressure(sleep_pressure)
     except Exception:
         level = "normal"
+        predicted_level = "normal"
     if mode == "shadow":
-        log.debug("flysleep prefer_maintenance mode=shadow would=%s", level)
+        log.debug(
+            "flysleep prefer_maintenance mode=shadow would=%s action_level=%s",
+            predicted_level,
+            level,
+        )
         return False
     return level in ("reduced", "maintenance")

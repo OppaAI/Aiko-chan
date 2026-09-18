@@ -3436,9 +3436,9 @@ class AikoMemorize:
         try:
             from cognition.fly_behavior.sleep_sched import dream_boost_multiplier
             _fly_dream_mult = float(dream_boost_multiplier(user_id))
-            self._fly_dream_mult = _fly_dream_mult
         except Exception:
             _fly_dream_mult = 1.0
+        self._fly_dream_mult = _fly_dream_mult
         log.info(
             f"{'(dry-run) ' if dry_run else ''}Starting consolidation pass..."
             + (f" flysleep_mult={_fly_dream_mult:.2f}" if _fly_dream_mult != 1.0 else "")

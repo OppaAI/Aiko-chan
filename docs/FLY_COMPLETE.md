@@ -9,7 +9,7 @@
 | LH | turn priors + **grasp score bias** |
 | GF | turn priors + system_note + force localchat |
 | Sleep | needle maintenance + **dream boost multiplier** |
-| AL / DN | available; default shadow (sensory/motor) until presence/avatar eval |
+| AL / DN | available; default off (sensory/motor) until presence/avatar eval |
 
 ## Not included
 
@@ -19,7 +19,7 @@
 ## A/B
 
 ```bash
-MEMORY_FLYMB_MODE=off MEMORY_FLYGF_MODE=off python -m tests.eval.fly_ab_harness
+MEMORY_FLYMB_MODE=off MEMORY_FLYGF_MODE=off MEMORY_FLYLH_MODE=off MEMORY_FLYSLEEP_MODE=off python -m tests.eval.fly_ab_harness
 MEMORY_FLYMB_MODE=live MEMORY_FLYGF_MODE=live MEMORY_FLYLH_MODE=live MEMORY_FLYSLEEP_MODE=live python -m tests.eval.fly_ab_harness
 ```
 

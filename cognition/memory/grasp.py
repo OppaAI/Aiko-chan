@@ -368,7 +368,13 @@ def score_novelty(token_set: set[str], others: list[set[str]]) -> float:
 def score_recall_freq(recall_count: int, cap: int = GRASP_RECALL_FREQ_CAP) -> float:
     return max(0.0, min(1.0, recall_count / max(1, cap)))
 
-def compute_score(turn: "GraspTurn", current_turn: int, *, user_id: str | None = None) -> float:
+def compute_score(
+    turn: "GraspTurn",
+    current_turn: int,
+    *,
+    user_id: str | None = None,
+    record_lh: bool = True,
+) -> float:
     emo = (turn.emotion + 1.0) * 0.5
     rec = score_recency(turn.created_turn, current_turn)
     rf = score_recall_freq(turn.recall_count)
@@ -396,7 +402,7 @@ def compute_score(turn: "GraspTurn", current_turn: int, *, user_id: str | None =
     try:
         from cognition.fly_behavior.lateral_horn import adjust_score
         text = f"{getattr(turn, 'user', '') or ''} {getattr(turn, 'assistant', '') or ''}"
-        base = adjust_score(base, text, user_id=user_id)
+        base = adjust_score(base, text, user_id=user_id, record=record_lh)
     except Exception as exc:
         log.debug("flylh grasp skipped: %s", exc)
     return base
@@ -558,7 +564,7 @@ class GraspBuffer:
     def _rescore(self) -> None:
         for i, t in enumerate(self._slots):
             t.novelty = score_novelty(t._token_set, [s._token_set for j, s in enumerate(self._slots) if j != i])
-            t.score = compute_score(t, self._turn_counter, user_id=self.identity)
+            t.score = compute_score(t, self._turn_counter, user_id=self.identity, record_lh=False)
         self._slots.sort(key=lambda t: t.score, reverse=True)
 
     def _enforce_capacity(self, token_budget: int) -> list[GraspTurn]:

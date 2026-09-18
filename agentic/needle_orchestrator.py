@@ -205,6 +205,23 @@ class NeedleOrchestrator:
         """Run workers concurrently (or sequentially when drowsy), preserving configured order."""
         cadence = _flycx_cadence(task)
         max_workers = 1 if cadence == "sequential" else len(self.workers)
+        try:
+            from cognition.fly_behavior import maintenance_level
+            uid = None
+            try:
+                from system.userspace import current_user_id
+                uid = current_user_id() or None
+            except Exception:
+                uid = None
+            level = maintenance_level(uid)
+            if level == "maintenance":
+                max_workers = 1
+                log.debug("flysleep maintenance → sequential needle user=%s", uid or "default")
+            elif level == "reduced":
+                max_workers = min(max_workers, max(1, (len(self.workers) + 1) // 2))
+                log.debug("flysleep reduced → max_workers=%d user=%s", max_workers, uid or "default")
+        except Exception:
+            pass
         results: dict[str, NeedleWorkerResult] = {}
         with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="needle-worker") as pool:
             futures = {pool.submit(self._run_one, worker, task, tools): worker for worker in self.workers}

@@ -387,7 +387,11 @@ class SubliminalLayer:
         return self._impulse
 
     def bias_line(self) -> str:
-        """L4: bias instruction for prompt — keeps response grounded in affect."""
+        """L4: bias instruction for prompt — keeps response grounded in affect.
+
+        Also folds soft NeuralState tone bits (GF/LH/sleep/circadian) when present.
+        Does not rewrite persona identity — style only.
+        """
         a = self._affect
         bits: list[str] = []
         if a.valence < -0.25:
@@ -400,6 +404,20 @@ class SubliminalLayer:
             bits.append("decisive tone, lead with the answer")
         if a.curiosity > 0.6:
             bits.append("lean into the question — a follow-up is welcome")
+        try:
+            from cognition.neural_state import get_neural_state
+            from system.userspace import current_user_id
+            st = get_neural_state(current_user_id())
+            if st.urgency >= 0.65 or st.interrupt:
+                bits.append("user signaled urgency — answer briefly")
+            if st.sleep_pressure > 0.6:
+                bits.append("keep the reply shorter")
+            if st.approach > 0.35 and st.context_familiarity > 0.6:
+                bits.append("warm, familiar tone is welcome")
+            elif st.avoidance > 0.35 or st.context_familiarity < 0.35:
+                bits.append("slightly careful tone with a new or tense context")
+        except Exception:
+            pass
         self._bias = "; ".join(bits) or "respond naturally"
         return self._bias
 

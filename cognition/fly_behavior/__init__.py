@@ -1,10 +1,14 @@
-"""Behavioral fly motifs: lateral horn (context prior) + giant fiber (interrupt).
+"""Behavioral fly motifs: lateral horn, giant fiber, per-turn priors.
 
-These are functional abstractions inspired by MaleCNS pathways, not full
-circuit simulations. Identity isolation for LH session state is per user_id;
-GF is stateless per call.
+Functional abstractions inspired by MaleCNS pathways — not full circuit sims.
 """
 from .giant_fiber import assess_interrupt
 from .lateral_horn import context_prior
+from .turn import apply_turn_priors, maintenance_level
 
-__all__ = ["assess_interrupt", "context_prior"]
+__all__ = [
+    "assess_interrupt",
+    "context_prior",
+    "apply_turn_priors",
+    "maintenance_level",
+]

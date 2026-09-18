@@ -1065,6 +1065,15 @@ class AikoThink:
                 self._fetch_memory_and_knowledge, user_input, query_vec
             )
 
+            # Live giant-fiber interrupt: never escalate to agentic/web tools.
+            try:
+                from cognition.neural_state import get_neural_state
+                if get_neural_state(user_id).interrupt:
+                    log.info("[route] fly_interrupt → force localchat (was intent=%s)", intent)
+                    intent = "localchat"
+            except Exception:
+                pass
+
             if intent == "agentic":
                 _brain_trace.record_step(
                     "think.route",

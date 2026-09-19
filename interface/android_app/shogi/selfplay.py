@@ -212,7 +212,8 @@ def _is_sente_to_move(board) -> bool:
 
 # ── engine move ──────────────────────────────────────────────────────────────
 
-def engine_choose_move(board, *, movetime_ms: int | None = None) -> Optional[str]:
+def engine_choose_move(board, *, movetime_ms: int | None = None,
+                        depth: int | None = None) -> Optional[str]:
     """Ask YaneuraOu. Returns USI, or None on engine failure/resign.
 
     NOTE: best_move_usi takes a RAW SFEN (it adds the "position sfen"
@@ -222,7 +223,12 @@ def engine_choose_move(board, *, movetime_ms: int | None = None) -> Optional[str
     try:
         if movetime_ms is None:
             movetime_ms = _env_int("SELFPLAY_MOVETIME_MS", 800)
-        return _yu.best_move_usi(board.sfen(), movetime_ms=movetime_ms)
+        if depth is None:
+            raw = (os.getenv("SELFPLAY_ENGINE_DEPTH") or "").strip()
+            depth = int(raw) if raw else None
+            if depth is not None and depth <= 0:
+                depth = None
+        return _yu.best_move_usi(board.sfen(), movetime_ms=movetime_ms, depth=depth)
     except Exception as exc:
         log.warning("selfplay: engine move failed: %s", exc)
         return None

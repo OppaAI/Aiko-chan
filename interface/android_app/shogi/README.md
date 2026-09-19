@@ -43,5 +43,7 @@ Budget honesty: Jev is called **once per Aiko move** (~50 calls/game).
 
 Run one: `python -m interface.android_app.shogi.selfplay <uid> [games]`
 (any exception aborts the game as void — never as a fake loss).
-Tune: `SELFPLAY_MOVETIME_MS` (800), `SELFPLAY_MAX_MOVES` (256),
-`SELFPLAY_BOOK_MIN_VISITS` (3), `SELFPLAY_EXPLORATION` (0.05).
+Tune (config/android_app.yaml): `SELFPLAY_MOVETIME_MS` (800),
+`SELFPLAY_ENGINE_DEPTH` (blank = full strength; 6-10 = training handicap so
+games are winnable and the book actually learns wins), `SELFPLAY_MAX_MOVES`
+(256), `SELFPLAY_BOOK_MIN_VISITS` (3), `SELFPLAY_EXPLORATION` (0.05).

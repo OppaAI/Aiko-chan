@@ -264,6 +264,27 @@ def test_engine_gets_raw_sfen_not_position_command(sp, monkeypatch):
     assert seen["movetime"] == 800
 
 
+def test_engine_depth_handicap(sp, monkeypatch):
+    """SELFPLAY_ENGINE_DEPTH caps the search so training games are winnable."""
+    import os
+    import interface.android_app.shogi.selfplay as real
+    import interface.android_app.shogi.yaneuraou as yu
+    seen = {}
+
+    def _rec(sfen, movetime_ms=None, depth=None):
+        seen["depth"] = depth
+        return "7g7f"
+
+    monkeypatch.setattr(yu, "best_move_usi", _rec)
+    monkeypatch.setenv("SELFPLAY_ENGINE_DEPTH", "8")
+    assert real.engine_choose_move(_Board()) == "7g7f"
+    assert seen["depth"] == 8
+    monkeypatch.delenv("SELFPLAY_ENGINE_DEPTH", raising=False)
+    real.engine_choose_move(_Board())
+    assert seen["depth"] is None
+    assert "SELFPLAY_ENGINE_DEPTH" in open("interface/android_app/shogi/selfplay.py").read()
+
+
 def test_color_alternates_on_selfplay_store_not_human_store(sp, monkeypatch):
     """Alternation must read the SELFPLAY table; human games must not shift
     training colors (bug: used the human 'shogi' store before)."""

@@ -15,7 +15,9 @@ class FlyRuntime:
     user_id: str | None = None
     trace: dict = field(default_factory=dict)
 
-    def activate(self, seeds: list[str], drive: dict[str, float], *, budget: int = 20000, max_hops: int = 4) -> dict:
+    def activate(self, seeds: list[str], drive: dict[str, float], *, budget: int = 20000, max_hops: int = 4, mode: str = "live", observations: list[dict] | None = None) -> dict:
+        if mode not in {"shadow", "live"}:
+            raise ValueError("mode must be 'shadow' or 'live'")
         active = self.catalog.subgraph(seeds, budget=budget, max_hops=max_hops)
         dynamics = ActiveDynamics(active["nodes"], active["edges"])
         # One bounded update per eligible hop lets a sensory drive reach an
@@ -31,10 +33,21 @@ class FlyRuntime:
             "at": time.time(), "user_id": self.user_id, "seeds": sorted(seeds),
             "budget": budget, "active_nodes": len(active["nodes"]), "active_edges": len(active["edges"]),
             "truncated": active["truncated"], "source": active["source"], "version": active["version"],
+            "checksum": active["checksum"], "mode": mode,
+            "observations": list(observations or []),
             "rates": {key: round(value, 5) for key, value in rates.items() if value > 0},
             "outputs": {key: round(value, 5) for key, value in outputs.items()},
+            "nodes": [
+                {"id": node.id, "type": node.type, "region": node.region, "rate": round(rates.get(node.id, 0.0), 5)}
+                for node in active["nodes"]
+            ],
+            "edges": [
+                {"source": edge.source, "target": edge.target, "weight": edge.weight, "sign": edge.sign}
+                for edge in active["edges"]
+            ],
         }
-        self._publish(rates, outputs)
+        if mode == "live":
+            self._publish(rates, outputs)
         return dict(self.trace)
 
     def _publish(self, rates: dict[str, float], outputs: dict[str, float]) -> None:

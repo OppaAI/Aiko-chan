@@ -8,6 +8,7 @@ for an observation or action request.
 from .catalog import ConnectomeCatalog, Edge, Node
 from .dynamics import ActiveDynamics
 from .runtime import FlyRuntime, get_fly_runtime, peek_fly_runtime
+from .adapters import SensoryObservation, auditory_observation, motion_observation, visual_observation
 
 __all__ = [
     "ActiveDynamics",
@@ -17,4 +18,8 @@ __all__ = [
     "Node",
     "get_fly_runtime",
     "peek_fly_runtime",
+    "SensoryObservation",
+    "auditory_observation",
+    "motion_observation",
+    "visual_observation",
 ]

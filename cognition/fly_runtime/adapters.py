@@ -14,6 +14,23 @@ class SensoryObservation:
     def drive(self, seed: str) -> dict[str, float]:
         return {seed: max(0.0, min(1.0, self.salience))} if self.consented else {}
 
+    def as_trace(self) -> dict:
+        """Privacy-preserving observation provenance for the active trace."""
+        return {"modality": self.modality, "salience": max(0.0, min(1.0, self.salience)), "consented": self.consented}
+
+
+def auditory_observation(*, speech_confidence: float, activity: float, consented: bool = True) -> SensoryObservation:
+    return SensoryObservation("auditory", min(1.0, max(0.0, speech_confidence) * max(0.0, activity)), consented)
+
+
+def visual_observation(*, salience: float, consented: bool = False) -> SensoryObservation:
+    """Camera-derived input is opt-in by default; never retain image contents."""
+    return SensoryObservation("visual", salience, consented)
+
+
+def motion_observation(*, energy: float, consented: bool = True) -> SensoryObservation:
+    return SensoryObservation("motion", energy, consented)
+
 
 class AvatarMotorController:
     """Maps vetted intents—not neural IDs—to the existing WebUI VRM protocol."""

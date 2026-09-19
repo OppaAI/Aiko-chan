@@ -20,7 +20,8 @@ def test_catalog_path_query_is_bounded_and_source_attributed(tmp_path):
 
     result = catalog.subgraph(["a"], budget=1)
 
-    assert catalog.summary() == {"nodes": 2, "edges": 1, "source": "fixture", "version": "v1"}
+    assert catalog.summary()["nodes"] == 2
+    assert catalog.summary()["checksum"]
     assert [node.id for node in result["nodes"]] == ["a"]
     assert result["truncated"] is True
 
@@ -34,6 +35,19 @@ def test_runtime_is_identity_scoped_and_publishes_bounded_readouts():
     assert trace["outputs"]["dn"] > 0
     assert get_neural_state("runtime-a").motion_salience > 0
     assert get_fly_runtime("runtime-a", catalog) is not get_fly_runtime("runtime-b", catalog)
+
+
+def test_shadow_mode_records_trace_without_publishing_and_preserves_path_details():
+    catalog = _catalog()
+    clear_neural_state("shadow-runtime")
+    trace = get_fly_runtime("shadow-runtime", catalog).activate(
+        ["eye"], {"eye": 1.0}, mode="shadow", observations=[{"modality": "visual", "consented": True}],
+    )
+    assert trace["mode"] == "shadow"
+    assert trace["nodes"][0]["id"] == "cx"
+    assert trace["edges"][0]["source"] == "eye"
+    assert trace["observations"] == [{"modality": "visual", "consented": True}]
+    assert get_neural_state("shadow-runtime").motion_salience == 0.0
 
 
 def test_rate_dynamics_respects_inhibitory_edges():

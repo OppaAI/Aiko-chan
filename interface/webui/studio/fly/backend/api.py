@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -138,7 +138,7 @@ def fly_circuit(request: Request) -> JSONResponse:
 
 
 @app.get("/api/trace")
-def fly_trace(request: Request) -> JSONResponse:
+def fly_trace(request: Request, node_limit: int = Query(160, ge=1, le=500), edge_limit: int = Query(260, ge=1, le=1000)) -> JSONResponse:
     """Return the identity-scoped active-subgraph trace, if one was evaluated."""
     uid = _uid(request)
     try:
@@ -146,6 +146,20 @@ def fly_trace(request: Request) -> JSONResponse:
         from cognition.neural_state import peek_neural_state
         runtime = peek_fly_runtime(uid)
         trace = dict(runtime.trace) if runtime is not None else {}
+        # The runtime may evaluate thousands of cells.  Studio receives a
+        # deterministic, bounded projection instead of an accidental 20k-node
+        # browser payload; counts in the trace retain the full evaluation size.
+        if trace:
+            nodes = list(trace.get("nodes", ()))
+            shown_nodes = sorted(nodes, key=lambda node: (-float(node.get("rate", 0)), str(node.get("id", ""))))[:node_limit]
+            shown_ids = {node["id"] for node in shown_nodes}
+            trace["nodes"] = shown_nodes
+            trace["edges"] = [
+                edge for edge in trace.get("edges", ())
+                if edge.get("source") in shown_ids and edge.get("target") in shown_ids
+            ][:edge_limit]
+            trace["display_nodes"] = len(trace["nodes"])
+            trace["display_edges"] = len(trace["edges"])
         state = peek_neural_state(uid)
         neural_state = state.snapshot() if state is not None else {}
     except Exception as exc:

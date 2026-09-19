@@ -114,6 +114,9 @@ def test_go_start_honors_requested_board_size(monkeypatch):
     assert st.board_size == 13
     # Invalid sizes fall back to configured default (9).
     gg._selfplay.clear()
+    # Invalid sizes fall back to the configured default: with the env
+    # override removed that is the code default (9), regardless of yaml.
+    monkeypatch.delenv("SELFPLAY_GO_SIZE", raising=False)
     st = asyncio.run(gg.selfplay_start(gg.SelfplayStartRequest(games=1, board_size=7),
                                        {"user_id": "u"}))
     assert st.board_size == 9

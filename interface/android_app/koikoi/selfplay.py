@@ -271,7 +271,11 @@ def play_match(uid: str, games: int = 1, *, months: int | None = None,
                     log.debug("koikoi selfplay on_round skipped: %s", exc)
             if game.get("status") != "playing":
                 break
-        if result["winner"] == "void" and game.get("status") == "finished":
+        if result["winner"] == "void" and result.get("end") == "aborted" \
+                and game.get("status") == "finished":
+            # Natural finish with no recorded outcome (e.g. all rounds
+            # exhausted): derive from totals. Void paths (stopped, jev-down,
+            # errors) already set end — never overwrite those.
             w = game.get("winner") or "draw"
             result.update(winner=("engine" if w == ENGINE_SEAT else w),
                           end="finished",

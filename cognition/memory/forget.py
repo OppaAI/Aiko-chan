@@ -29,6 +29,43 @@ from datetime import datetime, timezone
 import math
 import os
 
+from system.log import get_logger
+
+log = get_logger(__name__)
+
+# Fly mushroom-body layer: approach-associated memories decay slower (their
+# half-life stretches). Never accelerates forgetting and never causes
+# deletion — survival decisions stay with the existing threshold logic.
+def _flymb_mode() -> str:
+    try:
+        return (os.getenv("MEMORY_FLYMB_MODE", "off") or "off").strip().lower()
+    except Exception:
+        return "off"
+
+
+def _flymb_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+def _flymb_bias_for_forget(text: str, *, user_id: str | None = None) -> float | None:
+    """Identity-scoped MB bias for decay stretch (read-only)."""
+    if not text:
+        return None
+    try:
+        from cognition.fly_registry import get_flymb
+        from cognition.flymemory import text_features
+        mb = get_flymb(user_id)
+        if mb is None:
+            return None
+        return mb.valence_bias(text_features(text))
+    except Exception as exc:
+        log.debug("flymb forget unavailable: %s", exc)
+        return None
+
+
 # ── mood-dependent forgetting ──────────────────────────────────────────────
 FORGET_MOOD_MATCH_ENABLED = os.getenv("FORGET_MOOD_MATCH_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
 FORGET_MOOD_MATCH_SLOWDOWN = float(os.getenv("FORGET_MOOD_MATCH_SLOWDOWN", "1.3"))
@@ -151,6 +188,8 @@ def compute_weighted_score(
     valence_score: int | float | None = None,
     query_valence: int | None = None,
     access_day_count: int | None = None,
+    memory_text: str | None = None,
+    user_id: str | None = None,
 ) -> float:
     """Compute exponential decay score for a memory entry.
 
@@ -197,6 +236,20 @@ def compute_weighted_score(
             elif mem_sign != 0 and q_sign != 0 and mem_sign != q_sign:
                 h_eff /= FORGET_MOOD_MISMATCH_ACCELERATION
 
+        # Fly MB layer: approach-associated memories linger (half-life
+        # stretch only — this term can never hasten forgetting).
+        _fly_mode = _flymb_mode()
+        if _fly_mode in ("shadow", "live") and memory_text:
+            try:
+                _b = _flymb_bias_for_forget(memory_text, user_id=user_id)
+            except Exception as exc:
+                log.debug("flymb forget skipped: %s", exc)
+                _b = None
+            if _b is not None:
+                log.debug("flymb forget mode=%s bias=%+.3f", _fly_mode, _b)
+                if _fly_mode == "live" and _b > 0:
+                    h_eff *= 1.0 + _flymb_float("MEMORY_FLYMB_DECAY_W", 0.5) * _b
+
         h_eff = max(h_eff, 1e-6)
         return float(strength) * (0.5 ** (days / h_eff))
     except Exception:
@@ -228,6 +281,8 @@ def should_cleanup(
     valence_score: int | float | None = None,
     query_valence: int | None = None,
     access_day_count: int | None = None,
+    memory_text: str | None = None,
+    user_id: str | None = None,
 ) -> bool:
     """Return True if a memory is a deletion candidate."""
     if is_grace_protected(created_at_iso):
@@ -240,6 +295,8 @@ def should_cleanup(
             valence_score=valence_score,
             query_valence=query_valence,
             access_day_count=access_day_count,
+            memory_text=memory_text,
+            user_id=user_id,
         )
         < CLEANUP_THRESHOLD
     )

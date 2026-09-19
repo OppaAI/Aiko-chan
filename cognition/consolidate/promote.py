@@ -8,12 +8,24 @@ from __future__ import annotations
 import re
 
 from system.log import get_logger
+from system.config import env_float, env_str
 from cognition.memory.memorize import SALIENCE_POLICY_RE
 
 from .retention import is_must_keep
 from .schema import JOURNAL_PROMOTE, JOURNAL_PROMOTE_K
 
 log = get_logger(__name__)
+
+# Fly mushroom-body layer: opponent approach/avoid bias on promotion scores.
+# Reuses the grasp MB master mode (off | shadow | live); shadow is log-only.
+MEMORY_FLYMB_PROMOTE_W = env_float("MEMORY_FLYMB_PROMOTE_W", 0.1)
+
+
+def _flymb_mode() -> str:
+    try:
+        return env_str("MEMORY_FLYMB_MODE", "off").strip().lower()
+    except Exception:
+        return "off"
 
 __all__ = ["journal_fragment_lines", "promote_journal_fragments", "score_journal_fragment"]
 
@@ -36,7 +48,20 @@ def journal_fragment_lines(body: str) -> list[str]:
     return lines
 
 
-def score_journal_fragment(text: str) -> float:
+def _flymb_bias_for_text(text: str, *, user_id: str | None = None) -> float | None:
+    if _flymb_mode() not in ("shadow", "live"):
+        return None
+    try:
+        from cognition.flymemory import text_features
+        from cognition.fly_registry import get_flymb
+        mb = get_flymb(user_id)
+        return float(mb.valence_bias(text_features(text))) if mb is not None else None
+    except Exception as exc:
+        log.debug("flymb promote scoring failed: %s", exc)
+        return None
+
+
+def score_journal_fragment(text: str, *, user_id: str | None = None) -> float:
     """Cheap promote score: must_keep / salience / length (no LLM)."""
     score = 0.2
     if is_must_keep(text):
@@ -44,6 +69,12 @@ def score_journal_fragment(text: str) -> float:
     if SALIENCE_POLICY_RE.search(text or ""):
         score += 0.3
     score += min(0.2, len(text) / 500.0)
+    mode = _flymb_mode()
+    bias = _flymb_bias_for_text(text, user_id=user_id)
+    if bias is not None:
+        log.debug("flymb promote mode=%s bias=%+.3f", mode, bias)
+        if mode == "live":
+            score += MEMORY_FLYMB_PROMOTE_W * bias
     return score
 
 
@@ -66,7 +97,7 @@ def promote_journal_fragments(
         for r in memory_day_rows
     }
 
-    candidates: list[tuple[float, str, str]] = []  # score, date_tag, text
+    candidates: list[tuple[float, str, str]] = []
     for j in journal_day_rows:
         body = j.get("_text") or ""
         m = _DATE_FROM_JOURNAL_RE.search(body)
@@ -83,10 +114,23 @@ def promote_journal_fragments(
             line_norm = re.sub(r"\s+", " ", line.casefold().strip())
             if any(line_norm in e for e in existing_norms if len(line_norm) > 30):
                 continue
-            candidates.append((score_journal_fragment(line), day, line))
+            candidates.append((score_journal_fragment(line, user_id=user_id), day, line))
 
     candidates.sort(key=lambda x: x[0], reverse=True)
     picked = candidates[:JOURNAL_PROMOTE_K]
+    picked_biases = [
+        bias
+        for _score, _day, line in picked
+        if (bias := _flymb_bias_for_text(line, user_id=user_id)) is not None
+    ]
+    if picked_biases:
+        try:
+            from cognition.neural_state import get_neural_state
+            get_neural_state(user_id).publish_mb(
+                sum(picked_biases) / len(picked_biases), source="promote"
+            )
+        except Exception:
+            pass
     new_rows: list[dict] = []
     for _sc, day, line in picked:
         tagged = f"[{day}] {line}"

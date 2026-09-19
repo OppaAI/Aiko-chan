@@ -1065,6 +1065,15 @@ class AikoThink:
                 self._fetch_memory_and_knowledge, user_input, query_vec
             )
 
+            # Live giant-fiber interrupt: never escalate to agentic/web tools.
+            try:
+                from cognition.neural_state import get_neural_state
+                if get_neural_state(user_id).interrupt:
+                    log.info("[route] fly_interrupt → force localchat (was intent=%s)", intent)
+                    intent = "localchat"
+            except Exception:
+                pass
+
             if intent == "agentic":
                 _brain_trace.record_step(
                     "think.route",
@@ -2815,7 +2824,35 @@ class AikoThink:
                 affect = float(snap.get("affect", 0.0))
                 volume = 1.05 if affect > 0.25 else 0.9 if affect < -0.25 else 1.0
                 pitch = 0.05 if affect > 0.25 else -0.05 if affect < -0.25 else 0.0
-                speak.set_expression(for_identity(current_user_id()).adaptive_tts_rate(), volume, pitch)
+                try:
+                    _dn_mode = (os.getenv("MEMORY_FLYDN_MODE", "off") or "off").strip().lower()
+                except Exception:
+                    _dn_mode = "off"
+                if _dn_mode in ("shadow", "live"):
+                    # DN output drive: arousal-gated prosody energy. Existing
+                    # clamps inside set_expression stay authoritative.
+                    try:
+                        from cognition.attention import flycx_decisiveness_for_text as _flydec
+                        from cognition.flysense import FlyDN as _FlyDN
+                        _dec = _flydec(response) or 0.5
+                        _drv = _FlyDN().drive(
+                            energy=float(snap.get("energy", 0.5)),
+                            decisiveness=_dec, affect=affect)
+                    except Exception as exc:
+                        log.debug("[finalize] flydn prosody skipped: %s", exc)
+                        _drv = None
+                    if _drv is not None:
+                        log.debug("[finalize] flydn mode=%s arousal=%.2f rate x%.3f vol x%.3f",
+                                  _dn_mode, _drv["arousal"], _drv["rate_mult"], _drv["vol_mult"])
+                    if _drv is not None and _dn_mode == "live":
+                        # DN-gated vigor: arousal scales speech rate/volume
+                        # inside the existing clamps (never overrides them).
+                        base_rate = for_identity(current_user_id()).adaptive_tts_rate()
+                        base_rate = max(0.85, min(1.15, base_rate * _drv["rate_mult"]))
+                        volume = max(0.5, min(1.2, volume * _drv["vol_mult"]))
+                    else:
+                        base_rate = for_identity(current_user_id()).adaptive_tts_rate()
+                    speak.set_expression(base_rate, volume, pitch)
             elif speak is not None and hasattr(speak, "set_speech_rate"):
                 speak.set_speech_rate(for_identity(current_user_id()).adaptive_tts_rate())
         except Exception:

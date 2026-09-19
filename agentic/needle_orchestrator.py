@@ -16,6 +16,59 @@ from typing import Any
 
 from agentic.needle import NeedleClient, NeedleError, NeedleResponse
 
+try:
+    from system.log import get_logger as _get_logger
+    log = _get_logger(__name__)
+except Exception:
+    import logging as _logging
+    log = _logging.getLogger("aiko.needle_orchestrator")
+
+try:
+    from system.config import env_str as _env_str
+except Exception:
+    _env_str = None
+
+
+def _flycx_mode() -> str:
+    try:
+        if _env_str is None:
+            return "off"
+        return _env_str("MEMORY_FLYCX_MODE", "off").strip().lower()
+    except Exception:
+        return "off"
+
+
+def _flycx_cadence(task: str, user_id: str | None = None) -> str:
+    """parallel|sequential crew cadence from compass sleep pressure.
+
+    Shares the identity-scoped compass with cognition.attention via
+    fly_registry. Drowsy crews run sequentially (same coverage, calmer
+    cadence). Shadow only logs the would-be choice.
+    """
+    mode = _flycx_mode()
+    if mode not in ("shadow", "live"):
+        return "parallel"
+    try:
+        from cognition.fly_registry import get_flycx, get_flycx_lock
+        from cognition.flymemory import text_features
+        if user_id is None:
+            try:
+                from system.userspace import current_user_id
+                user_id = current_user_id() or None
+            except Exception:
+                user_id = None
+        cx = get_flycx(user_id)
+        if cx is None:
+            return "parallel"
+        with get_flycx_lock(user_id):
+            out = cx.step(text_features(task or ""), fatigue=0.0)
+    except Exception as exc:
+        log.debug("flycx cadence failed: %s", exc)
+        return "parallel"
+    choice = "sequential" if out["sleep_pressure"] > 0.5 else "parallel"
+    log.debug("flycx cadence mode=%s sleep=%.2f -> %s", mode, out["sleep_pressure"], choice)
+    return choice if mode == "live" else "parallel"
+
 
 @dataclass(frozen=True)
 class NeedleWorkerSpec:
@@ -149,15 +202,34 @@ class NeedleOrchestrator:
             return NeedleWorkerResult(worker.id, worker.role, error=str(exc))
 
     def complete(self, task: str, tools: list[dict[str, Any]]) -> tuple[NeedleWorkerResult, ...]:
-        """Run all workers concurrently, preserving configured worker order."""
+        """Run workers concurrently (or sequentially when drowsy), preserving configured order."""
+        cadence = _flycx_cadence(task)
+        max_workers = 1 if cadence == "sequential" else len(self.workers)
+        try:
+            from cognition.fly_behavior import maintenance_level
+            uid = None
+            try:
+                from system.userspace import current_user_id
+                uid = current_user_id() or None
+            except Exception:
+                uid = None
+            level = maintenance_level(uid)
+            if level == "maintenance":
+                max_workers = 1
+                log.debug("flysleep maintenance → sequential needle user=%s", uid or "default")
+            elif level == "reduced":
+                max_workers = min(max_workers, max(1, (len(self.workers) + 1) // 2))
+                log.debug("flysleep reduced → max_workers=%d user=%s", max_workers, uid or "default")
+        except Exception:
+            pass
         results: dict[str, NeedleWorkerResult] = {}
-        with ThreadPoolExecutor(max_workers=len(self.workers), thread_name_prefix="needle-worker") as pool:
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="needle-worker") as pool:
             futures = {pool.submit(self._run_one, worker, task, tools): worker for worker in self.workers}
             for future in as_completed(futures):
                 worker = futures[future]
                 try:
                     results[worker.id] = future.result()
-                except Exception as exc:  # defensive: one worker cannot abort the team
+                except Exception as exc:
                     results[worker.id] = NeedleWorkerResult(worker.id, worker.role, error=str(exc))
         ordered = tuple(results[worker.id] for worker in self.workers)
         if not any(result.response is not None for result in ordered):

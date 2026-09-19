@@ -1579,6 +1579,22 @@ def run_session(ui, args) -> None:
             factors=["received from ui.get_input() or ASR pipeline"],
         )
 
+        # Fly behavioral priors (GF interrupt, LH context, circadian) → NeuralState.
+        # Live GF interrupt: mark turn + inject system_note so route prefers brief non-agentic path.
+        _fly_priors = {}
+        try:
+            from cognition.fly_behavior import apply_turn_priors
+            _fly_priors = apply_turn_priors(user_input, user_id=turn_uid) or {}
+            if _fly_priors.get("interrupt"):
+                current_latency["fly_interrupt"] = True
+                note = (
+                    "[system notice] User signaled STOP/urgency. "
+                    "Answer in 1-3 short sentences. Do not call tools or start multi-step agent plans."
+                )
+                system_note = f"{system_note}\n{note}".strip() if system_note else note
+        except Exception:
+            _fly_priors = {}
+
         if typewriter is not None:
             typewriter.start()
             _sentence_buf = []

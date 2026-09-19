@@ -152,6 +152,11 @@ activemq-data/
 # SageMath parsed files
 *.sage.py
 
+# Fly connectome bulk artefacts (built locally, never committed; see
+# cognition/fly_runtime/tools/build_catalog.py). Small baked slices under
+# cognition/*/data/ ARE committed intentionally.
+data/fly_catalog/
+
 # Environments
 .env
 .envrc

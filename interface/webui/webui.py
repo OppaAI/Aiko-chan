@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
 from system.config import load_config
 from system.userspace import current_user_id, reset_current_display_name, reset_current_user_id, set_current_user_id, set_current_display_name
+from cognition.fly_runtime import observe as observe_fly_runtime, visual_observation
 load_config()
 
 from system import bioclock
@@ -513,6 +514,34 @@ class AikoWeb:
                         vision_tasks.add(task)
                         task.add_done_callback(vision_tasks.discard)
 
+                    elif mtype == "presence":
+                        # T4/T5 motion reflex arc: the browser sends only a
+                        # throttled presence LEVEL (0..1, on bin change, max
+                        # 1/10s) — never video. Shadow logs; live nudges
+                        # attention energy slightly upward on real presence.
+                        try:
+                            level = max(0.0, min(1.0, float(msg.get("level", 0.0))))
+                        except (TypeError, ValueError):
+                            continue
+                        store = getattr(self, "_presence_levels", None)
+                        if store is None:
+                            store = self._presence_levels = {}
+                        store[uid] = (level, time.time())
+                        try:
+                            pmode = (os.getenv("MEMORY_FLYCX_MODE", "off") or "off").strip().lower()
+                        except Exception:
+                            pmode = "off"
+                        log.debug("[aiko-web] presence uid=%s level=%.2f mode=%s", uid, level, pmode)
+                        if pmode == "live" and level >= 0.5:
+                            try:
+                                from cognition.attention import for_identity
+                                st = for_identity(uid)
+                                with st._lock:
+                                    st._energy = max(0.0, min(1.0, st._energy + 0.05 * (level - 0.5) * 2.0))
+                            except Exception as exc:
+                                log.debug("[aiko-web] presence nudge failed: %s", exc)
+                        continue
+
                     elif mtype == "vad":
                         event = msg.get("event")
                         if event == "start":
@@ -616,6 +645,12 @@ class AikoWeb:
 
     async def _handle_image_input(self, image: str, question: str, uid: str, source: str = "camera") -> None:
         """Run vision off the socket loop and return its result to the requesting user."""
+        # The authenticated user explicitly submitted this frame. The optional
+        # fly runtime receives no image bytes, only a consented scalar event.
+        try:
+            observe_fly_runtime(uid, visual_observation(salience=1.0, consented=True), seed_types=("sensory", "T4", "T5", "visual"))
+        except Exception:
+            log.debug("fly visual observation skipped", exc_info=True)
         self._broadcast({"type": "vision", "status": "working", "source": source}, user_id=uid)
         try:
             answer = await asyncio.to_thread(self._infer_image, image, question, source)
@@ -856,6 +891,10 @@ class AikoWeb:
     def set_viseme(self, viseme: str, weight: float = 1.0) -> None:
         """Broadcast a lip-sync viseme to the current user."""
         self._broadcast_to_current_user({"type": "viseme", "viseme": viseme, "weight": weight})
+
+    def set_pose(self, name: str, active: bool = True) -> None:
+        """Broadcast a vetted avatar pose intent to the current user."""
+        self._broadcast_to_current_user({"type": "pose", "name": name, "active": bool(active)})
 
     def get_input(self) -> str:
         """Fetch text input from the queue, binding the source user's identity.

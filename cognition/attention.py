@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import re
 import sqlite3
 import threading
@@ -24,7 +25,9 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass
 from typing import Any
 
-from system.config import env_bool, env_flag, env_int
+from system.config import env_bool, env_flag, env_float, env_int, env_str
+
+log = logging.getLogger("aiko.attention")
 try:
     from cognition.subliminal import SubliminalLayer
 except Exception:
@@ -48,6 +51,118 @@ EDGE_COGNITION_MAX_TURNS = max(1, env_int("EDGE_COGNITION_MAX_TURNS", 7))
 EDGE_COGNITION_MAX_CHARS = max(240, env_int("EDGE_COGNITION_MAX_CHARS", 1200))
 EDGE_COGNITION_MAX_OPEN_LOOPS = max(1, env_int("EDGE_COGNITION_MAX_OPEN_LOOPS", 3))
 EDGE_COGNITION_MAX_GOALS = max(1, env_int("EDGE_COGNITION_MAX_GOALS", 5))
+
+# Fly central-complex compass (cognition/centralcomplex): ring-attractor
+# focus heading + R5 sleep pressure from real MaleCNS connectivity. Modes:
+# off (default, zero overhead), shadow (readouts debug-logged, state
+# untouched), live (small drowsiness coupling into _energy).
+# Identity-scoped via cognition.fly_registry so attention and the agent
+# orchestrator share one compass per user.
+MEMORY_FLYCX_MODE = env_str("MEMORY_FLYCX_MODE", "off").strip().lower()
+MEMORY_FLYCX_W = env_float("MEMORY_FLYCX_W", 0.05)
+MEMORY_FLYCX_ATTEMPT_W = env_float("MEMORY_FLYCX_ATTEMPT_W", 0.05)
+
+
+def flycx_state_for_record(state: "EdgeCognitiveState", user: str) -> dict | None:
+    """One compass step for a freshly recorded turn. Shadow-safe (read-only
+    unless mode == live, in which case _energy gets a small drowsiness nudge).
+
+    ``user`` is the chat text (used for question/commitment features).
+    Compass identity is ``state._identity``.
+    """
+    if MEMORY_FLYCX_MODE not in ("shadow", "live"):
+        return None
+    try:
+        from cognition.fly_registry import get_flycx, get_flycx_lock, get_fly_store
+    except Exception as exc:
+        log.debug("fly registry unavailable: %s", exc)
+        return None
+    identity = getattr(state, "_identity", None) or None
+    cx = get_flycx(identity)
+    if cx is None:
+        return None
+    cx_lock = get_flycx_lock(identity)
+    store = get_fly_store(identity)
+    try:
+        with state._lock:
+            lat = list(state._turn_latencies)
+            feats = [
+                state._affect, state._energy, state._uncertainty,
+                min(1.0, len(state._open_loops) / 8.0),
+                min(1.0, len(state._goals) / 8.0),
+                1.0 if _QUESTION_RE.search(user or "") else 0.0,
+                1.0 if _COMMITMENT_RE.search(user or "") else 0.0,
+                min(1.0, (sum(lat) / max(1, len(lat))) / 30.0) if lat else 0.0,
+            ]
+            fatigue = feats[7]
+            pen = 0.5 * feats[5] + 0.3 * feats[6]
+        with cx_lock:
+            out = cx.step(feats, pen_drive=pen, fatigue=fatigue)
+            try:
+                if store is not None:
+                    store.save_if_due_cx(out["sleep_pressure"])
+            except Exception as exc:
+                log.debug("flycx persist skipped: %s", exc)
+        if MEMORY_FLYCX_MODE == "live":
+            with state._lock:
+                state._energy = max(0.0, min(1.0, state._energy - MEMORY_FLYCX_W * out["sleep_pressure"]))
+    except Exception as exc:
+        log.debug("flycx step failed: %s", exc)
+        return None
+    log.debug("flycx mode=%s id=%s heading=%.0f sharp=%.2f decis=%.2f sleep=%.2f",
+              MEMORY_FLYCX_MODE, identity or "default", out["heading_deg"], out["sharpness"],
+              out["decisiveness"], out["sleep_pressure"])
+    try:
+        from cognition.neural_state import get_neural_state
+        get_neural_state(identity).publish_cx(
+            heading_deg=out["heading_deg"],
+            sharpness=out["sharpness"],
+            decisiveness=out["decisiveness"],
+            sleep_pressure=out["sleep_pressure"],
+            source="attention",
+        )
+    except Exception:
+        pass
+    return out
+
+
+def flycx_decisiveness_for_text(
+    text: str,
+    uncertainty: float = 0.0,
+    user_id: str | None = None,
+) -> float | None:
+    """PFL decisiveness for an arbitrary text (routing use). Read-only: the
+    shared compass bump/sleep are snapshotted and restored, so the attempt
+    gate observes the compass without steering it."""
+    if MEMORY_FLYCX_MODE not in ("shadow", "live"):
+        return None
+    try:
+        from cognition.fly_registry import get_flycx, get_flycx_lock
+    except Exception as exc:
+        log.debug("fly registry unavailable: %s", exc)
+        return None
+    cx = get_flycx(user_id)
+    if cx is None:
+        return None
+    cx_lock = get_flycx_lock(user_id)
+    try:
+        feats = [_affect(text), 0.5, max(0.0, min(1.0, float(uncertainty or 0.0))),
+                 0.0, 0.0,
+                 1.0 if _QUESTION_RE.search(text or "") else 0.0,
+                 1.0 if _COMMITMENT_RE.search(text or "") else 0.0,
+                 0.0]
+        with cx_lock:
+            bump, sleep = cx.bump.copy(), cx.sleep_pressure
+            try:
+                out = cx.step(feats, pen_drive=0.5 * feats[5] + 0.3 * feats[6], fatigue=0.0)
+            finally:
+                cx.bump, cx.sleep_pressure = bump, sleep
+    except Exception as exc:
+        log.debug("flycx decisiveness failed: %s", exc)
+        return None
+    log.debug("flycx mode=%s decis=%.3f (routing observe-only)", MEMORY_FLYCX_MODE, out["decisiveness"])
+    return out["decisiveness"]
+
 
 # Debounced persist: buffer state changes and flush at run-end or after idle period
 _persist_timer: threading.Timer | None = None
@@ -272,6 +387,13 @@ def should_attempt(
 
     intent_conf = max(0.0, min(1.0, float(intent_confidence or 0.0)))
     intent_prob = max(0.0, min(1.0, float(intent_success_prob or 0.5)))
+    if MEMORY_FLYCX_MODE == "live":
+        # PFL steering: a decisive compass commits, a torn one clarifies.
+        dec = flycx_decisiveness_for_text(text, uncertainty)
+        if dec is not None:
+            intent_conf = max(0.0, min(1.0, intent_conf + MEMORY_FLYCX_ATTEMPT_W * (dec - 0.5) * 2.0))
+    elif MEMORY_FLYCX_MODE == "shadow":
+        flycx_decisiveness_for_text(text, uncertainty)  # log-only
     if soft and intent_conf > 0.65 and intent_prob < 0.35:
         return False, f"intent classifier: low success probability ({intent_prob:.1%})", "clarify"
 
@@ -579,6 +701,9 @@ class EdgeCognitiveState:
             self._energy = max(0.0, min(1.0, self._energy * 0.8 + self._energy_signal(combined) * 0.2))
             self._uncertainty = max(0.0, min(1.0, self._uncertainty * 0.7 + self._uncertainty_signal(combined) * 0.3))
             self._attention = self._attention_for(user)
+            if MEMORY_FLYCX_MODE in ("shadow", "live"):
+                # Compass observes every turn (shadow) or also nudges drowsiness (live).
+                flycx_state_for_record(self, user)
             if _QUESTION_RE.search(user) or _COMMITMENT_RE.search(user):
                 loop = user[:220]
                 if loop and loop not in self._open_loops:

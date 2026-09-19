@@ -24,10 +24,14 @@ const vrmSide = document.getElementById('vrm-side');
 const fill = document.getElementById('progress-fill');
 const loadMsg = document.getElementById('load-msg');
 
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.setClearColor(0x0a0a0f);
+// Transparent companion shell (Tauri, flagged by companion.js before this
+// deferred module runs) needs a fully clear canvas so the desktop shows
+// through; browsers keep the classic opaque backdrop.
+if (window.aikoIsTauri) renderer.setClearColor(0x000000, 0);
+else renderer.setClearColor(0x0a0a0f);
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(8, 1, 0.1, 100);

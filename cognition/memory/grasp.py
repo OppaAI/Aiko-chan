@@ -53,6 +53,77 @@ GRASP_W_PRIMACY = env_float("GRASP_W_PRIMACY", 0.07)
 GRASP_RECENCY_HALF_LIFE = max(1.0, env_float("GRASP_RECENCY_HALF_LIFE", 4.0))
 GRASP_RECALL_FREQ_CAP = max(1, env_int("GRASP_RECALL_FREQ_CAP", 6))
 GRASP_PRIMACY_SPAN = max(1.0, env_float("GRASP_PRIMACY_SPAN", 6.0))
+
+# Fly mushroom-body biological layer (cognition/flymemory): opponent
+# approach/avoid bias from real MaleCNS connectivity. Modes: off (default,
+# zero overhead), shadow (bias computed + debug-logged, score untouched),
+# live (bias added to score with MEMORY_FLYMB_W; one reinforce() per fill).
+MEMORY_FLYMB_MODE = env_str("MEMORY_FLYMB_MODE", "off").strip().lower()
+MEMORY_FLYMB_W = env_float("MEMORY_FLYMB_W", 0.05)
+
+
+def _resolve_fly_user(user_id: str | None = None) -> str | None:
+    """Prefer explicit user_id; else current_user_id() when available."""
+    if user_id:
+        return user_id
+    try:
+        from system.userspace import current_user_id
+        return current_user_id() or None
+    except Exception:
+        return None
+
+
+def _flymb_features(turn: "GraspTurn", current_turn: int) -> list[float]:
+    return [
+        turn.emotion, turn.importance, turn.relevance, turn.novelty,
+        turn.question, turn.entity,
+        min(1.0, turn.recall_count / max(1, GRASP_RECALL_FREQ_CAP)),
+        score_recency(turn.created_turn, current_turn),
+    ]
+
+
+def flymb_bias_for_turn(
+    turn: "GraspTurn",
+    current_turn: int,
+    *,
+    learn: bool = False,
+    user_id: str | None = None,
+) -> float | None:
+    """Opponent MB bias for a turn, or None when disabled/unavailable.
+
+    Shadow mode is read-only (debug log only). Live mode learns once per
+    call when learn=True — callers must ensure once-per-turn semantics.
+    State is identity-scoped via cognition.fly_registry.
+    """
+    if MEMORY_FLYMB_MODE not in ("shadow", "live"):
+        return None
+    try:
+        from cognition.fly_registry import get_flymb
+    except Exception as exc:
+        log.debug("fly registry unavailable: %s", exc)
+        return None
+    uid = _resolve_fly_user(user_id)
+    mb = get_flymb(uid)
+    if mb is None:
+        return None
+    try:
+        feats = _flymb_features(turn, current_turn)
+        if learn and MEMORY_FLYMB_MODE == "live":
+            mb.reinforce(mb.encode(feats), turn.emotion)
+            try:
+                from cognition.fly_registry import get_fly_store
+                store = get_fly_store(uid)
+                if store is not None:
+                    store.save_if_due_mb(mb)
+            except Exception as exc:
+                log.debug("flymb persist skipped: %s", exc)
+        bias = mb.valence_bias(feats)
+    except Exception as exc:
+        log.debug("flymb scoring failed: %s", exc)
+        return None
+    log.debug("flymb mode=%s user=%s bias=%+.3f", MEMORY_FLYMB_MODE, uid or "default", bias)
+    return bias
+
 GRASP_JOURNAL_ENABLED = env_flag("GRASP_JOURNAL_ENABLED", "1")
 GRASP_JOURNAL_DIR = env_str("GRASP_JOURNAL_DIR", str(Path.home() / ".local" / "share" / "aiko" / "journal"))
 _CHARS_PER_TOKEN = 4.0
@@ -297,7 +368,13 @@ def score_novelty(token_set: set[str], others: list[set[str]]) -> float:
 def score_recall_freq(recall_count: int, cap: int = GRASP_RECALL_FREQ_CAP) -> float:
     return max(0.0, min(1.0, recall_count / max(1, cap)))
 
-def compute_score(turn: "GraspTurn", current_turn: int) -> float:
+def compute_score(
+    turn: "GraspTurn",
+    current_turn: int,
+    *,
+    user_id: str | None = None,
+    record_lh: bool = True,
+) -> float:
     emo = (turn.emotion + 1.0) * 0.5
     rec = score_recency(turn.created_turn, current_turn)
     rf = score_recall_freq(turn.recall_count)
@@ -310,25 +387,41 @@ def compute_score(turn: "GraspTurn", current_turn: int) -> float:
     total_w = sum(weights.values())
     if total_w <= 0:
         return 0.0
-    return (
+    base = (
         weights["emotion"] * emo + weights["importance"] * turn.importance + weights["recency"] * rec
         + weights["relevance"] * turn.relevance + weights["novelty"] * turn.novelty
         + weights["question"] * turn.question + weights["entity"] * turn.entity
         + weights["recall_freq"] * rf + weights["primacy"] * pri
     ) / total_w
+    if MEMORY_FLYMB_MODE == "live":
+        bias = flymb_bias_for_turn(turn, current_turn, user_id=user_id)
+        if bias is not None:
+            base = base + MEMORY_FLYMB_W * bias
+    elif MEMORY_FLYMB_MODE == "shadow":
+        flymb_bias_for_turn(turn, current_turn, user_id=user_id)  # log-only, score untouched
+    try:
+        from cognition.fly_behavior.lateral_horn import adjust_score
+        text = f"{getattr(turn, 'user', '') or ''} {getattr(turn, 'assistant', '') or ''}"
+        base = adjust_score(base, text, user_id=user_id, record=record_lh)
+    except Exception as exc:
+        log.debug("flylh grasp skipped: %s", exc)
+    return base
+
 
 class GraspBuffer:
     def __init__(self, *, miller_min: int = GRASP_MILLER_MIN, miller_max: int = GRASP_MILLER_MAX,
                  miller_center: int = GRASP_MILLER_CENTER, token_budget: int = GRASP_TOKEN_BUDGET,
                  static_anchor_tokens: set[str] | None = None,
                  on_evict: Callable[[GraspTurn], None] | None = None,
-                 journal: DailyJournal | None = None, journal_enabled: bool | None = None) -> None:
+                 journal: DailyJournal | None = None, journal_enabled: bool | None = None,
+                 identity: str | None = None) -> None:
         self.miller_min = max(1, miller_min)
         self.miller_max = max(self.miller_min, miller_max)
         self.miller_center = max(self.miller_min, min(self.miller_max, miller_center))
         self.token_budget = max(0, token_budget)
         self.static_anchor_tokens = static_anchor_tokens or set()
         self.on_evict = on_evict
+        self.identity = identity or None
         if journal is not None:
             self.journal = journal
         elif journal_enabled is False:
@@ -385,7 +478,21 @@ class GraspBuffer:
             created_turn=self._turn_counter, user_ts=u_unix, assistant_ts=a_unix, _token_set=token_set,
         )
         turn.novelty = score_novelty(token_set, [s._token_set for s in self._slots])
-        turn.score = compute_score(turn, self._turn_counter)
+        turn.score = compute_score(turn, self._turn_counter, user_id=self.identity)
+        if MEMORY_FLYMB_MODE == "live":
+            # Single DAN-like teaching event per accepted turn (shadow learns nothing).
+            # Identity-scoped via fly_registry (multi-user safe).
+            try:
+                from cognition.fly_registry import get_flymb, get_fly_store
+                mb = get_flymb(self.identity)
+                if mb is not None:
+                    feats = _flymb_features(turn, self._turn_counter)
+                    mb.reinforce(mb.encode(feats), turn.emotion)
+                    store = get_fly_store(self.identity)
+                    if store is not None:
+                        store.save_if_due_mb(mb)
+            except Exception as exc:
+                log.debug("flymb teaching failed: %s", exc)
         self._slots.append(turn)
         self.journal.append_turn(turn, event="fill")
         self._rescore()
@@ -415,6 +522,17 @@ class GraspBuffer:
                 t.recall_count += 1
         if not lines:
             return ""
+        if MEMORY_FLYMB_MODE == "live" and included:
+            # Advisory gut-feeling line for the reasoner (read-only re-read;
+            # never stored, never authoritative, skipped when near-neutral).
+            try:
+                biases = [flymb_bias_for_turn(t, self._turn_counter, user_id=self.identity) or 0.0 for t in included]
+                mean_b = sum(biases) / len(biases)
+                if abs(mean_b) >= 0.02:
+                    lean = "approach-leaning" if mean_b > 0 else "avoid-leaning"
+                    lines.append(f"[fly valence {mean_b:+.2f} {lean} — mushroom-body readout, advisory only]")
+            except Exception:
+                pass
         return "<grasp>\nCurrent conversational focus (most salient first):\n\n" + "\n\n".join(lines) + "\n</grasp>"
 
     def snapshot(self) -> list[GraspTurn]:
@@ -446,7 +564,7 @@ class GraspBuffer:
     def _rescore(self) -> None:
         for i, t in enumerate(self._slots):
             t.novelty = score_novelty(t._token_set, [s._token_set for j, s in enumerate(self._slots) if j != i])
-            t.score = compute_score(t, self._turn_counter)
+            t.score = compute_score(t, self._turn_counter, user_id=self.identity, record_lh=False)
         self._slots.sort(key=lambda t: t.score, reverse=True)
 
     def _enforce_capacity(self, token_budget: int) -> list[GraspTurn]:
@@ -483,7 +601,8 @@ class GraspBuffer:
 def build_grasp(*, static_anchor_tokens: set[str] | None = None,
                 on_evict: Callable[[GraspTurn], None] | None = None,
                 journal_dir: str | Path | None = None,
-                journal_enabled: bool | None = None) -> GraspBuffer:
+                journal_enabled: bool | None = None,
+                identity: str | None = None) -> GraspBuffer:
     journal = None
     if journal_dir is not None or journal_enabled is not None:
         journal = DailyJournal(journal_dir=journal_dir, enabled=journal_enabled)
@@ -491,6 +610,7 @@ def build_grasp(*, static_anchor_tokens: set[str] | None = None,
         miller_min=GRASP_MILLER_MIN, miller_max=GRASP_MILLER_MAX, miller_center=GRASP_MILLER_CENTER,
         token_budget=GRASP_TOKEN_BUDGET, static_anchor_tokens=static_anchor_tokens,
         on_evict=on_evict, journal=journal, journal_enabled=journal_enabled,
+        identity=identity,
     )
 
 def load_journal_day(day: str | None = None, journal_dir: str | Path | None = None) -> list[dict]:
@@ -551,7 +671,7 @@ def get_live_buffer(identity: str | None = None) -> GraspBuffer:
     ident = _resolve_identity(identity)
     with _lock:
         if ident not in _buffers:
-            _buffers[ident] = build_grasp(on_evict=lambda turn, _id=ident: _on_evict(_id, turn))
+            _buffers[ident] = build_grasp(on_evict=lambda turn, _id=ident: _on_evict(_id, turn), identity=ident)
             # LRU-cap past 8 identities; evicted buffers are simply dropped
             # (their turns already published via _on_evict on overflow).
             while len(_buffers) > 8:

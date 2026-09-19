@@ -182,7 +182,57 @@ DREAM_BOOST_AMOUNT: "1"  # Access-count boost for memories promoted during dream
 # Stored as memories.valence_score; valence_tag kept for legacy (pos/neg/neutral).
 # Intensity for forget = |score| / 2. Inference: emoji + lexicon + intensifiers (no LLM).
 # FORGET_INTENSITY_* still apply when only valence_tag is present (old rows).
+# -- Biological layer: fly mushroom body (cognition/flymemory) --
+# Opponent approach/avoid bias from real MaleCNS v1.0 MB connectivity.
+# off = zero overhead; shadow = bias computed + debug-logged, scores
+# untouched; live = bias added to grasp scores (weight below) + one DAN-like
+# teaching event per accepted turn (reward = turn emotion).
+# State is identity-scoped via cognition.fly_registry (per-user SQLite).
+MEMORY_FLYMB_MODE: "live"  # off | shadow | live.
+MEMORY_FLYMB_W: "0.05"  # Live-mode weight of the opponent bias added to grasp scores.
+MEMORY_FLYMB_PROMOTE_W: "0.1"  # Live-mode weight of the bias on journal-promotion scores.
+MEMORY_FLYMB_RECALL_W: "0.01"  # Live-mode KC-overlap bonus on episodic recall (RRF scale ~0.03).
+MEMORY_FLYMB_LTM_W: "0.01"  # Live-mode approach-bias bonus on LTM recall ranking.
+MEMORY_FLYMB_DREAM_W: "0.2"  # Live-mode approach-replay bonus on dream-boost scores (threshold 0.35).
+MEMORY_FLYMB_DECAY_W: "0.5"  # Live-mode half-life stretch for approach-associated memories (slows decay only).
+# -- Biological persistence (cognition/flymemory/store.py + fly_registry) --
+# Learned KC->MBON deltas + compass sleep pressure survive restarts via
+# per-identity SQLite (default ~/.aiko/<user_id>/fly_plasticity.db).
+# The compass bump itself is NOT stored (fresh attention each boot).
+# Base connectome stays read-only. Writes are debounced every
+# FLY_PLASTICITY_EVERY events, plus flush_everything() on clean shutdown.
+# Applies in shadow AND live whenever the layer runs (observation persists;
+# only scores/decisions stay mode-gated).
+FLY_PLASTICITY_DB: ""  # Empty = per-user path; set dir/file to override.
+FLY_PLASTICITY_EVERY: "25"  # Teaching/step events between writes.
+FLY_PLASTICITY_SHARED: "0"  # 1 = single shared DB (dev/single-user only).
+# -- Biological layer II: fly central complex (cognition/centralcomplex) --
+# Ring-attractor focus heading + R5 sleep pressure from real MaleCNS v1.0
+# connectivity. off = zero overhead; shadow = readouts computed +
+# debug-logged per turn, state untouched; live = small drowsiness coupling
+# into attention _energy (weight below). Attention and agent orchestration
+# share one identity-scoped compass via cognition.fly_registry.
+MEMORY_FLYCX_MODE: "live"  # off | shadow | live.
+MEMORY_FLYCX_W: "0.05"  # Live-mode drowsiness coupling weight.
+MEMORY_FLYCX_ATTEMPT_W: "0.05"  # Live-mode PFL decisiveness nudge on attempt-gate confidence.
+# -- Sensory grafts (cognition/flysense) --
+# AL = antennal-lobe gain control on all embeddings (store+query consistent,
+# caches mode-partitioned). DN = descending-neuron prosody vigor on TTS.
+# Presence (webcam motion LEVEL 0..1, throttled) reuses MEMORY_FLYCX_MODE:
+# shadow logs, live nudges attention energy on real presence.
+MEMORY_FLYAL_MODE: "live"  # off | shadow | live.
+MEMORY_FLYDN_MODE: "live"  # off | shadow | live.
 # -- Search ranking and context budget --
+
+# -- Behavioral priors (functional MaleCNS motifs; not full circuits) --
+# Lateral horn: session context familiarity prior (not a second memory store).
+MEMORY_FLYLH_MODE: "live"  # off | shadow | live
+MEMORY_FLYLH_W: "0.05"  # Live-mode weight on context familiarity bias
+# Giant fiber: fast interrupt prior (STOP / urgent / system error).
+MEMORY_FLYGF_MODE: "live"  # off | shadow | live
+# Sleep-pressure maintenance throttle (needle/background). shadow=log only.
+MEMORY_FLYSLEEP_MODE: "live"  # off | shadow | live
+
 
 MEMORY_SEARCH_CACHE_SIZE: "128"  # Max number of memory search results cached in-process.
 MEMORY_SEARCH_CACHE_TTL: "20.0"  # Seconds before cached memory search result expires.

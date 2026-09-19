@@ -243,3 +243,22 @@ def test_engine_win_and_loss_lines(sp, monkeypatch):
     assert out["winner"] == "engine"
     _uid, _game, _m = rec["matches"][0]
     assert _game == "shogi_selfplay" and _m["winner"] == "engine"
+
+
+def test_engine_gets_raw_sfen_not_position_command(sp, monkeypatch):
+    """Regression: best_move_usi() wraps 'position sfen' itself; sending a
+    pre-wrapped command produced 'position position sfen ...' and the
+    engine never replied (human games pass raw SFEN — self-play must too)."""
+    import interface.android_app.shogi.selfplay as real
+    import interface.android_app.shogi.yaneuraou as yu
+    seen = {}
+    def _rec(sfen, movetime_ms=None, depth=None):
+        seen["cmd"] = sfen
+        seen["movetime"] = movetime_ms
+        return "7g7f"
+    monkeypatch.setattr(yu, "best_move_usi", _rec)
+    b = _Board()
+    assert real.engine_choose_move(b) == "7g7f"
+    assert seen["cmd"] == "sfen0", seen["cmd"]
+    assert not seen["cmd"].lstrip().startswith("position")
+    assert seen["movetime"] == 800

@@ -213,11 +213,16 @@ def _is_sente_to_move(board) -> bool:
 # ── engine move ──────────────────────────────────────────────────────────────
 
 def engine_choose_move(board, *, movetime_ms: int | None = None) -> Optional[str]:
-    """Ask YaneuraOu. Returns USI, 'resign', or None on engine failure."""
+    """Ask YaneuraOu. Returns USI, or None on engine failure/resign.
+
+    NOTE: best_move_usi takes a RAW SFEN (it adds the "position sfen"
+    wrapper itself) and already maps engine resign to None.
+    """
     from . import yaneuraou as _yu
     try:
-        cmd = f"position sfen {board.sfen()}"
-        return _yu.best_move_usi(cmd, movetime_ms=movetime_ms)
+        if movetime_ms is None:
+            movetime_ms = _env_int("SELFPLAY_MOVETIME_MS", 800)
+        return _yu.best_move_usi(board.sfen(), movetime_ms=movetime_ms)
     except Exception as exc:
         log.warning("selfplay: engine move failed: %s", exc)
         return None
@@ -258,8 +263,10 @@ def play_game(uid: str, *, aiko_sente: bool | None = None,
     loss_lines = _recent_loss_openings(uid)
     if aiko_sente is None:
         try:
-            from . import records as _records
-            aiko_sente = (_records.total_matches(uid) % 2 == 0)
+            # Alternate on the SELFPLAY store (human-vs-Aiko games must not
+            # shift training colors).
+            from interface.android_app import learn as _learn
+            aiko_sente = (_learn.total_matches(uid, GAME_SELFPLAY) % 2 == 0)
         except Exception:
             aiko_sente = True
     aiko_color = "sente" if aiko_sente else "gote"

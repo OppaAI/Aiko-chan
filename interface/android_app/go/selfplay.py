@@ -127,12 +127,50 @@ def tromp_taylor(board) -> tuple[float, float]:
     return float(black_stones + black_terr), float(white_stones + white_terr + komi)
 
 
+def _star_points(size: int) -> set:
+    """Hoshi points for 9/13/19 (0-indexed)."""
+    offs = {9: (2, 6), 13: (3, 9), 19: (3, 9, 15)}.get(size, ())
+    pts = {(a, b) for a in offs for b in offs}
+    if size % 2 == 1:
+        c = size // 2
+        pts.add((c, c))
+    return pts
+
+
+def _pos_desc(board, gtp: str) -> tuple[int, bool, str]:
+    """(edge distance, is_star, text). First/second line flagged weak."""
+    from .board import parse_gtp_move
+    try:
+        rc = parse_gtp_move(gtp, board.size)
+    except Exception:
+        return 2, False, ""
+    if rc is None:
+        return 99, False, ""
+    r, c = rc
+    edge = min(r, c, board.size - 1 - r, board.size - 1 - c)
+    star = (r, c) in _star_points(board.size)
+    if edge == 0:
+        note = "first line edge — nearly always bad"
+    elif edge == 1:
+        note = "second line — usually weak early"
+    elif star:
+        note = "star point"
+    elif edge >= 3:
+        note = "center"
+    else:
+        note = "3rd line"
+    return edge, star, note
+
+
 def _describe_candidate(board, gtp: str, captured: int) -> str:
     if gtp == "pass":
         return "pass (let opponent move)"
     s = f"play {gtp}"
     if captured > 0:
         s += f", captures {captured}"
+    edge, star, note = _pos_desc(board, gtp)
+    if note:
+        s += f" [{note}]"
     return s
 
 
@@ -153,7 +191,10 @@ def candidate_moves(board, cap: int) -> list[tuple[str, str]]:
             before = sum(trial.captured.values())
             trial.play_gtp(m)
             after = sum(trial.captured.values())
-            scored.append(((0, -(after - before), m), m))
+            edge, star, _ = _pos_desc(board, m)
+            # Captures first, then outward-in (center/star before edges),
+            # GTP order last for determinism.
+            scored.append(((0, -(after - before), -edge, 0 if star else 1, m), m))
         except Exception:
             continue
     scored.sort(key=lambda t: t[0])
@@ -201,7 +242,8 @@ def aiko_choose_move(uid: str, board, *, book: dict, rng: random.Random,
         pick, _, _ = _jev.choice(
             state,
             "Choose Aiko's Go move. Prefer captures and solid shape; "
-            "passing early is usually wrong." + avoid,
+            "play 3rd/4th line and star points early; avoid 1st/2nd line "
+            "edge moves (nearly always bad); passing early is usually wrong." + avoid,
             criteria,
         )
         if pick not in criteria:

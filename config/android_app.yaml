@@ -27,10 +27,11 @@ SELFPLAY_MAX_MOVES: "256"  # Plies before adjudicated draw.
 SELFPLAY_BOOK_MIN_VISITS: "3"  # Book needs this many visits to play a line.
 SELFPLAY_JEV_CANDIDATES: "10"  # Max moves offered to Jev per Aiko turn.
 SELFPLAY_EXPLORATION: "0.05"  # Epsilon for book exploration.
-SELFPLAY_GO_SIZE: "9"  # Board size for Go self-play (9 | 13 | 19). 9x9 trains fastest.
+SELFPLAY_JEV_RETRIES: "3"  # Jev attempts per Aiko decision (plus client-level backoff). Exhaustion voids the game — random moves are never recorded or learned.
+SELFPLAY_GO_SIZE: "13"  # Board size for Go self-play (9 | 13 | 19). 9x9 trains fastest.
 SELFPLAY_GO_KOMI: "6.5"  # Komi for Tromp-Taylor area scoring (all stones alive).
 SELFPLAY_GO_MAX_MOVES: "0"  # Ply cap (0 = size*size*3).
-SELFPLAY_KOI_MONTHS: "3"  # Months per Koi-Koi self-play match (1-12).
+SELFPLAY_KOI_MONTHS: "6"  # Months per Koi-Koi self-play match (1-12).
 SELFPLAY_KOI_BLUNDER: "easy"  # Heuristic sparring level (beatable curriculum).
 
 # -- KataGo (Go engine, GTP) --

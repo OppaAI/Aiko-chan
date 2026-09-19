@@ -85,3 +85,18 @@ def test_book_position_key_stable():
     b.play_gtp("D4")
     assert position_key(a) == position_key(b)
     assert position_key(GoBoard(9)) != position_key(a)
+
+
+def test_jev_down_voids_go_game(monkeypatch, tmp_path):
+    import interface.android_app.go.selfplay as sp
+    import interface.android_app.learn as learnmod
+    import agentic.toolkit.jev as jevmod
+    monkeypatch.setattr(jevmod, "choice", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    monkeypatch.setattr(jevmod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sp, "book_path", lambda uid: tmp_path / "g.json")
+    appended = []
+    monkeypatch.setattr(learnmod, "append_match",
+                        lambda uid, game, rec: appended.append(rec))
+    out = sp.play_game("u", size=9, rng=__import__("random").Random(0), max_moves=6)
+    assert out["winner"] == "void" and out["end"] == "jev-down"
+    assert appended == []

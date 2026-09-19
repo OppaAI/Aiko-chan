@@ -89,7 +89,10 @@ def _describe_play(hand: int, take: list[int]) -> str:
 
 def aiko_choose_play(uid: str, hand: int, takes_list: list[list[int]], captured: list[int],
                      loss_lines: list[str]) -> tuple[list[int], str]:
-    """Pick one take for an already-chosen hand card. Returns (take, source)."""
+    """Pick one take for an already-chosen hand card. Returns (take, source).
+
+    No random fallback: Jev failure raises (game voids) rather than guessing.
+    """
     from agentic.toolkit import jev as _jev
     takes = [list(t) for t in takes_list]
     if len(takes) <= 1:
@@ -98,25 +101,25 @@ def aiko_choose_play(uid: str, hand: int, takes_list: list[list[int]], captured:
     avoid = " Avoid lines resembling these recent losses: " + " | ".join(loss_lines[:3]) \
         if loss_lines else ""
     state = {"hand": hand, "captured": len(captured), "options": len(takes)}
-    try:
+    def _ask():
         pick, _, _ = _jev.choice(
             state,
             "Choose Aiko's hanafuda play. Prefer takes that capture high-value "
             "cards and build toward yaku." + avoid,
             criteria,
         )
-        if pick in criteria:
-            return takes[int(pick[4:])], "jev"
-        log.warning("koikoi selfplay: Jev picked unknown play %r", pick)
-    except Exception as exc:
-        log.warning("koikoi selfplay: Jev unavailable, random fallback: %s", exc)
-    import random as _rnd
-    return _rnd.choice(takes), "random-fallback"
+        if pick not in criteria:
+            raise _jev.JevError(f"unknown play pick {pick!r}")
+        return pick
+    return takes[int(_jev.decide(_ask, label="koikoi-play")[4:])], "jev"
 
 
 def aiko_choose_card(uid: str, options: list[tuple[int, list[int]]], captured: list[int],
                      loss_lines: list[str], cap: int, rng: random.Random) -> tuple[int, list[int], str]:
-    """Choose which hand card to play, then which take. Returns (hand, take, source)."""
+    """Choose which hand card to play, then which take. Returns (hand, take, source).
+
+    No random fallback (see aiko_choose_play).
+    """
     by_card: dict[int, list[list[int]]] = {}
     for h, t in options:
         by_card.setdefault(h, []).append(list(t))
@@ -132,23 +135,22 @@ def aiko_choose_card(uid: str, options: list[tuple[int, list[int]]], captured: l
     from agentic.toolkit import jev as _jev
     criteria = {f"card{i}": f"play card {h} ({len(takes)} takes available)"
                 for i, (h, takes) in enumerate(ordered)}
-    try:
+    def _ask():
         pick, _, _ = _jev.choice(
             {"cards": [h for h, _ in ordered], "captured": len(captured)},
             "Choose which hanafuda card Aiko plays. Prefer cards with rich takes." +
             (" Avoid lines resembling these recent losses: " + " | ".join(loss_lines[:3]) if loss_lines else ""),
             criteria,
         )
-        if pick in criteria:
-            h, takes = ordered[int(pick[4:])]
-            if len(takes) == 1:
-                return h, takes[0], "jev"
-            take, _ = aiko_choose_play(uid, h, takes, captured, loss_lines)
-            return h, take, "jev"
-    except Exception as exc:
-        log.warning("koikoi selfplay: Jev card pick unavailable, random fallback: %s", exc)
-    h = rng.choice([h for h, _ in ordered])
-    return h, rng.choice(by_card[h]), "random-fallback"
+        if pick not in criteria:
+            raise _jev.JevError(f"unknown card pick {pick!r}")
+        return pick
+    pick = _jev.decide(_ask, label="koikoi-card")
+    h, takes = ordered[int(pick[4:])]
+    if len(takes) == 1:
+        return h, takes[0], "jev"
+    take, _ = aiko_choose_play(uid, h, takes, captured, loss_lines)
+    return h, take, "jev"
 
 
 def aiko_choose_decision(captured: list[int], opp_captured: list[int], koi: int,
@@ -160,7 +162,7 @@ def aiko_choose_decision(captured: list[int], opp_captured: list[int], koi: int,
         mine = C.yaku_points(C.detect_yaku(captured))
     except Exception:
         mine = 0
-    try:
+    def _ask():
         pick, _, _ = _jev.choice(
             {"my_points_now": mine, "multiplier": koi + 1, "cards_left": cards_left,
              "opp_cards": len(opp_captured)},
@@ -168,11 +170,10 @@ def aiko_choose_decision(captured: list[int], opp_captured: list[int], koi: int,
             "Stop with solid points; continue only with a commanding lead.",
             {"koi": "continue for higher stakes", "stop": "bank the points now"},
         )
-        if pick in ("koi", "stop"):
-            return pick, "jev"
-    except Exception as exc:
-        log.warning("koikoi selfplay: Jev decision unavailable: %s", exc)
-    return ("stop" if mine >= 5 else "koi"), "random-fallback"
+        if pick not in ("koi", "stop"):
+            raise _jev.JevError(f"unknown decision pick {pick!r}")
+        return pick
+    return _jev.decide(_ask, label="koikoi-decision"), "jev"
 
 
 def _recent_loss_signatures(uid: str, n: int = 3) -> list[str]:
@@ -242,7 +243,17 @@ def play_match(uid: str, games: int = 1, *, months: int | None = None,
                 guard_turns += 1
                 side = game["turn"]
                 if side == AIKO_SEAT:
-                    _aiko_turn(game, book, loss_lines, cap, rng, sources)
+                    try:
+                        _aiko_turn(game, book, loss_lines, cap, rng, sources)
+                    except Exception as exc:
+                        # Jev down (or undecidable): void the match rather than
+                        # guessing — random plays would poison book + teaching.
+                        from agentic.toolkit.jev import JevUnavailable
+                        end = "jev-down" if isinstance(exc, JevUnavailable) else f"error: {type(exc).__name__}"
+                        log.warning("koikoi selfplay: Aiko cannot move (%s), voiding match", end)
+                        result.update(winner="void", end=end)
+                        game["status"] = "finished"
+                        break
                 else:
                     _eng_turn(game, blunder, rng, sources)
                 if game.get("status") != "playing":
@@ -266,6 +277,11 @@ def play_match(uid: str, games: int = 1, *, months: int | None = None,
                           end="finished",
                           aiko_pts=int(game["totals"]["aiko"]),
                           engine_pts=int(game["totals"]["you"]))
+        from collections import Counter as _Counter
+        log.info("koikoi selfplay game over: %s (%s) %s-%s pts | decisions=%s",
+                 result.get("winner"), result.get("end"),
+                 result.get("aiko_pts", 0), result.get("engine_pts", 0),
+                 dict(_Counter(sources)) or "none")
         if result["winner"] in ("aiko", "engine", "draw"):
             _learn_from_match(uid, game, result, book)
     except Exception as exc:

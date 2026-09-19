@@ -172,15 +172,15 @@ def test_book_hit_skips_jev(sp, monkeypatch):
     assert usi == "7g7f" and src == "book" and not called
 
 
-def test_jev_fallback_is_random(sp, monkeypatch):
+def test_jev_down_voids_instead_of_guessing(sp, monkeypatch):
+    """No random fallback anymore: Jev failure voids (tested end-to-end below)."""
     import agentic.toolkit.jev as jevmod
+    import interface.android_app.shogi.selfplay as real
     monkeypatch.setattr(jevmod, "choice", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    monkeypatch.setattr(jevmod.time, "sleep", lambda s: None)
     b = _Board()
-    usi, src = sp.aiko_choose_move("u", b, book={}, rng=random.Random(0), loss_lines=[])
-    assert src == "random-fallback" and usi in ("7g7f", "2g2f")
-
-
-# ── full games ─────────────────────────────────────────────────────────────────
+    with pytest.raises(jevmod.JevUnavailable):
+        real.aiko_choose_move("u", b, book={}, rng=random.Random(0), loss_lines=[])
 
 def _patch_learning(sp, monkeypatch, mb=None):
     rec = {"matches": [], "exp": []}
@@ -367,3 +367,58 @@ def test_book_bans_proven_losers_and_breaks_ties_randomly(sp, monkeypatch):
     picks = {real.aiko_choose_move("u", b, book=book2, rng=random.Random(s), loss_lines=[])[0]
              for s in range(10)}
     assert picks == {"2g2f", "7g7f"}
+
+
+def test_jev_retry_then_decide(sp, monkeypatch):
+    """Transient Jev failures retry; the move still comes from Jev."""
+    import agentic.toolkit.jev as jevmod
+    monkeypatch.setattr(jevmod.time, "sleep", lambda s: None)
+    calls = []
+
+    def flaky(state, ins, crit):
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError("blip")
+        return (sorted(crit)[0], {}, 0.9)
+
+    monkeypatch.setattr(jevmod, "choice", flaky)
+    b = _Board()
+    usi, src = sp.aiko_choose_move("u", b, book={}, rng=random.Random(0), loss_lines=[])
+    assert (usi, src) == ("2g2f", "jev") and len(calls) == 3
+
+
+def test_jev_down_voids_game(sp, monkeypatch):
+    """Exhausted Jev voids the game: nothing recorded, nothing learned."""
+    import agentic.toolkit.jev as jevmod
+    import interface.android_app.learn as learnmod
+    import agentic.experience.acquire as acq
+    monkeypatch.setattr(jevmod, "choice", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    monkeypatch.setattr(jevmod.time, "sleep", lambda s: None)
+    appended = []
+    monkeypatch.setattr(learnmod, "append_match",
+                        lambda uid, game, rec: appended.append(rec))
+    monkeypatch.setattr(acq, "record_experience", lambda *a, **k: "x")
+    import interface.android_app.shogi.selfplay as real
+    orig_board = _ShogiMod.__dict__["Board"]
+    _ShogiMod.Board = staticmethod(lambda: _Board(script_end=30))
+    try:
+        out = real.play_game("u", aiko_sente=True, rng=random.Random(0))
+    finally:
+        _ShogiMod.Board = orig_board
+    assert out["winner"] == "void" and out["end"] == "jev-down"
+    assert appended == []
+
+
+def test_jev_auth_fails_fast(sp, monkeypatch):
+    """Bad key: no pointless retries."""
+    import agentic.toolkit.jev as jevmod
+    calls = []
+
+    def authed(state, ins, crit):
+        calls.append(1)
+        raise jevmod.JevAuthError("bad key")
+
+    monkeypatch.setattr(jevmod, "choice", authed)
+    with pytest.raises(jevmod.JevAuthError):
+        jevmod.decide(lambda: jevmod.choice({}, "i", {"a": "b"}), label="t")
+    assert len(calls) == 1

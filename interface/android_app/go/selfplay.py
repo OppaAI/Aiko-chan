@@ -165,7 +165,10 @@ def candidate_moves(board, cap: int) -> list[tuple[str, str]]:
 
 def aiko_choose_move(uid: str, board, *, book: dict, rng: random.Random,
                      loss_lines: list[str]) -> tuple[str, str]:
-    """Return (gtp, source): book | jev | random-fallback."""
+    """Return (gtp, source): book | jev | forced.
+
+    No random fallback: Jev failure voids the game rather than teaching fiction.
+    """
     from agentic.toolkit import jev as _jev
     cap = _env_int("SELFPLAY_JEV_CANDIDATES", 12)
     cands = candidate_moves(board, cap)
@@ -193,20 +196,19 @@ def aiko_choose_move(uid: str, board, *, book: dict, rng: random.Random,
         if loss_lines else ""
     state = {"size": board.size, "turn": "B" if board.turn == 1 else "W",
              "history": list(board.history[-12:]), "candidates": [m for m, _ in cands]}
-    try:
+
+    def _ask():
         pick, _, _ = _jev.choice(
             state,
             "Choose Aiko's Go move. Prefer captures and solid shape; "
             "passing early is usually wrong." + avoid,
             criteria,
         )
-        if pick in criteria:
-            return pick, "jev"
-        log.warning("go selfplay: Jev picked unknown move %r", pick)
-    except Exception as exc:
-        log.warning("go selfplay: Jev unavailable, random fallback: %s", exc)
-    non_pass = [m for m, _ in cands if m != "pass"]
-    return rng.choice(non_pass or [m for m, _ in cands]), "random-fallback"
+        if pick not in criteria:
+            raise _jev.JevError(f"unknown move pick {pick!r}")
+        return pick
+
+    return _jev.decide(_ask, label="go-move"), "jev"
 
 
 def engine_choose_move(board, *, uid=None) -> tuple[Optional[str], str]:
@@ -280,8 +282,15 @@ def play_game(uid: str, *, size: int | None = None,
                 break
             aiko_turn = (board.turn == BLACK) == aiko_black
             if aiko_turn:
-                mv, src = aiko_choose_move(uid, board, book=book, rng=rng,
-                                           loss_lines=loss_lines)
+                try:
+                    mv, src = aiko_choose_move(uid, board, book=book, rng=rng,
+                                               loss_lines=loss_lines)
+                except Exception as exc:
+                    from agentic.toolkit.jev import JevUnavailable
+                    end = "jev-down" if isinstance(exc, JevUnavailable) else f"error: {type(exc).__name__}"
+                    log.warning("go selfplay: Aiko cannot move (%s), voiding game", end)
+                    result.update(winner="void", end=end)
+                    break
             else:
                 mv, src = engine_choose_move(board, uid=uid)
                 if mv is None:
@@ -304,8 +313,10 @@ def play_game(uid: str, *, size: int | None = None,
                 break
         else:
             pass
-        if result["winner"] == "void" and result.get("end") not in ("stopped", "engine-error") \
-                and not result["end"].startswith("illegal") and not result["end"].startswith("error"):
+        # Score ONLY clean completions: every abort path above sets end to
+        # something other than the initial "aborted" (stopped, engine-error,
+        # illegal-*, error:*, jev-down). Never score a voided game.
+        if result["winner"] == "void" and result.get("end") == "aborted":
             bpts, wpts = tromp_taylor(board)
             if abs(bpts - wpts) < 1e-9:
                 result.update(winner="draw", end="scored-draw")
@@ -317,6 +328,10 @@ def play_game(uid: str, *, size: int | None = None,
                               white_points=round(wpts, 1))
         result["moves_made"] = len(moves)
         result["moves"] = moves
+        from collections import Counter as _Counter
+        log.info("go selfplay game over: %s (%s) in %d as %s | decisions=%s",
+                 result.get("winner"), result.get("end"), len(moves),
+                 aiko_color, dict(_Counter(sources)) or "none")
         if result["winner"] in ("aiko", "engine", "draw"):
             _learn_from_game(uid, moves=moves, aiko_color=aiko_color,
                              result=result, book=book, sources=sources,

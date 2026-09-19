@@ -53,3 +53,19 @@ def test_decision_and_stop(monkeypatch, tmp_path):
 def test_sig_stable():
     from interface.android_app.koikoi.selfplay import _sig
     assert _sig([3, 1, 2], [9, 7], 2) == _sig([1, 2, 3], [7, 9], 2)
+
+
+def test_jev_down_voids_koi_match(monkeypatch, tmp_path):
+    import interface.android_app.koikoi.selfplay as sp
+    import agentic.toolkit.jev as jevmod
+    monkeypatch.setattr(jevmod, "choice", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    monkeypatch.setattr(jevmod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sp, "book_path", lambda uid: tmp_path / "k.json")
+    import interface.android_app.learn as learnmod
+    appended = []
+    monkeypatch.setattr(learnmod, "append_match",
+                        lambda uid, game, rec: appended.append(rec))
+    import random
+    out = sp.play_match("u", months=1, rng=random.Random(0))
+    assert out["winner"] == "void" and out["end"] == "jev-down"
+    assert appended == []

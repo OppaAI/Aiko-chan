@@ -133,3 +133,37 @@ def score(state, instructions: str, criteria: list, **kw) -> tuple[float, dict, 
         raise JevError(f"unexpected score answer: {str(ans)[:200]}")
     return (float(ans["score"]), dict(ans.get("probabilities") or {}),
             float(ans.get("confidence", 0.0)))
+
+
+class JevUnavailable(JevError):
+    """Jev could not decide after retries. Callers must void the turn/game —
+    a guessed move would pollute learning with fiction."""
+
+
+def _decide_retries() -> int:
+    try:
+        return max(0, int(os.getenv("SELFPLAY_JEV_RETRIES", "3")))
+    except Exception:
+        return 3
+
+
+def decide(call, *, label: str = "decision"):
+    """Run a zero-arg Jev call with retries; raise JevUnavailable on exhaustion.
+
+    Auth errors fail fast (retrying a bad key is pointless). Everything else
+    gets SELFPLAY_JEV_RETRIES attempts (default 3) with capped backoff, on
+    top of the per-request retries inside evaluate().
+    """
+    tries = max(1, _decide_retries())
+    last: Exception | None = None
+    for attempt in range(tries):
+        try:
+            return call()
+        except JevAuthError:
+            raise
+        except Exception as exc:
+            last = exc
+            log.debug("jev %s failed (attempt %d/%d): %s", label, attempt + 1, tries, exc)
+            if attempt + 1 < tries:
+                time.sleep(min(30.0, 2.0 ** attempt))
+    raise JevUnavailable(f"jev {label} failed after {tries} attempts: {last}")

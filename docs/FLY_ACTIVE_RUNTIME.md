@@ -19,6 +19,23 @@ but a turn activates a deterministic, size-limited forward subgraph.
 6. Avatar output is restricted to expression, viseme, and pose intents;
    external actions require an approval-capable scheduler/policy.
 
+## Embodiment and autonomy boundary
+
+The active graph can propose only reversible VRM body language (expression and
+pose) from its current output plus the identity's existing affect state. These
+proposals are traceable in Studio and are not automatically translated into
+speech, messages, purchases, browser actions, hardware control, or new sensor
+access. Those consequential capabilities remain behind their existing consent,
+conscience, permission, and approval layers; a learned conscience is not a
+safe replacement for independent technical controls.
+
+The repository does **not** bundle the full MaleCNS release. The public release
+is large (the complete weights artifact alone is about 1 GB) and this runtime
+does not yet provide a validated, redistributable 166k-neuron importer. Its
+catalog interface is ready to index such an extract once a verified source
+artifact and its license/checksum are supplied. Shipping a made-up or partial
+file as "all 166k neurons" would be misleading.
+
 ## Operations
 
 Use the Fly Studio endpoint `/studio/fly/api/trace` to inspect the active node

@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 
 from .catalog import ConnectomeCatalog
 from .dynamics import ActiveDynamics
+from .embodiment import AvatarEmbodiment
+from cognition.neural_state import peek_neural_state
 
 
 @dataclass
@@ -14,6 +16,7 @@ class FlyRuntime:
     catalog: ConnectomeCatalog
     user_id: str | None = None
     trace: dict = field(default_factory=dict)
+    embodiment: AvatarEmbodiment = field(default_factory=AvatarEmbodiment)
 
     def activate(self, seeds: list[str], drive: dict[str, float], *, budget: int = 20000, max_hops: int = 4, mode: str = "live", observations: list[dict] | None = None) -> dict:
         if mode not in {"shadow", "live"}:
@@ -29,6 +32,11 @@ class FlyRuntime:
         for _ in range(min(8, max(1, max_hops + 1))):
             rates = dynamics.step(drive)
         outputs = {node_id: value for node_id, value in rates.items() if self.catalog.nodes[node_id].type in {"DN", "VNC", "output"}}
+        sensory = max((v for node, v in rates.items() if self.catalog.nodes[node].type in {"sensory", "AL", "T4", "T5"}), default=0.0)
+        output_drive = max(outputs.values(), default=0.0)
+        current_state = peek_neural_state(self.user_id)
+        valence = current_state.valence if current_state is not None else 0.0
+        intents = self.embodiment.propose(valence=valence, arousal=output_drive, motion_salience=sensory, output_drive=output_drive)
         self.trace = {
             "at": time.time(), "user_id": self.user_id, "seeds": sorted(seeds),
             "budget": budget, "active_nodes": len(active["nodes"]), "active_edges": len(active["edges"]),
@@ -37,6 +45,7 @@ class FlyRuntime:
             "observations": list(observations or []),
             "rates": {key: round(value, 5) for key, value in rates.items() if value > 0},
             "outputs": {key: round(value, 5) for key, value in outputs.items()},
+            "avatar_intents": [intent.as_dict() for intent in intents],
             "nodes": [
                 {"id": node.id, "type": node.type, "region": node.region, "rate": round(rates.get(node.id, 0.0), 5)}
                 for node in active["nodes"]

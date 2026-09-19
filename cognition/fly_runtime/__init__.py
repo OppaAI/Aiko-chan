@@ -9,6 +9,7 @@ from .catalog import ConnectomeCatalog, Edge, Node
 from .dynamics import ActiveDynamics
 from .runtime import FlyRuntime, get_fly_runtime, peek_fly_runtime
 from .adapters import SensoryObservation, auditory_observation, motion_observation, visual_observation
+from .embodiment import AvatarEmbodiment, AvatarIntent
 
 __all__ = [
     "ActiveDynamics",
@@ -22,4 +23,6 @@ __all__ = [
     "auditory_observation",
     "motion_observation",
     "visual_observation",
+    "AvatarEmbodiment",
+    "AvatarIntent",
 ]

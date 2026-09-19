@@ -33,6 +33,7 @@ def test_runtime_is_identity_scoped_and_publishes_bounded_readouts():
 
     assert trace["active_nodes"] == 3
     assert trace["outputs"]["dn"] > 0
+    assert {intent["kind"] for intent in trace["avatar_intents"]} == {"expression", "pose"}
     assert get_neural_state("runtime-a").motion_salience > 0
     assert get_fly_runtime("runtime-a", catalog) is not get_fly_runtime("runtime-b", catalog)
 

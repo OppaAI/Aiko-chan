@@ -764,3 +764,161 @@ async def resign(session: dict = Depends(_require_user)):
                 tuple(_games[uid].get("lessons") or ()),
             )
     return _state_response(uid, ai_comment=comment)
+
+
+# ── self-play sessions (Aiko vs YaneuraOu, background thread + polling) ─────
+# Games take minutes (a Jev call per Aiko move), so start() returns fast and
+# the app polls state(). One active session per user; stop() halts gracefully.
+
+_selfplay: dict[str, dict] = {}
+_selfplay_lock: threading.Lock | None = None
+
+
+def _sp_lock() -> threading.Lock:
+    global _selfplay_lock
+    if _selfplay_lock is None:
+        import threading as _th
+        _selfplay_lock = _th.Lock()
+    return _selfplay_lock
+
+
+class SelfplayStartRequest(BaseModel):
+    games: int = 1
+
+
+class SelfplayState(BaseModel):
+    running: bool = False
+    game_index: int = 0
+    games_total: int = 0
+    sfen: str = ""
+    moves: list[str] = []
+    status: str = "idle"
+    last_winner: str = ""
+    last_end: str = ""
+    aiko_wins: int = 0
+    engine_wins: int = 0
+    draws: int = 0
+    matches: int = 0
+
+
+def _selfplay_stats(uid: str) -> dict:
+    try:
+        from interface.android_app import learn as _learn
+        st = _learn.stats(uid, "shogi_selfplay")
+        engine = sum(1 for r in _learn.load_recent(uid, "shogi_selfplay", 200)
+                     if r.get("winner") == "engine")
+        return {"aiko_wins": int(st.get("aiko_wins", 0)), "engine_wins": engine,
+                "draws": int(st.get("draws", 0)), "matches": int(st.get("matches", 0))}
+    except Exception:
+        return {"aiko_wins": 0, "engine_wins": 0, "draws": 0, "matches": 0}
+
+
+def _selfplay_snapshot(uid: str) -> SelfplayState:
+    sess = _selfplay.get(uid) or {}
+    st = _selfplay_stats(uid)
+    return SelfplayState(
+        running=bool(sess.get("running", False)),
+        game_index=int(sess.get("game_index", 0)),
+        games_total=int(sess.get("games_total", 0)),
+        sfen=str(sess.get("sfen", "")),
+        moves=list(sess.get("moves", [])),
+        status=str(sess.get("status", "idle")),
+        last_winner=str(sess.get("last_winner", "")),
+        last_end=str(sess.get("last_end", "")),
+        aiko_wins=st["aiko_wins"], engine_wins=st["engine_wins"],
+        draws=st["draws"], matches=st["matches"],
+    )
+
+
+def _run_selfplay(uid: str, games: int) -> None:
+    from . import selfplay as _sp
+    try:
+        for i in range(max(1, games)):
+            with _sp_lock():
+                sess = _selfplay.get(uid)
+                if not sess or sess.get("stop"):
+                    break
+                sess["game_index"] = i + 1
+                sess["status"] = "playing"
+
+            def _on_ply(sfen: str, moves: list[str], _i=i) -> None:
+                with _sp_lock():
+                    sess = _selfplay.get(uid)
+                    if sess is not None:
+                        sess["sfen"] = sfen
+                        sess["moves"] = moves
+
+            def _is_stopped() -> bool:
+                with _sp_lock():
+                    sess = _selfplay.get(uid)
+                    return sess is None or bool(sess.get("stop"))
+
+            out = _sp.play_game(uid, on_ply=_on_ply, is_stopped=_is_stopped)
+            with _sp_lock():
+                sess = _selfplay.get(uid)
+                if sess is not None:
+                    sess["last_winner"] = str(out.get("winner", ""))
+                    sess["last_end"] = str(out.get("end", ""))
+                    sess["status"] = "stopped" if out.get("end") == "stopped" else "game-done"
+                    if sess.get("stop"):
+                        break
+    except Exception as exc:
+        log.warning("selfplay session failed for %s: %s", uid, exc)
+        with _sp_lock():
+            sess = _selfplay.get(uid)
+            if sess is not None:
+                sess["status"] = f"error: {type(exc).__name__}"
+    finally:
+        with _sp_lock():
+            sess = _selfplay.get(uid)
+            if sess is not None:
+                sess["running"] = False
+
+
+@router.post("/selfplay/start", response_model=SelfplayState)
+async def selfplay_start(body: SelfplayStartRequest, session: dict = Depends(_require_user)):
+    """Start a background Aiko-vs-engine self-play session (fast return)."""
+    uid = session["user_id"]
+    try:
+        from . import yaneuraou
+        if not yaneuraou.available():
+            raise HTTPException(status_code=503, detail="YaneuraOu engine offline (set YANEURAOU_PATH)")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"engine check failed: {exc}")
+    games = max(1, min(int(body.games or 1), 20))
+    try:
+        shogi = _import_shogi()
+        sfen0 = shogi.Board().sfen()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    with _sp_lock():
+        sess = _selfplay.get(uid)
+        if sess is not None and sess.get("running"):
+            raise HTTPException(status_code=409, detail="self-play already running")
+        _selfplay[uid] = {"running": True, "stop": False, "game_index": 0,
+                          "games_total": games, "sfen": sfen0, "moves": [],
+                          "status": "starting", "last_winner": "", "last_end": ""}
+    import threading as _th
+    _th.Thread(target=_run_selfplay, args=(uid, games), daemon=True).start()
+    return _selfplay_snapshot(uid)
+
+
+@router.get("/selfplay/state", response_model=SelfplayState)
+async def selfplay_state(session: dict = Depends(_require_user)):
+    """Poll self-play progress (board SFEN, moves, last result, stats)."""
+    return _selfplay_snapshot(session["user_id"])
+
+
+@router.post("/selfplay/stop", response_model=SelfplayState)
+async def selfplay_stop(session: dict = Depends(_require_user)):
+    """Request a graceful stop (current game finishes as void)."""
+    uid = session["user_id"]
+    with _sp_lock():
+        sess = _selfplay.get(uid)
+        if sess is None or not sess.get("running"):
+            raise HTTPException(status_code=404, detail="no running self-play")
+        sess["stop"] = True
+        sess["status"] = "stopping"
+    return _selfplay_snapshot(uid)

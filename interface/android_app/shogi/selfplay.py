@@ -244,8 +244,13 @@ def _game_end(board) -> Optional[str]:
 def play_game(uid: str, *, aiko_sente: bool | None = None,
               movetime_ms: int | None = None,
               max_moves: int | None = None,
-              rng: random.Random | None = None) -> dict[str, Any]:
-    """Play one full Aiko-vs-engine game. Never raises on game logic errors."""
+              rng: random.Random | None = None,
+              on_ply=None, is_stopped=None) -> dict[str, Any]:
+    """Play one full Aiko-vs-engine game. Never raises on game logic errors.
+
+    on_ply(sfen, moves) is called after every ply (progress reporting);
+    is_stopped() polled per ply aborts the game as void (not recorded).
+    """
     shogi = _require_shogi()
     rng = rng or random.Random()
     max_plies = _env_int("SELFPLAY_MAX_MOVES", 256) if max_moves is None else max(10, int(max_moves))
@@ -266,6 +271,13 @@ def play_game(uid: str, *, aiko_sente: bool | None = None,
                               "aiko_color": aiko_color, "moves": moves}
     try:
         for _ in range(max_plies):
+            if is_stopped is not None:
+                try:
+                    if is_stopped():
+                        result.update(winner="void", end="stopped")
+                        break
+                except Exception:
+                    pass
             end = _game_end(board)
             if end == "checkmate":
                 # Side to move is mated; the other side wins.
@@ -298,6 +310,11 @@ def play_game(uid: str, *, aiko_sente: bool | None = None,
                 result.update(end=f"illegal-{src}")
                 break
             moves.append(usi)
+            if on_ply is not None:
+                try:
+                    on_ply(board.sfen(), list(moves))
+                except Exception as exc:
+                    log.debug("selfplay on_ply skipped: %s", exc)
         else:
             result.update(winner="draw", end="move-cap")
         result["moves_made"] = len(moves)
@@ -405,9 +422,18 @@ def _learn_from_game(uid: str, *, moves: list[str], aiko_color: str,
 
 
 def play_match(uid: str, games: int = 1, **kw) -> list[dict]:
-    """Play N games (colors alternate). Returns per-game result dicts."""
+    """Play N games (colors alternate). Returns per-game result dicts.
+
+    Accepts on_ply / is_stopped passthroughs (see play_game).
+    """
     out = []
     for _ in range(max(1, int(games))):
+        if kw.get("is_stopped") is not None:
+            try:
+                if kw["is_stopped"]():
+                    break
+            except Exception:
+                pass
         out.append(play_game(uid, **kw))
         time.sleep(0.5)
     return out

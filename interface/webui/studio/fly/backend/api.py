@@ -5,6 +5,7 @@ static frontend, mounted at /studio/fly from interface.webui.auth.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI, Query, Request
@@ -12,6 +13,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from interface.webui.studio.session_binding import bind_login_session
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Aiko Fly Circuit Studio")
 bind_login_session(app)
@@ -162,8 +165,9 @@ def fly_trace(request: Request, node_limit: int = Query(160, ge=1, le=500), edge
             trace["display_edges"] = len(trace["edges"])
         state = peek_neural_state(uid)
         neural_state = state.snapshot() if state is not None else {}
-    except Exception as exc:
-        trace = {"error": str(exc)}
+    except Exception:
+        logger.exception("Fly Studio trace retrieval failed")
+        trace = {"error": "trace unavailable"}
         neural_state = {}
     return JSONResponse({"user_id": uid, "trace": trace, "neural_state": neural_state}, headers={"Cache-Control": "no-store"})
 

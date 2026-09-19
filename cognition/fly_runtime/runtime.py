@@ -17,8 +17,13 @@ class FlyRuntime:
     user_id: str | None = None
     trace: dict = field(default_factory=dict)
     embodiment: AvatarEmbodiment = field(default_factory=AvatarEmbodiment)
+    _activation_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)
 
     def activate(self, seeds: list[str], drive: dict[str, float], *, budget: int = 20000, max_hops: int = 4, mode: str = "live", observations: list[dict] | None = None) -> dict:
+        with self._activation_lock:
+            return self._activate(seeds, drive, budget=budget, max_hops=max_hops, mode=mode, observations=observations)
+
+    def _activate(self, seeds: list[str], drive: dict[str, float], *, budget: int, max_hops: int, mode: str, observations: list[dict] | None) -> dict:
         if mode not in {"shadow", "live"}:
             raise ValueError("mode must be 'shadow' or 'live'")
         active = self.catalog.subgraph(seeds, budget=budget, max_hops=max_hops)
@@ -65,7 +70,7 @@ class FlyRuntime:
             from cognition.neural_state import get_neural_state
             state = get_neural_state(self.user_id)
             sensory = max((v for node, v in rates.items() if self.catalog.nodes[node].type in {"sensory", "AL", "T4", "T5"}), default=0.0)
-            vigor = max(outputs.values(), default=0.5)
+            vigor = max(outputs.values(), default=0.0)
             state.sensory_gain = max(0.5, min(1.5, 0.5 + sensory))
             state.motion_salience = max(0.0, min(1.0, sensory))
             state.publish_dn(arousal=vigor, rate_mult=0.8 + 0.4 * vigor, source="active_subgraph")

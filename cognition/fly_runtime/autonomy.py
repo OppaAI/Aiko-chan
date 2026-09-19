@@ -15,10 +15,12 @@ class ActionScheduler:
     def admit(self, action: dict, *, approved: bool = False) -> bool:
         kind = str(action.get("kind", ""))
         now = time.monotonic()
-        allowed = kind in self.allowed or approved
+        allowlisted = kind in self.allowed
+        allowed = allowlisted or approved
         cooled = now - self._last_at.get(kind, float("-inf")) >= self.cooldown_s
         accepted = bool(allowed and cooled)
-        self.audit.append({"kind": kind, "accepted": accepted, "reason": "allowed" if accepted else ("approval_required" if not allowed else "cooldown")})
+        reason = ("allowed" if allowlisted else "approved") if accepted else ("approval_required" if not allowed else "cooldown")
+        self.audit.append({"kind": kind, "accepted": accepted, "reason": reason})
         if accepted:
             self._last_at[kind] = now
         return accepted

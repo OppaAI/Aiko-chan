@@ -55,7 +55,8 @@ class ConnectomeCatalog:
         with path.open("rb") as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
             payload = mapped.read()
         raw = json.loads(payload.decode("utf-8"))
-        checksum = hashlib.sha256(payload).hexdigest()
+        checksum_payload = json.dumps({key: value for key, value in raw.items() if key != "checksum"}, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        checksum = hashlib.sha256(checksum_payload).hexdigest()
         nodes = [Node(str(n["id"]), str(n.get("type", "unknown")), str(n.get("region", "unknown"))) for n in raw.get("nodes", [])]
         edges = [Edge(str(e["source"]), str(e["target"]), float(e.get("weight", 1.0)), str(e.get("sign", "unknown"))) for e in raw.get("edges", [])]
         declared = str(raw.get("checksum", checksum))
@@ -73,27 +74,41 @@ class ConnectomeCatalog:
 
     def subgraph(self, seeds: Iterable[str], *, budget: int = 20000, max_hops: int = 4) -> dict:
         """Return a deterministic forward path query, never exceeding *budget*."""
+        valid_seeds = sorted(set(seeds).intersection(self.nodes))
         if budget < 1:
             return {
-                "nodes": [], "edges": [], "truncated": bool(tuple(seeds)),
+                "nodes": [], "edges": [], "truncated": bool(valid_seeds),
                 "source": self.source, "version": self.version, "checksum": self.checksum,
             }
         selected: set[str] = set()
-        queue = deque((seed, 0) for seed in sorted(set(seeds)) if seed in self.nodes)
-        while queue and len(selected) < budget:
-            node_id, depth = queue.popleft()
-            if node_id in selected:
+        selected_order: list[str] = []
+        scheduled: set[str] = set()
+        queue = deque()
+        truncated = False
+        for seed in valid_seeds:
+            if len(scheduled) >= budget:
+                truncated = True
                 continue
+            scheduled.add(seed)
+            queue.append((seed, 0))
+        while queue:
+            node_id, depth = queue.popleft()
             selected.add(node_id)
+            selected_order.append(node_id)
             if depth < max_hops:
                 for edge in self._out.get(node_id, ()):
-                    if edge.target not in selected:
-                        queue.append((edge.target, depth + 1))
-        edges = [edge for edge in self.edges if edge.source in selected and edge.target in selected]
+                    if edge.target in scheduled:
+                        continue
+                    if len(scheduled) >= budget:
+                        truncated = True
+                        continue
+                    scheduled.add(edge.target)
+                    queue.append((edge.target, depth + 1))
+        edges = [edge for node_id in selected_order for edge in self._out.get(node_id, ()) if edge.target in selected]
         return {
             "nodes": [self.nodes[node_id] for node_id in sorted(selected)],
             "edges": edges,
-            "truncated": bool(queue),
+            "truncated": truncated,
             "source": self.source,
             "version": self.version,
             "checksum": self.checksum,

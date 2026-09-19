@@ -38,6 +38,21 @@ file as "all 166k neurons" would be misleading.
 
 ## Wiring after importing a catalog
 
+A first verified catalog already exists (built 2026-09-18, not committed —
+512MB, gitignored under `data/fly_catalog/`):
+
+- File: `data/fly_catalog/male-cns-v1.0-w5.json`
+- Contents: 211,577 nodes / 6,300,108 synapse edges at weight≥5 (paper
+  standard), MaleCNS v1.0 minconf-0.5, CC-BY Berg et al. 2025.
+- SHA-256: `27ba5e5d50a758ddb0f5df7b4b7c00e39435375e1f441750a8dbf40914c4e561`
+  (verified on load by `ConnectomeCatalog.from_path`).
+- Honest gaps, per contract: every node `region` and every edge `sign` is
+  `"unknown"` (annotations carry no neuropil column; flat weights carry no
+  sign — joining neurotransmitter predictions is future work).
+- Rebuild: `python3 cognition/fly_runtime/tools/build_catalog.py
+  --annotations <annot.feather> --weights <weights.feather>
+  --out data/fly_catalog/male-cns-v1.0-w5.json` (streams; ~1GB sources).
+
 Set `AIKO_FLY_CATALOG_PATH` to the verified JSON catalog produced from the
 download and choose `AIKO_FLY_RUNTIME_MODE=shadow` before `live`. Optionally
 set `AIKO_FLY_ACTIVE_BUDGET` (1–20000). The WebUI's explicitly submitted camera

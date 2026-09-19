@@ -241,7 +241,8 @@ def _recent_loss_openings(uid: str, n: int = 3) -> list[str]:
 def play_game(uid: str, *, size: int | None = None,
               rng: random.Random | None = None,
               max_moves: int | None = None,
-              on_move=None, is_stopped=None) -> dict[str, Any]:
+              aiko_black: bool | None = None,
+              on_move=None, is_stopped=None, on_start=None) -> dict[str, Any]:
     """Play one full game. Never raises on game logic errors."""
     from .board import GoBoard, BLACK
     rng = rng or random.Random()
@@ -251,12 +252,15 @@ def play_game(uid: str, *, size: int | None = None,
     max_moves = max_moves or _env_int("SELFPLAY_GO_MAX_MOVES", 0) or size * size * 3
     book = load_book(uid)
     loss_lines = _recent_loss_openings(uid)
-    try:
-        from interface.android_app import learn as _learn
-        aiko_black = (_learn.total_matches(uid, GAME_SELFPLAY) % 2 == 0)
-    except Exception:
-        aiko_black = True
+    if aiko_black is None:
+        # Random sides every game (a coin flip, not alternation).
+        aiko_black = rng.random() < 0.5
     aiko_color = "B" if aiko_black else "W"
+    if on_start is not None:
+        try:
+            on_start({"aiko_color": aiko_color})
+        except Exception as exc:
+            log.debug("go selfplay on_start skipped: %s", exc)
 
     board = GoBoard(size)
     moves: list[str] = []
@@ -293,7 +297,7 @@ def play_game(uid: str, *, size: int | None = None,
             sources.append(src)
             if on_move is not None:
                 try:
-                    on_move(list(moves))
+                    on_move(list(moves), board.stones_list())
                 except Exception as exc:
                     log.debug("go selfplay on_move skipped: %s", exc)
             if board.passes >= 2:

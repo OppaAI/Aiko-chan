@@ -561,9 +561,11 @@ class SelfplayState(BaseModel):
     game_index: int = 0
     games_total: int = 0
     moves: list[str] = []
+    stones: list[dict] = []
     status: str = "idle"
     last_winner: str = ""
     last_end: str = ""
+    aiko_color: str = ""
     aiko_wins: int = 0
     engine_wins: int = 0
     draws: int = 0
@@ -590,9 +592,11 @@ def _selfplay_snapshot(uid: str) -> SelfplayState:
         game_index=int(sess.get("game_index", 0)),
         games_total=int(sess.get("games_total", 0)),
         moves=list(sess.get("moves", [])),
+        stones=list(sess.get("stones", [])),
         status=str(sess.get("status", "idle")),
         last_winner=str(sess.get("last_winner", "")),
         last_end=str(sess.get("last_end", "")),
+        aiko_color=str(sess.get("aiko_color", "")),
         aiko_wins=st["aiko_wins"], engine_wins=st["engine_wins"],
         draws=st["draws"], matches=st["matches"],
     )
@@ -609,18 +613,26 @@ def _run_selfplay(uid: str, games: int) -> None:
                 sess["game_index"] = i + 1
                 sess["status"] = "playing"
 
-            def _on_move(moves: list[str], _i=i) -> None:
+            def _on_move(moves: list[str], stones: list[dict], _i=i) -> None:
                 with _sp_lock():
                     sess = _selfplay.get(uid)
                     if sess is not None:
                         sess["moves"] = moves
+                        sess["stones"] = stones
 
             def _is_stopped() -> bool:
                 with _sp_lock():
                     sess = _selfplay.get(uid)
                     return sess is None or bool(sess.get("stop"))
 
-            out = _sp.play_game(uid, on_move=_on_move, is_stopped=_is_stopped)
+            def _on_start(info: dict, _i=i) -> None:
+                with _sp_lock():
+                    sess = _selfplay.get(uid)
+                    if sess is not None:
+                        sess["aiko_color"] = str(info.get("aiko_color", ""))
+
+            out = _sp.play_game(uid, on_move=_on_move, is_stopped=_is_stopped,
+                                on_start=_on_start)
             with _sp_lock():
                 sess = _selfplay.get(uid)
                 if sess is not None:
@@ -652,7 +664,7 @@ async def selfplay_start(body: SelfplayStartRequest, session: dict = Depends(_re
         if sess is not None and sess.get("running"):
             raise HTTPException(status_code=409, detail="self-play already running")
         _selfplay[uid] = {"running": True, "stop": False, "game_index": 0,
-                          "games_total": games, "moves": [],
+                          "games_total": games, "moves": [], "stones": [],
                           "status": "starting", "last_winner": "", "last_end": ""}
     import threading as _th
     _th.Thread(target=_run_selfplay, args=(uid, games), daemon=True).start()

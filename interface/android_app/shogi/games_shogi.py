@@ -817,10 +817,10 @@ def _selfplay_stats(uid: str) -> dict:
 def _selfplay_snapshot(uid: str) -> SelfplayState:
     sess = _selfplay.get(uid) or {}
     st = _selfplay_stats(uid)
-    # Current game's color follows the same alternation rule play_game uses:
-    # recorded (completed) self-play games decide it, so the running game
-    # and this snapshot always agree.
+    # Live color if this session reported one; otherwise the legacy parity
+    # rule (matches sessions started before color reporting existed).
     completed = int(st.get("matches", 0))
+    aiko_side = str(sess.get("aiko_color") or ("sente" if completed % 2 == 0 else "gote"))
     return SelfplayState(
         running=bool(sess.get("running", False)),
         game_index=int(sess.get("game_index", 0)),
@@ -830,7 +830,7 @@ def _selfplay_snapshot(uid: str) -> SelfplayState:
         status=str(sess.get("status", "idle")),
         last_winner=str(sess.get("last_winner", "")),
         last_end=str(sess.get("last_end", "")),
-        aiko_side="black" if completed % 2 == 0 else "white",
+        aiko_side="black" if aiko_side == "sente" else "white",
         aiko_wins=st["aiko_wins"], engine_wins=st["engine_wins"],
         draws=st["draws"], matches=st["matches"],
     )
@@ -859,7 +859,14 @@ def _run_selfplay(uid: str, games: int) -> None:
                     sess = _selfplay.get(uid)
                     return sess is None or bool(sess.get("stop"))
 
-            out = _sp.play_game(uid, on_ply=_on_ply, is_stopped=_is_stopped)
+            def _on_start(info: dict, _i=i) -> None:
+                with _sp_lock():
+                    sess = _selfplay.get(uid)
+                    if sess is not None:
+                        sess["aiko_color"] = str(info.get("aiko_color", ""))
+
+            out = _sp.play_game(uid, on_ply=_on_ply, is_stopped=_is_stopped,
+                                on_start=_on_start)
             with _sp_lock():
                 sess = _selfplay.get(uid)
                 if sess is not None:

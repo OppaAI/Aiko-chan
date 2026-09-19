@@ -265,7 +265,7 @@ def play_game(uid: str, *, aiko_sente: bool | None = None,
               movetime_ms: int | None = None,
               max_moves: int | None = None,
               rng: random.Random | None = None,
-              on_ply=None, is_stopped=None) -> dict[str, Any]:
+              on_ply=None, is_stopped=None, on_start=None) -> dict[str, Any]:
     """Play one full Aiko-vs-engine game. Never raises on game logic errors.
 
     on_ply(sfen, moves) is called after every ply (progress reporting);
@@ -277,14 +277,14 @@ def play_game(uid: str, *, aiko_sente: bool | None = None,
     book = load_book(uid)
     loss_lines = _recent_loss_openings(uid)
     if aiko_sente is None:
-        try:
-            # Alternate on the SELFPLAY store (human-vs-Aiko games must not
-            # shift training colors).
-            from interface.android_app import learn as _learn
-            aiko_sente = (_learn.total_matches(uid, GAME_SELFPLAY) % 2 == 0)
-        except Exception:
-            aiko_sente = True
+        # Random sides every game (a coin flip, not alternation).
+        aiko_sente = rng.random() < 0.5
     aiko_color = "sente" if aiko_sente else "gote"
+    if on_start is not None:
+        try:
+            on_start({"aiko_color": aiko_color, "aiko_sente": bool(aiko_sente)})
+        except Exception as exc:
+            log.debug("selfplay on_start skipped: %s", exc)
 
     board = shogi.Board()
     moves: list[str] = []

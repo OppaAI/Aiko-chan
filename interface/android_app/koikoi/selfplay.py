@@ -87,19 +87,17 @@ def _describe_play(hand: int, take: list[int]) -> str:
         return f"play {name} taking {len(take)}"
 
 
-def aiko_choose_play(uid: str, hand: int, options: list[list[int]], captured: list[int],
-                     loss_lines: list[str], cap: int) -> tuple[int, list[int], str]:
-    """Return (hand, take, source): jev | random-fallback. Options are takes for one card."""
+def aiko_choose_play(uid: str, hand: int, takes_list: list[list[int]], captured: list[int],
+                     loss_lines: list[str]) -> tuple[list[int], str]:
+    """Pick one take for an already-chosen hand card. Returns (take, source)."""
     from agentic.toolkit import jev as _jev
-    if len(options) <= 1:
-        return hand, list(options[0]) if options else [], "forced"
-    # Prefer takes (captures), deterministic order, capped.
-    ordered = sorted((list(o) for o in options), key=lambda o: (-len(o), o))
-    capped = ordered[:max(1, cap)]
-    criteria = {f"take{i}": _describe_play(hand, o) for i, o in enumerate(capped)}
+    takes = [list(t) for t in takes_list]
+    if len(takes) <= 1:
+        return (takes[0] if takes else []), "forced"
+    criteria = {f"take{i}": _describe_play(hand, o) for i, o in enumerate(takes)}
     avoid = " Avoid lines resembling these recent losses: " + " | ".join(loss_lines[:3]) \
         if loss_lines else ""
-    state = {"hand": hand, "captured": len(captured), "options": len(options)}
+    state = {"hand": hand, "captured": len(captured), "options": len(takes)}
     try:
         pick, _, _ = _jev.choice(
             state,
@@ -108,45 +106,49 @@ def aiko_choose_play(uid: str, hand: int, options: list[list[int]], captured: li
             criteria,
         )
         if pick in criteria:
-            return hand, capped[int(pick[4:])], "jev"
+            return takes[int(pick[4:])], "jev"
         log.warning("koikoi selfplay: Jev picked unknown play %r", pick)
     except Exception as exc:
         log.warning("koikoi selfplay: Jev unavailable, random fallback: %s", exc)
-    o = random.choice(capped)
-    return hand, o, "random-fallback"
+    import random as _rnd
+    return _rnd.choice(takes), "random-fallback"
 
 
 def aiko_choose_card(uid: str, options: list[tuple[int, list[int]]], captured: list[int],
                      loss_lines: list[str], cap: int, rng: random.Random) -> tuple[int, list[int], str]:
-    """Choose which hand card to play (then take options follow that card)."""
-    if len(options) <= 1:
-        h, takes = options[0]
-        take, src = (takes[0], "forced") if len(takes) == 1 else aiko_choose_play(
-            uid, h, takes, captured, loss_lines, cap)
+    """Choose which hand card to play, then which take. Returns (hand, take, source)."""
+    by_card: dict[int, list[list[int]]] = {}
+    for h, t in options:
+        by_card.setdefault(h, []).append(list(t))
+    if len(by_card) == 1:
+        h = next(iter(by_card))
+        takes = by_card[h]
+        if len(takes) == 1:
+            return h, takes[0], "forced"
+        take, src = aiko_choose_play(uid, h, takes, captured, loss_lines)
         return h, take, src
-    ordered = sorted(options, key=lambda o: (-max((len(t) for t in o[1]), default=0), o[0]))
-    capped_cards = [o[0] for o in ordered[:max(1, cap)]]
+    ordered = sorted(by_card.items(),
+                     key=lambda kv: (-max(len(t) for t in kv[1]), kv[0]))[:max(1, cap)]
     from agentic.toolkit import jev as _jev
-    criteria = {f"card{i}": f"play card {h} ({len([t for h2, t in options if h2 == h][0])} takes available)"
-                for i, h in enumerate(capped_cards)}
+    criteria = {f"card{i}": f"play card {h} ({len(takes)} takes available)"
+                for i, (h, takes) in enumerate(ordered)}
     try:
         pick, _, _ = _jev.choice(
-            {"cards": capped_cards, "captured": len(captured)},
+            {"cards": [h for h, _ in ordered], "captured": len(captured)},
             "Choose which hanafuda card Aiko plays. Prefer cards with rich takes." +
             (" Avoid lines resembling these recent losses: " + " | ".join(loss_lines[:3]) if loss_lines else ""),
             criteria,
         )
         if pick in criteria:
-            h = capped_cards[int(pick[4:])]
-            takes = next(t for hh, t in options if hh == h)
-            take, src = (takes[0], "forced") if len(takes) == 1 else aiko_choose_play(
-                uid, h, takes, captured, loss_lines, cap)
-            return h, take, src if src != "forced" else "jev"
+            h, takes = ordered[int(pick[4:])]
+            if len(takes) == 1:
+                return h, takes[0], "jev"
+            take, _ = aiko_choose_play(uid, h, takes, captured, loss_lines)
+            return h, take, "jev"
     except Exception as exc:
         log.warning("koikoi selfplay: Jev card pick unavailable, random fallback: %s", exc)
-    h = rng.choice([o[0] for o in options])
-    takes = next(t for hh, t in options if hh == h)
-    return h, rng.choice(takes), "random-fallback"
+    h = rng.choice([h for h, _ in ordered])
+    return h, rng.choice(by_card[h]), "random-fallback"
 
 
 def aiko_choose_decision(captured: list[int], opp_captured: list[int], koi: int,
@@ -213,13 +215,8 @@ def play_match(uid: str, games: int = 1, *, months: int | None = None,
         "engine": "heuristic", "round_result": None,
         "rng": rng, "koi_calls": 0, "moves_made": 0,
     }
-    # Alternate dealer: even completed self-play matches -> Aiko deals.
-    try:
-        from interface.android_app import learn as _learn
-        played = sum(1 for _ in _learn.load_recent(uid, GAME_SELFPLAY, 1000))
-        game["oya"] = "aiko" if played % 2 == 0 else ENGINE_SEAT
-    except Exception:
-        game["oya"] = "aiko"
+    # Random dealer every match (a coin flip, not alternation).
+    game["oya"] = "aiko" if rng.random() < 0.5 else ENGINE_SEAT
 
     result: dict[str, Any] = {"winner": "void", "end": "aborted", "months": months,
                               "aiko_pts": 0, "engine_pts": 0, "rounds": []}
@@ -341,7 +338,7 @@ def _after_aiko_play(game, rng, sources) -> None:
         if not opts:
             _g._apply_flip(game, "aiko", flip, [])
         else:
-            _, take, src = aiko_choose_play("x", flip, opts, game["cap"]["aiko"], [], 12)
+            take, src = aiko_choose_play("x", flip, opts, game["cap"]["aiko"], [])
             sources.append(src)
             _g._apply_flip(game, "aiko", flip, take)
     new = _g._new_yaku(game, "aiko")

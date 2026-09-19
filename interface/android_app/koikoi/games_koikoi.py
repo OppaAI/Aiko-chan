@@ -401,7 +401,10 @@ def _advance(game: dict) -> None:
         game["status"] = "finished"
         ty, ta = game["totals"]["you"], game["totals"]["aiko"]
         game["winner"] = "you" if ty > ta else ("aiko" if ta > ty else "draw")
-        _record_match(game)
+        if game.get("mode") != "selfplay":
+            # Self-play matches record into their own namespaced store
+            # (koikoi_selfplay); never pollute the human-vs-Aiko stats.
+            _record_match(game)
         return
     game["month"] += 1
     game["oya"] = game["round_result"]["winner"] if game["round_result"] else game["oya"]

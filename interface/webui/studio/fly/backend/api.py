@@ -5,13 +5,16 @@ static frontend, mounted at /studio/fly from interface.webui.auth.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from interface.webui.studio.session_binding import bind_login_session
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Aiko Fly Circuit Studio")
 bind_login_session(app)
@@ -135,6 +138,38 @@ def fly_circuit(request: Request) -> JSONResponse:
         },
         headers={"Cache-Control": "no-store"},
     )
+
+
+@app.get("/api/trace")
+def fly_trace(request: Request, node_limit: int = Query(160, ge=1, le=500), edge_limit: int = Query(260, ge=1, le=1000)) -> JSONResponse:
+    """Return the identity-scoped active-subgraph trace, if one was evaluated."""
+    uid = _uid(request)
+    try:
+        from cognition.fly_runtime import peek_fly_runtime
+        from cognition.neural_state import peek_neural_state
+        runtime = peek_fly_runtime(uid)
+        trace = dict(runtime.trace) if runtime is not None else {}
+        # The runtime may evaluate thousands of cells.  Studio receives a
+        # deterministic, bounded projection instead of an accidental 20k-node
+        # browser payload; counts in the trace retain the full evaluation size.
+        if trace:
+            nodes = list(trace.get("nodes", ()))
+            shown_nodes = sorted(nodes, key=lambda node: (-float(node.get("rate", 0)), str(node.get("id", ""))))[:node_limit]
+            shown_ids = {node["id"] for node in shown_nodes}
+            trace["nodes"] = shown_nodes
+            trace["edges"] = [
+                edge for edge in trace.get("edges", ())
+                if edge.get("source") in shown_ids and edge.get("target") in shown_ids
+            ][:edge_limit]
+            trace["display_nodes"] = len(trace["nodes"])
+            trace["display_edges"] = len(trace["edges"])
+        state = peek_neural_state(uid)
+        neural_state = state.snapshot() if state is not None else {}
+    except Exception:
+        logger.exception("Fly Studio trace retrieval failed")
+        trace = {"error": "trace unavailable"}
+        neural_state = {}
+    return JSONResponse({"user_id": uid, "trace": trace, "neural_state": neural_state}, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/")

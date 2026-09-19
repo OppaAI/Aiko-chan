@@ -110,6 +110,8 @@
       <div class="modes" id="modes">—</div>
       <h2>User</h2>
       <div class="modes" id="uid">—</div>
+      <h2>Active trace</h2>
+      <div class="modes" id="trace">No active subgraph evaluated.</div>
     </aside>
   </div>
   <script>
@@ -169,8 +171,10 @@
     }
     async function load() {
       try {
-        const r = await fetch("/studio/fly/api/circuit");
-        const j = await r.json();
+        const [r, traceResponse] = await Promise.all([
+          fetch("/studio/fly/api/circuit"), fetch("/studio/fly/api/trace")
+        ]);
+        const [j, tracePayload] = await Promise.all([r.json(), traceResponse.json()]);
         if (!r.ok) {
           const detail = j && j.detail;
           throw new Error(detail ? String(detail) : `HTTP ${r.status}`);
@@ -179,6 +183,10 @@
         renderMeters(j.neural_state || {});
         document.getElementById("modes").textContent = JSON.stringify(j.modes || {});
         document.getElementById("uid").textContent = j.user_id || "—";
+        const trace = tracePayload.trace || {};
+        document.getElementById("trace").textContent = trace.active_nodes === undefined
+          ? "No active subgraph evaluated."
+          : `${trace.active_nodes} nodes · ${trace.active_edges} edges · ${trace.truncated ? "budget reached" : "complete"}`;
       } catch (err) {
         document.getElementById("modes").textContent = String(err);
       }

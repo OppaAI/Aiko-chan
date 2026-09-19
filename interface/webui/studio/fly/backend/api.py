@@ -137,6 +137,23 @@ def fly_circuit(request: Request) -> JSONResponse:
     )
 
 
+@app.get("/api/trace")
+def fly_trace(request: Request) -> JSONResponse:
+    """Return the identity-scoped active-subgraph trace, if one was evaluated."""
+    uid = _uid(request)
+    try:
+        from cognition.fly_runtime import peek_fly_runtime
+        from cognition.neural_state import peek_neural_state
+        runtime = peek_fly_runtime(uid)
+        trace = dict(runtime.trace) if runtime is not None else {}
+        state = peek_neural_state(uid)
+        neural_state = state.snapshot() if state is not None else {}
+    except Exception as exc:
+        trace = {"error": str(exc)}
+        neural_state = {}
+    return JSONResponse({"user_id": uid, "trace": trace, "neural_state": neural_state}, headers={"Cache-Control": "no-store"})
+
+
 @app.get("/")
 def index():
     return FileResponse(FRONTEND_DIR / "index.html")

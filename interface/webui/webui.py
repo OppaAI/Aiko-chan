@@ -885,6 +885,10 @@ class AikoWeb:
         """Broadcast a lip-sync viseme to the current user."""
         self._broadcast_to_current_user({"type": "viseme", "viseme": viseme, "weight": weight})
 
+    def set_pose(self, name: str, active: bool = True) -> None:
+        """Broadcast a vetted avatar pose intent to the current user."""
+        self._broadcast_to_current_user({"type": "pose", "name": name, "active": bool(active)})
+
     def get_input(self) -> str:
         """Fetch text input from the queue, binding the source user's identity.
         

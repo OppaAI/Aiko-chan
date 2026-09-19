@@ -8,7 +8,7 @@ from interface.webui import auth
 from interface.webui.studio.fly.backend import api
 
 
-@pytest.mark.parametrize("handler", [api.fly_state, api.fly_circuit])
+@pytest.mark.parametrize("handler", [api.fly_state, api.fly_circuit, api.fly_trace])
 def test_fly_api_reads_existing_state_without_creating_and_disables_caching(monkeypatch, handler):
     user_id = "studio-reader"
     clear_neural_state(user_id)
@@ -21,7 +21,7 @@ def test_fly_api_reads_existing_state_without_creating_and_disables_caching(monk
     assert peek_neural_state(user_id) is None
 
 
-@pytest.mark.parametrize("handler", [api.fly_state, api.fly_circuit])
+@pytest.mark.parametrize("handler", [api.fly_state, api.fly_circuit, api.fly_trace])
 def test_fly_api_returns_existing_state(monkeypatch, handler):
     user_id = "studio-existing"
     clear_neural_state(user_id)

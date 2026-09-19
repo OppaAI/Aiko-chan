@@ -554,6 +554,7 @@ def _sp_lock():
 
 class SelfplayStartRequest(BaseModel):
     games: int = 1
+    board_size: int | None = None
 
 
 class SelfplayState(BaseModel):
@@ -562,6 +563,7 @@ class SelfplayState(BaseModel):
     games_total: int = 0
     moves: list[str] = []
     stones: list[dict] = []
+    board_size: int = 9
     status: str = "idle"
     last_winner: str = ""
     last_end: str = ""
@@ -593,6 +595,7 @@ def _selfplay_snapshot(uid: str) -> SelfplayState:
         games_total=int(sess.get("games_total", 0)),
         moves=list(sess.get("moves", [])),
         stones=list(sess.get("stones", [])),
+        board_size=int(sess.get("board_size", 9)),
         status=str(sess.get("status", "idle")),
         last_winner=str(sess.get("last_winner", "")),
         last_end=str(sess.get("last_end", "")),
@@ -602,7 +605,7 @@ def _selfplay_snapshot(uid: str) -> SelfplayState:
     )
 
 
-def _run_selfplay(uid: str, games: int) -> None:
+def _run_selfplay(uid: str, games: int, size: int = 9) -> None:
     from . import selfplay as _sp
     try:
         for i in range(max(1, games)):
@@ -631,7 +634,7 @@ def _run_selfplay(uid: str, games: int) -> None:
                     if sess is not None:
                         sess["aiko_color"] = str(info.get("aiko_color", ""))
 
-            out = _sp.play_game(uid, on_move=_on_move, is_stopped=_is_stopped,
+            out = _sp.play_game(uid, size=size, on_move=_on_move, is_stopped=_is_stopped,
                                 on_start=_on_start)
             with _sp_lock():
                 sess = _selfplay.get(uid)
@@ -659,15 +662,22 @@ async def selfplay_start(body: SelfplayStartRequest, session: dict = Depends(_re
     """Start a background Go self-play session (fast return)."""
     uid = session["user_id"]
     games = max(1, min(int(body.games or 1), 20))
+    size = int(body.board_size or 0)
+    if size not in (9, 13, 19):
+        from . import selfplay as _spmod
+        size = _spmod._env_int("SELFPLAY_GO_SIZE", 9)
+        if size not in (9, 13, 19):
+            size = 9
     with _sp_lock():
         sess = _selfplay.get(uid)
         if sess is not None and sess.get("running"):
             raise HTTPException(status_code=409, detail="self-play already running")
         _selfplay[uid] = {"running": True, "stop": False, "game_index": 0,
                           "games_total": games, "moves": [], "stones": [],
+                          "board_size": size,
                           "status": "starting", "last_winner": "", "last_end": ""}
     import threading as _th
-    _th.Thread(target=_run_selfplay, args=(uid, games), daemon=True).start()
+    _th.Thread(target=_run_selfplay, args=(uid, games, size), daemon=True).start()
     return _selfplay_snapshot(uid)
 
 

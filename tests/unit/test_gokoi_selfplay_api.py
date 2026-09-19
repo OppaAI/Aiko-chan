@@ -74,3 +74,47 @@ def test_koi_session_lifecycle(monkeypatch):
     with pytest.raises(HTTPException) as ei:
         _run(kk.selfplay_stop({"user_id": "nobody"}))
     assert ei.value.status_code == 404
+
+
+def test_koi_session_completes_game(monkeypatch):
+    import interface.android_app.koikoi.games_koikoi as kk
+    import interface.android_app.koikoi.selfplay as sp
+    gate = threading.Event()
+
+    def slow(uid, **kw):
+        gate.wait(10)
+        return {"winner": "draw", "end": "finished", "aiko_pts": 1,
+                "engine_pts": 1, "rounds": [{"winner": "draw", "points": 1}]}
+
+    monkeypatch.setattr(sp, "play_match", slow)
+    monkeypatch.setattr(kk, "_selfplay_stats",
+                        lambda uid: {"aiko_wins": 0, "engine_wins": 0, "draws": 0, "matches": 0})
+    kk._selfplay.clear()
+    st = _run(kk.selfplay_start(kk.SelfplayStartRequest(games=1), {"user_id": "u"}))
+    assert st.running
+    gate.set()
+    deadline = time.monotonic() + 10
+    while kk._selfplay["u"]["running"] and time.monotonic() < deadline:
+        time.sleep(0.05)
+    st = _run(kk.selfplay_state({"user_id": "u"}))
+    assert not st.running and st.last_winner == "draw"
+
+
+def test_go_start_honors_requested_board_size(monkeypatch):
+    import interface.android_app.go.games_go as gg
+    monkeypatch.setattr(gg, "_selfplay_stats",
+                        lambda uid: {"aiko_wins": 0, "engine_wins": 0, "draws": 0, "matches": 0})
+    gg._selfplay.clear()
+    import asyncio
+    st = asyncio.run(gg.selfplay_start(gg.SelfplayStartRequest(games=1, board_size=13),
+                                       {"user_id": "u"}))
+    assert st.board_size == 13
+    gg._selfplay["u"]["stop"] = True
+    st = asyncio.run(gg.selfplay_state({"user_id": "u"}))
+    assert st.board_size == 13
+    # Invalid sizes fall back to configured default (9).
+    gg._selfplay.clear()
+    st = asyncio.run(gg.selfplay_start(gg.SelfplayStartRequest(games=1, board_size=7),
+                                       {"user_id": "u"}))
+    assert st.board_size == 9
+    gg._selfplay["u"]["stop"] = True

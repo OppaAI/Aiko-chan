@@ -1000,7 +1000,7 @@ def _run_selfplay(uid: str, games: int) -> None:
                     sess = _selfplay.get(uid)
                     return sess is None or bool(sess.get("stop"))
 
-            out = _sp.play_match(uid, on_round=_on_round, is_stopped=_is_stopped)
+            out = _sp.play_matches(uid, 1, on_round=_on_round, is_stopped=_is_stopped)
             out = out[0] if out else {"winner": "void", "end": "no-game"}
             with _sp_lock():
                 sess = _selfplay.get(uid)

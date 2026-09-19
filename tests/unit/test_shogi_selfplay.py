@@ -285,32 +285,50 @@ def test_engine_depth_handicap(sp, monkeypatch):
     assert "SELFPLAY_ENGINE_DEPTH" in open("interface/android_app/shogi/selfplay.py").read()
 
 
-def test_color_alternates_on_selfplay_store_not_human_store(sp, monkeypatch):
-    """Alternation must read the SELFPLAY table; human games must not shift
-    training colors (bug: used the human 'shogi' store before)."""
-    import interface.android_app.learn as learnmod
+def test_color_is_random_coin_flip_not_store_driven(sp, monkeypatch):
+    """Sides are a per-game coin flip (rng), never store parity — human
+    games must not shift training colors and repeats must not lock in."""
     import interface.android_app.shogi.selfplay as real
+    import interface.android_app.learn as learnmod
     calls = []
     orig_total = learnmod.total_matches
-
-    def spy_total(uid, game):
-        calls.append(game)
-        return 3
-
-    monkeypatch.setattr(learnmod, "total_matches", spy_total)
+    monkeypatch.setattr(learnmod, "total_matches",
+                        lambda uid, game: calls.append(game) or 99)
     import agentic.toolkit.jev as jevmod
     monkeypatch.setattr(jevmod, "choice", lambda state, ins, crit: (sorted(crit)[0], {}, 0.9))
     monkeypatch.setattr(real, "engine_choose_move", lambda board, movetime_ms=None: "2g2f")
     orig_board = _ShogiMod.__dict__["Board"]
-    _ShogiMod.Board = staticmethod(lambda: _Board(script_end=1))
+    _ShogiMod.Board = staticmethod(lambda: _Board(script_end=8))
     try:
-        out = real.play_game("u", aiko_sente=None)
+        r1 = real.play_game("u", aiko_sente=None, rng=random.Random(7))
+        r2 = real.play_game("u", aiko_sente=None, rng=random.Random(7))
+        colors = {real.play_game("u", aiko_sente=None, rng=random.Random(s))["aiko_color"]
+                  for s in range(20)}
     finally:
         _ShogiMod.Board = orig_board
-    assert calls and all(g == "shogi_selfplay" for g in calls)
-    # total=3 (odd) -> Aiko gote; mated side to move decides winner, just check color used
-    assert out["aiko_color"] == "gote"
+    assert r1["aiko_color"] == r2["aiko_color"]  # seeded rng: deterministic
+    assert calls == []  # match store never consulted for colors
+    assert colors == {"sente", "gote"}  # both sides reachable
+    # Explicit colors still honored.
+    _ShogiMod.Board = staticmethod(lambda: _Board(script_end=8))
+    try:
+        assert real.play_game("u", aiko_sente=True)["aiko_color"] == "sente"
+        assert real.play_game("u", aiko_sente=False)["aiko_color"] == "gote"
+    finally:
+        _ShogiMod.Board = orig_board
 
+
+def test_on_start_reports_color(sp):
+    import interface.android_app.shogi.selfplay as real
+    seen = {}
+    orig_board = _ShogiMod.__dict__["Board"]
+    _ShogiMod.Board = staticmethod(lambda: _Board(script_end=8))
+    try:
+        real.play_game("u", aiko_sente=True, rng=random.Random(0),
+                       on_start=lambda info: seen.update(info))
+    finally:
+        _ShogiMod.Board = orig_board
+    assert seen == {"aiko_color": "sente", "aiko_sente": True}
 
 def test_suspect_short_mate_voided_not_recorded(sp, monkeypatch):
     """A 1-ply 'checkmate' is impossible: void it, never learn from it."""

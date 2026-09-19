@@ -116,6 +116,7 @@ def test_runtime_serializes_trace_publication_per_instance(monkeypatch):
     second.start()
     assert not second_published.wait(timeout=0.1)
     release_first.set()
+    assert second_published.wait(timeout=2)
     first.join(timeout=2)
     second.join(timeout=2)
 

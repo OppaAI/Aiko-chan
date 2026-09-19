@@ -7,7 +7,8 @@
 LLM_BASE_URL: "http://localhost:8080/v1"  # OpenAI-compatible chat endpoint, usually llama.cpp /v1 URL.
 LLM_MODEL: "ministral"  # Main chat model id/alias; must match the server model name.
 REFLECT_MODEL: "ministral"  # Model used for reflection/consolidation; often same as LLM_MODEL.
-LLM_TIMEOUT: "120"  # Seconds before chat/reflection LLM HTTP calls time out.
+LLM_TIMEOUT: "120"
+LLM_NO_SYSTEM: "1"  # llama.cpp chat template rejects system roles; merge persona/context into user messages.  # Seconds before chat/reflection LLM HTTP calls time out.
 # API key passed to every text LLM request. Leave blank for unauthenticated local
 # servers (Aiko supplies the harmless OpenAI-client placeholder automatically).
 # To use AISA Fable, set this to your AISA key, then set LLM_BASE_URL and

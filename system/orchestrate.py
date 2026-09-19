@@ -1536,6 +1536,9 @@ def run_session(ui, args) -> None:
         from system.userspace import current_user_id
         turn_uid = current_user_id()
         if turn_uid != last_bound_uid:
+            # Think history is process-local; never carry one identity's chat
+            # turns into another identity's prompt.
+            think.reset_context()
             if memorize is not None:
                 memorize.switch_user(turn_uid)
             last_bound_uid = turn_uid

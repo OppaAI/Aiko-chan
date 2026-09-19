@@ -202,7 +202,7 @@ MEMORY_RECALL_TIMEOUT = env_float("MEMORY_RECALL_TIMEOUT", 5.0)
 # (~0.015) — that constant only decides quick-vs-wide search, this one
 # actually filters weak individual results out of what gets returned.
 # 0 = off (default) — no memory is ever dropped for being weak.
-MEMORY_MIN_SCORE = env_float("MEMORY_MIN_SCORE", 0.0)
+MEMORY_MIN_SCORE = env_float("MEMORY_MIN_SCORE", 0.015)
 
 # ── deep-think mode ───────────────────────────────────────────────────────────
 # See module docstring. Triggered by /think (orchestrate.py) or by an
@@ -1126,8 +1126,12 @@ class AikoThink:
         except Exception:
             recent = []
         tail = " ".join(reversed(recent)).strip()
+        # Only use prior dialogue to resolve a referential follow-up.  Folding
+        # every previous answer into every search query lets unrelated stale
+        # topics (for example birthdays) hijack a fresh casual turn.
+        referential = re.search(r"\b(?:it|that|this|there|they|them|he|she|we|our|still|also|again|same|what about|how about)\b", user_input or "", re.IGNORECASE)
         enriched = user_input
-        if tail:
+        if tail and referential:
             enriched = f"{user_input}\n{tail}"[:600]
         if _brain_trace and _brain_trace.TRACE_ENABLED:
             _brain_trace.record_step(

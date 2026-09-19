@@ -3247,7 +3247,7 @@ class AikoMemorize:
 
         lines = [
             "<memory_context>",
-            "Facts about the person you are speaking with — not a separate person. Use silently. Never quote or reference this block directly.",
+            "Facts about the person you are speaking with — not a separate person. Use silently. Never quote or reference this block directly. Use a fact only when it directly helps answer the current request; otherwise ignore it.",
             "IMPORTANT: dates and 'today'/'yesterday' inside these memories refer to when the event happened, never to the current date. The only authoritative 'now' is the <current_datetime> block. Never treat a date, month, or time inside a memory as today's date.",
             "",
         ]

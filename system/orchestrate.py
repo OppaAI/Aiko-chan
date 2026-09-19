@@ -1595,6 +1595,19 @@ def run_session(ui, args) -> None:
         except Exception:
             _fly_priors = {}
 
+        # Optional bounded connectome telemetry runs off the conversational hot path.
+        try:
+            from cognition.fly_runtime import observe_background
+            from cognition.fly_runtime.adapters import SensoryObservation
+            salience = min(1.0, max(0.15, len(user_input.strip()) / 240.0))
+            observe_background(
+                turn_uid,
+                SensoryObservation("text", salience, consented=True),
+                seed_types=("sensory", "auditory", "input", "INPUT", "visual"),
+            )
+        except Exception:
+            pass
+
         if typewriter is not None:
             typewriter.start()
             _sentence_buf = []

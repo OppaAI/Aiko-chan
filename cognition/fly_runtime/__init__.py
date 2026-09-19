@@ -10,7 +10,7 @@ from .dynamics import ActiveDynamics
 from .runtime import FlyRuntime, get_fly_runtime, peek_fly_runtime
 from .adapters import SensoryObservation, auditory_observation, motion_observation, visual_observation
 from .embodiment import AvatarEmbodiment, AvatarIntent
-from .service import observe
+from .service import observe, observe_background
 
 __all__ = [
     "ActiveDynamics",
@@ -27,4 +27,5 @@ __all__ = [
     "AvatarEmbodiment",
     "AvatarIntent",
     "observe",
+    "observe_background",
 ]

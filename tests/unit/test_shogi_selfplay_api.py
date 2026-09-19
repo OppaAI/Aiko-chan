@@ -90,3 +90,17 @@ def test_run_selfplay_records_progress(gs, monkeypatch):
     assert sess["moves"] == ["7g7f", "3c3d", "8h2b"]
     st = asyncio.run(gs.selfplay_state({"user_id": "u"}))
     assert st.last_winner == "aiko" and not st.running
+
+
+def test_snapshot_reports_aiko_side(gs, monkeypatch):
+    import interface.android_app.learn as learnmod
+
+    class _Rows(list):
+        pass
+
+    monkeypatch.setattr(learnmod, "load_recent",
+                        lambda uid, game, limit: [{"winner": "aiko"}, {"winner": "engine"}])
+    import asyncio
+    st = asyncio.run(gs.selfplay_state({"user_id": "u"}))
+    assert st.matches == 2
+    assert st.aiko_side == "black"  # 2 completed -> even -> sente

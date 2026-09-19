@@ -262,3 +262,30 @@ def test_engine_gets_raw_sfen_not_position_command(sp, monkeypatch):
     assert seen["cmd"] == "sfen0", seen["cmd"]
     assert not seen["cmd"].lstrip().startswith("position")
     assert seen["movetime"] == 800
+
+
+def test_color_alternates_on_selfplay_store_not_human_store(sp, monkeypatch):
+    """Alternation must read the SELFPLAY table; human games must not shift
+    training colors (bug: used the human 'shogi' store before)."""
+    import interface.android_app.learn as learnmod
+    import interface.android_app.shogi.selfplay as real
+    calls = []
+    orig_total = learnmod.total_matches
+
+    def spy_total(uid, game):
+        calls.append(game)
+        return 3
+
+    monkeypatch.setattr(learnmod, "total_matches", spy_total)
+    import agentic.toolkit.jev as jevmod
+    monkeypatch.setattr(jevmod, "choice", lambda state, ins, crit: (sorted(crit)[0], {}, 0.9))
+    monkeypatch.setattr(real, "engine_choose_move", lambda board, movetime_ms=None: "2g2f")
+    orig_board = _ShogiMod.__dict__["Board"]
+    _ShogiMod.Board = staticmethod(lambda: _Board(script_end=1))
+    try:
+        out = real.play_game("u", aiko_sente=None)
+    finally:
+        _ShogiMod.Board = orig_board
+    assert calls and all(g == "shogi_selfplay" for g in calls)
+    # total=3 (odd) -> Aiko gote; mated side to move decides winner, just check color used
+    assert out["aiko_color"] == "gote"

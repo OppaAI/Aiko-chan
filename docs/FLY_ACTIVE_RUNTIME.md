@@ -36,6 +36,16 @@ catalog interface is ready to index such an extract once a verified source
 artifact and its license/checksum are supplied. Shipping a made-up or partial
 file as "all 166k neurons" would be misleading.
 
+## Wiring after importing a catalog
+
+Set `AIKO_FLY_CATALOG_PATH` to the verified JSON catalog produced from the
+download and choose `AIKO_FLY_RUNTIME_MODE=shadow` before `live`. Optionally
+set `AIKO_FLY_ACTIVE_BUDGET` (1–20000). The WebUI's explicitly submitted camera
+or screen images create a consented, privacy-preserving visual observation;
+only its scalar salience and modality enter the active graph, never image bytes.
+The service selects matching catalog types (`sensory`, `T4`, `T5`, or `visual`)
+and does nothing if the catalog, matching seed, or runtime mode is absent.
+
 ## Operations
 
 Use the Fly Studio endpoint `/studio/fly/api/trace` to inspect the active node

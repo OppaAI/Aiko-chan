@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
 from system.config import load_config
 from system.userspace import current_user_id, reset_current_display_name, reset_current_user_id, set_current_user_id, set_current_display_name
+from cognition.fly_runtime import observe as observe_fly_runtime, visual_observation
 load_config()
 
 from system import bioclock
@@ -644,6 +645,12 @@ class AikoWeb:
 
     async def _handle_image_input(self, image: str, question: str, uid: str, source: str = "camera") -> None:
         """Run vision off the socket loop and return its result to the requesting user."""
+        # The authenticated user explicitly submitted this frame. The optional
+        # fly runtime receives no image bytes, only a consented scalar event.
+        try:
+            observe_fly_runtime(uid, visual_observation(salience=1.0, consented=True), seed_types=("sensory", "T4", "T5", "visual"))
+        except Exception:
+            log.debug("fly visual observation skipped", exc_info=True)
         self._broadcast({"type": "vision", "status": "working", "source": source}, user_id=uid)
         try:
             answer = await asyncio.to_thread(self._infer_image, image, question, source)

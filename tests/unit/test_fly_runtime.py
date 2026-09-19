@@ -3,6 +3,7 @@ import json
 from cognition.fly_runtime import ActiveDynamics, ConnectomeCatalog, Edge, Node, get_fly_runtime
 from cognition.fly_runtime.adapters import AvatarMotorController, SensoryObservation
 from cognition.fly_runtime.autonomy import ActionScheduler
+from cognition.fly_runtime import service
 from cognition.neural_state import clear_neural_state, get_neural_state
 
 
@@ -65,3 +66,9 @@ def test_observation_consent_avatar_allowlist_and_autonomy_boundaries():
     assert scheduler.admit({"kind": "pose"}) is False
     assert scheduler.admit({"kind": "network_post"}) is False
     assert scheduler.admit({"kind": "network_post"}, approved=True) is True
+
+
+def test_service_is_off_without_an_operator_configured_catalog(monkeypatch):
+    monkeypatch.delenv("AIKO_FLY_CATALOG_PATH", raising=False)
+    monkeypatch.setenv("AIKO_FLY_RUNTIME_MODE", "live")
+    assert service.observe("service-user", SensoryObservation("visual", 1.0), seed_types=("visual",)) is None

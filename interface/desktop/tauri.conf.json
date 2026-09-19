@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "",
     "beforeBuildCommand": "",
-    "devUrl": "http://localhost:8787",
+    "devUrl": "https://aiko.ide-chroma.ts.net/",
     "frontendDist": "../webui/static"
   },
   "app": {
@@ -14,8 +14,8 @@
       {
         "label": "companion",
         "title": "Aiko",
-        "width": 460,
-        "height": 720,
+        "width": 1200,
+        "height": 800,
         "minWidth": 320,
         "minHeight": 420,
         "transparent": true,

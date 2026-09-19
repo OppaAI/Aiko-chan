@@ -215,15 +215,15 @@ def test_aiko_wins_and_learns(sp, monkeypatch):
     rec = _patch_learning(sp, monkeypatch, mb)
     import interface.android_app.shogi.selfplay as real
     real._Board = _Board  # noqa - keep linters calm about the fake
-    # script mate on ply 3 (after Aiko's 2nd move, engine to move mated)
+    # script mate on ply 7 (engine to move mated; >= 6 plies passes quarantine)
     orig_board = _ShogiMod.__dict__["Board"]
-    _ShogiMod.Board = staticmethod(lambda: _Board(script_end=3))
+    _ShogiMod.Board = staticmethod(lambda: _Board(script_end=7))
     try:
         out = sp.play_game("u", aiko_sente=True)
     finally:
         _ShogiMod.Board = orig_board
     assert out["winner"] == "aiko" and out["end"] == "checkmate"
-    assert out["moves_made"] == 3
+    assert out["moves_made"] == 7
     uid, game, m = rec["matches"][0]
     assert game == "shogi_selfplay" and m["winner"] == "aiko"
     assert rec["exp"] and mb.taught == [1.0]
@@ -235,7 +235,7 @@ def test_engine_win_and_loss_lines(sp, monkeypatch):
     monkeypatch.setattr(sp, "engine_choose_move", lambda board, movetime_ms=None: "2g2f")
     rec = _patch_learning(sp, monkeypatch)
     orig_board = _ShogiMod.__dict__["Board"]
-    _ShogiMod.Board = staticmethod(lambda: _Board(script_end=2))
+    _ShogiMod.Board = staticmethod(lambda: _Board(script_end=8))
     try:
         out = sp.play_game("u", aiko_sente=True)
     finally:
@@ -310,3 +310,42 @@ def test_color_alternates_on_selfplay_store_not_human_store(sp, monkeypatch):
     assert calls and all(g == "shogi_selfplay" for g in calls)
     # total=3 (odd) -> Aiko gote; mated side to move decides winner, just check color used
     assert out["aiko_color"] == "gote"
+
+
+def test_suspect_short_mate_voided_not_recorded(sp, monkeypatch):
+    """A 1-ply 'checkmate' is impossible: void it, never learn from it."""
+    import interface.android_app.shogi.selfplay as real
+    import interface.android_app.learn as learnmod
+    appended = []
+    monkeypatch.setattr(learnmod, "append_match",
+                        lambda uid, game, rec: appended.append(rec))
+    orig_board = _ShogiMod.__dict__["Board"]
+    _ShogiMod.Board = staticmethod(lambda: _Board(script_end=1))
+    try:
+        out = real.play_game("u", aiko_sente=True)
+    finally:
+        _ShogiMod.Board = orig_board
+    assert out["winner"] == "void" and out["end"] == "suspect-mate"
+    assert appended == []  # fiction must not teach
+
+
+def test_book_bans_proven_losers_and_breaks_ties_randomly(sp, monkeypatch):
+    import interface.android_app.shogi.selfplay as real
+    # Losing line with 4 visits, zero wins -> banned, falls through to Jev.
+    book = {"sfen0": {"7g7f": [0, 0, 4], "2g2f": [0, 0, 1]}}
+    seen = {}
+    import agentic.toolkit.jev as jevmod
+
+    def _choice(state, ins, crit):
+        seen["n"] = seen.get("n", 0) + 1
+        return (sorted(crit)[0], {}, 0.9)
+
+    monkeypatch.setattr(jevmod, "choice", _choice)
+    b = _Board()
+    usi, src = real.aiko_choose_move("u", b, book=book, rng=random.Random(1), loss_lines=[])
+    assert src == "jev"  # banned line skipped, Jev consulted
+    # Equal-rate tie-break is not deterministic across seeds.
+    book2 = {"sfen0": {"7g7f": [2, 0, 2], "2g2f": [2, 0, 2]}}
+    picks = {real.aiko_choose_move("u", b, book=book2, rng=random.Random(s), loss_lines=[])[0]
+             for s in range(10)}
+    assert picks == {"2g2f", "7g7f"}

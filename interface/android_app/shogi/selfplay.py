@@ -169,13 +169,22 @@ def aiko_choose_move(uid: str, board, *, book: dict, rng: random.Random,
     entry = book.get(key) if key else None
     if entry:
         scored = []
+        min_visits = _env_int("SELFPLAY_BOOK_MIN_VISITS", 3)
         for usi, rec in entry.items():
             w, d, l = (list(rec) + [0, 0, 0])[:3]
             total = w + d + l
-            if total >= _env_int("SELFPLAY_BOOK_MIN_VISITS", 3):
-                scored.append((((w + 0.5 * d) / total), usi))
+            if total < min_visits:
+                continue
+            if w == 0 and total >= 3:
+                # Proven loser: ban from book candidacy so she is forced to
+                # explore instead of replaying a refuted line forever.
+                continue
+            scored.append((((w + 0.5 * d) / total), usi))
         if scored:
-            scored.sort(reverse=True)
+            # Shuffle first: sort is stable, so equal win-rates break ties
+            # randomly instead of locking into one line deterministically.
+            rng.shuffle(scored)
+            scored.sort(key=lambda t: t[0], reverse=True)
             if rng.random() >= _env_float("SELFPLAY_EXPLORATION", 0.05):
                 return scored[0][1], "book"
             return rng.choice(scored)[1], "book-explore"
@@ -294,6 +303,17 @@ def play_game(uid: str, *, aiko_sente: bool | None = None,
             end = _game_end(board)
             if end == "checkmate":
                 # Side to move is mated; the other side wins.
+                # Sanity quarantine: no legal shogi mates in a handful of
+                # plies — a short "mate" means desync/corruption, so void it
+                # (with full board state logged) instead of recording fiction.
+                if len(moves) < 6:
+                    try:
+                        log.error("selfplay: suspect %d-ply mate, voiding game. sfen=%s moves=%s",
+                                  len(moves), board.sfen(), moves)
+                    except Exception:
+                        pass
+                    result.update(winner="void", end="suspect-mate")
+                    break
                 winner_is_aiko = (_is_sente_to_move(board) != aiko_sente)
                 result.update(winner="aiko" if winner_is_aiko else "engine",
                               end="checkmate")
@@ -334,7 +354,12 @@ def play_game(uid: str, *, aiko_sente: bool | None = None,
         result["moves"] = moves
         if result["winner"] in ("aiko", "engine", "draw"):
             _learn_from_game(uid, moves=moves, aiko_color=aiko_color,
-                             result=result, book=book)
+                             result=result, book=book, sources=sources)
+        from collections import Counter as _Counter
+        _src = dict(_Counter(sources))
+        log.info("selfplay game over: %s (%s) in %d as %s | decisions=%s",
+                 result.get("winner"), result.get("end"), len(moves),
+                 aiko_color, _src or "none")
     except Exception as exc:
         log.warning("selfplay game aborted: %s", exc)
         result.update(end=f"error: {type(exc).__name__}")
@@ -365,7 +390,7 @@ def _recent_loss_openings(uid: str, n: int = 3) -> list[str]:
 # ── learning ─────────────────────────────────────────────────────────────────
 
 def _learn_from_game(uid: str, *, moves: list[str], aiko_color: str,
-                     result: dict, book: dict) -> None:
+                     result: dict, book: dict, sources: list[str] | None = None) -> None:
     """Book + experience + fly teaching. Each step guarded; never raises."""
     winner = result.get("winner", "draw")
     # 1. Opening book: credit Aiko's moves at each position she faced.
@@ -407,14 +432,17 @@ def _learn_from_game(uid: str, *, moves: list[str], aiko_color: str,
     except Exception as exc:
         log.debug("selfplay match record skipped: %s", exc)
 
-    # 3. Full game experience (searchable later).
+    # 3. Full game experience (searchable later). Each move tagged with
+    # how it was decided (book/jev/random-fallback/forced) for observability.
     try:
         from agentic.experience.acquire import record_experience
         score = 1.0 if winner == "aiko" else (0.5 if winner == "draw" else 0.0)
+        srclist = list(sources or [])
         record_experience(
             "aiko-shogi-selfplay",
             f"Self-play vs YaneuraOu as {aiko_color} ({result.get('end')})",
-            [{"tool": "shogi-move", "ok": True, "args": {"move": m}} for m in moves],
+            [{"tool": f"shogi-{srclist[i] if i < len(srclist) else 'unknown'}",
+              "ok": True, "args": {"move": m}} for i, m in enumerate(moves)],
             f"{winner} in {len(moves)} moves",
             winner in ("aiko", "draw"), score,
         )

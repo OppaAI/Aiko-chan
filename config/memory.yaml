@@ -220,8 +220,8 @@ MEMORY_FLYCX_ATTEMPT_W: "0.05"  # Live-mode PFL decisiveness nudge on attempt-ga
 # caches mode-partitioned). DN = descending-neuron prosody vigor on TTS.
 # Presence (webcam motion LEVEL 0..1, throttled) reuses MEMORY_FLYCX_MODE:
 # shadow logs, live nudges attention energy on real presence.
-MEMORY_FLYAL_MODE: "off"  # off | shadow | live.
-MEMORY_FLYDN_MODE: "off"  # off | shadow | live.
+MEMORY_FLYAL_MODE: "live"  # off | shadow | live.
+MEMORY_FLYDN_MODE: "live"  # off | shadow | live.
 # -- Search ranking and context budget --
 
 # -- Behavioral priors (functional MaleCNS motifs; not full circuits) --

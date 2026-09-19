@@ -18,6 +18,15 @@ SHOGI_BANTER_FREQUENCY: "0.25"  # Odds of a line on a quiet move (0 = notable mo
 SHOGI_MAIN_TIME_S: "3600"  # Main time per side in seconds (60 min). 0 = sudden-death byoyomi (every move within SHOGI_BYOYOMI_S).
 SHOGI_BYOYOMI_S: "60"  # Byoyomi allowance per move in seconds once main time is gone. 0 with 0 main = no clock.
 
+# -- Aiko self-play vs YaneuraOu (interface/android_app/shogi/selfplay.py) --
+# Aiko moves by opening book -> Jev choice -> random fallback; learns via
+# book w/d/l, namespaced match store, experience rows, and FlyMB teaching.
+SELFPLAY_MOVETIME_MS: "800"  # Engine think time per Aiko-vs-engine game move (ms).
+SELFPLAY_MAX_MOVES: "256"  # Plies before adjudicated draw.
+SELFPLAY_BOOK_MIN_VISITS: "3"  # Book needs this many visits to play a line.
+SELFPLAY_JEV_CANDIDATES: "10"  # Max moves offered to Jev per Aiko turn.
+SELFPLAY_EXPLORATION: "0.05"  # Epsilon for book exploration.
+
 # -- KataGo (Go engine, GTP) --
 # Built for Jetson Orin Nano (aarch64, TensorRT backend). b10c128 is the
 # Nano-friendly network. Blank PATH = search PATH, fallback to random moves.

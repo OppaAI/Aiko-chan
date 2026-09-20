@@ -1,6 +1,6 @@
 {
   "scene": {
-    "location_id": "kyoto",
+    "location_id": "azuchi",
     "date": "1576-01-15",
     "present_npc_ids": [],
     "present_spirit_ids": [],
@@ -11,10 +11,17 @@
     "bond": 0.5,
     "morality": 0.0,
     "reputation": {},
-    "inventory": [],
+    "inventory": [
+      "old coin"
+    ],
     "completed_quests": [],
     "met_npc_ids": [],
-    "met_spirit_ids": []
+    "met_spirit_ids": [],
+    "hp": 10,
+    "max_hp": 10,
+    "mp": 10,
+    "max_mp": 10,
+    "skills": {}
   },
   "quests": {},
   "entities": {}

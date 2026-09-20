@@ -47,6 +47,30 @@ class ActIn(BaseModel):
     args: dict[str, Any] = {}
 
 
+class StartIn(BaseModel):
+    """POST /api/onmyoji/start body."""
+
+    location: str = "sakai"
+    date: str = "1576-01-15"
+
+
+class ApiActIn(BaseModel):
+    """POST /api/onmyoji/act body (Android shape)."""
+
+    action: str = ""
+    to: str = ""
+    ritual: str = ""
+    target: str = ""
+    skill: str = ""
+
+
+class ApiTalkIn(BaseModel):
+    """POST /api/onmyoji/talk body (Android shape)."""
+
+    target: str = "aiko"
+    message: str = ""
+
+
 def _client():
     from openai import OpenAI
 
@@ -351,21 +375,6 @@ def create_app():
         return figures_here()
 
     # ── Android client contract ──
-
-    class StartIn(BaseModel):
-        location: str = "sakai"
-        date: str = "1576-01-15"
-
-    class ApiActIn(BaseModel):
-        action: str = ""
-        to: str = ""
-        ritual: str = ""
-        target: str = ""
-        skill: str = ""
-
-    class ApiTalkIn(BaseModel):
-        target: str = "aiko"
-        message: str = ""
 
     @app.get("/api/onmyoji/health")
     def api_health() -> dict[str, Any]:

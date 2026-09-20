@@ -1,0 +1,21 @@
+{
+  "scene": {
+    "location_id": "kyoto",
+    "date": "1576-01-15",
+    "present_npc_ids": [],
+    "present_spirit_ids": [],
+    "visible_detail": ""
+  },
+  "player": {
+    "name": "Onmyoji",
+    "bond": 0.5,
+    "morality": 0.0,
+    "reputation": {},
+    "inventory": [],
+    "completed_quests": [],
+    "met_npc_ids": [],
+    "met_spirit_ids": []
+  },
+  "quests": {},
+  "entities": {}
+}

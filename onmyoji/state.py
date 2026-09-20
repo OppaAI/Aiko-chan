@@ -33,6 +33,11 @@ class PlayerState:
     completed_quests: list[str] = field(default_factory=list)
     met_npc_ids: list[str] = field(default_factory=list)
     met_spirit_ids: list[str] = field(default_factory=list)
+    hp: int = 10
+    max_hp: int = 10
+    mp: int = 10
+    max_mp: int = 10
+    skills: dict[str, int] = field(default_factory=dict)  # name -> level
 
 
 @dataclass
@@ -170,3 +175,25 @@ class GameStore:
         player.bond = max(0.0, min(1.0, player.bond + delta))
         self.save()
         return player.bond
+
+    def spend_mp(self, cost: int) -> bool:
+        """Spend spirit power; False when exhausted (action still narrated)."""
+        player = self.state.player
+        if player.mp < cost:
+            return False
+        player.mp -= cost
+        self.save()
+        return True
+
+    def harm(self, amount: int) -> int:
+        player = self.state.player
+        player.hp = max(0, player.hp - amount)
+        self.save()
+        return player.hp
+
+    def recover(self) -> PlayerState:
+        player = self.state.player
+        player.hp = player.max_hp
+        player.mp = player.max_mp
+        self.save()
+        return player

@@ -14,10 +14,16 @@ Run: python -m onmyoji.server  (UV_PROJECT_ENVIRONMENT must have fastapi/uvicorn
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 from .gatekeeper import build_aiko_context, build_narrator_context, eligible_figures
 from .state import Entity, GameState, GameStore
+
+try:
+    from pydantic import BaseModel
+except ImportError:  # pragma: no cover - fastapi pulls pydantic anyway
+    BaseModel = object  # type: ignore[assignment,misc]
 
 LLM_MODEL = os.getenv("ONMYOJI_MODEL", os.getenv("REFLECT_MODEL", os.getenv("LLM_MODEL", "ministral")))
 LLM_BASE_URL = os.getenv("ONMYOJI_BASE_URL", os.getenv("LLM_BASE_URL", "http://localhost:8080/v1"))
@@ -25,6 +31,20 @@ LLM_BASE_URL = os.getenv("ONMYOJI_BASE_URL", os.getenv("LLM_BASE_URL", "http://l
 _STORE_PATH = os.getenv("ONMYOJI_SAVE_PATH", "data/onmyoji_save.json")
 
 _VERBS = ("travel", "rest", "search", "ward", "strike", "bind", "flee", "command")
+
+
+class TalkIn(BaseModel):
+    """POST /talk body. Module level: FastAPI cannot resolve locally-defined models."""
+
+    to: str = "aiko"
+    text: str = ""
+
+
+class ActIn(BaseModel):
+    """POST /act body. Module level: FastAPI cannot resolve locally-defined models."""
+
+    verb: str = ""
+    args: dict[str, Any] = {}
 
 
 def _client():
@@ -144,22 +164,29 @@ def act(verb: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
         effects.append(f"traveled to {dest}")
     elif verb == "rest":
         store.shift_bond(+0.02)
-        effects.append("rested; bond +0.02")
+        store.recover()
+        effects.append("rested; HP/MP restored, bond +0.02")
     elif verb == "search":
         found = str(args.get("find", "old coin")).strip()
         store.give(found)
         effects.append(f"found: {found}")
     elif verb in ("strike", "bind"):
         target = str(args.get("target", "the spirit")).strip()
+        if not store.spend_mp(1):
+            effects.append(f"{verb} on {target} attempted without spirit power (mp 0) — weak")
         dark = bool(args.get("cruel", False))
         if dark:
             store.shift_morality(-0.15, faction="commoners", amount=-0.1)
-            effects.append(f"{verb} on {target} (cruel): morality -0.15, commoners -0.10")
+            store.harm(1)
+            effects.append(f"{verb} on {target} (cruel): morality -0.15, commoners -0.10, HP -1")
         else:
             store.shift_morality(+0.03)
             effects.append(f"{verb} on {target}: resolved, morality +0.03")
     elif verb == "ward":
-        effects.append("ward raised (protection for this scene)")
+        if store.spend_mp(2):
+            effects.append("ward raised (protection for this scene, MP -2)")
+        else:
+            effects.append("ward attempted without spirit power (mp 0) — thin")
     elif verb == "flee":
         store.shift_morality(-0.02)
         effects.append("fled: morality -0.02")
@@ -182,19 +209,122 @@ def figures_here() -> dict[str, Any]:
     return {"ok": True, "figures": eligible_figures(_store().state)}
 
 
+# ── Android client contract (/api/onmyoji/*) ────────────────────────────
+# The app shell (Aiko-Onmyoji/app) was scaffolded against this JourneyState
+# shape (hp/mp/skills/options). It maps onto the same state.py core above.
+
+def _journey_state(store: GameStore) -> dict[str, Any]:
+    scene = store.state.scene
+    player = store.state.player
+    return {
+        "date": scene.date,
+        "location": scene.location_id,
+        "inventory": list(player.inventory),
+        "standing": {k: int(round(v * 100)) for k, v in player.reputation.items()},
+        "bond": int(round(player.bond * 100)),
+        "standing_orders": [],
+        "journey_summary": "",
+        "entities": [
+            {"id": e.entity_id, "kind": e.kind, "name": e.name, "role": e.role,
+             "disposition": e.disposition, "details": list(e.details),
+             "dread": 0, "tier": "bonded" if e.kind == "spirit" else "passing",
+             "last_seen": e.first_met_date, "location": e.first_met_place}
+            for e in store.state.entities.values()
+        ],
+        "flags": list(player.completed_quests),
+        "dialogue": [],
+        "hp": player.hp,
+        "max_hp": player.max_hp,
+        "mp": player.mp,
+        "max_mp": player.max_mp,
+        "skills": dict(player.skills),
+        "secret_skills": [],
+        "limits": {},
+        "morality": int(round(player.morality * 100)),
+    }
+
+
+def _known_places() -> list[str]:
+    places: set[str] = set()
+    for anchor in _anchors_all():
+        if anchor.get("location_id"):
+            places.add(str(anchor["location_id"]))
+    for figure in _figures_all():
+        for place in figure.get("places", []) or []:
+            if place != "traveling":
+                places.add(str(place))
+    return sorted(places)
+
+
+def _anchors_all() -> list[dict]:
+    import json as _json
+
+    path = Path(__file__).resolve().parent / "data" / "anchors.json"
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _figures_all() -> list[dict]:
+    import json as _json
+
+    path = Path(__file__).resolve().parent / "data" / "figures.json"
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+_ACTION_MAP = {
+    "travel": "travel", "move": "travel", "go": "travel",
+    "rest": "rest", "sleep": "rest", "recover": "rest",
+    "search": "search", "look_around": "search", "investigate": "search",
+    "ward": "ward", "ritual": "ward", "purify": "ward", "divine": "ward",
+    "attack": "strike", "strike": "strike", "fight": "strike",
+    "bind": "bind", "exorcise": "bind",
+    "flee": "flee", "run": "flee", "retreat": "flee",
+    "command": "command", "order": "command",
+}
+
+
+def api_act(action: str, to: str = "", ritual: str = "", target: str = "", skill: str = "") -> dict[str, Any]:
+    """Android action shape -> core verbs. Returns {journey, events}."""
+    verb = _ACTION_MAP.get((action or "").strip().lower(), "")
+    if not verb:
+        store = _store()
+        return {"journey": _journey_state(store),
+                "events": [f"unknown action: {action}"]}
+    args: dict[str, Any] = {}
+    if to:
+        args["to"] = to
+    if target:
+        args["target"] = target
+    if ritual and verb == "ward":
+        args["ritual"] = ritual
+    if skill:
+        args["skill"] = skill
+    result = act(verb, args)
+    store = _store()
+    events = list(result.get("effects", []))
+    if result.get("text"):
+        events.append(result["text"])
+    return {"journey": _journey_state(store), "events": events}
+
+
+def api_talk(target: str, message: str) -> dict[str, Any]:
+    """Android talk shape -> core talk()."""
+    result = talk(target or "aiko", message or "")
+    result["journey"] = _journey_state(_store())
+    return result
+
+
 def create_app():
     from fastapi import FastAPI
-    from pydantic import BaseModel
 
     app = FastAPI(title="Aiko Onmyoji — game server (slice)")
-
-    class TalkIn(BaseModel):
-        to: str = "aiko"
-        text: str = ""
-
-    class ActIn(BaseModel):
-        verb: str = ""
-        args: dict[str, Any] = {}
 
     @app.get("/state")
     def get_state() -> dict[str, Any]:
@@ -219,6 +349,52 @@ def create_app():
     @app.get("/figures")
     def get_figures() -> dict[str, Any]:
         return figures_here()
+
+    # ── Android client contract ──
+
+    class StartIn(BaseModel):
+        location: str = "sakai"
+        date: str = "1576-01-15"
+
+    class ApiActIn(BaseModel):
+        action: str = ""
+        to: str = ""
+        ritual: str = ""
+        target: str = ""
+        skill: str = ""
+
+    class ApiTalkIn(BaseModel):
+        target: str = "aiko"
+        message: str = ""
+
+    @app.get("/api/onmyoji/health")
+    def api_health() -> dict[str, Any]:
+        return {"ok": True, "game": "onmyoji", "phase": 1}
+
+    @app.post("/api/onmyoji/start")
+    def api_start(body: StartIn) -> dict[str, Any]:
+        store = _store()
+        if body.location:
+            store.move(body.location, body.date or "")
+        return _journey_state(_store())
+
+    @app.get("/api/onmyoji/state")
+    def api_state() -> dict[str, Any]:
+        return _journey_state(_store())
+
+    @app.get("/api/onmyoji/options")
+    def api_options() -> dict[str, Any]:
+        places = _known_places()
+        return {"actions": sorted(_ACTION_MAP), "destinations": places,
+                "all_places": places, "rituals": ["ward", "bind", "purify", "divine"]}
+
+    @app.post("/api/onmyoji/act")
+    def api_act_route(body: ApiActIn) -> dict[str, Any]:
+        return api_act(body.action, body.to, body.ritual, body.target, body.skill)
+
+    @app.post("/api/onmyoji/talk")
+    def api_talk_route(body: ApiTalkIn) -> dict[str, Any]:
+        return api_talk(body.target, body.message)
 
     return app
 

@@ -15,3 +15,12 @@ WEBUI_LOCAL_PLAYBACK: "0"  # Play TTS locally as well as in browser; options: 1/
 STREAM_DRAW_INTERVAL: "0.05"  # Seconds between streamed-token redraws in active UI.
 EMIT_DELAY: "0.012"  # Delay in seconds between word emits for TUI/TTS pacing.
 LATENCY_LOG: "1"  # Log per-turn latency timing; options: 1/0, true/false, yes/no, on/off.
+
+# -- Fly studio (Neural Observatory) --
+PYTHONPATH: "/home/oppa-ai/jetson/Aiko-chan"
+FLY_STUDIO_MOUNT: "/studio/fly"
+FLY_CATALOG_PATH: "data/fly_catalog/male-cns-v1.0-w5.json"
+FULL_BRAIN_NODES: 211577
+FULL_BRAIN_EDGES: 7622864
+BUDGET_PER_TURN: 20000
+MAX_HOPS: 4

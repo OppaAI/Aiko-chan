@@ -17,7 +17,7 @@ EMIT_DELAY: "0.012"  # Delay in seconds between word emits for TUI/TTS pacing.
 LATENCY_LOG: "1"  # Log per-turn latency timing; options: 1/0, true/false, yes/no, on/off.
 
 # -- Fly studio (Neural Observatory) --
-PYTHONPATH: "/home/oppa-ai/jetson/Aiko-chan"
+PYTHONPATH: "/home/oppa-ai/Aiko-chan"
 FLY_STUDIO_MOUNT: "/studio/fly"
 FLY_CATALOG_PATH: "data/fly_catalog/male-cns-v1.0-w5.json"
 FULL_BRAIN_NODES: 211577

@@ -334,6 +334,7 @@ async function loadCatalog() {
     renderUI(circuit, trace);
   } catch (e) {
     $('loading').innerHTML = `<div style="color:#ff6b6b">${esc(String(e))}</div>`;
+    $('loading').classList.add('hidden');
   }
 }
 

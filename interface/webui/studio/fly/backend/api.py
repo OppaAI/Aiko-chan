@@ -23,6 +23,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="fly-frontend")
 
+_CATALOG_LAYOUT: list[dict] | None = None
+_CATALOG_SUMMARY: dict | None = None
+
 # Functional graph: not a full MaleCNS render — motif nodes + live signal strengths.
 _CIRCUIT = {
     "nodes": [
@@ -67,6 +70,56 @@ def _modes() -> dict:
         }
     except Exception:
         return {}
+
+
+def _load_catalog() -> tuple[list[dict], dict]:
+    global _CATALOG_LAYOUT, _CATALOG_SUMMARY
+    if _CATALOG_LAYOUT is not None and _CATALOG_SUMMARY is not None:
+        return _CATALOG_LAYOUT, _CATALOG_SUMMARY
+    try:
+        from cognition.fly_runtime.catalog import ConnectomeCatalog
+        from cognition.fly_runtime.layout import compute_layout, group_color
+
+        catalog_path = Path(__file__).resolve().parents[5] / "data" / "fly_catalog" / "male-cns-v1.0-w5.json"
+        catalog = ConnectomeCatalog.from_path(catalog_path)
+
+        nodes_data = [{"id": n.id, "type": n.type, "region": n.region} for n in catalog.nodes.values()]
+        layout = compute_layout(nodes_data)
+
+        layout_dicts = []
+        for ln in layout:
+            layout_dicts.append({
+                "id": ln.id,
+                "type": ln.type,
+                "region": ln.region,
+                "group": ln.group,
+                "x": ln.x,
+                "y": ln.y,
+                "color": group_color(ln.group),
+            })
+
+        type_counts: dict[str, int] = {}
+        group_counts: dict[str, int] = {}
+        for ln in layout:
+            type_counts[ln.type] = type_counts.get(ln.type, 0) + 1
+            group_counts[ln.group] = group_counts.get(ln.group, 0) + 1
+
+        summary = {
+            "total_nodes": len(layout),
+            "total_edges": len(catalog.edges),
+            "type_count": len(type_counts),
+            "group_counts": group_counts,
+            "source": catalog.source,
+            "version": catalog.version,
+            "checksum": catalog.checksum,
+        }
+
+        _CATALOG_LAYOUT = layout_dicts
+        _CATALOG_SUMMARY = summary
+        return layout_dicts, summary
+    except Exception as exc:
+        logger.exception("Catalog load failed")
+        return [], {"error": str(exc)}
 
 
 def _uid(request: Request) -> str | None:
@@ -170,6 +223,30 @@ def fly_trace(request: Request, node_limit: int = Query(160, ge=1, le=500), edge
         trace = {"error": "trace unavailable"}
         neural_state = {}
     return JSONResponse({"user_id": uid, "trace": trace, "neural_state": neural_state}, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/catalog")
+def fly_catalog(request: Request, limit: int = Query(50000, ge=1, le=250000), offset: int = Query(0, ge=0)) -> JSONResponse:
+    """Return paginated full catalog with computed 2D layout positions."""
+    layout, summary = _load_catalog()
+    total = len(layout)
+    page = layout[offset:offset + limit]
+    return JSONResponse(
+        {
+            "user_id": _uid(request),
+            "summary": summary,
+            "nodes": page,
+            "pagination": {"total": total, "limit": limit, "offset": offset, "has_more": offset + limit < total},
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/catalog/summary")
+def fly_catalog_summary(request: Request) -> JSONResponse:
+    """Return catalog summary without node list."""
+    _, summary = _load_catalog()
+    return JSONResponse({"user_id": _uid(request), "summary": summary}, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/")

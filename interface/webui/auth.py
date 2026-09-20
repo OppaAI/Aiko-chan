@@ -111,6 +111,11 @@ except ImportError as e:
 
 # Fly Circuit Studio — NeuralState motif graph
 try:
+    import os, sys
+    # auth.py is at interface/webui/auth.py → up 3 dirs = Aiko-chan root
+    aiko_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if aiko_root not in sys.path:
+        sys.path.insert(0, aiko_root)
     from interface.webui.studio.fly.backend.api import app as fly_studio_app
     app.mount("/studio/fly", fly_studio_app)
 except ImportError as e:

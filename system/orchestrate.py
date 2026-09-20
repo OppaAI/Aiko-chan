@@ -1773,6 +1773,14 @@ def run_session(ui, args) -> None:
             _update_latency_stats(current_latency)
             _log_latency(current_latency)
             ui._draw()
+            try:
+                # Reply already delivered — sweep arenas while idle (throttled
+                # inside; no-op most turns). See system/resource.py.
+                from system.resource import release_ram
+
+                release_ram("turn")
+            except Exception:
+                pass
 
             _brain_trace.record_step(
                 "transport.commit",

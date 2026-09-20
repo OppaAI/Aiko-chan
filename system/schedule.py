@@ -2290,6 +2290,14 @@ class ScheduleRunner:
                 "Schedule graph %s completed — ok=%s, nodes=%d",
                 graph.id, all(r.ok for r in result.results), len(result.results),
             )
+            try:
+                # Heavy background jobs (job posts, forecasts) allocate hard;
+                # sweep arenas before chat resumes (throttled inside).
+                from system.resource import release_ram
+
+                release_ram(f"schedule:{graph.id}")
+            except Exception:
+                pass
             if graph.id == "gen_job_post" and all(r.ok for r in result.results):
                 self._record_job_post_run()
         except Exception as e:

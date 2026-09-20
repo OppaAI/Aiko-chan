@@ -6,6 +6,7 @@ static frontend, mounted at /studio/fly from interface.webui.auth.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, Query, Request
@@ -77,11 +78,18 @@ def _load_catalog() -> tuple[list[dict], dict]:
     if _CATALOG_LAYOUT is not None and _CATALOG_SUMMARY is not None:
         return _CATALOG_LAYOUT, _CATALOG_SUMMARY
     try:
-        from cognition.fly_runtime.catalog import ConnectomeCatalog
+        from cognition.fly_runtime.service import _configured_catalog
         from cognition.fly_runtime.layout import compute_layout, group_color
 
-        catalog_path = Path(__file__).resolve().parents[5] / "data" / "fly_catalog" / "male-cns-v1.0-w5.json"
-        catalog = ConnectomeCatalog.from_path(catalog_path)
+        # Reuse the runtime indexed SQLite catalog; parsing the canonical JSON
+        # here causes a multi-minute, ~1 GB heap spike on the Jetson.
+        if not os.getenv("AIKO_FLY_CATALOG_PATH"):
+            default_path = Path(__file__).resolve().parents[5] / "data" / "fly_catalog" / "male-cns-v1.0-w5.json"
+            os.environ["AIKO_FLY_CATALOG_PATH"] = str(default_path)
+        catalog = _configured_catalog()
+        if catalog is None:
+            raise RuntimeError("Fly catalog is not configured")
+
 
         nodes_data = [{"id": n.id, "type": n.type, "region": n.region} for n in catalog.nodes.values()]
         layout = compute_layout(nodes_data)
@@ -106,7 +114,7 @@ def _load_catalog() -> tuple[list[dict], dict]:
 
         summary = {
             "total_nodes": len(layout),
-            "total_edges": len(catalog.edges),
+            "total_edges": catalog.summary()["edges"],
             "type_count": len(type_counts),
             "group_counts": group_counts,
             "source": catalog.source,

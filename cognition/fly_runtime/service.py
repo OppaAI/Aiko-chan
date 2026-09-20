@@ -117,7 +117,7 @@ def observe(user_id: str | None, observation: SensoryObservation, *, seed_types:
     if not seeds:
         return None
     # Keep normal chat telemetry bounded; explicit evaluation can raise this.
-    budget = max(1, min(20000, int(os.getenv("AIKO_FLY_ACTIVE_BUDGET", "4000"))))
+    budget = max(1, min(20000, int(os.getenv("AIKO_FLY_ACTIVE_BUDGET", os.getenv("BUDGET_PER_TURN", "20000")))))
     max_hops = max(1, min(8, int(os.getenv("AIKO_FLY_ACTIVE_HOPS", "4"))))
     return get_fly_runtime(user_id, catalog).activate(
         seeds, {seed: max(0.0, min(1.0, observation.salience)) for seed in seeds},

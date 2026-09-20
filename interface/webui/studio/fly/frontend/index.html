@@ -128,6 +128,7 @@ function initThree() {
   controls.enableDamping = true;
   controls.dampingFactor = 0.05;
   controls.enablePan = true;
+  controls.enableRotate = false;
   controls.minZoom = 0.3;
   controls.maxZoom = 8;
   controls.target.set(WIDTH / 2, HEIGHT / 2, 0);
@@ -171,6 +172,7 @@ function initThree() {
     opacity: 0.6,
     sizeAttenuation: true,
     depthWrite: false,
+    depthTest: false,
   });
 
   pointsMesh = new THREE.Points(geom, material);
@@ -196,6 +198,7 @@ function initThree() {
     opacity: 1.0,
     sizeAttenuation: true,
     depthWrite: false,
+    depthTest: false,
     blending: THREE.AdditiveBlending,
   });
   activeMesh = new THREE.Points(activeGeom, activeMat);
@@ -215,8 +218,10 @@ function initThree() {
     transparent: true,
     opacity: 0.5,
     depthWrite: false,
+    depthTest: false,
   });
   edgesLine = new THREE.LineSegments(edgeGeom, edgeMat);
+  edgesLine.renderOrder = 10;
   scene.add(edgesLine);
 
   $('loading').classList.add('hidden');
@@ -328,7 +333,7 @@ async function refreshTelemetry() {
   if (!catalogReady || telemetryRequest) return;
   telemetryRequest = Promise.all([
     fetch("/studio/fly/api/circuit"),
-    fetch("/studio/fly/api/trace?node_limit=300&edge_limit=500")
+    fetch("/studio/fly/api/trace?node_limit=500&edge_limit=1000")
   ]).then(async ([circuitRes, traceRes]) => {
     if (!circuitRes.ok || !traceRes.ok) throw new Error("Telemetry unavailable");
     const [circuit, trace] = await Promise.all([circuitRes.json(), traceRes.json()]);
@@ -348,11 +353,10 @@ async function loadCatalog() {
   }
   try {
     const catalogRes = await fetch("/studio/fly/api/catalog?limit=211577");
-    catalogNodes = allCatalogNodes;
+    const catalog = await catalogRes.json();
     const allCatalogNodes = catalog.nodes || [];
     catalogById = new Map(allCatalogNodes.map(n => [n.id, n]));
-    const renderStride = Math.max(1, Math.ceil(allCatalogNodes.length / 50000));
-    catalogNodes = allCatalogNodes.filter((_, index) => index % renderStride === 0);
+    catalogNodes = allCatalogNodes;
     buildLegend();
     initThree();
     catalogReady = true;

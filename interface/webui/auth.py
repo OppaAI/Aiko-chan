@@ -263,10 +263,71 @@ def _record_terms_acceptance(provider: str, user_id) -> None:
     _save_terms_store(uid, store)
 
 
+# ── session persistence ──────────────────────────────────────────────────────
+# sessions used to live only in RAM *and* the cookie signer was ephemeral
+# unless SECRET_KEY was set — so every main.py restart logged all browsers
+# out and every studio fell back to guest. Sessions now persist to disk
+# (0600) and reload on boot; entries older than the 30-day TTL are dropped.
+# NOTE: a permanent SECRET_KEY in .env is still required — otherwise the
+# signer rotates each restart and old cookies fail signature checks anyway.
+_SESSIONS_PATH = Path.home() / ".aiko" / "sessions.json"
+
+
+def _load_sessions() -> None:
+    try:
+        raw = json.loads(_SESSIONS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(raw, dict):
+        return
+    now = bioclock.local_now()
+    kept = 0
+    for session_id, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            created = entry.get("created_at")
+            created_at = (bioclock.local_now().fromisoformat(created)
+                          if isinstance(created, str) else created)
+            if now - created_at > timedelta(days=30):
+                continue
+            entry["created_at"] = created_at
+            sessions[str(session_id)] = entry
+            kept += 1
+        except Exception:
+            continue
+    if kept:
+        log.info("auth: restored %d persisted session(s)", kept)
+
+
+def _save_sessions() -> None:
+    try:
+        _SESSIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        serialisable = {}
+        for session_id, entry in sessions.items():
+            created = entry.get("created_at")
+            serialisable[str(session_id)] = {
+                **entry,
+                "created_at": (created.isoformat() if hasattr(created, "isoformat")
+                               else str(created)),
+            }
+        tmp = _SESSIONS_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(serialisable, ensure_ascii=False), encoding="utf-8")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        tmp.replace(_SESSIONS_PATH)
+    except Exception as exc:
+        log.debug("auth: session persist skipped: %s", exc)
+
+
 # ── in-memory state ──────────────────────────────────────────────────────────
-# Use redis or a DB in production; fine for solo/small-community use for now.
+# sessions also persist to ~/.aiko/sessions.json (see above); oauth_states
+# stay RAM-only — a restart mid-OAuth just means logging in again.
 
 sessions: dict[str, dict] = {}
+_load_sessions()
 
 # oauth_states maps state -> expiry timestamp. Generated on /login, consumed
 # (and deleted) on /callback. Prevents CSRF: an attacker cannot forge a valid
@@ -319,6 +380,7 @@ def _create_session(user_id, username: str, email: str | None, provider: str) ->
         # accepted this exact terms version in a previous session
         "accepted_terms": _has_accepted_terms(provider, runtime_user_id),
     }
+    _save_sessions()
     return session_id
 
 
@@ -368,6 +430,7 @@ async def require_session(request: Request) -> dict:
     session = sessions[session_id]
     if bioclock.local_now() - session["created_at"] > timedelta(days=30):
         del sessions[session_id]
+        _save_sessions()
         raise HTTPException(status_code=401, detail="Session expired")
 
     return session

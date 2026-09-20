@@ -137,6 +137,31 @@ def _install_os_exit_trap(log: logging.Logger, enabled: bool) -> None:
     # but noisy). Currently called once, gated on --debug, in main().
 
 
+def _install_two_stage_sigint(log: logging.Logger) -> None:
+    """First Ctrl-C behaves as before (graceful KeyboardInterrupt); a second
+    one within the same run hard-exits immediately instead of queuing behind
+    blocking shutdown waits (adapter stops, memory flush, TTS drain — each of
+    which eats the next Ctrl-C on a loaded box)."""
+    import signal as _signal
+
+    state = {"count": 0}
+
+    def _handler(signum, frame) -> None:
+        state["count"] += 1
+        if state["count"] == 1:
+            raise KeyboardInterrupt
+        try:
+            log.warning("[main] second interrupt — forcing immediate exit")
+        except Exception:
+            pass
+        os._exit(130)
+
+    try:
+        _signal.signal(_signal.SIGINT, _handler)
+    except Exception as exc:
+        log.debug("[main] two-stage SIGINT unavailable: %s", exc)
+
+
 def _console_enabled() -> bool:
     """True when log records already reach the terminal (else print()s fill in)."""
     return os.environ.get("LOG_CONSOLE") == "1"
@@ -488,6 +513,7 @@ def main() -> int:
     # for the whole process lifetime. Gated on --debug: the exit-stack dump is
     # heavy-debug territory; a --trace run keeps the console clean.
     _install_os_exit_trap(log, args.debug)
+    _install_two_stage_sigint(log)
 
     if args.clear_mem:                                  # if clear memory argument set
         return _handle_clear_mem(log)

@@ -59,7 +59,7 @@ AGENT_INCLUDE_EXPERIENCE_CONTEXT: "0"  # Experience is now used for offline play
 # Graph/playbook workflows stay deterministic. Low-confidence or unavailable
 # Needle responses fall back to the configured main LLM. Needle never executes
 # tools; Aiko still validates, approves, and runs every call.
-AGENT_REACT_BACKEND: "openai"  # openai | needle | needle_multi. Flip to needle after the local Needle server is up.
+AGENT_REACT_BACKEND: "needle_multi"  # openai | needle | needle_multi. Flip to needle after the local Needle server is up.
 NEEDLE_BASE_URL: "http://127.0.0.1:8082"  # Single-worker Needle 3 playground POST /complete server.
 NEEDLE_CONFIDENCE_THRESHOLD: "0.85"  # Below this, escalate the ReAct turn to the main LLM. Range 0.0-1.0.
 NEEDLE_TIMEOUT: "15"  # Seconds before a Needle /complete request is treated as unavailable.
@@ -68,7 +68,9 @@ NEEDLE_MAX_WORKERS: "4"  # Cap on NEEDLE_WORKERS length for needle_multi. On Jet
 # Example: [{"id":"research","role":"researcher","base_url":"http://127.0.0.1:8082","allowed_tools":["adaptive_search","deep_read"]}]
 # Jetson example (2 workers max): [{"id":"research","role":"researcher","base_url":"http://127.0.0.1:8082","allowed_tools":["adaptive_search","deep_read"]},
 #  {"id":"coder","role":"code reviewer","base_url":"http://127.0.0.1:8083","allowed_tools":["codebase_search","repo_read_file","repo_search_text"]}]
-NEEDLE_WORKERS: ""  # JSON array of NeedleWorkerSpec objects. Empty disables multi-worker.
+
+# JSON array of NeedleWorkerSpec objects. Empty disables multi-worker.
+NEEDLE_WORKERS: '[{"id":"research","role":"researcher","base_url":"http://127.0.0.1:8082","allowed_tools":["adaptive_search","deep_read"]},{"id":"coder","role":"code reviewer","base_url":"http://127.0.0.1:8083","allowed_tools":["codebase_search","repo_search_text"]},{"id":"planner","role":"planner","base_url":"http://127.0.0.1:8084","allowed_tools":["create_checklist","save_note"]},{"id":"reader","role":"reader","base_url":"http://127.0.0.1:8085","allowed_tools":["fetch_from_url","repo_read_file"]}]'
 
 # -- Coding-agent + IT/DAG studio budgets (Jetson Orin Nano 8GB) --
 # Ministral-3-3B CAN self-improve on small scoped tasks (single file, <200

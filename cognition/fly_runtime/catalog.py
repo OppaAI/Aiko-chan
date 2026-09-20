@@ -72,6 +72,23 @@ class ConnectomeCatalog:
             ids.update(self._by_region.get(value, ()))
         return sorted(ids)
 
+    def ids_matching_prefixes(self, prefixes: Iterable[str]) -> list[str]:
+        """Case-insensitive cell-type prefix match.
+
+        The MaleCNS catalog labels cells anatomically (``DNp01``, ``MBON01``,
+        ``AMMC-A1`` …) while callers seed functionally (``sensory``, ``visual``).
+        This bridges the two without hard-coding full type names.
+        """
+        wanted = [str(p).lower() for p in prefixes if str(p)]
+        if not wanted:
+            return []
+        ids: set[str] = set()
+        for cell_type, members in self._by_type.items():
+            lowered = cell_type.lower()
+            if any(lowered.startswith(prefix) for prefix in wanted):
+                ids.update(members)
+        return sorted(ids)
+
     def subgraph(self, seeds: Iterable[str], *, budget: int = 20000, max_hops: int = 4) -> dict:
         """Return a deterministic forward path query, never exceeding *budget*."""
         valid_seeds = sorted(set(seeds).intersection(self.nodes))

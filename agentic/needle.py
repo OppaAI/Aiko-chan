@@ -1,4 +1,4 @@
-"""Optional adapter for a local Needle 2 structured tool-calling server.
+"""Optional adapter for a local Needle 3 structured tool-calling server.
 
 Needle is deliberately a *worker*, not an authority: callers must validate and
 execute its proposed calls through Aiko's existing registry and approval gates.
@@ -6,6 +6,7 @@ execute its proposed calls through Aiko's existing registry and approval gates.
 from __future__ import annotations
 
 import json
+import logging as _logging
 import math
 from dataclasses import dataclass
 from typing import Any
@@ -13,6 +14,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 
+log = _logging.getLogger("aiko.needle")
 
 class NeedleError(RuntimeError):
     """Needle returned an unusable response or its local service was unavailable."""
@@ -55,7 +57,12 @@ def needle_tools(openai_tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 class NeedleClient:
-    """Small synchronous client for Needle's local ``POST /complete`` server."""
+    """Small synchronous client for Needle 3's local ``POST /complete`` server.
+
+    Served via ``needle playground --weights <name.cact> --port <port>``.
+    The playground contract takes tools per request (``query`` + ``tools``);
+    ``input`` is also sent for backward compatibility with Needle 2 servers.
+    """
 
     def __init__(self, base_url: str, *, timeout: float = 15.0, confidence_threshold: float = 0.85):
         self.url = f"{base_url.rstrip('/')}/complete"
@@ -63,17 +70,17 @@ class NeedleClient:
         self.confidence_threshold = confidence_threshold
 
     def complete(self, prompt: str, tools: list[dict[str, Any]]) -> NeedleResponse:
-        # Needle's documented HTTP server loads its catalogue at startup. Keep
-        # this request to its documented input contract and enforce Aiko's
-        # capability-filtered subset again after the response arrives.
-        payload = json.dumps({"input": prompt}).encode("utf-8")
+        # Needle 3's playground server takes the tool catalogue per request.
+        # ``input`` is kept so a lingering Needle 2 server still understands us.
+        needle_schemas = needle_tools(tools)
+        payload = json.dumps({"input": prompt, "query": prompt, "tools": needle_schemas}).encode("utf-8")
         request = Request(self.url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 raw = json.loads(response.read().decode("utf-8"))
         except (OSError, URLError, ValueError) as exc:
             raise NeedleError(f"Needle request failed: {exc}") from exc
-        allowed_names = {tool["name"] for tool in needle_tools(tools)}
+        allowed_names = {tool["name"] for tool in needle_schemas}
         return self._parse(raw, allowed_names)
 
     def _parse(self, raw: Any, allowed_names: set[str]) -> NeedleResponse:
@@ -89,7 +96,12 @@ class NeedleClient:
             raise NeedleError("Needle confidence must be finite") from exc
         if confidence is not None and not math.isfinite(confidence):
             raise NeedleError("Needle confidence must be finite")
-        if confidence is not None and confidence < self.confidence_threshold:
+        if confidence is None:
+            # Needle 3 reports confidence as None for tuned (.cact) weights —
+            # the confidence head is not updated by fine-tuning, so gating is
+            # skipped and the caller accepts the proposal on validation alone.
+            log.debug("Needle confidence is None (tuned weights); skipping threshold gate")
+        elif confidence < self.confidence_threshold:
             raise NeedleLowConfidence(
                 f"Needle confidence {confidence:.2f} is below threshold {self.confidence_threshold:.2f}"
             )

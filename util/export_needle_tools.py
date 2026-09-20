@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Export Aiko's registry schemas in Needle 2's startup catalogue format."""
+"""Export Aiko's registry schemas in Needle's tool-catalogue format.
+
+Needle 3's playground server takes tools per request; this file can be
+passed as the request catalogue or used to seed a worker's toolset.
+Keep it in sync with the registry via this script.
+"""
 from __future__ import annotations
 
 import argparse

@@ -274,9 +274,9 @@ uv run python main.py --clear-mem
 
 In-app commands include `/quit`, `/reset`, `/memory`, `/clear`, `/remember`, `/think <question>`, `/web <query>`, `/voice`, `/listen`, and `/help`.
 
-### Optional Needle 2 ReAct worker
+### Optional Needle 3 ReAct worker
 
-Aiko can use a local Needle 2 server only for novel-task ReAct tool selection;
+Aiko can use a local Needle 3 playground server only for novel-task ReAct tool selection;
 known graph/playbook workflows remain deterministic and the configured main LLM
 remains the fallback for low-confidence or unavailable Needle responses.
 
@@ -287,27 +287,29 @@ NEEDLE_CONFIDENCE_THRESHOLD=0.85
 NEEDLE_TIMEOUT=15
 ```
 
-Export Aiko's startup catalogue, then start Needle with it:
+Start a playground server with the base weights (tools are sent per request,
+so no startup catalogue is needed — optionally export one for reference):
 
 ```bash
-uv run python util/export_needle_tools.py needle-tools.json
-needle --tools needle-tools.json --serve
+needle playground --weights models/needle3.cact --port 8082
+# optional: uv run python util/export_needle_tools.py needle-tools.json
 ```
 
-Configure the server port in `NEEDLE_BASE_URL`. Needle retrieves from its
-startup catalogue, while Aiko rejects any call outside its already
+Configure the server port in `NEEDLE_BASE_URL`. Needle proposes calls from the
+per-request tool list, while Aiko rejects any call outside its already
 capability-filtered subset, validates all arguments through the registry, and
-retains every existing approval gate. Set `AGENT_REACT_BACKEND=openai` (the
+retains every existing approval gate. Tuned (`.cact`) weights report
+`confidence: None`, so threshold gating is skipped and validation alone
+decides. Set `AGENT_REACT_BACKEND=openai` (the
 default) to disable Needle.
 
-### Optional deterministic Needle 2 worker fan-out
+### Optional deterministic Needle 3 worker fan-out
 
 Set `AGENT_REACT_BACKEND=needle_multi` to fan each *novel-task ReAct turn* out
 to explicitly configured Needle workers. This is deterministic orchestration,
 not an LLM supervisor: Aiko starts no processes itself, so run one isolated
-Needle server per worker and supply each server only its role's startup tool
-catalogue. `allowed_tools` is required and intersects with Aiko's existing
-per-turn capability filter before a request is sent.
+playground server per worker (`needle playground --weights <name.cact> --port <port>`)
+and give each worker only its role's tools via `allowed_tools`.
 
 ```dotenv
 AGENT_REACT_BACKEND=needle_multi

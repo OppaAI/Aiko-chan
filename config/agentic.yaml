@@ -52,15 +52,15 @@ GRAPH_AGENT_PLAYBOOK: "agentic/playbook.json"  # Per-user JSON file for practice
 GRAPH_MAX_WORKERS: "2"  # Max parallel tool nodes for graph execution. 2 on Jetson Orin Nano 8GB (4+ risks LLM/RAM contention).
 AGENT_INCLUDE_EXPERIENCE_CONTEXT: "0"  # Experience is now used for offline playbook promotion, not prompt context, by default.
 
-# -- Optional Needle 2 ReAct backend --
+# -- Optional Needle 3 ReAct backend --
 # openai = main chat LLM picks tools (default).
-# needle = one local Needle 2 server proposes tools for novel ReAct turns.
+# needle = one local Needle 3 playground server proposes tools for novel ReAct turns.
 # needle_multi = fan-out to isolated Needle workers in NEEDLE_WORKERS.
 # Graph/playbook workflows stay deterministic. Low-confidence or unavailable
 # Needle responses fall back to the configured main LLM. Needle never executes
 # tools; Aiko still validates, approves, and runs every call.
 AGENT_REACT_BACKEND: "openai"  # openai | needle | needle_multi. Flip to needle after the local Needle server is up.
-NEEDLE_BASE_URL: "http://127.0.0.1:8082"  # Single-worker Needle 2 POST /complete server.
+NEEDLE_BASE_URL: "http://127.0.0.1:8082"  # Single-worker Needle 3 playground POST /complete server.
 NEEDLE_CONFIDENCE_THRESHOLD: "0.85"  # Below this, escalate the ReAct turn to the main LLM. Range 0.0-1.0.
 NEEDLE_TIMEOUT: "15"  # Seconds before a Needle /complete request is treated as unavailable.
 NEEDLE_MAX_WORKERS: "4"  # Cap on NEEDLE_WORKERS length for needle_multi. On Jetson 8GB keep <=2 workers.

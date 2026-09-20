@@ -1,4 +1,4 @@
-"""Deterministic, bounded orchestration for independent Needle 2 workers.
+"""Deterministic, bounded orchestration for independent Needle 3 workers.
 
 Workers are configured explicitly and must point at separate Needle servers (or
 at server sessions that the Needle deployment documents as isolated).  This

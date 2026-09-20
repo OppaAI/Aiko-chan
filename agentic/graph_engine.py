@@ -1038,10 +1038,10 @@ def _default_playbooks() -> list[dict[str, Any]]:
                 {"id": "test", "tool": "code_run_tests", "depends_on": ["lint"], "args": {"target": "tests/unit"}},
             ],
         },
-        # ── Needle2 multi-agent ───────────────────────────────────────
+        # ── Needle 3 multi-agent ───────────────────────────────────────
         {
             "id": "needle_team_research",
-            "name": "Multi-agent research via Needle2 workers, then synthesize",
+            "name": "Multi-agent research via Needle 3 workers, then synthesize",
             "triggers": ["multi-agent", "needle team", "ask the team", "delegate to agents", "second opinion"],
             "semantic_triggers": [
                 "have the agent team research this",

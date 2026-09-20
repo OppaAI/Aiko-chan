@@ -110,7 +110,7 @@ AGENT_VERIFY_MIN_SCORE = float(os.getenv("AGENT_VERIFY_MIN_SCORE", "0.70"))
 AGENT_TOOL_RETRY_BACKOFF = float(os.getenv("AGENT_TOOL_RETRY_BACKOFF", 0.4))
 AGENT_EXECUTOR_MODE = os.getenv("AGENT_EXECUTOR_MODE", "hybrid").strip().lower()  # react | graph | hybrid
 AGENT_INCLUDE_EXPERIENCE_CONTEXT = os.getenv("AGENT_INCLUDE_EXPERIENCE_CONTEXT", "0").lower() in {"1", "true", "yes", "on"}
-# ``needle`` uses the local Needle 2 /complete contract for the novel ReAct
+# ``needle`` uses the local Needle 3 playground /complete contract for the novel ReAct
 # path. Graph playbooks remain deterministic; low-confidence Needle outputs
 # intentionally fall back to the configured conversational LLM.
 AGENT_REACT_BACKEND = os.getenv("AGENT_REACT_BACKEND", "openai").strip().lower()

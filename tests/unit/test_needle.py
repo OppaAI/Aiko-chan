@@ -1,4 +1,4 @@
-"""Unit tests for the optional Needle 2 local tool-worker adapter."""
+"""Unit tests for the optional Needle 3 local tool-worker adapter."""
 from __future__ import annotations
 
 import json
@@ -66,3 +66,29 @@ def test_complete_rejects_tool_outside_allowed_subset():
     response = {"type": "call", "success": True, "confidence": 0.99, "function_calls": [{"name": "send_money", "arguments": {}}]}
     with patch("agentic.needle.urlopen", return_value=_Response(response)), pytest.raises(NeedleError, match="outside Aiko's allowed subset"):
         client.complete("pay", [{"function": {"name": "save_note", "parameters": {}}}])
+
+
+def test_complete_sends_needle3_query_and_tools_contract():
+    """Needle 3 playground reads per-request ``query`` + ``tools`` (``input`` kept for v2)."""
+    client = NeedleClient("http://needle.test", confidence_threshold=0.8)
+    response = {"type": "call", "success": True, "confidence": 0.91, "function_calls": []}
+    captured = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return _Response(response)
+
+    with patch("agentic.needle.urlopen", side_effect=fake_urlopen):
+        client.complete("save this", [{"function": {"name": "save_note", "parameters": {}}}])
+    assert captured["body"]["query"] == "save this"
+    assert captured["body"]["tools"] == [{"name": "save_note", "description": "", "parameters": {}}]
+
+
+def test_complete_accepts_none_confidence_for_tuned_weights():
+    """Needle 3 tuned (.cact) weights report confidence=None; validation alone decides."""
+    client = NeedleClient("http://needle.test", confidence_threshold=0.9)
+    response = {"type": "call", "success": True, "confidence": None, "function_calls": [{"name": "save_note", "arguments": {"text": "hi"}}]}
+    with patch("agentic.needle.urlopen", return_value=_Response(response)):
+        result = client.complete("save this", [{"function": {"name": "save_note", "parameters": {}}}])
+    assert result.confidence is None
+    assert result.calls[0].name == "save_note"

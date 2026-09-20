@@ -499,8 +499,8 @@ def summarize_emails(
 
 
 @tool(
-    _spec("needle_multi_agent_delegate", "Delegate subtasks to Needle2 workers"),
-    description="Delegate subtasks to Needle2 workers. Compat shim — prefer needle_team:needle_team_run.",
+    _spec("needle_multi_agent_delegate", "Delegate subtasks to Needle 3 workers"),
+    description="Delegate subtasks to Needle 3 workers. Compat shim — prefer needle_team:needle_team_run.",
     graph=True,
     react=True,
     domain="multi_agent",

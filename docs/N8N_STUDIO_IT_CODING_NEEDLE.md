@@ -62,7 +62,7 @@ in `config/tools.yaml`). Studio dry-runs should preview diffs, never apply.
 Workflows: `code_explain` (read-only), `code_small_fix` (full loop, approval
 node included).
 
-## 4. Needle2 as multi-agent spawner — yes
+## 4. Needle 3 as multi-agent spawner — yes
 
 `agentic/toolkit/needle_team.py`: `needle_team_status` (config probe, never
 leaks URLs) + `needle_team_run` (fan-out, merge proposals). Rule unchanged:

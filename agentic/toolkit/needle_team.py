@@ -1,7 +1,7 @@
 """
 agentic/toolkit/needle_team.py
 
-Needle2 multi-agent delegation as first-class graph/ReAct tools.
+Needle 3 multi-agent delegation as first-class graph/ReAct tools.
 
 Aiko's rule (unchanged): Needle proposes, Aiko disposes. Every Needle
 response is validated against the capability-filtered tool subset and
@@ -41,8 +41,8 @@ def _worker_summary(w) -> dict:
 
 
 @tool(
-    _spec("needle_team_status", "Show Needle2 worker config (roles/tools, no secrets)."),
-    description="Show Needle2 worker config (roles/tools, no secrets).",
+    _spec("needle_team_status", "Show Needle 3 worker config (roles/tools, no secrets)."),
+    description="Show Needle 3 worker config (roles/tools, no secrets).",
     graph=True,
     react=True,
     domain="multi_agent",
@@ -79,8 +79,8 @@ def needle_team_status() -> str:
 
 
 @tool(
-    _spec("needle_team_run", "Fan out a task to Needle2 workers and merge proposals."),
-    description="Fan out a task to Needle2 workers and merge proposals.",
+    _spec("needle_team_run", "Fan out a task to Needle 3 workers and merge proposals."),
+    description="Fan out a task to Needle 3 workers and merge proposals.",
     graph=True,
     react=True,
     domain="multi_agent",

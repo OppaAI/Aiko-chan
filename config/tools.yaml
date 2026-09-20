@@ -871,7 +871,7 @@
     {
       "handler": "agentic.workflows.common.nodes:needle_multi_agent_delegate",
       "name": "needle_multi_agent_delegate",
-      "description": "Delegate subtasks to Needle2 workers. Compat shim — prefer needle_team:needle_team_run.",
+      "description": "Delegate subtasks to Needle 3 workers. Compat shim — prefer needle_team:needle_team_run.",
       "props": {},
       "domain": "multi_agent",
       "react": true,
@@ -882,7 +882,7 @@
     {
       "handler": "agentic.toolkit.needle_team:needle_team_run",
       "name": "needle_team_run",
-      "description": "Fan out a task to Needle2 workers and merge proposals.",
+      "description": "Fan out a task to Needle 3 workers and merge proposals.",
       "props": {},
       "domain": "multi_agent",
       "react": true,
@@ -893,7 +893,7 @@
     {
       "handler": "agentic.toolkit.needle_team:needle_team_status",
       "name": "needle_team_status",
-      "description": "Show Needle2 worker config (roles/tools, no secrets).",
+      "description": "Show Needle 3 worker config (roles/tools, no secrets).",
       "props": {},
       "domain": "multi_agent",
       "react": true,

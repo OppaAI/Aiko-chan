@@ -956,6 +956,7 @@ micBtn.addEventListener('click', async () => {
 
 // ── WebSocket ─────────────────────────────────────────────────────────────
 let ws = null;
+let wsReconnectTimer = null;
 
 function wsReady() { return ws && ws.readyState === WebSocket.OPEN; }
 // Small public surface for companion.js. Keeping the socket itself private
@@ -988,17 +989,20 @@ function websocketURL() {
 }
 
 function connectWS() {
+  if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
+  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
   const wsUrl = websocketURL();
-  ws = new WebSocket(wsUrl);
-  ws.binaryType = 'arraybuffer';
+  const socket = new WebSocket(wsUrl);
+  ws = socket;
+  socket.binaryType = 'arraybuffer';
 
-  ws.onopen = () => {
+  socket.onopen = () => {
     wsDot.className = 'dot on';
     wsLabel.textContent = 'ws connected';
     if (AUTO_MIC) startMic();
   };
 
-  ws.onmessage = (e) => {
+  socket.onmessage = (e) => {
     if (e.data instanceof ArrayBuffer) {
       enqueueTtsAudio(e.data);
       return;
@@ -1073,7 +1077,9 @@ function connectWS() {
     }
   };
 
-  ws.onclose = () => {
+  socket.onclose = () => {
+    if (ws !== socket) return;
+    ws = null;
     wsDot.className = 'dot';
     wsLabel.textContent = 'ws offline';
     stopMic();
@@ -1082,11 +1088,11 @@ function connectWS() {
     } else {
       toolStatus.textContent = "  ws offline: " + wsUrl;
     }
-    setTimeout(connectWS, 3000);
+    if (!wsReconnectTimer) wsReconnectTimer = setTimeout(() => { wsReconnectTimer = null; connectWS(); }, 3000);
   };
-  ws.onerror = () => {
+  socket.onerror = () => {
     console.error('[ws] connection failed:', wsUrl);
-    ws.close();
+    socket.close();
   };
 }
 

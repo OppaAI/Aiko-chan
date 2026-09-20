@@ -17,6 +17,7 @@ _catalog: ConnectomeCatalog | None = None
 _catalog_path: str | None = None
 _background_lock = threading.Lock()
 _background_inflight: set[str] = set()
+_bg_counts: dict[str, int] = {}
 
 
 # Functional seed label -> anatomical cell-type prefixes in the MaleCNS
@@ -70,7 +71,15 @@ def _resolve_seeds(catalog: ConnectomeCatalog, seed_types: tuple[str, ...]) -> l
     return matched[:seed_limit]
 
 
-def _configured_catalog() -> ConnectomeCatalog | None:
+def _configured_catalog() -> "ConnectomeCatalog | SqliteCatalog | None":
+    """Load the connectome, preferring the indexed SQLite build.
+
+    ``AIKO_FLY_CATALOG_PATH`` points at the canonical JSON; when a
+    same-basename ``.db`` sits beside it (built once via
+    tools/build_catalog_sqlite.py), the SQLite backend is used instead —
+    hot cells in RAM, cold graph on disk, no 1GB parse spike. The JSON
+    path remains the fallback (dev machines, tests).
+    """
     global _catalog, _catalog_path
     path = (os.getenv("AIKO_FLY_CATALOG_PATH", "") or "").strip()
     if not path:
@@ -78,8 +87,21 @@ def _configured_catalog() -> ConnectomeCatalog | None:
     resolved = str(Path(path).expanduser().resolve())
     with _lock:
         if _catalog is None or _catalog_path != resolved:
-            _catalog = ConnectomeCatalog.from_path(resolved)
-            _catalog_path = resolved
+            db_path = str(Path(resolved).with_suffix(".db"))
+            if Path(db_path).exists():
+                try:
+                    from .sqlite_catalog import SqliteCatalog
+
+                    _catalog = SqliteCatalog(db_path)
+                    _catalog_path = resolved
+                    log.info("fly runtime: using indexed catalog %s", db_path)
+                except Exception as exc:
+                    log.warning("fly runtime: indexed catalog unusable, JSON fallback: %s", exc)
+                    _catalog = ConnectomeCatalog.from_path(resolved)
+                    _catalog_path = resolved
+            else:
+                _catalog = ConnectomeCatalog.from_path(resolved)
+                _catalog_path = resolved
         return _catalog
 
 
@@ -105,13 +127,27 @@ def observe(user_id: str | None, observation: SensoryObservation, *, seed_types:
 
 
 def observe_background(user_id: str | None, observation: SensoryObservation, *, seed_types: tuple[str, ...]) -> None:
-    """Evaluate optional telemetry off the conversational hot path."""
+    """Evaluate optional telemetry off the conversational hot path.
+
+    Throttled by AIKO_FLY_BG_EVERY_N (default 1 = every call): background
+    threads share the GIL, so each CPU-bound evaluation measurably slows
+    token streaming on small boxes. Raising the stride (e.g. 3) keeps the
+    trace fresh at a fraction of the contention.
+    """
     mode = (os.getenv("AIKO_FLY_RUNTIME_MODE", "off") or "off").strip().lower()
     if mode not in {"shadow", "live"} or not observation.consented:
         return
+    try:
+        stride = max(1, int(os.getenv("AIKO_FLY_BG_EVERY_N", "1")))
+    except (TypeError, ValueError):
+        stride = 1
     key = (user_id or "").strip() or "default"
     with _background_lock:
         if key in _background_inflight:
+            return
+        count = _bg_counts.get(key, 0) + 1
+        _bg_counts[key] = count
+        if (count - 1) % stride != 0:
             return
         _background_inflight.add(key)
 

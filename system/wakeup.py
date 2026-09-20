@@ -261,6 +261,29 @@ class AikoWakeup:
                 think_exc = exc                                                               # logged once and chained into the raise later
             memorize = mem_future.result()                                                    # grab the results of memory system
 
+        # ── fly catalog warmup (fire-and-forget) ──────────────────────────────
+        # First evaluation parses ~489MB of connectome JSON; done lazily that
+        # stalls a chat turn AND starves the webui (GIL + swap spike) for
+        # minutes. Warm it once here, in the background, so the cost lands
+        # at boot instead of mid-conversation. Best-effort: never blocks boot.
+        def _warm_fly_catalog() -> None:
+            try:
+                import os as _os
+
+                if (_os.getenv("AIKO_FLY_RUNTIME_MODE", "off") or "off").strip().lower() not in {"shadow", "live"}:
+                    return
+                if not (_os.getenv("AIKO_FLY_CATALOG_PATH", "") or "").strip():
+                    return
+                from cognition.fly_runtime.service import _configured_catalog
+
+                _configured_catalog()
+                log.info("[wakeup] fly catalog warmed")
+            except Exception as exc:
+                log.debug("[wakeup] fly catalog warmup skipped: %s", exc)
+
+        _fly_warm = threading.Thread(target=_warm_fly_catalog, name="aiko-fly-warmup", daemon=True)
+        _fly_warm.start()
+
         # ── MCP client boot (non-fatal) ─────────────────────────────────────────
         try:
             from agentic.mcp_client.bridge import bootstrap_mcp

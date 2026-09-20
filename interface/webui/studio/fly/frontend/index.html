@@ -50,7 +50,7 @@ legend i{width:12px;height:12px;border-radius:3px}
 <div class="stats" id="stats"></div>
 <canvas id="canvas"></canvas>
 <div id="loading"><div class="spinner"></div>Loading connectome…</div>
-<p class="note">Full catalog loaded (211,577 neurons); browser projection renders a sampled subset for responsiveness. Active subgraph (≤20k) highlighted per turn. Colors = functional group.</p>
+<p class="note">Full brain projection: 211,577 catalog neurons. Active subgraph is bounded by the 4,000-cell runtime budget and highlighted per turn. Colors = functional group.</p>
 <legend id="legend"></legend>
 </section>
 <aside class="side">
@@ -130,6 +130,8 @@ function initThree() {
   controls.enablePan = true;
   controls.minZoom = 0.3;
   controls.maxZoom = 8;
+  controls.target.set(WIDTH / 2, HEIGHT / 2, 0);
+  controls.update();
 
   const ambient = new THREE.AmbientLight(0x404060, 0.6);
   scene.add(ambient);
@@ -346,8 +348,7 @@ async function loadCatalog() {
   }
   try {
     const catalogRes = await fetch("/studio/fly/api/catalog?limit=211577");
-    if (!catalogRes.ok) throw new Error("Catalog unavailable " + catalogRes.status);
-    const catalog = await catalogRes.json();
+    catalogNodes = allCatalogNodes;
     const allCatalogNodes = catalog.nodes || [];
     catalogById = new Map(allCatalogNodes.map(n => [n.id, n]));
     const renderStride = Math.max(1, Math.ceil(allCatalogNodes.length / 50000));

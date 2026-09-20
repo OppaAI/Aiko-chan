@@ -50,7 +50,7 @@ legend i{width:12px;height:12px;border-radius:3px}
 <div class="stats" id="stats"></div>
 <canvas id="canvas"></canvas>
 <div id="loading"><div class="spinner"></div>Loading connectome…</div>
-<p class="note">Full brain (211,577 neurons) rendered as instanced points. Active subgraph (≤20k) highlighted per turn. Colors = functional group.</p>
+<p class="note">Full catalog loaded (211,577 neurons); browser projection renders a sampled subset for responsiveness. Active subgraph (≤20k) highlighted per turn. Colors = functional group.</p>
 <legend id="legend"></legend>
 </section>
 <aside class="side">
@@ -116,7 +116,7 @@ function initThree() {
   const canvas = $('canvas');
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
   renderer.setSize(canvas.clientWidth, canvas.clientHeight);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setPixelRatio(1);
 
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x07101c);
@@ -185,6 +185,7 @@ function initThree() {
   activeGeom.setAttribute('color', new THREE.BufferAttribute(aColor, 3));
   activeGeom.setAttribute('size', new THREE.BufferAttribute(aSize, 1));
   activeGeom.setAttribute('rate', new THREE.BufferAttribute(aRate, 1));
+  activeGeom.setDrawRange(0, 0);
 
   const activeMat = new THREE.PointsMaterial({
     size: 8,
@@ -204,6 +205,7 @@ function initThree() {
   const ePos = new Float32Array(maxEdges * 2 * 3);
   const eColor = new Float32Array(maxEdges * 2 * 3);
   edgeGeom.setAttribute('position', new THREE.BufferAttribute(ePos, 3));
+  edgeGeom.setDrawRange(0, 0);
   edgeGeom.setAttribute('color', new THREE.BufferAttribute(eColor, 3));
 
   const edgeMat = new THREE.LineBasicMaterial({
@@ -346,8 +348,10 @@ async function loadCatalog() {
     const catalogRes = await fetch("/studio/fly/api/catalog?limit=211577");
     if (!catalogRes.ok) throw new Error("Catalog unavailable " + catalogRes.status);
     const catalog = await catalogRes.json();
-    catalogNodes = catalog.nodes || [];
-    catalogById = new Map(catalogNodes.map(n => [n.id, n]));
+    const allCatalogNodes = catalog.nodes || [];
+    catalogById = new Map(allCatalogNodes.map(n => [n.id, n]));
+    const renderStride = Math.max(1, Math.ceil(allCatalogNodes.length / 50000));
+    catalogNodes = allCatalogNodes.filter((_, index) => index % renderStride === 0);
     buildLegend();
     initThree();
     catalogReady = true;
@@ -360,13 +364,13 @@ async function loadCatalog() {
 }
 
 let lastTime = 0;
-function animate(time) {
+function animate(time = performance.now()) {
   animationId = requestAnimationFrame(animate);
   controls.update();
   if (activeMesh && activeMesh.geometry.attributes.rate) {
     const rates = activeMesh.geometry.attributes.rate.array;
     const sizes = activeMesh.geometry.attributes.size.array;
-    const drawRange = activeMesh.geometry.drawRange.count;
+    const drawRange = Math.min(activeMesh.geometry.drawRange.count, 500);
     for (let i = 0; i < drawRange; i++) {
       const pulse = 1 + 0.3 * Math.sin(time * 0.004 + i);
       sizes[i] = (6 + rates[i] * 10) * pulse;

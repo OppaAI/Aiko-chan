@@ -1153,6 +1153,13 @@ class EpisodicStore:
         """Format episodic hits as a compact <episodic_context> block."""
         if not episodes:
             return None
+        # Diversity: same-motif traces from one evening otherwise fill every
+        # episodic slot. Collapse near-duplicates (best-first) before render.
+        try:
+            from cognition.memory.diversity import diversify
+            episodes = diversify(episodes)
+        except Exception:
+            pass
         budget = EMC_CONTEXT_CHARS if max_chars is None else max(40, int(max_chars))
         lines = [
             "<episodic_context>",

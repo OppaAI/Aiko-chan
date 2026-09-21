@@ -14,11 +14,18 @@ Aiko-chan is built in phases. Each phase is a self-contained capability layer th
 
 | Feature | Status |
 |---|---|
-| CLI chatbot architecture | ✅ Done |
-| Local inference via Ollama | ✅ Done |
-| Persistent memory — mem0 + Qdrant | ✅ Done |
+| CLI + WebUI chat architecture | ✅ Done |
+| Local inference via llama.cpp server (`ministral`) | ✅ Done |
+| Persistent memory — custom sqlite-vec + KNN/FTS5/RRF (replaced mem0 + Qdrant: OOM on Nano) | ✅ Done |
+| Episodic memory (EMC store, staging → flush → distill) | ✅ Done |
+| Entity graph, supersession chains, dream consolidation | ✅ Done |
+| Recall diversity filter — near-duplicate collapse (`cognition/memory/diversity.py`, SM + EMC paths) | ✅ Done 2026-09-20 |
+| Attention attempt-gate — contradiction clarify at ≥2 shared tokens, matching recorder bar | ✅ Done 2026-09-20 |
 | Async (non-blocking) memory writes | ✅ Done |
 | Web search integration via SearXNG | ✅ Done |
+| Karaoke display/TTS pipeline — bubbles render dialogue text, actions/emphasis words kept | ✅ Done 2026-09-20 |
+
+Known envelope (Jetson Orin Nano, Sep 2026): ~2 tok/s, ~20 s time-to-first-token on long-context turns, RAM ~7.2/7.4 GB under ASR + LLM + TTS. Fly connectome telemetry runs off the hot path (`observe_background`, stride-tunable via `AIKO_FLY_BG_EVERY_N`). Per-turn recall budget: 5 semantic + 4 episodic + persona blob. Further latency work needs on-device measurement, not code guesses.
 
 ---
 

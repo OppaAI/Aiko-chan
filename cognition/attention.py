@@ -412,9 +412,11 @@ def should_attempt(
     # summaries share boilerplate ("current=... | earlier=...") and raw
     # tokens let filler words ("do", "you") match everything. _detect needs
     # ≥2 shared tokens + a negation flip to record; the gate mirrors that
-    # topical bar instead of firing on a single stopword.
+    # topical bar (≥2 shared content tokens) instead of firing on a single
+    # stopword — or a single shared word, which kept hijacking ordinary
+    # same-topic follow-ups into clarify turns.
     query_content = _tokens(text)
-    related_contradictions = [c for c in (contradictions or []) if len(query_content & _tokens(c)) >= 1]
+    related_contradictions = [c for c in (contradictions or []) if len(query_content & _tokens(c)) >= 2]
     latest_review = (response_reviews or [{}])[0] if response_reviews else {}
     latest_flags = [str(f) for f in latest_review.get("flags", [])] if isinstance(latest_review, dict) else []
     incomplete_flag = any("may not answer" in flag or "completeness" in flag for flag in latest_flags)
@@ -1563,6 +1565,19 @@ class EdgeCognitiveState:
             scored.append((score, -index, reconstructed))
         scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
         result = [row for _, _, row in scored]
+        # Diversity: collapse near-duplicate lower-ranked hits so one motif
+        # can't occupy every recall slot on topic-continuous chats. Exact
+        # duplicates are already handled upstream; this catches same-motif
+        # rewordings. Pinned rows and the top hit always survive.
+        try:
+            from cognition.memory.diversity import diversify
+            kept = diversify(result)
+            if len(kept) != len(result):
+                log.debug("prioritize_memories diversity dropped %d/%d near-dupes",
+                          len(result) - len(kept), len(result))
+            result = kept
+        except Exception:
+            pass
         _bt_record(
             "EdgeCognitiveState.prioritize_memories",
             layer="rerank",

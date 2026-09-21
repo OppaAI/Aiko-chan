@@ -227,10 +227,21 @@ def test_should_attempt_uses_contradictions_with_energy_available():
     state = EdgeCognitiveState()
     state.record("I like coffee", "")
     state.record("I do not like coffee", "")
-    ok, reason, action = state.should_attempt("Please update my coffee preference", mode="agentic")
+    ok, reason, action = state.should_attempt("Do I still like coffee — update my preference?", mode="agentic")
     assert not ok
     assert action == "clarify"
     assert "contradictions" in reason
+
+
+def test_should_attempt_ignores_single_token_contradiction_overlap():
+    # Regression: the gate mirrors the recorder's topical bar (≥2 shared
+    # content tokens). One shared word must not hijack a turn into clarify.
+    state = EdgeCognitiveState()
+    state.record("I like coffee", "")
+    state.record("I do not like coffee", "")
+    ok, reason, action = state.should_attempt("Tell me about coffee brewing", mode="route")
+    assert ok
+    assert action == "proceed"
 
 
 def test_should_attempt_defers_low_energy_discretionary_work():

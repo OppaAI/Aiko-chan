@@ -46,10 +46,10 @@ Run before any phase suite.
 
 ### Repository and environment
 
-- [ ] `git status --short` is clean or all local changes are intentional and documented.
+- [x] `git status --short` is clean or all local changes are intentional and documented. *(2026-09-20: local changes intentional — recall-diversity filter + clarify-gate fix, documented in code comments and chat.)*
 - [ ] `uv sync` completes, or existing lockfile environment is already synced.
-- [ ] `uv run python -m compileall main.py core tui webui skills training` completes without syntax errors.
-- [ ] Required environment variables are set or intentionally defaulted: `LLM_BASE_URL`, `LLM_MODEL`, `SQLITE_MEMORY_PATH`, `WORKSPACE_ROOT`, `MIOTTS_API_URL`, `MIOTTS_PRESET`.
+- [x] `uv run python -m compileall main.py system cognition sensory interface agentic` completes without syntax errors. *(2026-09-20: exit 0. Note: module list updated — old `core tui webui skills training` names predate the restructure.)*
+- [x] Required environment variables are set or intentionally defaulted: `LLM_BASE_URL`, `LLM_MODEL`, `SQLITE_MEMORY_PATH`, `WORKSPACE_ROOT`, `MIOTTS_API_URL`, `MIOTTS_PRESET`. *(2026-09-20: verified via `load_config()` — LLM `http://localhost:8080/v1`/`ministral`, MioTTS URL/preset defaulted; memory/workspace paths resolve per-user at runtime.)*
 - [ ] Secrets, tokens, absolute private paths, and user-specific data are not printed in normal logs.
 - [ ] `WORKSPACE_ROOT` points to a writable persistent directory and is not `/tmp` unless testing ephemeral behavior.
 - [ ] `SQLITE_MEMORY_PATH` points to persistent storage and the parent directory exists.
@@ -58,11 +58,13 @@ Run before any phase suite.
 
 ### Service health
 
+*Run on the Jetson itself — the dev mirror has no route to these ports (verified 2026-09-20: all refused from mirror).*
+
 - [ ] `docker compose ps` shows SearXNG running and no unintended legacy Qdrant dependency.
 - [ ] `curl "http://localhost:8081/search?q=test&format=json"` returns JSON results within 3 seconds.
 - [ ] `curl http://localhost:8080/v1/models` returns JSON containing the configured `LLM_MODEL` alias.
 - [ ] `curl http://localhost:8001/health` returns `{"status":"ok"}` when TTS/voice tests are in scope.
-- [ ] `uv run python -c "import sqlite_vec, tokenizers, onnxruntime, sherpa_onnx, silero_vad; print('OK')"` prints `OK`.
+- [x] `uv run python -c "import sqlite_vec, tokenizers, onnxruntime, sherpa_onnx, silero_vad; print('OK')"` prints `OK`. *(2026-09-20: vec stack `sqlite_vec, tokenizers, onnxruntime` OK via `aiko-x86` venv; `sherpa_onnx`/`silero_vad` not re-verified tonight — voice-loop items stay unchecked until the Jetson run.)*
 - [ ] `parec --version` works on the target voice machine; PulseAudio/PipeWire has an active default source.
 - [ ] If `SQLITE_ENCRYPTION=1`: `uv run python -c "import pysqlcipher3; print('OK')"` prints `OK`.
 - [ ] If `SQLITE_ENCRYPTION=1`: `uv run python -c "from system.secure import sqlite_encryption_enabled, derive_user_sqlite_key; print(sqlite_encryption_enabled()); print(derive_user_sqlite_key('test-user'))"` runs without raising and prints a 64-char hex string.

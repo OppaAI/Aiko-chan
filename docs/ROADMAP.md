@@ -23,7 +23,6 @@ Aiko-chan is built in phases. Each phase is a self-contained capability layer th
 | Attention attempt-gate — contradiction clarify at ≥2 shared tokens, matching recorder bar | ✅ Done 2026-09-20 |
 | Async (non-blocking) memory writes | ✅ Done |
 | Web search integration via SearXNG | ✅ Done |
-| Karaoke display/TTS pipeline — bubbles render dialogue text, actions/emphasis words kept | ✅ Done 2026-09-20 |
 
 Known envelope (Jetson Orin Nano, Sep 2026): ~2 tok/s, ~20 s time-to-first-token on long-context turns, RAM ~7.2/7.4 GB under ASR + LLM + TTS. Fly connectome telemetry runs off the hot path (`observe_background`, stride-tunable via `AIKO_FLY_BG_EVERY_N`). Per-turn recall budget: 5 semantic + 4 episodic + persona blob. Further latency work needs on-device measurement, not code guesses.
 
@@ -90,6 +89,7 @@ Known envelope (Jetson Orin Nano, Sep 2026): ~2 tok/s, ~20 s time-to-first-token
 | Optional owner voice verification via sherpa-onnx speaker embeddings | ✅ Done |
 | TTS runtime decision — MioTTS active; Kokoro/RealtimeTTS removed | ✅ Done |
 | MioTTS HTTP client + local sounddevice playback | ✅ Done (*OOM issue)|
+| Karaoke display/TTS pipeline — bubbles render dialogue text, actions/emphasis words kept (no span deletion) | ✅ Done 2026-09-20 |
 | Remote/browser TTS audio sink for WebUI playback | ✅ Done |
 | Browser/WebUI microphone streaming into ASR/VAD pipeline | ✅ Done |
 | Staged TTS/ASR/VAD warmup during boot | ✅ Done |

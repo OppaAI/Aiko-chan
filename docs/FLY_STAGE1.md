@@ -14,9 +14,9 @@ Make existing MaleCNS-derived circuits the **authority** for continuous behavior
 |------|----------|
 | **GF interrupt** | Multi-source urgency (keywords + safety + system_error + priority + subliminal + motion). `should_abort_plan(user_id)` for agent loops. |
 | **MB valence** | Each turn publishes MB `valence_bias` into NeuralState when `MEMORY_FLYMB_MODE=live`. |
-| **SOUL teach** | On first turn (or SOUL.md change), curated situations are reinforced into KC→MBON plasticity (`FLY_SOUL_TEACH_ON_BOOT`). |
+| **SOUL teach** | Disabled by default. When enabled, the first turn (or a SOUL.md change) reinforces curated situations into KC→MBON plasticity (`FLY_SOUL_TEACH_ON_BOOT`). |
 | **Online teach** | User praise / correction / “stop talking about X” → small `reinforce()`. |
-| **DN vigor** | Turn priors publish DN rate/volume proxies into NeuralState. |
+| **DN vigor** | Turn priors call `NeuralState.publish_dn()` with `arousal` and `rate_mult` (stored as `action_drive` and `motor_vigor`); `vol_mult` remains only in the DN influence event. |
 | **Influence log** | NeuralState keeps a ring buffer of last ~48 fly events for Studio. |
 | **LH / CX / sleep** | Unchanged modes; still live. Diversity/anti-loop remains memory-side. |
 
@@ -31,7 +31,7 @@ MEMORY_FLYSLEEP_MODE: live
 MEMORY_FLYDN_MODE: live
 MEMORY_FLYAL_MODE: live
 
-FLY_SOUL_TEACH_ON_BOOT: live   # off | shadow | live
+FLY_SOUL_TEACH_ON_BOOT: off    # off | shadow | live (default: off)
 FLY_SOUL_TEACH_FORCE: 0        # 1 = re-bootstrap even if SOUL hash unchanged
 ```
 
@@ -47,7 +47,7 @@ Existing weights (`MEMORY_FLYMB_W`, `MEMORY_FLYLH_W`, …) still apply to rankin
 
 ## Agent abort
 
-`cognition.fly_behavior.should_abort_plan(user_id)` returns True when live GF interrupt is set. Needle aborts the crew when this is true. Route already maps interrupt → localchat.
+`cognition.fly_behavior.should_abort_plan(user_id)` returns True in live mode when GF interrupt is set or urgency is at least 0.65. It returns False outside live mode or when state lookup raises an exception. Route already maps interrupt → localchat.
 
 ## Rollback
 

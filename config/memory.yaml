@@ -235,7 +235,7 @@ MEMORY_FLYSLEEP_MODE: "live"  # off | shadow | live
 
 # -- Stage 1: SOUL bootstrap + observability (cognition/flymemory/soul_teach.py) --
 # off = no SOUL→MB teaching; shadow = count only; live = reinforce curated episodes.
-FLY_SOUL_TEACH_ON_BOOT: "live"  # off | shadow | live
+FLY_SOUL_TEACH_ON_BOOT: "off"  # off | shadow | live (default: off)
 FLY_SOUL_TEACH_FORCE: "0"  # 1 = re-run bootstrap even if SOUL.md hash unchanged
 
 

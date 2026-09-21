@@ -69,7 +69,7 @@ def _modes() -> dict:
             "MEMORY_FLYSLEEP_MODE": env_str("MEMORY_FLYSLEEP_MODE", "off"),
             "MEMORY_FLYDN_MODE": env_str("MEMORY_FLYDN_MODE", "off"),
             "MEMORY_FLYAL_MODE": env_str("MEMORY_FLYAL_MODE", "off"),
-            "FLY_SOUL_TEACH_ON_BOOT": env_str("FLY_SOUL_TEACH_ON_BOOT", "live"),
+            "FLY_SOUL_TEACH_ON_BOOT": env_str("FLY_SOUL_TEACH_ON_BOOT", "off"),
         }
     except Exception:
         return {}

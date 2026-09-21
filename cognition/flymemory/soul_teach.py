@@ -5,7 +5,7 @@ strings and apply DAN-like reinforce() so approach/avoid biases track Aiko's
 character priors. Online teachers in online_teach.py continue from live outcomes.
 
 Config:
-  FLY_SOUL_TEACH_ON_BOOT — off | shadow | live (default live)
+  FLY_SOUL_TEACH_ON_BOOT — off | shadow | live (default off)
   FLY_SOUL_TEACH_FORCE  — 1 to re-run even if mtime unchanged
 """
 from __future__ import annotations
@@ -39,9 +39,9 @@ _BOOTSTRAPPED: dict[str, str] = {}
 def _mode() -> str:
     try:
         from system.config import env_str
-        return env_str("FLY_SOUL_TEACH_ON_BOOT", "live").strip().lower()
+        return env_str("FLY_SOUL_TEACH_ON_BOOT", "off").strip().lower()
     except Exception:
-        return (os.getenv("FLY_SOUL_TEACH_ON_BOOT") or "live").strip().lower()
+        return (os.getenv("FLY_SOUL_TEACH_ON_BOOT") or "off").strip().lower()
 
 
 def _force() -> bool:

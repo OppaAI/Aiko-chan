@@ -17,32 +17,32 @@ class LayoutNode:
 
 
 GROUP_ORDER = [
-    ("sensory", "Sensory", (0.08, 0.5)),
-    ("AL", "Antennal Lobe", (0.18, 0.25)),
-    ("T4", "T4/T5 Motion", (0.18, 0.75)),
-    ("T5", "T4/T5 Motion", (0.18, 0.75)),
-    ("Tm", "Medulla Tm", (0.28, 0.35)),
-    ("Mi", "Medulla Mi", (0.28, 0.45)),
-    ("C", "Medulla C", (0.28, 0.55)),
-    ("L", "Lamina L", (0.28, 0.65)),
-    ("MB", "Mushroom Body", (0.45, 0.2)),
-    ("MBON", "MB Output", (0.5, 0.15)),
-    ("KC", "Kenyon Cell", (0.5, 0.3)),
-    ("DAN", "Dopaminergic", (0.55, 0.25)),
-    ("APL", "MB Feedback", (0.55, 0.35)),
-    ("CX", "Central Complex", (0.45, 0.7)),
-    ("EPG", "CX Compass", (0.5, 0.65)),
-    ("PEN", "CX Compass", (0.5, 0.75)),
-    ("PFN", "CX Output", (0.55, 0.7)),
-    ("LH", "Lateral Horn", (0.45, 0.5)),
-    ("LHN", "LH Output", (0.5, 0.5)),
-    ("GF", "Giant Fiber", (0.65, 0.5)),
-    ("DN", "Descending", (0.8, 0.35)),
-    ("DNp", "DN Projection", (0.8, 0.35)),
-    ("DNg", "DN Ground", (0.8, 0.45)),
-    ("VNC", "Ventral Nerve Cord", (0.85, 0.6)),
-    ("output", "Motor Output", (0.9, 0.5)),
-    ("unknown", "Other", (0.5, 0.5)),
+    ("sensory", "Sensory", (0.50, 0.18)),
+    ("AL", "Antennal Lobe", (0.50, 0.34)),
+    ("T4", "T4/T5 Motion", (0.50, 0.62)),
+    ("T5", "T4/T5 Motion", (0.50, 0.62)),
+    ("Tm", "Medulla Tm", (0.50, 0.34)),
+    ("Mi", "Medulla Mi", (0.50, 0.45)),
+    ("C", "Medulla C", (0.50, 0.55)),
+    ("L", "Lamina L", (0.50, 0.66)),
+    ("MB", "Mushroom Body", (0.50, 0.22)),
+    ("MBON", "MB Output", (0.50, 0.18)),
+    ("KC", "Kenyon Cell", (0.50, 0.34)),
+    ("DAN", "Dopaminergic", (0.58, 0.28)),
+    ("APL", "MB Feedback", (0.58, 0.40)),
+    ("CX", "Central Complex", (0.50, 0.67)),
+    ("EPG", "CX Compass", (0.50, 0.62)),
+    ("PEN", "CX Compass", (0.50, 0.72)),
+    ("PFN", "CX Output", (0.58, 0.67)),
+    ("LH", "Lateral Horn", (0.58, 0.50)),
+    ("LHN", "LH Output", (0.62, 0.50)),
+    ("GF", "Giant Fiber", (0.50, 0.72)),
+    ("DN", "Descending", (0.50, 0.84)),
+    ("DNp", "DN Projection", (0.50, 0.84)),
+    ("DNg", "DN Ground", (0.55, 0.86)),
+    ("VNC", "Ventral Nerve Cord", (0.50, 0.94)),
+    ("output", "Motor Output", (0.50, 0.98)),
+    ("unknown", "Other", (0.50, 0.52)),
 ]
 
 
@@ -103,6 +103,9 @@ def compute_layout(nodes: list[dict], width: float = 1000.0, height: float = 600
 
     import random
     rng = random.Random(seed)
+    # Stylized bilateral fly-brain projection: optic-lobe groups flank the
+    # central brain. This is anatomical-inspired, not registered XYZ data.
+    lateral_groups = {"sensory", "AL", "T4", "Tm", "Mi", "C", "L"}
 
     layout: list[LayoutNode] = []
     for grp, members in by_group.items():
@@ -113,9 +116,14 @@ def compute_layout(nodes: list[dict], width: float = 1000.0, height: float = 600
         radius_x = 80 + min(count * 0.8, 120)
         radius_y = 60 + min(count * 0.6, 100)
         for i, n in enumerate(members):
+            if grp in lateral_groups:
+                side = -1 if sum(map(ord, str(n.get("id", "")))) % 2 else 1
+                local_x = (0.20 if side < 0 else 0.80) * width
+            else:
+                local_x = base_x
             angle = rng.uniform(0, 2 * math.pi)
             r = rng.uniform(0.15, 1.0)
-            x = base_x + math.cos(angle) * radius_x * r
+            x = local_x + math.cos(angle) * radius_x * r
             y = base_y + math.sin(angle) * radius_y * r
             x = max(20, min(width - 20, x))
             y = max(20, min(height - 20, y))

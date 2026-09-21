@@ -305,10 +305,10 @@ function renderUI(c, p) {
   ].map((x, i) => `<span class="badge ${i===0 && x==='live' ? 'live' : ''}">${esc(x)}</span>`).join('');
 
   $('stats').innerHTML = [
-    ['Active cells', active ? t.active_nodes : '—'],
-    ['Active edges', active ? t.active_edges : '—'],
-    ['Display cells', active ? t.display_nodes : catalogNodes.length],
-    ['Budget', active ? t.budget : '—']
+    ["Evaluated cells", active ? t.active_nodes : "—"],
+    ["Evaluated edges", active ? t.active_edges : "—"],
+    ["Drawn cells", active ? t.display_nodes : catalogNodes.length],
+    ["Drawn edges", active ? t.display_edges : "—"]
   ].map(([n, v]) => `<div class="stat"><b>${v ?? '—'}</b><span>${n}</span></div>`).join('');
 
   meters(c.neural_state || {});

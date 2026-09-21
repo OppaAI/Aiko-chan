@@ -218,10 +218,24 @@ def fly_trace(request: Request, node_limit: int = Query(160, ge=1, le=500), edge
             shown_nodes = sorted(nodes, key=lambda node: (-float(node.get("rate", 0)), str(node.get("id", ""))))[:node_limit]
             shown_ids = {node["id"] for node in shown_nodes}
             trace["nodes"] = shown_nodes
-            trace["edges"] = [
+            candidates = [
                 edge for edge in trace.get("edges", ())
                 if edge.get("source") in shown_ids and edge.get("target") in shown_ids
-            ][:edge_limit]
+            ]
+            selected_edges = []
+            source_counts = {}
+            target_counts = {}
+            for edge in candidates:
+                source = edge.get("source")
+                target = edge.get("target")
+                if source_counts.get(source, 0) >= 12 or target_counts.get(target, 0) >= 12:
+                    continue
+                selected_edges.append(edge)
+                source_counts[source] = source_counts.get(source, 0) + 1
+                target_counts[target] = target_counts.get(target, 0) + 1
+                if len(selected_edges) >= edge_limit:
+                    break
+            trace["edges"] = selected_edges
             trace["display_nodes"] = len(trace["nodes"])
             trace["display_edges"] = len(trace["edges"])
         state = peek_neural_state(uid)

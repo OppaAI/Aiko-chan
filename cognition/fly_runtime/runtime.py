@@ -9,6 +9,12 @@ from .catalog import ConnectomeCatalog
 from .dynamics import ActiveDynamics
 from .embodiment import AvatarEmbodiment
 from cognition.neural_state import peek_neural_state
+def _is_output_type(cell_type: str) -> bool:
+    """Return whether a catalog type represents a motor/descending output."""
+    value = str(cell_type or "").strip().upper()
+    return value == "VNC" or value.startswith(("DN", "MN", "MNS", "MOTOR")) or value == "OUTPUT"
+
+
 
 
 @dataclass
@@ -36,7 +42,7 @@ class FlyRuntime:
         # request cannot turn one interaction into O(nodes * hops) work.
         for _ in range(min(8, max(1, max_hops + 1))):
             rates = dynamics.step(drive)
-        outputs = {node_id: value for node_id, value in rates.items() if self.catalog.nodes[node_id].type in {"DN", "VNC", "output"}}
+        outputs = {node_id: value for node_id, value in rates.items() if _is_output_type(self.catalog.nodes[node_id].type)}
         sensory = max((v for node, v in rates.items() if self.catalog.nodes[node].type in {"sensory", "AL", "T4", "T5"}), default=0.0)
         output_drive = max(outputs.values(), default=0.0)
         current_state = peek_neural_state(self.user_id)

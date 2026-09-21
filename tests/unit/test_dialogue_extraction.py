@@ -12,12 +12,12 @@ class TestDialogueExtraction(unittest.TestCase):
     def test_emoji_header_and_non_verbal(self):
         text = "😊: *sighs softly* (inner thoughts: glad he asked) I'm doing well, thank you."
         result = extract_dialogue_for_tts(text)
-        self.assertEqual(result, "I'm doing well, thank you.")
+        self.assertEqual(result, "sighs softly I'm doing well, thank you.")
 
     def test_angry_emoji_and_actions(self):
         text = "😒: *crosses arms* You really don't know? *looks away* Let me explain."
         result = extract_dialogue_for_tts(text)
-        self.assertEqual(result, "You really don't know? Let me explain.")
+        self.assertEqual(result, "crosses arms You really don't know? looks away Let me explain.")
 
     def test_bracketed_feelings(self):
         text = "🤖: [analyzing parameters...] Here are the results."
@@ -27,7 +27,7 @@ class TestDialogueExtraction(unittest.TestCase):
     def test_pure_action_no_dialogue(self):
         text = "*nods silently*"
         result = extract_dialogue_for_tts(text)
-        self.assertEqual(result, "")
+        self.assertEqual(result, "nods silently")
 
     def test_pure_dialogue(self):
         text = "Hello, OppaAI!"

@@ -225,7 +225,6 @@ _EMOJI_HEADER_RE = re.compile(
     r"^\s*(?:[\U0001F300-\U0001FAFF\u2600-\u27BF\u2300-\u23FF\u2B00-\u2BFF\uFE00-\uFE0F]|\:[a-zA-Z0-9_-]+\:)?\s*:\s*",
     re.UNICODE
 )
-_ACTION_ASTERISK_RE = re.compile(r"\*[^*]+\*")
 _THOUGHT_PAREN_RE = re.compile(r"\([^)]+\)")
 _FEELING_BRACKET_RE = re.compile(r"\[[^\]]+\]")
 _STRUCTURED_SEP_RE = re.compile(r"\n\s*---\s*\n")
@@ -268,7 +267,10 @@ def parse_aiko_response(text: str) -> dict:
 
     body = re.sub(r"(?m)^\s*---+\s*$", "", body)
     body = _EMOJI_HEADER_RE.sub("", body)
-    body = _ACTION_ASTERISK_RE.sub("", body)
+    # Strip only the asterisk markers, keeping the wrapped words so actions
+    # and emphasis stay visible in bubbles and speakable in TTS.
+    body = re.sub(r"\*\*([^*]+)\*\*", r"\1", body)
+    body = re.sub(r"\*([^*]+)\*", r"\1", body)
     body = _THOUGHT_PAREN_RE.sub("", body)
     body = _FEELING_BRACKET_RE.sub("", body)
     body = re.sub(r"\*+", " ", body)

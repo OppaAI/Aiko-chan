@@ -191,8 +191,9 @@ DREAM_BOOST_AMOUNT: "1"  # Access-count boost for memories promoted during dream
 MEMORY_FLYMB_MODE: "live"  # off | shadow | live.
 MEMORY_FLYMB_W: "0.05"  # Live-mode weight of the opponent bias added to grasp scores.
 MEMORY_FLYMB_PROMOTE_W: "0.1"  # Live-mode weight of the bias on journal-promotion scores.
-MEMORY_FLYMB_RECALL_W: "0.01"  # Live-mode KC-overlap bonus on episodic recall (RRF scale ~0.03).
-MEMORY_FLYMB_LTM_W: "0.01"  # Live-mode approach-bias bonus on LTM recall ranking.
+MEMORY_FLYMB_RECALL_W: "0.03"  # Stage 2  # Live-mode KC-overlap bonus on episodic recall (RRF scale ~0.03).
+MEMORY_FLYMB_LTM_W: "0.04"  # Stage 2: stronger visible rank effect
+MEMORY_FLYMB_AVOID_MULT: "1.8"  # Stage 2: avoidance suppresses more than approach boosts  # Live-mode approach-bias bonus on LTM recall ranking.
 MEMORY_FLYMB_DREAM_W: "0.2"  # Live-mode approach-replay bonus on dream-boost scores (threshold 0.35).
 MEMORY_FLYMB_DECAY_W: "0.5"  # Live-mode half-life stretch for approach-associated memories (slows decay only).
 # -- Biological persistence (cognition/flymemory/store.py + fly_registry) --
@@ -235,7 +236,7 @@ MEMORY_FLYSLEEP_MODE: "live"  # off | shadow | live
 
 # -- Stage 1: SOUL bootstrap + observability (cognition/flymemory/soul_teach.py) --
 # off = no SOUL→MB teaching; shadow = count only; live = reinforce curated episodes.
-FLY_SOUL_TEACH_ON_BOOT: "off"  # off | shadow | live (default: off)
+FLY_SOUL_TEACH_ON_BOOT: "live"  # off | shadow | live (enabled for Stage 2)
 FLY_SOUL_TEACH_FORCE: "0"  # 1 = re-run bootstrap even if SOUL.md hash unchanged
 
 

@@ -1,4 +1,6 @@
 """Unit tests for the fly mushroom-body biological layer (numpy-only, offline)."""
+import logging
+
 import numpy as np
 import pytest
 
@@ -324,3 +326,112 @@ def test_plasticity_debounce_and_env(tmp_path, monkeypatch):
     assert store.save_if_due_cx(0.2) is False
     assert store.save_if_due_cx(0.3) is True
     assert store.load_cx() == 0.3
+
+
+@pytest.mark.parametrize("message", ["Don't talk about spoilers.", "Don't bring up spoilers."])
+def test_online_teach_routes_dont_topic_cues_to_stage2(monkeypatch, message):
+    from cognition.flymemory import online_teach, teach_api
+
+    calls = []
+    monkeypatch.setattr(online_teach, "_mode", lambda: "live")
+    monkeypatch.setattr(
+        teach_api,
+        "teach_preference",
+        lambda topic, *, direction, user_id: calls.append((topic, direction, user_id))
+        or {"mode": "live", "reward": -0.55, "taught": True},
+    )
+
+    result = online_teach.teach_from_user_text(message, user_id="user-1")
+
+    assert calls == [("spoilers", "avoid", "user-1")]
+    assert result["reason"] == "avoid_topic"
+    assert result["topic"] == "spoilers"
+
+
+@pytest.mark.parametrize(
+    ("direction", "canonical", "reward"),
+    [("prefer", "prefer", 0.5), ("approach", "prefer", 0.5), ("avoid", "avoid", -0.55), ("suppress", "avoid", -0.55)],
+)
+def test_teach_preference_accepts_documented_direction_aliases(monkeypatch, direction, canonical, reward):
+    from cognition.flymemory import teach_api
+
+    monkeypatch.setattr(teach_api, "_mb_mode", lambda: "shadow")
+
+    result = teach_api.teach_preference("spoilers", direction=direction)
+
+    assert result["direction"] == canonical
+    assert result["reward"] == reward
+    assert result["reason"] == "shadow"
+
+
+@pytest.mark.parametrize("direction", ["aviod", "like", "want", "", None])
+def test_teach_preference_rejects_unsupported_directions(monkeypatch, direction):
+    from cognition.flymemory import teach_api
+
+    monkeypatch.setattr(teach_api, "_mb_mode", lambda: "live")
+
+    result = teach_api.teach_preference("spoilers", direction=direction)
+
+    assert result["reason"] == "invalid_direction"
+    assert result["taught"] is False
+    assert result["persisted"] is False
+    assert result["reward"] == 0.0
+
+
+class _TeachMB:
+    def encode(self, _features):
+        return "encoded"
+
+    def reinforce(self, _encoded, _reward):
+        return 0.25
+
+    def valence_bias(self, _features):
+        return 0.2
+
+
+class _TeachState:
+    def publish_mb(self, _bias, *, source):
+        assert source == "teach:avoid"
+
+    def record_influence(self, _event):
+        pass
+
+
+def _configure_live_teach(monkeypatch, store):
+    from cognition.flymemory import teach_api
+
+    monkeypatch.setattr(teach_api, "_mb_mode", lambda: "live")
+    monkeypatch.setattr("cognition.fly_registry.get_flymb", lambda _user_id: _TeachMB())
+    monkeypatch.setattr("cognition.fly_registry.get_fly_store", lambda _user_id: store)
+    monkeypatch.setattr("cognition.neural_state.get_neural_state", lambda _user_id: _TeachState())
+    return teach_api
+
+
+def test_teach_preference_reports_successful_flymb_persistence(monkeypatch):
+    class Store:
+        def flush_mb(self, _mb):
+            return 1
+
+    teach_api = _configure_live_teach(monkeypatch, Store())
+
+    result = teach_api.teach_preference("spoilers", user_id="user-1", write_memory_fact=False)
+
+    assert result["taught"] is True
+    assert result["persisted"] is True
+    assert result["reason"] == "ok"
+
+
+def test_teach_preference_logs_failed_flymb_persistence(monkeypatch, caplog):
+    class Store:
+        def flush_mb(self, _mb):
+            raise OSError("disk detail")
+
+    teach_api = _configure_live_teach(monkeypatch, Store())
+
+    with caplog.at_level(logging.ERROR, logger=teach_api.log.name):
+        result = teach_api.teach_preference("spoilers", user_id="user-1", write_memory_fact=False)
+
+    assert result["taught"] is True
+    assert result["persisted"] is False
+    assert result["reason"] == "ok"
+    assert "disk detail" in caplog.text

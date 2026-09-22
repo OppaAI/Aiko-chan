@@ -13,6 +13,7 @@ import os
 import sys
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, PropertyMock
 
 import numpy as np
@@ -727,6 +728,63 @@ def test_skill_proposal_written_for_multistep_run(monkeypatch, tmp_path):
     )
     assert path is not None
     assert "Reusable tool order" in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(("interrupted", "expected_submissions"), [(True, 0), (False, 2)])
+def test_agentic_interrupt_skips_run_learning(monkeypatch, interrupted, expected_submissions):
+    import agentic.agentic as agentic_module
+
+    owner = MockOwner()
+    owner._persona = "persona"
+    owner._fetch_memory_and_knowledge = lambda _text, query_vector=None: ([], "")
+    owner._get_memorize = lambda: SimpleNamespace(format_for_context=lambda *_args, **_kwargs: "")
+    owner._current_system_prompt = lambda: "system"
+
+    profile = SimpleNamespace(
+        capability_ids=[], tool_domains=set(), system_overlay="", max_iter=1, research_budget=0
+    )
+    empty_context = {
+        "agentic_policy": "",
+        "wiki": "",
+        "skill": "",
+        "experience": "",
+        "wiki_knowledge": "",
+        "_scores": {},
+    }
+    submit = MagicMock()
+    monkeypatch.setattr(agentic_module, "AGENT_EXECUTOR_MODE", "react")
+    monkeypatch.setattr(agentic_module, "AGENT_VERIFY_FINAL", False)
+    monkeypatch.setattr(agentic_module, "_owner_embedder", lambda _owner: None)
+    monkeypatch.setattr(agentic_module, "match_capabilities", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(agentic_module, "resolve_handoff", lambda *_args, **_kwargs: profile)
+    monkeypatch.setattr(agentic_module, "tool_schemas", lambda: [])
+    monkeypatch.setattr(agentic_module, "filtered_tool_schemas", lambda *_args: [])
+    monkeypatch.setattr(agentic_module, "_agent_context", lambda *_args, **_kwargs: SimpleNamespace(user_id=None))
+    monkeypatch.setattr(agentic_module, "_append_step_trace", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(agentic_module, "_fetch_agentic_only_context", lambda *_args, **_kwargs: dict(empty_context))
+    monkeypatch.setattr(agentic_module.reason, "batch_block_relevance_scores", lambda *_args, **_kwargs: [0.0])
+    monkeypatch.setattr(agentic_module, "_enforce_agentic_context_budget", lambda *_args, **_kwargs: ("", "", "", "", "", ""))
+    monkeypatch.setattr(agentic_module.bioclock, "current_datetime_block", lambda: "")
+    monkeypatch.setattr(agentic_module, "_recent_history_messages", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(agentic_module, "default_pre_tool_guardrails", lambda _budget: None)
+    monkeypatch.setattr(agentic_module, "current_user_id", lambda: None)
+    monkeypatch.setattr("cognition.fly_behavior.should_abort_plan", lambda _user_id: interrupted)
+    monkeypatch.setattr(agentic_module.CONTEXT_POOL, "submit", submit)
+    monkeypatch.setattr(agentic_module, "_emit_file_artifacts", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(agentic_module, "_finalize_agentic_answer", lambda _owner, _input, draft, **_kwargs: draft)
+    monkeypatch.setattr(agentic_module, "_flush_trace_buffer", lambda: None)
+    monkeypatch.setattr("cognition.attention.flush_all_persist", lambda: None)
+
+    message = SimpleNamespace(content="completed", tool_calls=None, model_dump=lambda **_kwargs: {"content": "completed"})
+    monkeypatch.setattr(agentic_module, "_stream_agent_message", lambda *_args, **_kwargs: (message, None))
+
+    result = agentic_module.run_agentic_chat(owner, "test task")
+
+    assert result == ("Stopped — interrupt received." if interrupted else "completed")
+    assert submit.call_count == expected_submissions
+    if not interrupted:
+        assert submit.call_args_list[0].args[0] is agentic_module.experience.record_experience
+        assert submit.call_args_list[1].args[0] is agentic_module.skill_learning.propose_skill_from_run
 
 
 def test_handoff_profile_includes_additional_domains():

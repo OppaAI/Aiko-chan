@@ -307,6 +307,31 @@ def fly_catalog_summary(request: Request) -> JSONResponse:
     return JSONResponse({"user_id": _uid(request), "summary": summary}, headers={"Cache-Control": "no-store"})
 
 
+
+@app.get("/api/causal")
+def fly_causal(request: Request, limit: int = Query(32, ge=1, le=48)) -> JSONResponse:
+    """Stage 2: recent influence events as a short causal trail."""
+    uid = _uid(request)
+    events: list = []
+    try:
+        from cognition.neural_state import peek_neural_state
+        state = peek_neural_state(uid)
+        if state is not None:
+            snap = state.snapshot()
+            events = list(snap.get("influence") or [])[-limit:]
+    except Exception:
+        logger.exception("Fly Studio causal trail retrieval failed")
+        return JSONResponse(
+            {"user_id": uid, "error": "causal trail unavailable", "events": []},
+            status_code=500,
+            headers={"Cache-Control": "no-store"},
+        )
+    return JSONResponse(
+        {"user_id": uid, "events": events, "count": len(events), "stage": "2"},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.get("/")
 def index():
     return FileResponse(FRONTEND_DIR / "index.html")

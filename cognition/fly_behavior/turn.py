@@ -75,6 +75,12 @@ def apply_turn_priors(
             log.debug("online_teach skipped: %s", exc)
 
         try:
+            from cognition.fly_behavior.stage4_hooks import after_online_teach
+            after_online_teach(user_id, text or "", out)
+        except Exception as exc:
+            log.debug("stage4_hooks skipped: %s", exc)
+
+        try:
             from system.config import env_str
             mb_mode = env_str("MEMORY_FLYMB_MODE", "off").strip().lower()
         except Exception:
@@ -127,7 +133,12 @@ def apply_turn_priors(
             if gf.get("interrupt"):
                 try:
                     from cognition.flymemory.online_teach import teach_interrupt_honored
-                    teach_interrupt_honored(user_id, text or "stop abort cancel")
+                    online_teach = out.get("online_teach") or {}
+                    out["interrupt_teach"] = teach_interrupt_honored(
+                        user_id,
+                        text or "stop abort cancel",
+                        eligibility_recorded=bool(online_teach.get("eligibility_recorded")),
+                    )
                 except Exception:
                     pass
 

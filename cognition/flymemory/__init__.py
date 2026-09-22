@@ -7,13 +7,15 @@ honest limits (functional abstraction, not a simulation).
 
 Stage 1: soul_teach + online_teach for SOUL.md / outcome alignment.
 Stage 2: teach_preference / extract_topic for explicit do-or-don't teaching.
-Stage 3 follow-up: eligibility trace for delayed credit over recent turns.
+Stage 3: eligibility trail. Stage 4: dopamine PAM/PPL1 + MB sleep consolidation.
 """
 from .circuit import FlyMB, load_circuit, text_features
 from .soul_teach import ensure_soul_bootstrap, soul_episodes
 from .online_teach import teach_from_user_text, teach_interrupt_honored
 from .teach_api import teach_preference, extract_topic
 from .eligibility import assign_credit, record_step, stats as eligibility_stats
+from .dopamine import pulse as dopamine_pulse, split_channels as dopamine_channels
+from .consolidate_mb import consolidate as consolidate_mb
 
 __all__ = [
     "FlyMB",
@@ -28,4 +30,7 @@ __all__ = [
     "assign_credit",
     "record_step",
     "eligibility_stats",
+    "dopamine_pulse",
+    "dopamine_channels",
+    "consolidate_mb",
 ]

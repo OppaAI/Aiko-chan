@@ -903,6 +903,13 @@ class AikoSpeak:
 
     def speak(self, text: str) -> bool:
         """Synthesize a complete string, non-blocking. Caller prints to console."""
+        try:
+            from cognition.fly_behavior.dn_tts import apply_dn_prosody
+            from system.userspace import current_user_id
+            user_id = current_user_id()
+            apply_dn_prosody(self, user_id=user_id)
+        except Exception:
+            pass
         clean = extract_dialogue_for_tts(text)
         if not clean:
             return False
@@ -923,6 +930,13 @@ class AikoSpeak:
         speak(). on_word receives each word pre-padded with a leading space
         except the first, e.g. "Hello", " I'm", " Aiko".
         """
+        try:
+            from cognition.fly_behavior.dn_tts import apply_dn_prosody
+            from system.userspace import current_user_id
+            user_id = current_user_id()
+            apply_dn_prosody(self, user_id=user_id)
+        except Exception:
+            pass
         clean = extract_dialogue_for_tts(text)
         if not clean:
             return False

@@ -50,6 +50,7 @@ def _sim_threshold() -> float:
 def diversify(
     rows: list[dict] | None,
     *,
+    user_id: str | None = None,
     text_of=None,
     sim_threshold: float | None = None,
 ) -> list[dict]:
@@ -60,7 +61,7 @@ def diversify(
     always non-empty when input is non-empty.
     """
     items = list(rows or [])
-    if len(items) <= 1:
+    if not items:
         return items
     threshold = _sim_threshold() if sim_threshold is None else sim_threshold
     get_text = text_of or (
@@ -84,4 +85,15 @@ def diversify(
         if sim < threshold:
             kept.append(row)
             kept_sets.append(words)
+    try:
+        if (os.getenv("MEMORY_ANTILOOP", "1") or "1").strip().lower() not in ("0", "off", "false"):
+            from cognition.memory.antiloop import apply_antiloop
+            return apply_antiloop(kept, user_id=user_id, text_of=get_text)
+    except Exception:
+        pass
     return kept
+
+
+def diversify_and_freshness(rows: list[dict] | None, *, user_id: str | None = None, text_of=None, sim_threshold: float | None = None) -> list[dict]:
+    """diversify() then anti-loop freshness. Used when caller has a user_id."""
+    return diversify(rows, user_id=user_id, text_of=text_of, sim_threshold=sim_threshold)

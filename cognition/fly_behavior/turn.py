@@ -1,6 +1,9 @@
-"""Per-turn fly behavioral priors: GF interrupt, LH context, circadian proxy.
+"""Per-turn fly behavioral priors (Stage 1 closed loops).
 
-Called once at the start of a user turn. Publishes into NeuralState.
+Called once at the start of a user turn. Publishes into NeuralState:
+  GF interrupt (multi-source), LH familiarity, circadian, MB valence,
+  DN vigor, optional SOUL bootstrap + online teach.
+
 Modes stay off/shadow until explicitly enabled in config.
 """
 from __future__ import annotations
@@ -27,8 +30,10 @@ def apply_turn_priors(
     user_id: str | None = None,
     system_error: bool = False,
     priority: float = 0.0,
+    prior_assistant: str | None = None,
+    subliminal_urgency: float = 0.0,
 ) -> dict:
-    """Run GF + LH + circadian; return a compact summary for the turn.
+    """Run Stage-1 fly priors; return a compact summary for the turn.
 
     Never raises. Safe to call on every turn.
     """
@@ -38,7 +43,12 @@ def apply_turn_priors(
         "familiarity": 0.5,
         "novel": False,
         "sleep_pressure": None,
+        "valence": 0.0,
+        "motor_vigor": 1.0,
         "tone_bits": [],
+        "gf_sources": {},
+        "soul_teach": None,
+        "online_teach": None,
     }
     try:
         from cognition.neural_state import get_neural_state
@@ -48,15 +58,76 @@ def apply_turn_priors(
         st = get_neural_state(user_id)
         st.publish_circadian(_circadian_phase_now(), source="wallclock")
 
-        gf = assess_interrupt(text or "", system_error=system_error, priority=priority)
+        try:
+            from cognition.flymemory.soul_teach import ensure_soul_bootstrap
+            out["soul_teach"] = ensure_soul_bootstrap(user_id)
+        except Exception as exc:
+            log.debug("soul_teach skipped: %s", exc)
+
+        try:
+            from cognition.flymemory.online_teach import teach_from_user_text
+            out["online_teach"] = teach_from_user_text(
+                text or "", user_id=user_id, prior_assistant=prior_assistant
+            )
+        except Exception as exc:
+            log.debug("online_teach skipped: %s", exc)
+
+        try:
+            from system.config import env_str
+            mb_mode = env_str("MEMORY_FLYMB_MODE", "off").strip().lower()
+        except Exception:
+            mb_mode = "off"
+        if mb_mode in ("shadow", "live"):
+            try:
+                from cognition.fly_registry import get_flymb
+                from cognition.flymemory.circuit import text_features
+
+                mb = get_flymb(user_id)
+                if mb is not None:
+                    bias = float(mb.valence_bias(text_features(text or "")))
+                    out["valence"] = bias
+                    if mb_mode == "live":
+                        st.publish_mb(bias, source="turn")
+                    st.record_influence(
+                        {"kind": "mb_valence", "mode": mb_mode, "bias": round(bias, 4)}
+                    )
+            except Exception as exc:
+                log.debug("mb valence skipped: %s", exc)
+
+        motion = float(st.motion_salience or 0.0)
+        gf = assess_interrupt(
+            text or "",
+            system_error=system_error,
+            priority=priority,
+            subliminal_urgency=float(subliminal_urgency or 0.0),
+            motion_salience=motion,
+        )
         st.publish_gf(float(gf.get("urgency") or 0.0), bool(gf.get("interrupt")), source="turn")
         out["urgency"] = gf.get("urgency", 0.0)
         out["interrupt"] = bool(gf.get("interrupt"))
+        out["gf_sources"] = gf.get("sources") or {}
         if gf.get("mode") in ("shadow", "live"):
             log.debug(
-                "flygf mode=%s urgency=%.2f interrupt=%s would=%s",
-                gf.get("mode"), gf.get("urgency"), gf.get("interrupt"), gf.get("would_interrupt"),
+                "flygf mode=%s urgency=%.2f interrupt=%s would=%s sources=%s",
+                gf.get("mode"), gf.get("urgency"), gf.get("interrupt"),
+                gf.get("would_interrupt"), gf.get("sources"),
             )
+            st.record_influence(
+                {
+                    "kind": "gf",
+                    "mode": gf.get("mode"),
+                    "urgency": gf.get("urgency"),
+                    "interrupt": gf.get("interrupt"),
+                    "would_interrupt": gf.get("would_interrupt"),
+                    "sources": gf.get("sources"),
+                }
+            )
+            if gf.get("interrupt"):
+                try:
+                    from cognition.flymemory.online_teach import teach_interrupt_honored
+                    teach_interrupt_honored(user_id, text or "stop abort cancel")
+                except Exception:
+                    pass
 
         lh = context_prior(text or "", user_id=user_id)
         if "familiarity" in lh:
@@ -68,6 +139,49 @@ def apply_turn_priors(
                     "flylh mode=%s familiarity=%.2f novel=%s bias=%s",
                     lh.get("mode"), lh.get("familiarity"), lh.get("novel"), lh.get("bias"),
                 )
+                st.record_influence(
+                    {
+                        "kind": "lh",
+                        "mode": lh.get("mode"),
+                        "familiarity": lh.get("familiarity"),
+                        "novel": lh.get("novel"),
+                        "bias": lh.get("bias"),
+                    }
+                )
+
+        try:
+            from system.config import env_str
+            dn_mode = env_str("MEMORY_FLYDN_MODE", "off").strip().lower()
+        except Exception:
+            dn_mode = "off"
+        if dn_mode in ("shadow", "live"):
+            try:
+                from cognition.flysense.dn import FlyDN
+
+                energy = max(0.0, min(1.0, 1.0 - float(st.sleep_pressure or 0.0)))
+                drv = FlyDN().drive(
+                    energy=energy,
+                    decisiveness=float(st.decisiveness or 0.5),
+                    affect=float(st.valence or 0.0),
+                )
+                out["motor_vigor"] = drv.get("rate_mult", 1.0)
+                if dn_mode == "live":
+                    st.publish_dn(
+                        arousal=float(drv.get("arousal") or 0.5),
+                        rate_mult=float(drv.get("rate_mult") or 1.0),
+                        source="turn",
+                    )
+                st.record_influence(
+                    {
+                        "kind": "dn",
+                        "mode": dn_mode,
+                        "arousal": drv.get("arousal"),
+                        "rate_mult": drv.get("rate_mult"),
+                        "vol_mult": drv.get("vol_mult"),
+                    }
+                )
+            except Exception as exc:
+                log.debug("dn drive skipped: %s", exc)
 
         out["sleep_pressure"] = st.sleep_pressure
 

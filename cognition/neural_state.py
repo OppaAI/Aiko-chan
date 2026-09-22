@@ -4,11 +4,14 @@ Call sites should publish into NeuralState and consumers should read from it,
 instead of each subsystem constructing its own FlyMB/FlyCompass/FlyDN.
 
 Isolation: one NeuralState per user_id (via fly_registry-style keying).
+
+Stage 1: bounded influence ring buffer for Fly Studio observability.
 """
 from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -21,6 +24,8 @@ except Exception:  # pragma: no cover
 
 _lock = threading.RLock()
 _states: dict[str, "NeuralState"] = {}
+
+_INFLUENCE_MAX = 48
 
 
 def _key(user_id: str | None) -> str:
@@ -59,15 +64,26 @@ class NeuralState:
     sources: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        # Kept outside the dataclass fields so asdict(self) never attempts to
-        # copy or serialize the lock itself.
         self._instance_lock = threading.RLock()
+        self._influence: deque[dict[str, Any]] = deque(maxlen=_INFLUENCE_MAX)
 
     def snapshot(self) -> dict[str, Any]:
         with self._instance_lock:
             d = asdict(self)
             d["updated_at"] = self.updated_at
+            d["influence"] = list(self._influence)
             return d
+
+    def record_influence(self, event: dict[str, Any]) -> None:
+        """Append a small observability event (Studio / debug). Never raises."""
+        try:
+            with self._instance_lock:
+                row = dict(event or {})
+                row.setdefault("ts", time.time())
+                self._influence.append(row)
+                self.updated_at = time.time()
+        except Exception:
+            pass
 
     def publish_mb(self, valence: float, *, source: str = "mb") -> None:
         with self._instance_lock:
@@ -113,6 +129,18 @@ class NeuralState:
             self.urgency = max(0.0, min(1.0, float(urgency)))
             self.interrupt = bool(interrupt)
             self.sources["gf"] = source
+            self.updated_at = time.time()
+
+    def publish_motion(self, salience: float, *, source: str = "t4t5") -> None:
+        with self._instance_lock:
+            self.motion_salience = max(0.0, min(1.0, float(salience)))
+            self.sources["motion"] = source
+            self.updated_at = time.time()
+
+    def publish_sensory_gain(self, gain: float, *, source: str = "al") -> None:
+        with self._instance_lock:
+            self.sensory_gain = max(0.1, min(2.0, float(gain)))
+            self.sources["al"] = source
             self.updated_at = time.time()
 
     def publish_circadian(self, phase: float, *, source: str = "clock") -> None:

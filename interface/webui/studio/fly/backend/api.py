@@ -68,7 +68,28 @@ def _modes() -> dict:
             "MEMORY_FLYGF_MODE": env_str("MEMORY_FLYGF_MODE", "off"),
             "MEMORY_FLYSLEEP_MODE": env_str("MEMORY_FLYSLEEP_MODE", "off"),
             "MEMORY_FLYDN_MODE": env_str("MEMORY_FLYDN_MODE", "off"),
+            "MEMORY_FLYAL_MODE": env_str("MEMORY_FLYAL_MODE", "off"),
+            "FLY_SOUL_TEACH_ON_BOOT": env_str("FLY_SOUL_TEACH_ON_BOOT", "off"),
         }
+    except Exception:
+        return {}
+
+
+def _weights() -> dict:
+    """Stage 1: expose live ranking / teach weights for Studio."""
+    try:
+        from system.config import env_str
+        keys = (
+            "MEMORY_FLYMB_W",
+            "MEMORY_FLYMB_RECALL_W",
+            "MEMORY_FLYMB_LTM_W",
+            "MEMORY_FLYMB_DREAM_W",
+            "MEMORY_FLYMB_DECAY_W",
+            "MEMORY_FLYLH_W",
+            "MEMORY_FLYCX_W",
+            "MEMORY_FLYCX_ATTEMPT_W",
+        )
+        return {k: env_str(k, "") for k in keys}
     except Exception:
         return {}
 
@@ -150,8 +171,23 @@ def fly_state(request: Request) -> JSONResponse:
         snap = state.snapshot() if state is not None else {}
     except Exception as exc:
         snap = {"error": str(exc)}
+    mb_summary = {}
+    try:
+        from cognition.fly_registry import get_flymb
+        mb = get_flymb(uid)
+        if mb is not None and hasattr(mb, "summary"):
+            mb_summary = mb.summary()
+    except Exception:
+        mb_summary = {}
     return JSONResponse(
-        {"user_id": uid, "neural_state": snap, "modes": _modes()},
+        {
+            "user_id": uid,
+            "neural_state": snap,
+            "modes": _modes(),
+            "weights": _weights(),
+            "mb_summary": mb_summary,
+            "stage": "1",
+        },
         headers={"Cache-Control": "no-store"},
     )
 

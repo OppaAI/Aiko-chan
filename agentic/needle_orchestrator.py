@@ -203,6 +203,22 @@ class NeedleOrchestrator:
 
     def complete(self, task: str, tools: list[dict[str, Any]]) -> tuple[NeedleWorkerResult, ...]:
         """Run workers concurrently (or sequentially when drowsy), preserving configured order."""
+        # Stage 1 GF: abort whole needle crew when live interrupt is set.
+        try:
+            from cognition.fly_behavior import should_abort_plan
+            uid = None
+            try:
+                from system.userspace import current_user_id
+                uid = current_user_id() or None
+            except Exception:
+                uid = None
+            if should_abort_plan(uid):
+                log.info("flygf interrupt → abort needle crew user=%s", uid or "default")
+                raise NeedleError("fly giant-fiber interrupt: aborting needle crew")
+        except NeedleError:
+            raise
+        except Exception:
+            pass
         cadence = _flycx_cadence(task)
         max_workers = 1 if cadence == "sequential" else len(self.workers)
         try:

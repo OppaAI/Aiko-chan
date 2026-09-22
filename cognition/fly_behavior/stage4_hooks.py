@@ -28,4 +28,4 @@ def after_online_teach(user_id, text: str, out: dict) -> None:
 
         out["mb_consolidate"] = maybe_consolidate_mb(user_id)
     except Exception as exc:
-        log.debug("mb_consolidate skipped: %s", exp if False else exc)
+        log.debug("mb_consolidate skipped: %s", exc)

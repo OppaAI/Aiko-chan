@@ -23,6 +23,7 @@ def install(user_id: str | None = None) -> bool:
             return True
         try:
             from cognition.fly_registry import get_flycx
+
             cx = get_flycx(user_id)
             if cx is None or not hasattr(cx, "step"):
                 return False
@@ -34,6 +35,7 @@ def install(user_id: str | None = None) -> bool:
             def step(features, pen_drive: float = 0.0, fatigue: float = 0.0):
                 try:
                     from cognition.fly_behavior.cx_features import blend_cx_features
+
                     feats, pen, fat = blend_cx_features(
                         list(features), pen_drive, fatigue, "", user_id
                     )
@@ -47,5 +49,5 @@ def install(user_id: str | None = None) -> bool:
             log.debug("stage5 CX blend installed for %s", key[:12])
             return True
         except Exception as exc:
-            log.debug("cx blend install skipped: %s", exp if False else exc)
+            log.debug("cx blend install skipped: %s", exc)
             return False

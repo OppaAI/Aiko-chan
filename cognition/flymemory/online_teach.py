@@ -32,6 +32,17 @@ def _mode() -> str:
         return "off"
 
 
+def _record_eligibility(out: dict, user_id: str | None, text: str) -> None:
+    if out.get("eligibility_recorded", False):
+        return
+    try:
+        from cognition.flymemory.eligibility import record_step
+
+        out["eligibility_recorded"] = record_step(user_id, text)
+    except Exception:
+        pass
+
+
 def teach_from_user_text(
     text: str,
     *,
@@ -40,10 +51,16 @@ def teach_from_user_text(
 ) -> dict:
     """Infer a small reward from the user's message and reinforce MB if live.
 
-    Returns {mode, reward, taught, reason}.
+    Returns {mode, reward, taught, reason, eligibility_recorded}.
     """
     mode = _mode()
-    out = {"mode": mode, "reward": 0.0, "taught": False, "reason": ""}
+    out = {
+        "mode": mode,
+        "reward": 0.0,
+        "taught": False,
+        "reason": "",
+        "eligibility_recorded": False,
+    }
     if mode not in ("shadow", "live"):
         out["reason"] = "mode_off"
         return out
@@ -59,9 +76,9 @@ def teach_from_user_text(
             if pref.get("mode") in ("shadow", "live"):
                 if mode == "live" and pref.get("taught"):
                     try:
-                        from cognition.flymemory.eligibility import assign_credit, record_step
+                        from cognition.flymemory.eligibility import assign_credit
                         assign_credit(user_id, pref.get("reward", -0.55))
-                        record_step(user_id, t)
+                        _record_eligibility(out, user_id, t)
                     except Exception:
                         pass
                 return out
@@ -71,9 +88,9 @@ def teach_from_user_text(
             if pref.get("mode") in ("shadow", "live"):
                 if mode == "live" and pref.get("taught"):
                     try:
-                        from cognition.flymemory.eligibility import assign_credit, record_step
+                        from cognition.flymemory.eligibility import assign_credit
                         assign_credit(user_id, pref.get("reward", 0.5))
-                        record_step(user_id, t)
+                        _record_eligibility(out, user_id, t)
                     except Exception:
                         pass
                 return out
@@ -95,11 +112,7 @@ def teach_from_user_text(
     else:
         out["reason"] = "no_signal"
         if mode == "live":
-            try:
-                from cognition.flymemory.eligibility import record_step
-                record_step(user_id, t)
-            except Exception:
-                pass
+            _record_eligibility(out, user_id, t)
         return out
 
     out["reward"] = reward
@@ -120,9 +133,15 @@ def teach_from_user_text(
         try:
             from cognition.flymemory.dopamine import pulse as _da_pulse
             _da = _da_pulse(reward, user_id=user_id, kc=kc, text=teach_text, source="online_teach")
+            if _da.get("reason") != "ok" or not _da.get("applied"):
+                _record_eligibility(out, user_id, teach_text)
+                return out
             delta = float(_da.get("delta") or 0.0)
         except Exception:
             delta = float(mb.reinforce(kc, reward) or 0.0)
+            if not delta:
+                _record_eligibility(out, user_id, teach_text)
+                return out
         bias = mb.valence_bias(text_features(teach_text))
         st = get_neural_state(user_id)
         st.publish_mb(bias, source=f"online:{reason}")
@@ -147,9 +166,9 @@ def teach_from_user_text(
         out["taught"] = True
         out["delta"] = round(delta, 4)
         try:
-            from cognition.flymemory.eligibility import assign_credit, record_step
+            from cognition.flymemory.eligibility import assign_credit
             credit = assign_credit(user_id, reward)
-            record_step(user_id, teach_text)
+            _record_eligibility(out, user_id, teach_text)
             out["credit_steps"] = credit.get("steps", 0)
         except Exception:
             pass
@@ -160,30 +179,44 @@ def teach_from_user_text(
     return out
 
 
-def teach_interrupt_honored(user_id: str | None = None, text: str = "user stop abort cancel") -> dict:
+def teach_interrupt_honored(
+    user_id: str | None = None,
+    text: str = "user stop abort cancel",
+    *,
+    eligibility_recorded: bool = False,
+) -> dict:
     """Small positive teaching when GF interrupt was honored."""
     mode = _mode()
+    out = {"mode": mode, "taught": False, "eligibility_recorded": eligibility_recorded}
     if mode != "live":
-        return {"mode": mode, "taught": False}
+        return out
     try:
         from cognition.fly_registry import get_flymb
         from cognition.flymemory.circuit import text_features
 
         mb = get_flymb(user_id)
         if mb is None:
-            return {"mode": mode, "taught": False}
+            return out
         try:
             from cognition.flymemory.dopamine import pulse as _da_pulse
-            _da_pulse(0.35, user_id=user_id, text=text, source="interrupt_honored")
+            _da = _da_pulse(0.35, user_id=user_id, text=text, source="interrupt_honored")
+            if _da.get("reason") != "ok" or not _da.get("applied"):
+                _record_eligibility(out, user_id, text)
+                return out
         except Exception:
-            mb.reinforce(mb.encode(text_features(text)), 0.35)
+            delta = float(mb.reinforce(mb.encode(text_features(text)), 0.35) or 0.0)
+            if not delta:
+                _record_eligibility(out, user_id, text)
+                return out
         try:
-            from cognition.flymemory.eligibility import assign_credit, record_step
+            from cognition.flymemory.eligibility import assign_credit
             assign_credit(user_id, 0.35)
-            record_step(user_id, text)
+            _record_eligibility(out, user_id, text)
         except Exception:
             pass
-        return {"mode": mode, "taught": True, "reward": 0.35}
+        out.update({"taught": True, "reward": 0.35})
+        return out
     except Exception as exc:
         log.debug("teach_interrupt_honored failed: %s", exc)
-        return {"mode": mode, "taught": False, "error": str(exc)}
+        out["error"] = str(exc)
+        return out

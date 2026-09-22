@@ -37,9 +37,15 @@ def main() -> int:
 
     dop = pulse(-0.5, user_id=uid, text="fruit tarts again", source="stage4_ab")
     report["checks"].append({"name": "dopamine", "dop": dop})
+    if dop.get("reason") != "ok" or not dop.get("applied"):
+        report["ok"] = False
+        report.setdefault("reason", "dopamine_failed")
 
     cons = consolidate(uid, sleep_pressure=0.9, force=True)
     report["checks"].append({"name": "consolidate", "cons": cons})
+    if not cons.get("ran"):
+        report["ok"] = False
+        report.setdefault("reason", "consolidate_failed")
 
     print(json.dumps(report, default=str))
     return 0 if report["ok"] else 2

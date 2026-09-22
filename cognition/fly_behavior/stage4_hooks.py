@@ -10,7 +10,10 @@ def after_online_teach(user_id, text: str, out: dict) -> None:
     try:
         from cognition.flymemory.eligibility import record_step
 
-        record_step(user_id, text or "")
+        online_teach = out.get("online_teach") or {}
+        if not online_teach.get("eligibility_recorded", False):
+            online_teach["eligibility_recorded"] = record_step(user_id, text or "")
+        out["online_teach"] = online_teach
     except Exception as exc:
         log.debug("eligibility record_step skipped: %s", exc)
     try:

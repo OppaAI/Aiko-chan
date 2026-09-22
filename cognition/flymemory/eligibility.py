@@ -126,9 +126,14 @@ def assign_credit(user_id: str | None, reward: float) -> dict:
                 try:
                     from cognition.flymemory.dopamine import pulse
                     res = pulse(r, user_id=user_id, kc=kc, weight=w, source="eligibility")
-                    total += float(res.get("delta") or 0.0)
+                    if res.get("reason") != "ok" or not res.get("applied"):
+                        continue
+                    delta = float(res.get("delta") or 0.0)
                 except Exception:
-                    total += float(mb.reinforce(kc, r * w) or 0.0)
+                    delta = float(mb.reinforce(kc, r * w) or 0.0)
+                    if not delta:
+                        continue
+                total += delta
                 credited += 1
             except Exception:
                 continue

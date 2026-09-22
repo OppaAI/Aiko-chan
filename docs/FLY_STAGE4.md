@@ -27,7 +27,8 @@ FLY_ELIGIBILITY_DECAY: "0.7"
 FLY_REVERSAL_MULT: "1.6"
 FLY_MB_CONSOLIDATE: "1"
 FLY_MB_CONSOLIDATE_MIN_SLEEP: "0.55"
-MEMORY_FLYSLEEP_MODE: "live"   # optional, enables maintenance path
+MEMORY_FLYMB_MODE: "live"      # required for learning and consolidation
+MEMORY_FLYSLEEP_MODE: "live"   # required for maintenance-triggered consolidation
 ```
 
 ## Still later

@@ -7,8 +7,16 @@ weight. Schedule still owns when dream() runs; this biases *how much*.
 from __future__ import annotations
 
 import logging
+import threading
 
 log = logging.getLogger("aiko.fly_behavior.sleep_sched")
+
+_maintenance_users: set[str] = set()
+_maintenance_lock = threading.RLock()
+
+
+def _uid(user_id: str | None) -> str:
+    return (user_id or "").strip() or "default"
 
 
 def _mode() -> str:
@@ -67,12 +75,20 @@ def should_prefer_maintenance(user_id: str | None = None) -> bool:
 
 
 def maybe_consolidate_mb(user_id: str | None = None) -> dict:
-    """When maintenance preferred, run MB plastic consolidation once."""
+    """Run MB consolidation once per transition into maintenance."""
     out = {"ran": False}
     try:
+        key = _uid(user_id)
         if not should_prefer_maintenance(user_id):
+            with _maintenance_lock:
+                _maintenance_users.discard(key)
             out["reason"] = "not_maintenance"
             return out
+        with _maintenance_lock:
+            if key in _maintenance_users:
+                out["reason"] = "already_consolidated"
+                return out
+            _maintenance_users.add(key)
         from cognition.flymemory.consolidate_mb import consolidate
         return consolidate(user_id)
     except Exception as exc:

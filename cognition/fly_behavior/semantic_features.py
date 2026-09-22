@@ -29,7 +29,7 @@ def _projection(dim: int) -> list[list[float]]:
     """Deterministic projection matrix (dim × 8)."""
     global _proj
     with _proj_lock:
-        if _proj is not None and len(_proj) == dim:
+        if _proj and len(_proj[0]) == dim:
             return _proj
         import random
         rng = random.Random(20260922)

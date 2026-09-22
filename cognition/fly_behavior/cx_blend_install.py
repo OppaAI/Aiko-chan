@@ -33,15 +33,16 @@ def install(user_id: str | None = None) -> bool:
             orig = cx.step
 
             def step(features, pen_drive: float = 0.0, fatigue: float = 0.0):
+                feats, pen, fat = features, pen_drive, fatigue
                 try:
                     from cognition.fly_behavior.cx_features import blend_cx_features
 
                     feats, pen, fat = blend_cx_features(
                         list(features), pen_drive, fatigue, "", user_id
                     )
-                    return orig(feats, pen, fat)
                 except Exception:
-                    return orig(features, pen_drive, fatigue)
+                    pass
+                return orig(feats, pen, fat)
 
             cx.step = step  # type: ignore[method-assign]
             cx._stage5_blend_wrapped = True

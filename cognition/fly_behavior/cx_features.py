@@ -15,6 +15,10 @@ def blend_cx_features(
     user_id: str | None = None,
 ) -> tuple[list[float], float, float]:
     """Blend semantic 8-D into affect features; motion boosts pen_drive."""
+    mode = (os.getenv("MEMORY_FLYCX_MODE") or "off").strip().lower()
+    if mode != "live":
+        return affect_feats, pen, fatigue
+
     feats = [float(x) for x in affect_feats]
     if len(feats) < 8:
         feats = (feats + [0.0] * 8)[:8]
@@ -24,9 +28,11 @@ def blend_cx_features(
             last_semantic_features,
             semantic_features,
         )
-        sem = last_semantic_features(user_id)
-        if sem is None and (text or "").strip():
-            sem = semantic_features(text, user_id=user_id)
+        sem = (
+            semantic_features(text, user_id=user_id)
+            if (text or "").strip()
+            else last_semantic_features(user_id)
+        )
         if sem is not None and len(sem) >= 8:
             w = blend_weight()
             feats = [(1.0 - w) * feats[i] + w * float(sem[i]) for i in range(8)]

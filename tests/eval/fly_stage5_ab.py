@@ -31,9 +31,14 @@ def main() -> int:
 
     topic = apply_topic_drive("tell me about the shogi game", user_id=uid)
     report["checks"].append({"name": "cx_topic", "topic": topic})
-    if topic.get("reason") == "observe_only":
+    if (
+        not topic.get("applied")
+        or topic.get("reason") != "semantic"
+        or topic.get("heading") is None
+        or topic.get("sharpness") is None
+    ):
         report["ok"] = False
-        report["reason"] = "still_observe_only"
+        report["reason"] = "cx_topic_failed"
 
     context_prior("garden roses in the morning", user_id=uid, record=True)
     p2 = context_prior("garden roses in the morning", user_id=uid, record=True)

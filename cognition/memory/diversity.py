@@ -84,4 +84,20 @@ def diversify(
         if sim < threshold:
             kept.append(row)
             kept_sets.append(words)
+    try:
+        if (os.getenv("MEMORY_ANTILOOP", "1") or "1").strip().lower() not in ("0", "off", "false"):
+            from cognition.memory.antiloop import apply_antiloop
+            return apply_antiloop(kept, text_of=get_text)
+    except Exception:
+        pass
     return kept
+
+
+def diversify_and_freshness(rows: list[dict] | None, *, user_id: str | None = None, text_of=None, sim_threshold: float | None = None) -> list[dict]:
+    """diversify() then anti-loop freshness. Used when caller has a user_id."""
+    kept = diversify(rows, text_of=text_of, sim_threshold=sim_threshold)
+    try:
+        from cognition.memory.antiloop import apply_antiloop
+        return apply_antiloop(kept, user_id=user_id, text_of=text_of)
+    except Exception:
+        return kept

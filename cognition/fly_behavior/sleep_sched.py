@@ -64,3 +64,18 @@ def should_prefer_maintenance(user_id: str | None = None) -> bool:
         )
         return False
     return level in ("reduced", "maintenance")
+
+
+def maybe_consolidate_mb(user_id: str | None = None) -> dict:
+    """When maintenance preferred, run MB plastic consolidation once."""
+    out = {"ran": False}
+    try:
+        if not should_prefer_maintenance(user_id):
+            out["reason"] = "not_maintenance"
+            return out
+        from cognition.flymemory.consolidate_mb import consolidate
+        return consolidate(user_id)
+    except Exception as exc:
+        log.debug("maybe_consolidate_mb skipped: %s", exc)
+        out["reason"] = str(exc)
+        return out

@@ -8,6 +8,13 @@ log = logging.getLogger("aiko.fly_behavior.stage4_hooks")
 
 def after_online_teach(user_id, text: str, out: dict) -> None:
     try:
+        from cognition.fly_behavior.cx_blend_install import install as _install_cx_blend
+
+        _install_cx_blend(user_id)
+    except Exception:
+        pass
+
+    try:
         from cognition.flymemory.eligibility import record_step
 
         online_teach = out.get("online_teach") or {}

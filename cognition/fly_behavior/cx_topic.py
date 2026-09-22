@@ -39,6 +39,12 @@ def apply_topic_drive(text: str, *, user_id: str | None = None) -> dict:
             sharpness_from_features,
         )
 
+        try:
+            from cognition.fly_behavior.cx_blend_install import install as _install_cx_blend
+
+            _install_cx_blend(user_id)
+        except Exception:
+            pass
         feats = semantic_features(t, user_id=user_id)
         heading = heading_from_features(feats)
         sharp = sharpness_from_features(feats)
@@ -48,6 +54,7 @@ def apply_topic_drive(text: str, *, user_id: str | None = None) -> dict:
         out["reason"] = "semantic"
         try:
             from cognition.neural_state import get_neural_state
+
             st = get_neural_state(user_id)
             if out["mode"] == "live" and hasattr(st, "publish_cx"):
                 try:

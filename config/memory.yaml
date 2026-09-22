@@ -1,1 +1,61 @@
-# RESTORED - see follow-up if incomplete
+# Learned knowledge vector-store config
+#
+# Settings for cognition/knowledge/ (schema.py + ingest.py), Aiko's machine-writable
+# RAG store for durable learned facts, user-ingested document/PDF text, and self-learning
+# research notes. This is separate from agentic/wiki.py, which indexes
+# human-authored wiki/skill/persona/config files.
+
+KNOWLEDGE_DB_PATH: "knowledge/knowledge.db"  # Relative paths are stored under the active user's state dir; encrypted when SQLITE_ENCRYPTION=1.
+KNOWLEDGE_WORKSPACE_DIR: ""  # Default ~/.aiko/<user_id>/library; empty = use code default
+KNOWLEDGE_STORE_CHUNK_CHARS: "900"  # Chunk size at ingest time; chunks are embedded once and stored individually.
+KNOWLEDGE_CONTEXT_CHARS: "3500"  # Max learned-knowledge context characters injected into a prompt.
+KNOWLEDGE_KNN_LIMIT: "20"  # sqlite-vec semantic candidates before RRF fusion.
+KNOWLEDGE_FTS_LIMIT: "20"  # FTS5 lexical candidates before RRF fusion.
+KNOWLEDGE_RRF_K: "60"  # Reciprocal Rank Fusion constant; higher dampens rank differences.
+KNOWLEDGE_RECALL_SCORE_THRESHOLD: "0.012"  # Minimum fused score for a learned chunk to be injected.
+KNOWLEDGE_QUERY_INSTRUCT: "Retrieve durable learned knowledge relevant to the request"
+
+# Phase 8: entity tags + relate
+KNOWLEDGE_ENTITY_BOOST: "0.003"  # Soft search boost when query overlaps chunk entities.
+KNOWLEDGE_WRITE_DEDUP_THRESHOLD: "0.95"  # Cosine ≥ this → skip near-dup chunk (same ingest). 0 disables.
+
+# Learn config
+#
+# Settings for cognition/memory/learn.py — Aiko's two research depths (quick_studying,
+# deep_studying) and the idle learner loop that decides when to run them.
+# Both depths sit on top of agentic/toolkit/research.py's primitives
+# (see web.yaml for the shared search/fetch/condense tunables they inherit).
+
+# -- idle learner loop (when Aiko is allowed to self-study at all) --
+IDLE_LEARNER_CHECK_INTERVAL: "300"  # How often (seconds) the loop wakes up to check idle conditions. Doesn't trigger study by itself.
+IDLE_LEARN_SECONDS: "1800"  # Short-idle threshold. Once chat has been quiet this long (and TTS isn't playing), the loop is allowed to run QUICK study. 30 min default — "I'm around but not talking right now."
+DEEP_IDLE_LEARN_SECONDS: "7200"  # Long-idle threshold. Once chat has been quiet THIS long, the loop escalates to DEEP study instead of quick. 2 hr default — "I'm at work / asleep." NOTE: not yet read by learn.py — idle_learner_loop currently only checks IDLE_LEARN_SECONDS and always calls quick_studying; this is the knob to wire up when the two-depth escalation logic gets built.
+
+# -- topic queue (planned, not yet implemented) --
+# The intent: give Aiko a standing list of topics instead of inferring one
+# from the last chat message. Quick study pulls the current topic, may not
+# finish it in one pass, and should resume the SAME topic next idle window
+# instead of restarting. Deep study works a topic across many differently-
+# angled sub-queries until it has an answer, then advances the queue.
+# None of this state (current topic pointer, partial-progress record,
+# per-topic "answered" flag) exists in learn.py yet — these are placeholders
+# for when that gets built, not live settings.
+# LEARN_TOPIC_QUEUE_PATH: "~/.aiko/learn_topics.json"  # Ordered topic list + resume pointer. TODO.
+# LEARN_TOPIC_RESUME_ENABLED: "true"  # Whether quick_studying should resume a partial topic rather than always taking the latest chat message. TODO.
+
+# -- quick_studying (thin alias over adaptive_search; interactive-scale) --
+QUICK_STUDY_MAX_ROUNDS: "5"  # Passed as max_rounds to adaptive_search. Quick study can explore deeper than adaptive_search's default (2) since it's an offline idle activity.
+
+# -- deep_studying (autonomous, long-running; genuine idle/overnight) --
+DEEP_STUDY_MAX_ITERATIONS: "10"  # Hard ceiling on search+fetch iterations for one deep_studying() call. Starting point per your request — was 60. Raise once you've seen how long 10 iterations actually takes on the Jetson's Ministral-3B and how it feels alongside RAM headroom; 60 is likely too many for AuRoRA's 8GB unified memory to sustain unattended.
+DEEP_STUDY_SEED_QUERIES: "6"  # How many concrete sub-queries the model breaks the topic into up front, explored before the adaptive next-query loop kicks in. Keep this comfortably below MAX_ITERATIONS (currently is) so there's still budget left for adaptive follow-ups.
+DEEP_STUDY_RESULTS_PER_QUERY: "3"  # SearXNG results considered per sub-query. Falls back to web.yaml's SEARXNG_MAX_RESULTS if unset.
+DEEP_STUDY_FETCH_TOP: "3"  # How many of those results actually get fetched per iteration.
+DEEP_STUDY_MAX_CHARS_PER_PAGE: "2000"  # Per-page fetched text cap, same role as CONDENSE_CHUNK_CHARS but scoped to deep_studying's own fetch calls.
+DEEP_STUDY_CHUNK_CHARS: "500"  # Chunk size fetched pages are split into before scoring/storing. Falls back to web.yaml's CONDENSE_CHUNK_CHARS if unset.
+DEEP_STUDY_MIN_SCORE: "0.15"  # Minimum relevance score for a chunk to survive into distillation. Falls back to web.yaml's CONDENSE_MIN_SCORE if unset.
+DEEP_STUDY_TOP_K_FOR_DISTILLATION: "40"  # Max ranked chunks handed to the final synthesis call, scored against the ORIGINAL topic (not individual sub-queries). Lower this if 40 excerpts is more than DEEP_STUDY_SYNTHESIS_MAX_TOKENS can meaningfully use.
+DEEP_STUDY_PER_HOST_MIN_INTERVAL: "3.0"  # Minimum seconds between fetches to the same host across the whole session — politeness guard so many iterations can't hammer one domain (e.g. a project's own GitHub) repeatedly.
+DEEP_STUDY_SCRATCH_DIR: ""  # Disk-backed scratch SQLite location for the duration of ONE deep_studying() call. Deleted when the call returns — not a persistent index. Long-term storage of results is the caller's job via the on_distilled hook.
+DEEP_STUDY_DECISION_MAX_TOKENS: "250"  # Token budget for each "what's the next sub-query, or should we stop" decision call.
+DEEP_STUDY_SYNTHESIS_MAX_TOKENS: "900"  # Token budget for the final distillation/synthesis call over the top-K ranked chunks.

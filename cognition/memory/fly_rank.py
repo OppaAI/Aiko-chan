@@ -1,8 +1,9 @@
-"""Stage 2: MB approach/avoid → memory retrieval score adjustment.
+"""Stage 2/3: MB approach/avoid → memory retrieval score adjustment.
 
 Closes the causal gap:
   memory candidate text → MB valence_bias → score delta → influence log
 
+Stage 3 also blends durable preference facts and a weak subliminal prior.
 Used by memorize ranking paths. Never raises.
 """
 from __future__ import annotations
@@ -51,14 +52,7 @@ def adjust_recall_score(
     default_weight: float = 0.04,
     log_influence: bool = True,
 ) -> tuple[float, dict]:
-    """Apply MB bias to a retrieval score.
-
-    Negative bias (avoidance) reduces score more aggressively so taught
-    "don't bring this up" topics drop out of the top-k more reliably.
-    Positive bias gives a milder approach lift.
-
-    Returns (new_score, meta).
-    """
+    """Apply MB bias to a retrieval score."""
     meta: dict = {"mode": _mode(), "bias": None, "delta": 0.0, "weight": 0.0}
     mode = meta["mode"]
     if mode not in ("shadow", "live"):
@@ -73,6 +67,24 @@ def adjust_recall_score(
         delta = w * bias * _float_env("MEMORY_FLYMB_AVOID_MULT", 1.8)
     else:
         delta = w * bias
+    try:
+        from cognition.memory.preference_store import preference_delta
+        pdelta = preference_delta(text, user_id=user_id)
+        meta["pref_delta"] = round(pdelta, 5)
+        delta += pdelta
+    except Exception:
+        pass
+    try:
+        sw = _float_env("MEMORY_FLY_SUBLIMINAL_W", 0.2)
+        if sw and user_id is not None:
+            from cognition.neural_state import peek_neural_state
+            st = peek_neural_state(user_id)
+            if st is not None:
+                sub = float(getattr(st, "valence", 0.0) or 0.0)
+                delta += sw * 0.01 * sub
+                meta["sub_blend"] = round(sw * 0.01 * sub, 5)
+    except Exception:
+        pass
     meta["delta"] = round(delta, 5)
     new_score = float(score)
     if mode == "live":
@@ -80,7 +92,6 @@ def adjust_recall_score(
     if log_influence and abs(delta) >= 1e-5:
         try:
             from cognition.neural_state import get_neural_state
-
             get_neural_state(user_id).record_influence(
                 {
                     "kind": "recall_rank",

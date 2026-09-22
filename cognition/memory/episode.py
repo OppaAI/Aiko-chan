@@ -1149,7 +1149,7 @@ class EpisodicStore:
         except Exception as e:
             log.debug("EMC touch failed: %s", e)
 
-    def format_for_context(self, episodes: list[dict], *, max_chars: int | None = None) -> str | None:
+    def format_for_context(self, episodes: list[dict], *, max_chars: int | None = None, user_id: str | None = None) -> str | None:
         """Format episodic hits as a compact <episodic_context> block."""
         if not episodes:
             return None
@@ -1157,7 +1157,7 @@ class EpisodicStore:
         # episodic slot. Collapse near-duplicates (best-first) before render.
         try:
             from cognition.memory.diversity import diversify
-            episodes = diversify(episodes)
+            episodes = diversify(episodes, user_id=user_id if user_id is not None else self._user_id)
         except Exception:
             pass
         budget = EMC_CONTEXT_CHARS if max_chars is None else max(40, int(max_chars))
@@ -1322,7 +1322,7 @@ class EpisodicMemory:
             return None
         if not hits:
             return None
-        return store.format_for_context(hits)
+        return store.format_for_context(hits, user_id=self._memorize.get_user_id())
 
     def close_all(self) -> None:
         """Flush + close every cached store. Called from AikoMemorize.switch_user."""

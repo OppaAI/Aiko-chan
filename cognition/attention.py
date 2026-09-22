@@ -1516,9 +1516,10 @@ class EdgeCognitiveState:
         with self._lock:
             self._perceptions.appendleft(item)
 
-    def prioritize_memories(self, query: str, memories: list[dict] | None) -> list[dict]:
+    def prioritize_memories(self, query: str, memories: list[dict] | None, user_id: str | None = None) -> list[dict]:
         """Rank memories as a bounded reconstruction with confidence cues. Memory prioritization."""
         rows = list(memories or [])
+        uid = user_id if user_id is not None else (self._identity or None)
         snap = self.snapshot()
         query_words = _tokens(query)
         context_words = _tokens(" ".join([snap.get("attention", ""), " ".join(snap.get("goals", [])), " ".join(snap.get("open_loops", []))]))
@@ -1571,7 +1572,7 @@ class EdgeCognitiveState:
         # rewordings. Pinned rows and the top hit always survive.
         try:
             from cognition.memory.diversity import diversify
-            kept = diversify(result)
+            kept = diversify(result, user_id=uid)
             if len(kept) != len(result):
                 log.debug("prioritize_memories diversity dropped %d/%d near-dupes",
                           len(result) - len(kept), len(result))

@@ -58,15 +58,12 @@ def adjust_recall_score(
     if mode not in ("shadow", "live"):
         return float(score), meta
     bias = mb_bias_for_text(text, user_id=user_id)
-    if bias is None:
-        return float(score), meta
-    meta["bias"] = round(bias, 4)
-    w = _float_env(weight_env, default_weight)
-    meta["weight"] = w
-    if bias < 0:
-        delta = w * bias * _float_env("MEMORY_FLYMB_AVOID_MULT", 1.8)
-    else:
-        delta = w * bias
+    delta = 0.0
+    if bias is not None:
+        meta["bias"] = round(bias, 4)
+        w = _float_env(weight_env, default_weight)
+        meta["weight"] = w
+        delta = w * bias * _float_env("MEMORY_FLYMB_AVOID_MULT", 1.8) if bias < 0 else w * bias
     try:
         from cognition.memory.preference_store import preference_delta
         pdelta = preference_delta(text, user_id=user_id)
@@ -99,7 +96,7 @@ def adjust_recall_score(
                     "memory_id": memory_id,
                     "bias": meta["bias"],
                     "delta": meta["delta"],
-                    "weight": w,
+                    "weight": meta["weight"],
                     "text_preview": (text or "")[:60],
                 }
             )

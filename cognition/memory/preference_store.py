@@ -5,9 +5,13 @@ so a taught topic is more than a one-shot MB reinforce.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
+import os
+import tempfile
 import time
+from contextlib import suppress
 from pathlib import Path
 
 log = logging.getLogger("aiko.memory.preference_store")
@@ -18,7 +22,7 @@ _MAX = 64
 def _path(user_id: str | None) -> Path | None:
     try:
         from system.userspace import user_state_dir
-        root = Path(user_state_dir(user_id or ""))
+        root = Path(user_state_dir(user_id))
         root.mkdir(parents=True, exist_ok=True)
         return root / "fly_preferences.json"
     except Exception:
@@ -43,15 +47,45 @@ def record_preference(topic: str, direction: str, *, user_id: str | None = None)
     out = {"topic": topic, "direction": direction, "ts": time.time()}
     if not topic:
         return out
-    rows = [r for r in load_preferences(user_id) if str(r.get("topic") or "").lower() != topic.lower()]
-    rows.append(out)
-    rows = rows[-_MAX:]
     p = _path(user_id)
     if p is not None:
+        lock_fd = None
+        tmp_path = None
         try:
-            p.write_text(json.dumps(rows, indent=0), encoding="utf-8")
+            lock_fd = os.open(p.with_suffix(p.suffix + ".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            rows = [
+                r
+                for r in load_preferences(user_id)
+                if str(r.get("topic") or "").lower() != topic.lower()
+            ]
+            rows.append(out)
+            rows = rows[-_MAX:]
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=p.parent,
+                prefix=f".{p.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp:
+                tmp_path = Path(tmp.name)
+                json.dump(rows, tmp, indent=0)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(tmp_path, p)
+            tmp_path = None
         except Exception as exc:
             log.debug("record_preference write failed: %s", exc)
+        finally:
+            if tmp_path is not None:
+                with suppress(OSError):
+                    tmp_path.unlink(missing_ok=True)
+            if lock_fd is not None:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(lock_fd)
     return out
 
 

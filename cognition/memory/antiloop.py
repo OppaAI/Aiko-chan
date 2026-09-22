@@ -80,7 +80,11 @@ def apply_antiloop(
     )
     scored: list[tuple[float, dict]] = []
     for i, row in enumerate(rows or []):
-        base = float(row.get("score") or row.get("rank") or (1000 - i))
+        score = row.get("score")
+        if score is None:
+            rank = row.get("rank")
+            score = (1000 - i) if rank is None else rank
+        base = float(score)
         pen = freshness_penalty(get_text(row), user_id=user_id)
         scored.append((base - weight * pen, row))
     scored.sort(key=lambda x: x[0], reverse=True)

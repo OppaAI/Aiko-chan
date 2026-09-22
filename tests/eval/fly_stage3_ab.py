@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 
 
 def main() -> int:
@@ -31,18 +30,22 @@ def main() -> int:
     pdelta = preference_delta("we ate fruit tarts yesterday", user_id=uid)
     gf = assess_interrupt("STOP right now")
 
-    live = modes.get("MEMORY_FLYMB_MODE") == "live"
+    mb_live = modes.get("MEMORY_FLYMB_MODE") == "live"
+    gf_live = modes.get("MEMORY_FLYGF_MODE") == "live"
     report["checks"].append({"name": "teach", "pref": pref})
     report["checks"].append({"name": "rank", "tart": tart_score, "other": other_score, "meta": tart_meta, "pdelta": pdelta})
     report["checks"].append({"name": "gf", "gf": gf})
 
-    if live:
-        if tart_score >= other_score and pdelta >= 0:
+    if mb_live:
+        if tart_score >= other_score:
             report["ok"] = False
             report["reason"] = "live avoid did not suppress tart vs other"
-        if not (gf.get("interrupt") or float(gf.get("urgency") or 0) >= 0.5):
+        if pdelta >= 0:
             report["ok"] = False
-            report["reason"] = "live GF did not flag STOP"
+            report["reason"] = "live avoid preference delta was not negative"
+    if gf_live and not (gf.get("interrupt") or float(gf.get("urgency") or 0) >= 0.5):
+        report["ok"] = False
+        report["reason"] = "live GF did not flag STOP"
     print(json.dumps(report, default=str))
     return 0 if report["ok"] else 2
 

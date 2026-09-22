@@ -905,7 +905,9 @@ class AikoSpeak:
         """Synthesize a complete string, non-blocking. Caller prints to console."""
         try:
             from cognition.fly_behavior.dn_tts import apply_dn_prosody
-            apply_dn_prosody(self)
+            from system.userspace import current_user_id
+            user_id = current_user_id()
+            apply_dn_prosody(self, user_id=user_id)
         except Exception:
             pass
         clean = extract_dialogue_for_tts(text)
@@ -930,7 +932,9 @@ class AikoSpeak:
         """
         try:
             from cognition.fly_behavior.dn_tts import apply_dn_prosody
-            apply_dn_prosody(self)
+            from system.userspace import current_user_id
+            user_id = current_user_id()
+            apply_dn_prosody(self, user_id=user_id)
         except Exception:
             pass
         clean = extract_dialogue_for_tts(text)

@@ -50,7 +50,6 @@ def teach_from_user_text(
     t = text or ""
     reward = 0.0
     reason = ""
-    # Stage 2: explicit prefer/avoid topic teaching first.
     try:
         from cognition.flymemory.teach_api import _TOPIC_FROM_AVOID, extract_topic, teach_preference
         topic = extract_topic(t)
@@ -118,7 +117,12 @@ def teach_from_user_text(
             out["reason"] = "mb_unavailable"
             return out
         kc = mb.encode(text_features(teach_text))
-        delta = float(mb.reinforce(kc, reward) or 0.0)
+        try:
+            from cognition.flymemory.dopamine import pulse as _da_pulse
+            _da = _da_pulse(reward, user_id=user_id, kc=kc, text=teach_text, source="online_teach")
+            delta = float(_da.get("delta") or 0.0)
+        except Exception:
+            delta = float(mb.reinforce(kc, reward) or 0.0)
         bias = mb.valence_bias(text_features(teach_text))
         st = get_neural_state(user_id)
         st.publish_mb(bias, source=f"online:{reason}")
@@ -168,7 +172,11 @@ def teach_interrupt_honored(user_id: str | None = None, text: str = "user stop a
         mb = get_flymb(user_id)
         if mb is None:
             return {"mode": mode, "taught": False}
-        mb.reinforce(mb.encode(text_features(text)), 0.35)
+        try:
+            from cognition.flymemory.dopamine import pulse as _da_pulse
+            _da_pulse(0.35, user_id=user_id, text=text, source="interrupt_honored")
+        except Exception:
+            mb.reinforce(mb.encode(text_features(text)), 0.35)
         try:
             from cognition.flymemory.eligibility import assign_credit, record_step
             assign_credit(user_id, 0.35)

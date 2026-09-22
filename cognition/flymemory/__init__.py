@@ -7,11 +7,13 @@ honest limits (functional abstraction, not a simulation).
 
 Stage 1: soul_teach + online_teach for SOUL.md / outcome alignment.
 Stage 2: teach_preference / extract_topic for explicit do-or-don't teaching.
+Stage 3 follow-up: eligibility trace for delayed credit over recent turns.
 """
 from .circuit import FlyMB, load_circuit, text_features
 from .soul_teach import ensure_soul_bootstrap, soul_episodes
 from .online_teach import teach_from_user_text, teach_interrupt_honored
 from .teach_api import teach_preference, extract_topic
+from .eligibility import assign_credit, record_step, stats as eligibility_stats
 
 __all__ = [
     "FlyMB",
@@ -23,4 +25,7 @@ __all__ = [
     "teach_interrupt_honored",
     "teach_preference",
     "extract_topic",
+    "assign_credit",
+    "record_step",
+    "eligibility_stats",
 ]

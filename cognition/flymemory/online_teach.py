@@ -58,11 +58,25 @@ def teach_from_user_text(
             pref = teach_preference(topic, direction="avoid", user_id=user_id)
             out.update({"reward": pref.get("reward", -0.55), "reason": "avoid_topic", "taught": pref.get("taught", False), "topic": topic})
             if pref.get("mode") in ("shadow", "live"):
+                if mode == "live" and pref.get("taught"):
+                    try:
+                        from cognition.flymemory.eligibility import assign_credit, record_step
+                        assign_credit(user_id, pref.get("reward", -0.55))
+                        record_step(user_id, t)
+                    except Exception:
+                        pass
                 return out
         if topic and re.search(r"\b(prefer|always|do more of|i like when)\b", t, re.I):
             pref = teach_preference(topic, direction="prefer", user_id=user_id)
             out.update({"reward": pref.get("reward", 0.5), "reason": "prefer_topic", "taught": pref.get("taught", False), "topic": topic})
             if pref.get("mode") in ("shadow", "live"):
+                if mode == "live" and pref.get("taught"):
+                    try:
+                        from cognition.flymemory.eligibility import assign_credit, record_step
+                        assign_credit(user_id, pref.get("reward", 0.5))
+                        record_step(user_id, t)
+                    except Exception:
+                        pass
                 return out
     except Exception as exc:
         log.debug("teach_api path skipped: %s", exc)
@@ -81,6 +95,12 @@ def teach_from_user_text(
         teach_text = prior_assistant or t
     else:
         out["reason"] = "no_signal"
+        if mode == "live":
+            try:
+                from cognition.flymemory.eligibility import record_step
+                record_step(user_id, t)
+            except Exception:
+                pass
         return out
 
     out["reward"] = reward
@@ -122,6 +142,13 @@ def teach_from_user_text(
                 pass
         out["taught"] = True
         out["delta"] = round(delta, 4)
+        try:
+            from cognition.flymemory.eligibility import assign_credit, record_step
+            credit = assign_credit(user_id, reward)
+            record_step(user_id, teach_text)
+            out["credit_steps"] = credit.get("steps", 0)
+        except Exception:
+            pass
         log.debug("online_teach live reason=%s reward=%+.2f delta=%.4f", reason, reward, delta)
     except Exception as exc:
         log.debug("online_teach failed: %s", exc)
@@ -142,6 +169,12 @@ def teach_interrupt_honored(user_id: str | None = None, text: str = "user stop a
         if mb is None:
             return {"mode": mode, "taught": False}
         mb.reinforce(mb.encode(text_features(text)), 0.35)
+        try:
+            from cognition.flymemory.eligibility import assign_credit, record_step
+            assign_credit(user_id, 0.35)
+            record_step(user_id, text)
+        except Exception:
+            pass
         return {"mode": mode, "taught": True, "reward": 0.35}
     except Exception as exc:
         log.debug("teach_interrupt_honored failed: %s", exc)

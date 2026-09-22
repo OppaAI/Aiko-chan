@@ -151,6 +151,11 @@ def teach_preference(
 
         if write_memory_fact:
             try:
+                from cognition.memory.preference_store import record_preference
+                record_preference(topic, d, user_id=user_id)
+            except Exception as exc:
+                log.debug("preference store skipped: %s", exc)
+            try:
                 _write_preference_fact(topic, d, user_id=user_id)
             except Exception as exc:
                 log.debug("preference fact write skipped: %s", exc)

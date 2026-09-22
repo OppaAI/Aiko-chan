@@ -65,6 +65,8 @@ def apply_turn_priors(
             log.debug("soul_teach skipped: %s", exc)
 
         try:
+            from cognition.fly_behavior.cx_topic import apply_topic_drive
+            out["cx_topic"] = apply_topic_drive(text or "", user_id=user_id)
             from cognition.flymemory.online_teach import teach_from_user_text
             out["online_teach"] = teach_from_user_text(
                 text or "", user_id=user_id, prior_assistant=prior_assistant

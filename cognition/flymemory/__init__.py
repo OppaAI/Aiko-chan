@@ -6,10 +6,12 @@ See README.md in this package for the biology, the mapping, and the
 honest limits (functional abstraction, not a simulation).
 
 Stage 1: soul_teach + online_teach for SOUL.md / outcome alignment.
+Stage 2: teach_preference / extract_topic for explicit do-or-don't teaching.
 """
 from .circuit import FlyMB, load_circuit, text_features
 from .soul_teach import ensure_soul_bootstrap, soul_episodes
 from .online_teach import teach_from_user_text, teach_interrupt_honored
+from .teach_api import teach_preference, extract_topic
 
 __all__ = [
     "FlyMB",
@@ -19,4 +21,6 @@ __all__ = [
     "soul_episodes",
     "teach_from_user_text",
     "teach_interrupt_honored",
+    "teach_preference",
+    "extract_topic",
 ]

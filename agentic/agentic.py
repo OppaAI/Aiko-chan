@@ -2151,6 +2151,20 @@ def run_agentic_chat(owner, user_input: str, token_callback=None, mem_kb_future=
     turn_guards = default_pre_tool_guardrails(handoff_profile.research_budget)
 
     for step in range(handoff_profile.max_iter):
+        # Stage 2 GF: abort agent loop when live interrupt/urgency is set.
+        try:
+            from cognition.fly_behavior import should_abort_plan
+            _uid = None
+            try:
+                _uid = current_user_id() or None
+            except Exception:
+                _uid = None
+            if should_abort_plan(_uid):
+                log.info("flygf interrupt → abort agentic loop step=%s user=%s", step, _uid or "default")
+                final_text = "Stopped — interrupt received."
+                break
+        except Exception:
+            pass
         if token_callback:
             token_callback("__THINKING__\n")
 

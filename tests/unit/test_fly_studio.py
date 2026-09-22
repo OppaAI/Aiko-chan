@@ -51,6 +51,28 @@ def test_fly_trace_hides_internal_errors_and_logs_details(monkeypatch, caplog):
     assert "sensitive detail" in caplog.text
 
 
+def test_fly_causal_hides_internal_errors_and_returns_500(monkeypatch, caplog):
+    def fail_causal(_user_id):
+        raise RuntimeError("sensitive detail")
+
+    monkeypatch.setattr(api, "_uid", lambda _request: "studio-error")
+    monkeypatch.setattr("cognition.neural_state.peek_neural_state", fail_causal)
+
+    with caplog.at_level(logging.ERROR, logger=api.logger.name):
+        response = api.fly_causal(object())
+
+    body = json.loads(response.body)
+    assert response.status_code == 500
+    assert response.headers["cache-control"] == "no-store"
+    assert body == {
+        "user_id": "studio-error",
+        "error": "causal trail unavailable",
+        "events": [],
+    }
+    assert "sensitive detail" not in body["error"]
+    assert "sensitive detail" in caplog.text
+
+
 def test_mounted_fly_api_requires_session():
     client = TestClient(auth.app)
 

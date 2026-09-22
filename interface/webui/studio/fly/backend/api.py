@@ -319,8 +319,13 @@ def fly_causal(request: Request, limit: int = Query(32, ge=1, le=48)) -> JSONRes
         if state is not None:
             snap = state.snapshot()
             events = list(snap.get("influence") or [])[-limit:]
-    except Exception as exc:
-        return JSONResponse({"user_id": uid, "error": str(exc), "events": []}, headers={"Cache-Control": "no-store"})
+    except Exception:
+        logger.exception("Fly Studio causal trail retrieval failed")
+        return JSONResponse(
+            {"user_id": uid, "error": "causal trail unavailable", "events": []},
+            status_code=500,
+            headers={"Cache-Control": "no-store"},
+        )
     return JSONResponse(
         {"user_id": uid, "events": events, "count": len(events), "stage": "2"},
         headers={"Cache-Control": "no-store"},

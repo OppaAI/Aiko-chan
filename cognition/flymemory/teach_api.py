@@ -76,6 +76,7 @@ def teach_preference(
         "topic": topic,
         "direction": direction,
         "taught": False,
+        "persisted": False,
         "reward": 0.0,
         "reason": "",
     }
@@ -86,15 +87,18 @@ def teach_preference(
         out["reason"] = "mode_off"
         return out
 
-    d = (direction or "avoid").strip().lower()
-    if d in ("prefer", "approach", "like", "want"):
+    d = (direction or "").strip().lower()
+    if d in ("prefer", "approach"):
         sign = 1.0
         d = "prefer"
         default_mag = 0.50
-    else:
+    elif d in ("avoid", "suppress"):
         sign = -1.0
         d = "avoid"
         default_mag = 0.55
+    else:
+        out["reason"] = "invalid_direction"
+        return out
     mag = float(strength) if strength is not None else default_mag
     mag = max(0.05, min(1.0, abs(mag)))
     reward = sign * mag
@@ -135,8 +139,11 @@ def teach_preference(
         if store is not None:
             try:
                 store.flush_mb(mb)
+                out["persisted"] = True
             except Exception:
-                pass
+                # Keep the taught in-memory MB state available for the normal
+                # flush_all() retry path, but do not claim it reached storage.
+                log.exception("teach_preference FlyMB persistence failed")
         out["taught"] = True
         out["delta"] = round(delta, 4)
         out["bias"] = round(bias, 4)

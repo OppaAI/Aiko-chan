@@ -8,7 +8,7 @@ can show a short causal trail.
 
 | Piece | Behavior |
 |-------|----------|
-| **Teach API** | `teach_preference(topic, direction=prefer|avoid)` — explicit do/don’t |
+| **Teach API** | `teach_preference(topic, direction in {"prefer", "avoid"})` — explicit do/don’t |
 | **Online cues** | “prefer X”, “avoid X”, “stop talking about X” → teach API + MB |
 | **Recall rank** | `cognition.memory.fly_rank.adjust_recall_score` — MB bias adjusts scores; avoidance weighted harder |
 | **Agent abort** | Main ReAct loop polls `should_abort_plan` each step (not only Needle) |

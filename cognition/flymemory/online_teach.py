@@ -52,9 +52,9 @@ def teach_from_user_text(
     reason = ""
     # Stage 2: explicit prefer/avoid topic teaching first.
     try:
-        from cognition.flymemory.teach_api import extract_topic, teach_preference
+        from cognition.flymemory.teach_api import _TOPIC_FROM_AVOID, extract_topic, teach_preference
         topic = extract_topic(t)
-        if topic and (_STOP_TOPIC_RE.search(t) or re.search(r"\b(avoid|never (?:talk|bring))\b", t, re.I)):
+        if topic and (_STOP_TOPIC_RE.search(t) or _TOPIC_FROM_AVOID.search(t)):
             pref = teach_preference(topic, direction="avoid", user_id=user_id)
             out.update({"reward": pref.get("reward", -0.55), "reason": "avoid_topic", "taught": pref.get("taught", False), "topic": topic})
             if pref.get("mode") in ("shadow", "live"):

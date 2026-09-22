@@ -2147,6 +2147,7 @@ def run_agentic_chat(owner, user_input: str, token_callback=None, mem_kb_future=
     final_repairs = 0
     last_verdict: VerificationResult | None = None
     used_incomplete_fallback = False
+    interrupted = False
 
     turn_guards = default_pre_tool_guardrails(handoff_profile.research_budget)
 
@@ -2162,6 +2163,7 @@ def run_agentic_chat(owner, user_input: str, token_callback=None, mem_kb_future=
             if should_abort_plan(_uid):
                 log.info("flygf interrupt → abort agentic loop step=%s user=%s", step, _uid or "default")
                 final_text = "Stopped — interrupt received."
+                interrupted = True
                 break
         except Exception:
             pass
@@ -2355,16 +2357,17 @@ def run_agentic_chat(owner, user_input: str, token_callback=None, mem_kb_future=
     else:
         exp_verified_ok, exp_score = True, 1.0
 
-    CONTEXT_POOL.submit(
-        experience.record_experience,
-        owner, user_input, state.steps, final_text,
-        verified_ok=exp_verified_ok, score=exp_score, embedder=_embedder,
-    )
-    CONTEXT_POOL.submit(
-        skill_learning.propose_skill_from_run,
-        user_input, state.steps, final_text,
-        verified_ok=exp_verified_ok, score=exp_score, user_id=trace_ctx.user_id,
-    )
+    if not interrupted:
+        CONTEXT_POOL.submit(
+            experience.record_experience,
+            owner, user_input, state.steps, final_text,
+            verified_ok=exp_verified_ok, score=exp_score, embedder=_embedder,
+        )
+        CONTEXT_POOL.submit(
+            skill_learning.propose_skill_from_run,
+            user_input, state.steps, final_text,
+            verified_ok=exp_verified_ok, score=exp_score, user_id=trace_ctx.user_id,
+        )
     _emit_file_artifacts(token_callback, state)
     final_text = _finalize_agentic_answer(owner, user_input, final_text, token_callback=token_callback)
 

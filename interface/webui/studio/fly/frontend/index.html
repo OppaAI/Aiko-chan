@@ -59,6 +59,7 @@ legend i{width:12px;height:12px;border-radius:3px}
 <section class="panel"><h2>Avatar proposals</h2><div id="intents" class="list">No body-language proposals.</div></section>
 <section class="panel"><h2>Observations</h2><div id="observations" class="list">No observations recorded.</div></section>
 <section class="panel"><h2>Runtime modes</h2><div id="modes" class="list">—</div></section>
+<section class="panel"><h2>Causal trail</h2><div id="causal" class="list">No influence events yet.</div></section>
 </aside>
 </main>
 <script type="importmap">
@@ -329,6 +330,15 @@ function renderUI(c, p) {
     'No observations recorded.'
   );
   $('modes').innerHTML = esc(JSON.stringify(modes, null, 2));
+  fetch('/studio/fly/api/causal?limit=16').then(r => r.ok ? r.json() : {events:[]}).then(d => {
+    const ev = d.events || [];
+    $('causal').innerHTML = ev.length ? ev.slice().reverse().map(e => {
+      const k = e.kind || e.source || 'event';
+      const extra = e.topic || e.text_preview || e.direction || '';
+      const dlt = (e.delta != null) ? ` Δ${e.delta}` : '';
+      return esc(`${k}${extra ? ' · '+extra : ''}${dlt}`);
+    }).join('<br>') : 'No influence events yet.';
+  }).catch(() => {});
 }
 
 async function refreshTelemetry() {

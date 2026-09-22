@@ -1,4 +1,4 @@
-"""Minimal eligibility trace for delayed credit (Stage 3 follow-up).
+"""Minimal eligibility trace for delayed credit (Stage 4 temporal learning).
 
 Immediate teaching (`reinforce()` on the current text) can't credit the
 trajectory that led to an outcome ("search → bad result → retry → good
@@ -123,7 +123,12 @@ def assign_credit(user_id: str | None, reward: float) -> dict:
             if w < 0.05:
                 break
             try:
-                total += float(mb.reinforce(kc, r * w) or 0.0)
+                try:
+                    from cognition.flymemory.dopamine import pulse
+                    res = pulse(r, user_id=user_id, kc=kc, weight=w, source="eligibility")
+                    total += float(res.get("delta") or 0.0)
+                except Exception:
+                    total += float(mb.reinforce(kc, r * w) or 0.0)
                 credited += 1
             except Exception:
                 continue

@@ -8,15 +8,36 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+import uuid
 
 
 def main() -> int:
+    # Hermetic: redirect user state to a temp dir with a fresh uid so eval
+    # runs never pollute the live ~/.aiko store (learned avoids would
+    # otherwise leak into real recall ranking).
+    tmp = tempfile.mkdtemp(prefix="fly-stage3-ab-")
+    for key in ("USER_STATE_ROOT", "AIKO_USER_STATE_ROOT", "USER_SPACE_ROOT"):
+        os.environ[key] = tmp
+    try:
+        from system import userspace
+
+        def _tmp_state(user_id=None):
+            import pathlib
+            p = pathlib.Path(tmp) / (str(user_id or "default"))
+            p.mkdir(parents=True, exist_ok=True)
+            return str(p)
+
+        userspace.user_state_dir = _tmp_state  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
     from cognition.flymemory.teach_api import teach_preference
     from cognition.memory.fly_rank import adjust_recall_score
     from cognition.memory.preference_store import preference_delta, record_preference
     from cognition.fly_behavior.giant_fiber import assess_interrupt
 
-    uid = "stage3-ab"
+    uid = f"stage3-ab-{uuid.uuid4().hex[:8]}"
     modes = {
         k: os.getenv(k, "off")
         for k in ("MEMORY_FLYMB_MODE", "MEMORY_FLYGF_MODE")

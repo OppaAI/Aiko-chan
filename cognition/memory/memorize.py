@@ -1562,19 +1562,19 @@ class _MemoryBackend:
                 except Exception:
                     pass
 
-                # Fly MB layer: approach-flavoured memories surface slightly
-                # easier at recall (read-only; never learns on the recall path).
-                _fly_mode = _flymb_mode()
-                if _fly_mode in ("shadow", "live"):
-                    try:
-                        _b = _flymb_bias_for_text(row["memory"] or "", user_id=user_id)
-                    except Exception as exc:
-                        log.debug("flymb ltm rank skipped: %s", exc)
-                        _b = None
-                    if _b is not None:
-                        log.debug("flymb ltm mode=%s bias=%+.3f", _fly_mode, _b)
-                        if _fly_mode == "live":
-                            score += _flymb_float("MEMORY_FLYMB_LTM_W", 0.01) * _b
+                # Stage 2 Fly MB: approach/avoid adjusts recall score (avoidance weighted harder).
+                try:
+                    from cognition.memory.fly_rank import adjust_recall_score
+                    score, _meta = adjust_recall_score(
+                        score,
+                        row.get("memory") or "",
+                        user_id=user_id,
+                        memory_id=row.get("id"),
+                        weight_env="MEMORY_FLYMB_LTM_W",
+                        default_weight=0.04,
+                    )
+                except Exception as exc:
+                    log.debug("flymb ltm rank skipped: %s", exc)
 
                 # Phase 4: entity importance boost
                 if MEMORY_RANK_ENTITY_IMPORTANCE_WEIGHT > 0 and entity_importance_map:

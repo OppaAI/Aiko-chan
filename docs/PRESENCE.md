@@ -62,8 +62,13 @@ The motion director does the same:
 
 New VRM gestures (`interface/webui/static/vrm.js`): `wave`, `giggle`,
 `bow`, `clap` (also in the idle pool), `dance` (reactive-only, 4.2 s
-happy bounce). All follow the existing bone/blend conventions and are
+happy bounce), plus young-girl idle fidgets — `hairTwirl`, `handsBehindBack`,
+`footTap`, `skirtSmooth`, `hugSelf`, `happyBounce` — picked from the idle
+pool every few seconds. All follow the existing bone/blend conventions and are
 validated by `KNOWN_GESTURES` on both ends.
+
+Camera defaults frame her full body (FOV 10, pulled back, target at
+mid-torso); orbit/zoom still available.
 
 ## Tuning
 

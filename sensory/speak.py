@@ -907,7 +907,8 @@ class AikoSpeak:
             from cognition.fly_behavior.dn_tts import apply_dn_prosody
             from system.userspace import current_user_id
             user_id = current_user_id()
-            apply_dn_prosody(self, user_id=user_id)
+            if apply_dn_prosody(self, user_id=user_id).get("cancelled"):
+                return False
         except Exception:
             pass
         clean = extract_dialogue_for_tts(text)
@@ -934,7 +935,8 @@ class AikoSpeak:
             from cognition.fly_behavior.dn_tts import apply_dn_prosody
             from system.userspace import current_user_id
             user_id = current_user_id()
-            apply_dn_prosody(self, user_id=user_id)
+            if apply_dn_prosody(self, user_id=user_id).get("cancelled"):
+                return False
         except Exception:
             pass
         clean = extract_dialogue_for_tts(text)
@@ -990,6 +992,13 @@ class AikoSpeak:
 
     def start_speech_stream(self, on_word=None) -> None:
         """Start sentence-level TTS playback for one streamed response."""
+        try:
+            from cognition.fly_behavior.dn_tts import apply_dn_prosody
+            from system.userspace import current_user_id
+            if apply_dn_prosody(self, user_id=current_user_id()).get("cancelled"):
+                return
+        except Exception:
+            pass
         self._capture_notice_uid()
         self.stop()
         self._first_audio_fired.clear()

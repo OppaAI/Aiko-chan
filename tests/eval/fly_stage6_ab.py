@@ -17,6 +17,7 @@ def main() -> int:
     from cognition.flysense.dn import FlyDN
     from cognition.fly_behavior.dn_body import body_drive, agent_step_budget
     from cognition.fly_behavior.gf_global import should_cancel_output, clear_interrupt
+    from cognition.fly_behavior.turn import apply_turn_priors
 
     drv = FlyDN().drive(energy=0.9, decisiveness=0.8, affect=0.3)
     report["checks"].append({"name": "dn_drive", "drv": drv})
@@ -28,8 +29,21 @@ def main() -> int:
     bd = body_drive(user_id="stage6-ab")
     report["checks"].append({"name": "body", "bd": bd})
     report["checks"].append({"name": "budget", "n": agent_step_budget(user_id="stage6-ab", base=8)})
-    report["checks"].append({"name": "cancel", "v": should_cancel_output("stage6-ab")})
-    clear_interrupt("stage6-ab")
+    stopped = apply_turn_priors("stop", user_id="stage6-ab")
+    cancelled = should_cancel_output("stage6-ab")
+    stopped_body = body_drive(user_id="stage6-ab")
+    stopped_budget = agent_step_budget(user_id="stage6-ab", base=8)
+    for name, passed in (
+        ("stop_turn", stopped["interrupt"]),
+        ("cancel", cancelled),
+        ("body_cancelled", stopped_body["cancelled"]),
+        ("budget_zero", stopped_budget == 0),
+    ):
+        report["checks"].append({"name": name, "v": passed})
+        report["ok"] = report["ok"] and passed
+    cleared = clear_interrupt("stage6-ab") and not should_cancel_output("stage6-ab")
+    report["checks"].append({"name": "clear_interrupt", "v": cleared})
+    report["ok"] = report["ok"] and cleared
 
     print(json.dumps(report, default=str))
     return 0 if report["ok"] else 2

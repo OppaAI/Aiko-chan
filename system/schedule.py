@@ -2085,6 +2085,8 @@ class ScheduleRunner:
         _run() now always passes it explicitly right after set_user(uid),
         so callers should not rely on the implicit fallback going forward.
         """
+        from cognition.fly_behavior.gf_global import should_cancel_scheduler
+
         jobs = _read_all(user_id=user_id)
         changed = False
         due_events: list[DueJob] = []
@@ -2112,6 +2114,8 @@ class ScheduleRunner:
                 handler_name = job.get("handler") or (
                     "weekly_social" if job.get("kind") == "system_weekly_social" else None
                 )
+                if handler_name != "deep_study_stop" and should_cancel_scheduler(user_id):
+                    continue
                 if handler_name and handler_name in _SYSTEM_HANDLERS:
                     try:
                         result = _SYSTEM_HANDLERS[handler_name](self._memorize)
@@ -2154,6 +2158,8 @@ class ScheduleRunner:
 
         # fire sequentially — preserves order and avoids concurrent job side effects
         for event in due_events:
+            if should_cancel_scheduler(user_id):
+                break
             if self._on_due:
                 try:
                     self._on_due(event)

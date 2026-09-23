@@ -100,7 +100,7 @@ def apply_turn_priors(
                         {"kind": "mb_valence", "mode": mb_mode, "bias": round(bias, 4)}
                     )
             except Exception as exc:
-                log.debug("mb valence skipped: %s", exp if False else str(exc))
+                log.debug("mb valence skipped: %s", str(exc))
 
         motion = float(st.motion_salience or 0.0)
         gf = assess_interrupt(
@@ -189,7 +189,7 @@ def apply_turn_priors(
                 if dn_mode == "live":
                     st.publish_dn(
                         arousal=float(drv.get("arousal") or 0.5),
-                        rate_mult=float(drv.get("action_vigor") or drv.get("rate_mult") or 1.0),
+                        rate_mult=float(drv.get("rate_mult", 1.0)),
                         source="turn",
                     )
                 st.record_influence(
@@ -206,7 +206,7 @@ def apply_turn_priors(
                     }
                 )
             except Exception as exc:
-                log.debug("dn drive skipped: %s", exp if False else str(exc))
+                log.debug("dn drive skipped: %s", str(exc))
 
         out["sleep_pressure"] = st.sleep_pressure
 
@@ -224,7 +224,7 @@ def apply_turn_priors(
             bits.append("late/early hours — softer volume of commitment")
         out["tone_bits"] = bits
     except Exception as exc:
-        log.debug("fly turn priors skipped: %s", exp if False else str(exc))
+        log.debug("fly turn priors skipped: %s", str(exc))
     return out
 
 

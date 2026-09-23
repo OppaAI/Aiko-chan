@@ -2089,7 +2089,7 @@ class ScheduleRunner:
 
         jobs = _read_all(user_id=user_id)
         changed = False
-        due_events: list[DueJob] = []
+        due_events: list[tuple[dict, DueJob, str]] = []
 
         for job in jobs:
             if not job.get("enabled", True):
@@ -2131,14 +2131,19 @@ class ScheduleRunner:
                 elif handler_name:
                     log.warning("job references unregistered handler %r — skipping fire.", handler_name)
                 else:
-                    due_events.append(DueJob(
-                        id=job.get("id", ""),
-                        title=job.get("title", "Scheduled job"),
-                        task=job.get("task", "Scheduled job"),
-                        action=job.get("action", "agentic"),
-                        tool_call=job.get("tool_call"),
-                        skill=job.get("skill"),
+                    due_events.append((
+                        job,
+                        DueJob(
+                            id=job.get("id", ""),
+                            title=job.get("title", "Scheduled job"),
+                            task=job.get("task", "Scheduled job"),
+                            action=job.get("action", "agentic"),
+                            tool_call=job.get("tool_call"),
+                            skill=job.get("skill"),
+                        ),
+                        tz_name,
                     ))
+                    continue
                 job["last_ran_at"] = bioclock.local_now(tz_name).isoformat()
                 if job.get("frequency") == "once":
                     job["enabled"] = False
@@ -2157,7 +2162,7 @@ class ScheduleRunner:
             _write_all(jobs, user_id=user_id)
 
         # fire sequentially — preserves order and avoids concurrent job side effects
-        for event in due_events:
+        for job, event, tz_name in due_events:
             if should_cancel_scheduler(user_id):
                 break
             if self._on_due:
@@ -2165,6 +2170,21 @@ class ScheduleRunner:
                     self._on_due(event)
                 except Exception:
                     log.exception("Scheduled job handler failed for %s", event.title or event.id or "?")
+                    continue
+                completed_at = bioclock.local_now(tz_name)
+                job["last_ran_at"] = completed_at.isoformat()
+                if job.get("frequency") == "once":
+                    job["enabled"] = False
+                else:
+                    job["next_due"] = calculate_next_due(
+                        job.get("time_of_day", "06:00"),
+                        job.get("frequency", "daily"),
+                        tz_name,
+                        job.get("days_of_week"),
+                        after=completed_at,
+                        interval_seconds=job.get("interval_seconds"),
+                    ).isoformat()
+                _write_all(jobs, user_id=user_id)
 
     # ── schedule-graph runner ───────────────────────────────────────────────────
 

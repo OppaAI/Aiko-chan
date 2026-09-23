@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 
 
@@ -31,6 +33,52 @@ def test_stop_prevents_speech_playback(monkeypatch, method):
     assert not speaker._streaming_active
     assert speaker._stream_queue is None
     clear_neural_state(user_id)
+
+
+@pytest.mark.parametrize(
+    ("method", "expected"),
+    [
+        ("speak", False),
+        ("speak_synced", False),
+        ("play_async", None),
+        ("feed_and_play", None),
+        ("start_speech_stream", None),
+    ],
+)
+def test_all_playback_entry_points_share_cancellation_gate(monkeypatch, method, expected):
+    from sensory import speak
+
+    def unexpected_thread(*_args, **_kwargs):
+        raise AssertionError("cancelled speech started a playback thread")
+
+    monkeypatch.setattr(speak.threading, "Thread", unexpected_thread)
+    speaker = speak.AikoSpeak(silent=True)
+    gate_state = []
+    consumed = []
+
+    def playback_cancelled():
+        gate_state.append((list(speaker._token_buf), list(consumed)))
+        return True
+
+    monkeypatch.setattr(speaker, "_playback_cancelled", playback_cancelled)
+    if method == "play_async":
+        speaker.feed("hello")
+        result = speaker.play_async()
+    elif method == "feed_and_play":
+        def tokens():
+            consumed.append("hello")
+            yield "hello"
+        result = speaker.feed_and_play(tokens())
+    elif method == "start_speech_stream":
+        result = speaker.start_speech_stream()
+    else:
+        result = getattr(speaker, method)("hello")
+
+    assert result is expected
+    expected_gate_state = [([], ["hello"])] if method == "feed_and_play" else [([], [])]
+    assert gate_state == expected_gate_state
+    assert not speaker._playing.is_set()
+    assert not speaker._streaming_active
 
 
 def test_cancelled_scheduled_jobs_remain_due_except_cleanup(monkeypatch, tmp_path):
@@ -69,20 +117,77 @@ def test_stop_after_queueing_does_not_dispatch_due_callback(monkeypatch, tmp_pat
     user_id = "stage6-scheduler-midflight"
     monkeypatch.setenv("USER_SPACE_ROOT", str(tmp_path))
     calls = []
-    job = {"id": "queued", "next_due": "2000-01-01T00:00:00+00:00", "frequency": "once"}
-    monkeypatch.setattr(schedule, "_read_all", lambda user_id=None: [job])
-    monkeypatch.setattr(schedule, "_write_all", lambda *_args, **_kwargs: None)
+    jobs = [
+        {"id": name, "next_due": "2000-01-01T00:00:00+00:00", "frequency": "once"}
+        for name in ("current", "remaining")
+    ]
+    monkeypatch.setattr(schedule, "_read_all", lambda user_id=None: jobs)
+    writes = []
+    monkeypatch.setattr(schedule, "_write_all", lambda records, **_kwargs: writes.append(copy.deepcopy(records)))
 
     def cancel_after_queue(uid):
         calls.append(uid)
-        return len(calls) > 1
+        return len(calls) > len(jobs)
 
     monkeypatch.setattr(gf_global, "should_cancel_scheduler", cancel_after_queue)
     runner = schedule.ScheduleRunner(on_due=lambda _event: pytest.fail("cancelled callback fired"), user_id=user_id)
 
     runner._fire_due_user_jobs_locked(user_id)
 
-    assert calls == [user_id, user_id]
+    assert calls == [user_id, user_id, user_id]
+    assert writes == []
+    for job in jobs:
+        assert job.get("enabled", True) is True
+        assert job["next_due"] == "2000-01-01T00:00:00+00:00"
+        assert "last_ran_at" not in job
+
+
+def test_due_callback_is_persisted_only_after_successful_dispatch(monkeypatch, tmp_path):
+    from cognition.fly_behavior import gf_global
+    from system import schedule
+
+    user_id = "stage6-scheduler-success"
+    monkeypatch.setenv("USER_SPACE_ROOT", str(tmp_path))
+    job = {"id": "queued", "next_due": "2000-01-01T00:00:00+00:00", "frequency": "once"}
+    writes = []
+    monkeypatch.setattr(schedule, "_read_all", lambda user_id=None: [job])
+    monkeypatch.setattr(schedule, "_write_all", lambda records, **_kwargs: writes.append(copy.deepcopy(records)))
+    monkeypatch.setattr(gf_global, "should_cancel_scheduler", lambda _uid: False)
+
+    def on_due(_event):
+        assert job.get("enabled", True) is True
+        assert job["next_due"] == "2000-01-01T00:00:00+00:00"
+        assert "last_ran_at" not in job
+        assert writes == []
+
+    schedule.ScheduleRunner(on_due=on_due, user_id=user_id)._fire_due_user_jobs_locked(user_id)
+
+    assert job["enabled"] is False
+    assert "last_ran_at" in job
+    assert writes == [[job]]
+
+
+def test_failed_due_callback_remains_due(monkeypatch, tmp_path):
+    from cognition.fly_behavior import gf_global
+    from system import schedule
+
+    user_id = "stage6-scheduler-failure"
+    monkeypatch.setenv("USER_SPACE_ROOT", str(tmp_path))
+    job = {"id": "queued", "next_due": "2000-01-01T00:00:00+00:00", "frequency": "once"}
+    writes = []
+    monkeypatch.setattr(schedule, "_read_all", lambda user_id=None: [job])
+    monkeypatch.setattr(schedule, "_write_all", lambda records, **_kwargs: writes.append(copy.deepcopy(records)))
+    monkeypatch.setattr(gf_global, "should_cancel_scheduler", lambda _uid: False)
+
+    def fail(_event):
+        raise RuntimeError("dispatch failed")
+
+    schedule.ScheduleRunner(on_due=fail, user_id=user_id)._fire_due_user_jobs_locked(user_id)
+
+    assert writes == []
+    assert job.get("enabled", True) is True
+    assert job["next_due"] == "2000-01-01T00:00:00+00:00"
+    assert "last_ran_at" not in job
 
 
 def test_scheduled_tool_checks_current_user_before_invocation(monkeypatch):

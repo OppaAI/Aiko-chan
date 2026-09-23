@@ -84,6 +84,56 @@ def test_get_input_uses_queued_identity_not_shared_state(monkeypatch):
     assert current_display_name() == "Bobby"
 
 
+@pytest.mark.parametrize(("active_until", "expected"), [
+    (float("inf"), []),
+    (0.0, ["leanIn"]),
+])
+def test_text_only_get_input_respects_reactive_gesture_state(active_until, expected):
+    web = AikoWeb.__new__(AikoWeb)
+    web._no_voice = True
+    web._gesture_active_until = active_until
+    web._input_q = queue.Queue()
+    web._input_q.put(("hello", "bob", "Bobby"))
+    web._broadcast = lambda payload, **_kwargs: None
+    web._push_vitals = lambda: None
+    played = []
+    web.play_gesture = played.append
+
+    assert web.get_input() == "hello"
+    assert played == expected
+
+
+def test_text_only_get_input_plays_lean_in_once_after_reactive_gesture_ends():
+    class EmptyThenInputQueue:
+        def __init__(self):
+            self._items = [queue.Empty, queue.Empty, ("hello", "bob", "Bobby")]
+
+        def get(self, timeout):
+            item = self._items.pop(0)
+            if item is queue.Empty:
+                raise queue.Empty
+            return item
+
+    web = AikoWeb.__new__(AikoWeb)
+    web._no_voice = True
+    web._input_q = EmptyThenInputQueue()
+    web._broadcast = lambda payload, **_kwargs: None
+    web._push_vitals = lambda: None
+    checks = 0
+
+    def gesture_is_active():
+        nonlocal checks
+        checks += 1
+        return checks == 1
+
+    web._gesture_is_active = gesture_is_active
+    played = []
+    web.play_gesture = played.append
+
+    assert web.get_input() == "hello"
+    assert played == ["leanIn"]
+
+
 def test_camera_image_validation_accepts_small_jpeg_data_uri():
     image = "data:image/jpeg;base64,/9j/2Q=="
 

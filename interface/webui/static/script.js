@@ -1074,6 +1074,7 @@ function connectWS() {
         break;
       case 'viseme': if (window.aikoSetViseme) window.aikoSetViseme(msg.viseme, msg.weight ?? 1.0); break;
       case 'pose': if (window.aikoSetPose) window.aikoSetPose(msg.name, msg.active); break;
+      case 'gesture': if (window.aikoPlayGesture) window.aikoPlayGesture(msg.name); break;
     }
   };
 

@@ -27,6 +27,17 @@ def test_attention_state_has_no_context_before_first_turn():
     assert EdgeCognitiveState().context("hello") == ""
 
 
+def test_metacognitive_context_surfaces_one_queued_aside():
+    state = EdgeCognitiveState()
+    state._inner_voice.queue_aside("A spontaneous thought")
+
+    first = state.metacognitive_context()
+    second = state.metacognitive_context()
+
+    assert "- A spontaneous thought\n</inner_voice>" in first
+    assert "A spontaneous thought" not in second
+
+
 def test_detects_recent_contradiction():
     state = EdgeCognitiveState()
     state.record("I like coffee", "")
@@ -94,6 +105,40 @@ def test_clear_resets_all_state_and_removes_persisted_snapshot(tmp_path, monkeyp
     conn = sqlite3.connect(database)
     assert conn.execute("SELECT state_json FROM cognitive_state WHERE user_id = ?", ("person",)).fetchone() is None
     conn.close()
+
+
+def test_restore_realiases_intuitions_to_subliminal_state(tmp_path, monkeypatch):
+    database = tmp_path / "memory.db"
+    conn = sqlite3.connect(database)
+    conn.execute(
+        "CREATE TABLE cognitive_state "
+        "(user_id TEXT PRIMARY KEY, state_json TEXT NOT NULL)"
+    )
+    snapshot = {
+        "intuitions": ["legacy intuition"],
+        "subliminal": {
+            "intuitions": [
+                {"text": "restored intuition", "affective_tag": "warm"}
+            ]
+        },
+    }
+    conn.execute(
+        "INSERT INTO cognitive_state VALUES (?, ?)",
+        ("person", json.dumps(snapshot)),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(attention, "EDGE_COGNITION_PERSIST", True)
+    monkeypatch.setattr(
+        "cognition.memory.vecstore.connect_sqlite_db",
+        lambda *_args, **_kwargs: sqlite3.connect(database),
+    )
+
+    state = EdgeCognitiveState("person")
+    state.load_persistent()
+
+    assert state._intuitions is state._subliminal._intuitions
+    assert list(state._intuitions) == [("restored intuition", "warm")]
 
 
 def test_lesson_evidence_evicts_oldest_signatures_at_fixed_limit():

@@ -48,6 +48,18 @@ from system import bioclock
 
 log = logging.getLogger(__name__)
 
+_REACTIVE_GESTURE_DURATIONS = {
+    "leanIn": 2.8,
+    "curiousTilt": 2.8,
+    "handsClasp": 3.2,
+    "emphasizePoint": 2.6,
+    "wave": 2.6,
+    "giggle": 2.4,
+    "bow": 2.6,
+    "clap": 2.8,
+    "dance": 4.2,
+}
+
 HTTP_PORT  = int(os.getenv("HTTP_PORT", "8787"))
 STATIC_DIR = Path(__file__).parent / "static"
 NO_BROWSER = os.getenv("NO_BROWSER", "0") == "1"
@@ -224,6 +236,7 @@ class AikoWeb:
 
         self._streaming   = ""
         self._tool_status = None
+        self._gesture_active_until = 0.0
 
         self._stats: dict = {
             "tokens":     0,
@@ -896,6 +909,23 @@ class AikoWeb:
         """Broadcast a vetted avatar pose intent to the current user."""
         self._broadcast_to_current_user({"type": "pose", "name": name, "active": bool(active)})
 
+    def play_gesture(self, name: str) -> None:
+        """Broadcast a one-shot avatar gesture to the current user.
+
+        The frontend (vrm.js ``window.aikoPlayGesture``) validates the name
+        against its gesture engine and ignores unknown names, so this is
+        safe to call speculatively from the motion director.
+        """
+        if not name or not isinstance(name, str):
+            return
+        self._broadcast_to_current_user({"type": "gesture", "name": name})
+        self._gesture_active_until = (
+            time.monotonic() + _REACTIVE_GESTURE_DURATIONS.get(name, 3.0)
+        )
+
+    def _gesture_is_active(self) -> bool:
+        return time.monotonic() < getattr(self, "_gesture_active_until", 0.0)
+
     def get_input(self) -> str:
         """Fetch text input from the queue, binding the source user's identity.
         
@@ -905,6 +935,17 @@ class AikoWeb:
         the entire turn. Caller is responsible for cleanup via reset_current_user_id/reset_current_display_name.
         """
         self._broadcast_to_current_user({"type": "voice", "status": "idle"})
+        # Instant "I'm listening" — the avatar leans in the moment she starts
+        # waiting for input, so attention lands in <100 ms (presence upgrade).
+        waiting_for_reactive_gesture = False
+        try:
+            waiting_for_reactive_gesture = (
+                getattr(self, "_no_voice", False) and self._gesture_is_active()
+            )
+            if not waiting_for_reactive_gesture:
+                self.play_gesture("leanIn")
+        except Exception:
+            pass
         idle_ticks = 0
         while True:
             try:
@@ -921,6 +962,13 @@ class AikoWeb:
                 return text
             except queue.Empty:
                 idle_ticks += 1
+                if waiting_for_reactive_gesture:
+                    try:
+                        if not self._gesture_is_active():
+                            waiting_for_reactive_gesture = False
+                            self.play_gesture("leanIn")
+                    except Exception:
+                        pass
                 if idle_ticks % 10 == 0:
                     self._push_vitals()
 

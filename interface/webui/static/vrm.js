@@ -34,16 +34,16 @@ if (window.aikoIsTauri) renderer.setClearColor(0x000000, 0);
 else renderer.setClearColor(0x0a0a0f);
 
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(8, 1, 0.1, 100);
-camera.position.set(0.00, 1.36, 5.0);
+const camera = new THREE.PerspectiveCamera(10, 1, 0.1, 100);
+camera.position.set(0.00, 0.82, 9.0);
 
 const controls = new OrbitControls(camera, canvas);
-controls.target.set(0.00, 1.33, 0);
+controls.target.set(0.00, 0.78, 0);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.enablePan = false;
-controls.minDistance = 1.0;
-controls.maxDistance = 3.2;
+controls.minDistance = 2.0;
+controls.maxDistance = 12;
 controls.update();
 
 scene.add(new THREE.AmbientLight(0xc8b0ff, 0.6));
@@ -211,6 +211,13 @@ const GESTURES = [
   'gentleStretch',     // subtle chest-opening stretch
   'handsClasp',        // hands clasp together briefly in front
   'thoughtfulLook',    // slow gaze upward with head tilt
+  // ── young-girl idle fidgets ──
+  'hairTwirl',         // twirls a strand of hair around a finger
+  'handsBehindBack',   // clasps hands behind back, sways
+  'footTap',           // taps one foot, playful impatience
+  'skirtSmooth',       // smooths skirt with both hands
+  'hugSelf',           // wraps arms around herself, shy
+  'happyBounce',       // little bounce on her toes
 ];
 
 const SPEAKING_GESTURES = [
@@ -252,6 +259,19 @@ const GESTURE_DURATION = {
   bothHandsExplain: 2.8,
   contemplativeNod: 3.4,
   tapFinger: 3.6,
+  // lively girl motions (presence upgrade)
+  wave: 2.6,
+  giggle: 2.4,
+  bow: 2.6,
+  clap: 2.8,
+  dance: 4.2,
+  // young-girl idle fidgets
+  hairTwirl: 3.6,
+  handsBehindBack: 4.2,
+  footTap: 3.0,
+  skirtSmooth: 3.0,
+  hugSelf: 3.8,
+  happyBounce: 2.6,
 };
 
 function easeInOutSine(v) {
@@ -521,6 +541,9 @@ function applyIdle(dt) {
     hips.rotation.z = io.hips.z;
     hips.rotation.x = io.hips.x;
     hips.position.x = io.hips.px;
+    // Restore vertical rest height every frame (gestures like happyBounce
+    // add bounce as an offset on top of this).
+    if (hips.userData.restY !== undefined) hips.position.y = hips.userData.restY;
   }
 
   const head = get('head');
@@ -542,6 +565,13 @@ function applyIdle(dt) {
   const rLA = get('rightLowerArm');
   const lH = get('leftHand');
   const rH = get('rightHand');
+  const lUL = get('leftUpperLeg');
+  const rUL = get('rightUpperLeg');
+
+  // Foot taps animate the upper legs outside the standard idle offsets.
+  // Reset both so an interrupted tap cannot leave either leg lifted.
+  if (lUL) lUL.rotation.x = 0;
+  if (rUL) rUL.rotation.x = 0;
 
   if (lUA) {
     lUA.rotation.x = REST.leftUpperArm.x + io.lUA.x;
@@ -1161,6 +1191,183 @@ function applyGestures(dt) {
         applyFingerCurl(1, Math.abs(explain) * 0.4);
       }
       break;
+
+    case 'wave':
+      // Cheerful wave — right arm up, hand swaying side to side
+      {
+        const w = Math.sin(progress * Math.PI * 5) * 0.38 * intensity;
+        const lift = holdCurve(progress);
+        if (rUA) { rUA.rotation.x = blend(REST.rightUpperArm.x + io.rUA.x, -0.35 * lift, 1); rUA.rotation.z = blend(REST.rightUpperArm.z + io.rUA.z, 2.30 * lift, 1); }
+        if (rLA) rLA.rotation.x = blend(REST.rightLowerArm.x + io.rLA.x, -0.25 * lift, 1);
+        if (rH) rH.rotation.z = blend(REST.rightHand.z + io.rH.z, w, 1);
+        if (head) { head.rotation.x = blend(io.head.x, -0.06 * lift, 1); head.rotation.y = blend(io.head.y, 0.12 * lift, 1); }
+        if (spine) spine.rotation.x = blend(io.spine.x, -0.03 * lift, 1);
+        applyFingerCurl(1, 0.12 * lift);
+      }
+      break;
+
+    case 'giggle':
+      // Shoulders shake with laughter, head dips and tilts
+      {
+        const g = Math.abs(Math.sin(progress * Math.PI * 4)) * 0.11 * intensity;
+        const lift = holdCurve(progress);
+        if (lUA) lUA.rotation.x = blend(REST.leftUpperArm.x + io.lUA.x, -g * 2.0, 1);
+        if (rUA) rUA.rotation.x = blend(REST.rightUpperArm.x + io.rUA.x, -g * 2.0, 1);
+        if (head) { head.rotation.x = blend(io.head.x, 0.13 * lift + g * 0.5, 1); head.rotation.z = blend(io.head.z, side * 0.10 * lift, 1); }
+        if (chest) chest.rotation.x = blend(io.chest.x, g * 1.3, 1);
+        if (spine) spine.rotation.x = blend(io.spine.x, g * 0.7, 1);
+      }
+      break;
+
+    case 'bow':
+      // Polite grateful bow — spine folds forward and rises back
+      {
+        const b = Math.sin(progress * Math.PI) * 0.52;
+        if (spine) spine.rotation.x = blend(io.spine.x, b, 1);
+        if (chest) chest.rotation.x = blend(io.chest.x, b * 0.7, 1);
+        if (head) head.rotation.x = blend(io.head.x, b * 0.45, 1);
+        if (neck) neck.rotation.x = blend(io.neck.x, b * 0.3, 1);
+        if (lUA) lUA.rotation.x = blend(REST.leftUpperArm.x + io.lUA.x, b * 0.22, 1);
+        if (rUA) rUA.rotation.x = blend(REST.rightUpperArm.x + io.rUA.x, b * 0.22, 1);
+      }
+      break;
+
+    case 'clap':
+      // Delighted applause — hands meet in front, three claps
+      {
+        const c = Math.sin(progress * Math.PI * 3);
+        const lift = holdCurve(progress);
+        const spread = (0.55 + c * 0.38) * lift;
+        if (lUA) { lUA.rotation.x = blend(REST.leftUpperArm.x + io.lUA.x, -0.85 * lift, 1); lUA.rotation.z = blend(REST.leftUpperArm.z + io.lUA.z, -spread * 0.55, 1); }
+        if (rUA) { rUA.rotation.x = blend(REST.rightUpperArm.x + io.rUA.x, -0.85 * lift, 1); rUA.rotation.z = blend(REST.rightUpperArm.z + io.rUA.z, spread * 0.55, 1); }
+        if (lLA) lLA.rotation.x = blend(REST.leftLowerArm.x + io.lLA.x, -0.55 * lift, 1);
+        if (rLA) rLA.rotation.x = blend(REST.rightLowerArm.x + io.rLA.x, -0.55 * lift, 1);
+        if (head) { head.rotation.x = blend(io.head.x, -0.08 * lift, 1); head.rotation.y = blend(io.head.y, c * 0.06 * lift, 1); }
+        if (spine) spine.rotation.x = blend(io.spine.x, -0.05 * lift + Math.abs(c) * 0.02, 1);
+        applyFingerCurl(-1, 0.25 * lift);
+        applyFingerCurl(1, 0.25 * lift);
+      }
+      break;
+
+    case 'dance':
+      // Happy little dance — bouncing sway, arms pumping alternately
+      {
+        const beat = progress * Math.PI * 4;
+        const bounce = Math.abs(Math.sin(beat)) * 0.085 * intensity;
+        const swayD = Math.sin(beat * 0.5) * 0.15 * intensity;
+        const armL = Math.max(0, Math.sin(beat)) * 1.1;
+        const armR = Math.max(0, Math.sin(beat + Math.PI)) * 1.1;
+        const lift = holdCurve(progress, 0.12, 0.18);
+        if (spine) { spine.rotation.x = blend(io.spine.x, -bounce * 0.6, 1); spine.rotation.z = blend(io.spine.z, swayD * 0.5, 1); }
+        if (chest) chest.rotation.z = blend(io.chest.z, swayD * 0.7, 1);
+        if (head) { head.rotation.z = blend(io.head.z, swayD * 0.9, 1); head.rotation.x = blend(io.head.x, -0.06 * lift, 1); }
+        if (lUA) { lUA.rotation.z = blend(REST.leftUpperArm.z + io.lUA.z, -armL * lift, 1); lUA.rotation.x = blend(REST.leftUpperArm.x + io.lUA.x, -0.25 * lift, 1); }
+        if (rUA) { rUA.rotation.z = blend(REST.rightUpperArm.z + io.rUA.z, armR * lift, 1); rUA.rotation.x = blend(REST.rightUpperArm.x + io.rUA.x, -0.25 * lift, 1); }
+        if (lLA) lLA.rotation.z = blend(REST.leftLowerArm.z + io.lLA.z, -armL * 0.35 * lift, 1);
+        if (rLA) rLA.rotation.z = blend(REST.rightLowerArm.z + io.rLA.z, armR * 0.35 * lift, 1);
+        applyFingerCurl(-1, 0.1);
+        applyFingerCurl(1, 0.1);
+      }
+      break;
+
+    case 'hairTwirl': {
+      // Twirls a strand of hair around one finger — classic daydream fidget
+      const twirl = Math.sin(gestureT * 7.0) * 0.22 * intensity;
+      if (head) { head.rotation.z = blend(io.head.z, side * intensity * 0.10, 1); head.rotation.x = blend(io.head.x, intensity * 0.05, 1); }
+      if (side < 0) {
+        if (lUA) { lUA.rotation.z = blend(REST.leftUpperArm.z + io.lUA.z, -intensity * 0.95, 1); lUA.rotation.x = blend(REST.leftUpperArm.x + io.lUA.x, -intensity * 0.50, 1); }
+        if (lLA) { lLA.rotation.x = blend(REST.leftLowerArm.x + io.lLA.x, -intensity * 0.85, 1); lLA.rotation.z = blend(REST.leftLowerArm.z + io.lLA.z, -intensity * 0.30, 1); }
+        if (lH) { lH.rotation.z = blend(REST.leftHand.z + io.lH.z, twirl, 1); lH.rotation.y = blend(REST.leftHand.y + io.lH.y, intensity * 0.35, 1); }
+        applyFingerCurl(-1, 0.55 * intensity);
+      } else {
+        if (rUA) { rUA.rotation.z = blend(REST.rightUpperArm.z + io.rUA.z, intensity * 0.95, 1); rUA.rotation.x = blend(REST.rightUpperArm.x + io.rUA.x, -intensity * 0.50, 1); }
+        if (rLA) { rLA.rotation.x = blend(REST.rightLowerArm.x + io.rLA.x, -intensity * 0.85, 1); rLA.rotation.z = blend(REST.rightLowerArm.z + io.rLA.z, intensity * 0.30, 1); }
+        if (rH) { rH.rotation.z = blend(REST.rightHand.z + io.rH.z, -twirl, 1); rH.rotation.y = blend(REST.rightHand.y + io.rH.y, -intensity * 0.35, 1); }
+        applyFingerCurl(1, 0.55 * intensity);
+      }
+      break;
+    }
+
+    case 'handsBehindBack': {
+      // Clasps hands behind her back and sways — bashful, girlish
+      const swayB = Math.sin(gestureT * 1.8) * 0.05 * intensity;
+      if (hips) { hips.rotation.z = blend(io.hips.z, swayB, 1); hips.position.x = blend(io.hips.px, swayB * 0.6, 1); }
+      if (spine) spine.rotation.z = blend(io.spine.z, -swayB * 0.5, 1);
+      if (head) { head.rotation.z = blend(io.head.z, swayB * 0.7, 1); head.rotation.x = blend(io.head.x, intensity * 0.06, 1); }
+      if (lUA) { lUA.rotation.x = blend(REST.leftUpperArm.x + io.lUA.x, intensity * 0.55, 1); lUA.rotation.z = blend(REST.leftUpperArm.z + io.lUA.z, -intensity * 0.18, 1); }
+      if (rUA) { rUA.rotation.x = blend(REST.rightUpperArm.x + io.rUA.x, intensity * 0.55, 1); rUA.rotation.z = blend(REST.rightUpperArm.z + io.rUA.z, intensity * 0.18, 1); }
+      if (lLA) lLA.rotation.x = blend(REST.leftLowerArm.x + io.lLA.x, intensity * 0.35, 1);
+      if (rLA) rLA.rotation.x = blend(REST.rightLowerArm.x + io.rLA.x, intensity * 0.35, 1);
+      applyFingerCurl(-1, 0.25 * intensity);
+      applyFingerCurl(1, 0.25 * intensity);
+      break;
+    }
+
+    case 'footTap': {
+      // Taps one foot — playful impatience while she waits
+      const tap = Math.abs(Math.sin(gestureT * 9.0)) * 0.30 * intensity;
+      const lUL = getBone('leftUpperLeg');
+      const rUL = getBone('rightUpperLeg');
+      if (hips) { hips.rotation.z = blend(io.hips.z, -side * 0.02 * intensity, 1); hips.position.x = blend(io.hips.px, -side * 0.015 * intensity, 1); }
+      if (side < 0) {
+        if (lUL) lUL.rotation.x = blend(0, -tap, 1);
+      } else {
+        if (rUL) rUL.rotation.x = blend(0, -tap, 1);
+      }
+      if (head) head.rotation.z = blend(io.head.z, side * 0.06 * intensity, 1);
+      if (lUA) lUA.rotation.z = blend(REST.leftUpperArm.z + io.lUA.z, -intensity * 0.10, 1);
+      if (rUA) rUA.rotation.z = blend(REST.rightUpperArm.z + io.rUA.z, intensity * 0.10, 1);
+      break;
+    }
+
+    case 'skirtSmooth': {
+      // Smooths her skirt with both hands, gliding downward
+      const glide = holdCurve(progress, 0.25, 0.35);
+      const smooth = Math.sin(glide * Math.PI) * 0.35 * intensity;
+      if (spine) spine.rotation.x = blend(io.spine.x, smooth * 0.35, 1);
+      if (head) head.rotation.x = blend(io.head.x, smooth * 0.30, 1);
+      if (lUA) { lUA.rotation.x = blend(REST.leftUpperArm.x + io.lUA.x, -intensity * 0.55 - smooth * 0.4, 1); lUA.rotation.z = blend(REST.leftUpperArm.z + io.lUA.z, -intensity * 0.22, 1); }
+      if (rUA) { rUA.rotation.x = blend(REST.rightUpperArm.x + io.rUA.x, -intensity * 0.55 - smooth * 0.4, 1); rUA.rotation.z = blend(REST.rightUpperArm.z + io.rUA.z, intensity * 0.22, 1); }
+      if (lLA) lLA.rotation.x = blend(REST.leftLowerArm.x + io.lLA.x, -intensity * 0.25, 1);
+      if (rLA) rLA.rotation.x = blend(REST.rightLowerArm.x + io.rLA.x, -intensity * 0.25, 1);
+      applyFingerCurl(-1, 0.15 * intensity);
+      applyFingerCurl(1, 0.15 * intensity);
+      break;
+    }
+
+    case 'hugSelf': {
+      // Wraps her arms around herself — shy, or a little cold
+      const squeeze = holdCurve(progress, 0.30, 0.35);
+      if (spine) spine.rotation.x = blend(io.spine.x, squeeze * 0.08 * intensity, 1);
+      if (head) { head.rotation.x = blend(io.head.x, squeeze * 0.10 * intensity, 1); head.rotation.z = blend(io.head.z, side * 0.05 * intensity, 1); }
+      if (lUA) { lUA.rotation.y = blend(REST.leftUpperArm.y + (io.lUA.y || 0), -squeeze * 0.85 * intensity, 1); lUA.rotation.x = blend(REST.leftUpperArm.x + io.lUA.x, -squeeze * 0.35 * intensity, 1); }
+      if (rUA) { rUA.rotation.y = blend(REST.rightUpperArm.y + (io.rUA.y || 0), squeeze * 0.85 * intensity, 1); rUA.rotation.x = blend(REST.rightUpperArm.x + io.rUA.x, -squeeze * 0.35 * intensity, 1); }
+      if (lLA) lLA.rotation.x = blend(REST.leftLowerArm.x + io.lLA.x, -squeeze * 0.55 * intensity, 1);
+      if (rLA) rLA.rotation.x = blend(REST.rightLowerArm.x + io.rLA.x, -squeeze * 0.55 * intensity, 1);
+      applyFingerCurl(-1, 0.45 * intensity);
+      applyFingerCurl(1, 0.45 * intensity);
+      break;
+    }
+
+    case 'happyBounce': {
+      // Little bounce on her toes, hands lifting — pure delight
+      const bnc = Math.abs(Math.sin(gestureT * 6.0)) * 0.05 * intensity;
+      const liftB = holdCurve(progress, 0.20, 0.30);
+      if (hips) {
+        // Capture rest height once; applyIdle restores it every frame.
+        if (hips.userData.restY === undefined) hips.userData.restY = hips.position.y;
+        hips.position.y = hips.userData.restY + bnc;
+      }
+      if (spine) spine.rotation.x = blend(io.spine.x, -bnc * 0.8, 1);
+      if (head) head.rotation.x = blend(io.head.x, -0.08 * liftB * intensity, 1);
+      if (lUA) { lUA.rotation.z = blend(REST.leftUpperArm.z + io.lUA.z, -liftB * 0.55 * intensity, 1); lUA.rotation.x = blend(REST.leftUpperArm.x + io.lUA.x, -liftB * 0.30 * intensity, 1); }
+      if (rUA) { rUA.rotation.z = blend(REST.rightUpperArm.z + io.rUA.z, liftB * 0.55 * intensity, 1); rUA.rotation.x = blend(REST.rightUpperArm.x + io.rUA.x, -liftB * 0.30 * intensity, 1); }
+      if (lLA) lLA.rotation.z = blend(REST.leftLowerArm.z + io.lLA.z, -liftB * 0.25 * intensity, 1);
+      if (rLA) rLA.rotation.z = blend(REST.rightLowerArm.z + io.rLA.z, liftB * 0.25 * intensity, 1);
+      applyFingerCurl(-1, 0.12);
+      applyFingerCurl(1, 0.12);
+      break;
+    }
   }
 
   if (progress >= 1) {
@@ -1362,4 +1569,31 @@ window.aikoSetPose = (name, active = true) => {
     gestureState = 'none';
     gestureCooldown = 1.2 + Math.random() * 2.0;
   }
+};
+
+// ── Reactive gesture playback (presence upgrade) ───────────────────────
+// Called from the backend motion director via {"type":"gesture","name"}.
+// Plays a single gesture immediately, blending out whatever was running.
+const KNOWN_GESTURES = new Set([
+  ...GESTURES,
+  ...SPEAKING_GESTURES,
+  ...THINKING_POSES,
+  // Reactive-only: deliberately excluded from the idle pools.
+  'dance', 'wave', 'giggle', 'bow', 'clap',
+]);
+
+window.aikoPlayGesture = (name) => {
+  if (typeof name !== 'string' || !KNOWN_GESTURES.has(name)) return;
+  if (gestureState !== 'none') startBlendOut();
+  const side = Math.random() < 0.5 ? -1 : 1;
+  gestureState = name;
+  gestureT = 0;
+  gestureBlendIn = 0; // reset blend-in ramp
+  gestureDuration = GESTURE_DURATION[name] ?? 3.0;
+  gestureTarget = {
+    side,
+    look: side * 0.3,
+    tilt: side * 0.12,
+    sway: side * 0.02,
+  };
 };

@@ -109,15 +109,6 @@
     <div id="load-msg">loading model…</div>
   </div>
 
-  <!-- ── Floating Particles (shoujo mode; hidden by style-dark.css) ────────── -->
-  <div class="particle" style="top:10%;left:8%;font-size:18px;animation-delay:0s">🌸</div>
-  <div class="particle" style="top:20%;right:12%;font-size:14px;animation-delay:2s">✨</div>
-  <div class="particle" style="top:60%;left:5%;font-size:16px;animation-delay:4s">💫</div>
-  <div class="particle" style="top:75%;right:8%;font-size:12px;animation-delay:1s">⭐</div>
-  <div class="particle" style="top:40%;left:15%;font-size:20px;animation-delay:3s">🌙</div>
-  <div class="particle" style="top:85%;left:25%;font-size:14px;animation-delay:5s">🌸</div>
-  <div class="particle" style="top:30%;right:20%;font-size:16px;animation-delay:1.5s">✨</div>
-
   <!-- ── VRM side ─────────────────────────────────────────────────────────── -->
   <div id="vrm-side">
     <canvas id="canvas"></canvas>
@@ -125,23 +116,43 @@
     <div class="avatar-glow"></div>
 
     <!-- Fenestra-style stage HUD: status · growth · floating caption · talk -->
-    <div id="stage-status" aria-label="Aiko presence"><span id="stage-dot"></span><span id="stage-status-text">IDLE</span></div>
+    <div id="stage-status" aria-label="Aiko presence"><span id="stage-dot"></span><span class="presence-label">PRESENCE:</span><span id="stage-status-text">ONLINE</span></div>
+
+    <div id="stage-clock-top" aria-label="clock"><span id="panel-clock">—</span><span id="tz-label"></span><canvas id="voice-wave" width="72" height="16" aria-label="Aiko voice waveform"></canvas></div>
 
     <div id="stage-growth" aria-label="Aiko growth">
+      <div class="sg-head">GROWTH OVERVIEW</div>
       <div class="sg-row" data-stat="intelligence"><span class="sg-name">INT</span><div class="sg-bar"><div class="sg-fill"></div></div><span class="sg-val"></span></div>
       <div class="sg-row" data-stat="sensitivity"><span class="sg-name">SEN</span><div class="sg-bar"><div class="sg-fill"></div></div><span class="sg-val"></span></div>
       <div class="sg-row" data-stat="morality"><span class="sg-name">MOR</span><div class="sg-bar"><div class="sg-fill"></div></div><span class="sg-val"></span></div>
-      <div class="sg-row sg-phase"><span class="sg-name" id="sg-phase-text">PHASE 0</span><div class="sg-bar"><div class="sg-fill" id="sg-phase-fill"></div></div><span class="sg-val" id="sg-phase-val"></span></div>
     </div>
 
-    <div id="stage-clock" aria-label="clock"><span id="stage-date"></span><span id="stage-time"></span></div>
+    <div id="stage-phase" aria-label="Aiko voice waveform">
+      <canvas id="speech-wave" width="232" height="56" aria-label="Aiko speech waveform"></canvas>
+      <div class="sg-row phase-prog"><div class="sg-bar"><div class="sg-fill" id="sg-phase-fill"></div></div><span class="sg-val" id="sg-phase-val"></span></div>
+    </div>
+
 
     <div id="caption-scrim"></div>
     <div id="caption-box" class="caption-hidden" aria-live="polite">
-      <div id="caption-name"><span id="caption-name-text">AIKO</span><span id="caption-emotion"></span></div>
+      <div id="caption-name"><span class="plate-inner"><span id="caption-name-text">AIKO</span><span id="caption-emotion"></span></span></div>
       <div id="caption-text"><span class="caption-idle-hint">…</span></div>
     </div>
-    <button id="talk-btn" type="button" title="Talk to Aiko (microphone)"><span class="talk-glyph">▷</span><span>TALK</span></button>
+    <div id="talk-frame"><button id="talk-btn" type="button" title="Talk to Aiko (microphone)"><span class="talk-glyph">▷</span><span>TALK</span></button></div>
+
+    <div id="stage-chatbox" aria-label="Message Aiko">
+      <input id="user-input" type="text" autocomplete="off" spellcheck="false" placeholder="Type your message...">
+      <button id="camera-btn" class="input-btn ghost" title="Take a picture and ask Aiko's vision model" aria-label="Take a picture">📷</button>
+      <button id="screen-btn" class="input-btn ghost" title="Share one screen frame with Aiko" aria-label="Share screen with Aiko">▣</button>
+      <button id="send-btn" class="input-btn send" aria-label="Send message">➤</button>
+    </div>
+
+    <div id="stage-osbar" aria-hidden="true">
+      <span class="osbar-left">— AIKO COMPANION OS v2.7.1 —</span>
+      <span class="osbar-dots"></span>
+      <span class="osbar-right">USER:&nbsp;<b id="osbar-user">GUEST</b>&nbsp;&nbsp;|&nbsp;&nbsp;SESSION:&nbsp;<b id="osbar-session">—</b></span>
+    </div>
+    <button id="mic-btn" type="button" hidden aria-hidden="true" tabindex="-1"></button>
 
     <div id="vrm-hud">
       <div id="vrm-title">AI Waifu: <span id="vrm-ai-name">Aiko</span></div>
@@ -165,30 +176,34 @@
       </div>
     </div>
 
-    <section id="companion-hud" aria-label="Aiko companion controls">
-      <div class="companion-wordmark"><span class="companion-signal"></span> AIKO / PRESENCE</div>
-      <div class="companion-status" id="companion-status">settling in</div>
-      <div class="focus-readout"><span id="focus-state">READY</span><strong id="focus-time">00:00</strong></div>
-      <label class="companion-work-label" for="companion-routine">MODE</label>
-      <select id="companion-routine" class="companion-select" aria-label="Companion routine">
-        <option value="coding">Coding</option><option value="study">Study</option><option value="writing">Writing</option><option value="gaming">Gaming</option><option value="quiet">Quiet company</option>
-      </select>
-      <input id="companion-working-on" class="companion-work-input" maxlength="120" placeholder="What are we working on?" aria-label="Currently working on">
-      <div class="companion-actions">
-        <button type="button" id="focus-toggle" class="companion-btn">Start focus</button>
-        <button type="button" id="companion-toggle" class="companion-btn ghost">Compact</button>
+    <div id="stage-side-cluster">
+      <div id="stage-status-stack" aria-live="polite">
+        <div id="voice-status"></div>
+        <div class="companion-status" id="companion-status">settling in</div>
+        <div id="companion-error" hidden></div>
       </div>
-      <div class="companion-actions companion-secondary-actions">
-        <button type="button" id="task-toggle" class="companion-btn ghost">Tasks</button>
-        <button type="button" id="webcam-toggle" class="companion-btn ghost">Webcam off</button>
+    </div><!-- /stage-side-cluster -->
+
+    <div id="transcript-store" hidden>
+      <div class="ts-head"><span>RELATIONSHIP LOG</span><button type="button" id="ts-close" aria-label="Close transcript">✕</button></div>
+      <div id="content">
+        <!-- init phase -->
+        <div id="init-panel">
+          <div class="init-heading">Initializing Neural Systems</div>
+          <div class="boot-progress-bar">
+            <div class="boot-progress-fill" id="boot-progress-fill"></div>
+          </div>
+          <div class="boot-progress-msg" id="boot-progress-msg">starting subsystems...</div>
+          <div class="all-online" id="all-online">[ All Systems Online ]</div>
+        </div>
+
+        <!-- chat phase -->
+        <div id="chat-panel">
+          <div id="tool-status"></div>
+        </div>
       </div>
-      <div id="companion-task-panel" hidden>
-        <form id="companion-task-form"><input id="companion-task-input" maxlength="140" placeholder="Add a task…" aria-label="Add task" autocomplete="off"><button type="submit" class="companion-btn" aria-label="Add task">+</button></form>
-        <ul id="companion-task-list" aria-label="Local task list"></ul>
-        <details id="companion-summary-panel"><summary>Local focus summaries</summary><ul id="companion-summary-list" aria-label="Local focus summaries"></ul></details>
-        <button type="button" id="clear-companion-data" class="companion-text-btn">Delete local companion history</button>
-      </div>
-    </section>
+
+    </div>
 
     <div id="screen-live-indicator" role="status" aria-live="polite" hidden>
       <span></span> Screen frame shared <button type="button" id="stop-screen-share">Dismiss</button>
@@ -197,81 +212,81 @@
 
   <!-- ── right panel ──────────────────────────────────────────────────────── -->
   <div id="panel">
+    <button type="button" id="panel-collapse" aria-label="Collapse sidebar" title="Collapse sidebar">&#10218;</button>
 
-    <div id="panel-header">
-      <div id="panel-title">Aiko Link</div>
-      <div id="panel-clock">—</div>
-      <button id="transcript-toggle" class="input-btn" title="Show/hide full transcript">☰</button>
+    <div id="panel-top">
+    <section id="companion-hud" aria-label="Aiko companion controls">
+    <div class="companion-wordmark"><span class="companion-signal"></span> AIKO / PRESENCE</div>
+    <div class="focus-readout"><span id="focus-state">READY</span><strong id="focus-time">00:00</strong></div>
+    <label class="companion-work-label" for="companion-routine">MODE</label>
+    <select id="companion-routine" class="companion-select" aria-label="Companion routine">
+      <option value="coding">Coding</option><option value="study">Study</option><option value="writing">Writing</option><option value="gaming">Gaming</option><option value="quiet">Quiet company</option>
+    </select>
+    <input id="companion-working-on" class="companion-work-input" maxlength="120" placeholder="What are we working on?" aria-label="Currently working on">
+    <div class="companion-actions">
+      <button type="button" id="focus-toggle" class="companion-btn">Start focus</button>
+      <button type="button" id="companion-toggle" class="companion-btn ghost">Compact</button>
     </div>
-
-    <!-- Aiko status: presence, emotion, growth -->
-    <section id="aiko-status" aria-label="Aiko status">
-      <div class="status-head">
-        <div class="status-presence"><span id="presence-dot"></span><span id="presence-text">IDLE</span></div>
-        <div class="status-emotion" id="status-emotion">—</div>
-      </div>
-      <div class="growth-grid" id="growth-grid"></div>
-      <div class="train-row">
-        <label for="train-stat">TRAIN</label>
-        <select id="train-stat" class="companion-select" aria-label="Stat to train during focus">
-          <option value="intelligence">Intelligence</option>
-          <option value="sensitivity">Sensitivity</option>
-          <option value="morality">Morality</option>
-        </select>
-      </div>
-      <div id="growth-flash" class="growth-flash" hidden></div>
+    <div class="companion-actions companion-secondary-actions">
+      <button type="button" id="task-toggle" class="companion-btn ghost">Tasks</button>
+      <button type="button" id="webcam-toggle" class="companion-btn ghost">Webcam off</button>
+    </div>
+    <div id="companion-task-panel" hidden>
+      <form id="companion-task-form"><input id="companion-task-input" maxlength="140" placeholder="Add a task…" aria-label="Add task" autocomplete="off"><button type="submit" class="companion-btn" aria-label="Add task">+</button></form>
+      <ul id="companion-task-list" aria-label="Local task list"></ul>
+      <details id="companion-summary-panel"><summary>Local focus summaries</summary><ul id="companion-summary-list" aria-label="Local focus summaries"></ul></details>
+      <button type="button" id="clear-companion-data" class="companion-text-btn">Delete local companion history</button>
+    </div>
     </section>
 
-    <!-- Studio Toolbar -->
-    <div id="studio-toolbar" aria-label="Aiko Studios">
-      <a href="/studio/memory/stm/" target="_blank" class="studio-btn" title="Memory Studio (STM · LTM · ITM · KB)"><span class="studio-ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3"></circle><circle cx="5" cy="18" r="2"></circle><circle cx="19" cy="18" r="2"></circle><path d="M12 15v-3M7 17l3.2-3.2M16.8 13.8L20 17M4 7h16M7 4h10"></path></svg></span><span class="studio-label">Memory</span></a>
-      <a href="/studio/codebase/" target="_blank" class="studio-btn" title="Codebase Studio"><span class="studio-ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 6l-5 6 5 6"></path><path d="M16 6l5 6-5 6"></path><path d="M14 4l-4 16"></path></svg></span><span class="studio-label">Codebase</span></a>
-      <a href="/studio/spec/" target="_blank" class="studio-btn" title="Spec Studio"><span class="studio-ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect><path d="M10 10h4M10 10v4"></path></svg></span><span class="studio-label">Spec</span></a>
-      <a href="/studio/mcp/" target="_blank" class="studio-btn" title="MCP Server Status"><span class="studio-ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="20" rx="2"></rect><path d="M7 12l3 3 7-7"></path><circle cx="12" cy="12" r="1"></circle></svg></span><span class="studio-label">MCP</span></a>
-      <a href="/studio/approval/" target="_blank" class="studio-btn" title="Approval Studio"><span class="studio-ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 12l2 2 4-4"></path><path d="M21 12c0 4.97-4.03 9-9 9s-9-4.03-9-9 4.03-9 9-9 9 4.03 9 9z"></path></svg></span><span class="studio-label">Approval</span></a>
-      <a href="/studio/log/" target="_blank" class="studio-btn" title="Log Studio"><span class="studio-ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 4h16v16H4z"></path><path d="M8 8h8M8 12h8M8 16h5"></path></svg></span><span class="studio-label">Logs</span></a>
-      <a href="/studio/calendar/" target="_blank" class="studio-btn" title="Calendar Studio — agenda, tasks, reminders & workflows"><span class="studio-ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="5" width="18" height="16" rx="2"></rect><path d="M16 3v4M8 3v4M3 10h18"></path><path d="M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"></path></svg></span><span class="studio-label">Calendar</span></a>
-      <a href="/studio/fly/" target="_blank" class="studio-btn" title="Fly Circuit Studio — neural motif + NeuralState"><span class="studio-ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="6" cy="12" r="2"/><circle cx="12" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><circle cx="18" cy="12" r="2"/><path d="M8 12h2M12 8v2M12 14v2M14 12h2"/></svg></span><span class="studio-label">Fly Brain</span></a>
-      <button type="button" id="theme-toggle" class="studio-btn" title="Switch to dark mode"><svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path></svg>
-        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
-      <span class="studio-label">Theme</span></button>
+
+
+
+    <nav id="studio-strip" aria-label="Studios">
+      <a class="sbtn" href="/studio/memory/stm/" target="_blank" rel="noopener" title="Memory Vault"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5.5" rx="7.5" ry="2.8"/><path d="M4.5 5.5v13c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8v-13"/><path d="M4.5 12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8"/></svg><span class="sbtn-label">Memory Vault</span></a>
+      <button type="button" class="sbtn" id="theme-toggle" title="Switch appearance theme"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4L3.5 7l2.2 3.6 1.8-1v9.4h9v-9.4l1.8 1L20.5 7 15 4a3 3 0 0 1-6 0z"/></svg><span class="sbtn-label">Outfit Studio</span></button>
+      <button type="button" class="sbtn" id="tile-voice" title="Toggle microphone"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/></svg><span class="sbtn-label">Voice Lab</span></button>
+      <button type="button" class="sbtn" id="tile-scene" title="Toggle webcam"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="9.5" width="18" height="11" rx="2"/><path d="M3.2 9.5L4.8 5l15.6 2.6-.9 2"/><path d="M8.6 5.9l1.7 3.3M13.4 6.7l1.7 3.3"/></svg><span class="sbtn-label">Scene Director</span></button>
+      <button type="button" class="sbtn" id="transcript-toggle" title="Show/hide full transcript"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20.5S3.5 15.4 3.5 9.6A4.6 4.6 0 0 1 8.2 5c1.7 0 3 .9 3.8 2.2A4.6 4.6 0 0 1 15.8 5a4.6 4.6 0 0 1 4.7 4.6c0 5.8-8.5 10.9-8.5 10.9z"/></svg><span class="sbtn-label">Relationship Log</span></button>
+      <button type="button" class="sbtn" id="tile-photo" title="Take a picture"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7.5" width="18" height="12.5" rx="2.5"/><circle cx="12" cy="13.5" r="3.8"/><path d="M8.5 7.5L10 5h4l1.5 2.5"/></svg><span class="sbtn-label">Photo Mode</span></button>
+      <a class="sbtn" href="/studio/fly/" target="_blank" rel="noopener" title="Affinity Map"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="6" r="2.4"/><circle cx="12" cy="18" r="2.4"/><path d="M7.8 7.8l3 7.4M16.2 7.8l-3 7.4M8.4 6h7.2"/></svg><span class="sbtn-label">Affinity Map</span></a>
+      <button type="button" class="sbtn" id="tile-sys" title="Companion settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v2.6M12 18.6v2.6M2.8 12h2.6M18.6 12h2.6M5.5 5.5l1.8 1.8M16.7 16.7l1.8 1.8M18.5 5.5l-1.8 1.8M7.3 16.7l-1.8 1.8"/></svg><span class="sbtn-label">System Settings</span></button>
+    </nav>
     </div>
 
-    <div id="content">
-      <!-- init phase -->
-      <div id="init-panel">
-        <div class="init-heading">Initializing Neural Systems</div>
-        <div class="boot-progress-bar">
-          <div class="boot-progress-fill" id="boot-progress-fill"></div>
+    <section class="ry-panel" id="ry-grow">
+      <div class="ry-head static">
+        <span class="ry-title">GROW <em>Aiko</em> <span class="ry-sprout">\🌱</span></span>
+      </div>
+      <div class="ry-body">
+        <div class="grow-row" data-stat="intelligence"><span class="grow-name">INTELLIGENCE</span><div class="grow-bar"><div class="grow-fill"></div></div><span class="grow-val"></span></div>
+        <div class="grow-row" data-stat="sensitivity"><span class="grow-name">SENSITIVITY</span><div class="grow-bar"><div class="grow-fill"></div></div><span class="grow-val"></span></div>
+        <div class="grow-row" data-stat="morality"><span class="grow-name">MORALITY</span><div class="grow-bar"><div class="grow-fill"></div></div><span class="grow-val"></span></div>
+        <div class="train-row">
+          <label for="train-stat">TRAIN</label>
+          <select id="train-stat" class="companion-select" aria-label="Stat to train during focus">
+            <option value="intelligence">Intelligence</option>
+            <option value="sensitivity">Sensitivity</option>
+            <option value="morality">Morality</option>
+          </select>
         </div>
-        <div class="boot-progress-msg" id="boot-progress-msg">starting subsystems...</div>
-        <div class="all-online" id="all-online">[ All Systems Online ]</div>
+        <div class="grow-row"><span class="grow-name">BOND LEVEL</span><div class="bond-segs" id="bond-segs" aria-hidden="true"></div><span class="grow-val" id="bond-val"></span></div>
+        <div class="bond-status"><span class="grow-name">BOND STATUS</span><span id="bond-status-text">—</span></div>
+        <div class="bond-line">\💗&nbsp;<span id="bond-line-text">…</span></div>
+        <div id="growth-flash" class="growth-flash" hidden></div>
       </div>
+    </section>
 
-      <!-- chat phase -->
-      <div id="chat-panel">
-        <div id="tool-status"></div>
-      </div>
-    </div>
 
     <div id="vitals">
-      <span id="v-mode">⌨ TXT</span>
-      <span id="v-ram">RAM —</span>
-      <span id="v-tok">0 tokens</span>
-      <span id="v-toks">— t/s</span>
-      <span id="v-up">↑ 0s</span>
-    </div>
+        <span id="v-mode">⌨ TXT</span>
+        <span id="v-ram">RAM —</span>
+        <span id="v-tok">0 tokens</span>
+        <span id="v-toks">— t/s</span>
+        <span id="v-up">↑ 0s</span>
+      </div>
 
-    <div id="voice-status"></div>
-
-    <div id="input-row">
-      <span id="prompt-label">❯</span>
-      <input id="user-input" type="text" autocomplete="off" spellcheck="false" placeholder="type a message to Aiko-chan…">
-      <button id="camera-btn" class="input-btn" title="Take a picture and ask Aiko's vision model" aria-label="Take a picture">📷</button>
-      <button id="screen-btn" class="input-btn" title="Share one screen frame with Aiko" aria-label="Share screen with Aiko">▣</button>
-      <button id="mic-btn" class="input-btn" title="Microphone auto-starts when available">🎤</button>
-      <button id="send-btn" class="input-btn">send</button>
-    </div>
+    <div id="error-log" aria-label="Error log" aria-live="polite"></div>
 
     <div id="panel-footer-legal">
       <a href="./legal/privacy-policy.html" target="_blank" rel="noopener">Privacy Policy</a>
@@ -318,6 +333,61 @@
   <script src="./script.js"></script>
   <script src="./companion.js"></script>
   <script src="./growth.js"></script>
+
+  <!-- ── reference-style chrome: collapsible panels, studio tiles, OS bar ── -->
+  <script>
+  (() => {
+    'use strict';
+    const $ = id => document.getElementById(id);
+
+    // collapsible right-panel sections
+    document.querySelectorAll('.ry-head[data-target]').forEach(head => {
+      const body = $(head.dataset.target);
+      const setBody = () => { if (body) body.style.maxHeight = body.scrollHeight + 'px'; };
+      setBody();
+      head.addEventListener('click', () => {
+        const panel = head.closest('.ry-panel');
+        const collapsed = panel.classList.toggle('collapsed');
+        head.setAttribute('aria-expanded', String(!collapsed));
+        head.querySelector('.ry-chev').textContent = collapsed ? '\u25BE' : '\u25B4';
+        if (body) body.style.maxHeight = collapsed ? '0px' : body.scrollHeight + 'px';
+      });
+      window.addEventListener('resize', () => { if (!head.closest('.ry-panel').classList.contains('collapsed')) setBody(); });
+    });
+
+    // studio tile actions (each tile does something real)
+    const click = id => { const el = $(id); if (el) el.click(); };
+    $('tile-voice')?.addEventListener('click', () => click('mic-btn'));       // VOICE LAB → mic kill-switch
+    $('tile-scene')?.addEventListener('click', () => click('webcam-toggle')); // SCENE DIRECTOR → webcam
+    $('tile-photo')?.addEventListener('click', () => click('camera-btn'));    // PHOTO MODE → snapshot
+    $('tile-sys')?.addEventListener('click', () => click('companion-toggle'));// SYSTEM SETTINGS → companion panel
+    // OUTFIT STUDIO is #theme-toggle (wired by script.js); RELATIONSHIP LOG is
+    // #transcript-toggle (wired by script.js); MEMORY VAULT / AFFINITY MAP are links.
+
+    // UTC offset label, e.g. UTC+09:00
+    const tz = $('tz-label');
+    if (tz) {
+      const off = -new Date().getTimezoneOffset();
+      const sign = off >= 0 ? '+' : '-';
+      const a = Math.abs(off);
+      tz.textContent = `UTC${sign}${String(Math.floor(a / 60)).padStart(2, '0')}:${String(a % 60).padStart(2, '0')}`;
+    }
+
+    // OS bar: user + session
+    const sess = $('osbar-session');
+    if (sess && sess.textContent === '\u2014') {
+      sess.textContent = `${Math.floor(10000 + Math.random() * 89999)}-AIKO`;
+    }
+    const userEl = $('osbar-user');
+    const syncUser = () => {
+      if (!userEl) return;
+      const n = $('vrm-user-name')?.textContent?.trim();
+      if (n) userEl.textContent = n.toUpperCase();
+    };
+    syncUser();
+    setInterval(syncUser, 2000);
+  })();
+  </script>
 
 </body>
 

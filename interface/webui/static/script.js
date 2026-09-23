@@ -82,6 +82,24 @@ function applyTheme(theme) {
   }
 }
 
+// ── right sidebar collapse ─────────────────────────────────────────────
+(function initPanelCollapse() {
+  const btn = document.getElementById('panel-collapse');
+  if (!btn) return;
+  const apply = (collapsed) => {
+    document.body.classList.toggle('panel-collapsed', collapsed);
+    btn.innerHTML = collapsed ? '&#10217;' : '&#10218;';
+    btn.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+    btn.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+  };
+  btn.addEventListener('click', () => {
+    const next = !document.body.classList.contains('panel-collapsed');
+    apply(next);
+    try { localStorage.setItem('aiko-panel-collapsed', next ? '1' : '0'); } catch (_) {}
+  });
+  try { if (localStorage.getItem('aiko-panel-collapsed') === '1') apply(true); } catch (_) {}
+})();
+
 function initTheme() {
   let saved = null;
   try { saved = localStorage.getItem(THEME_KEY); } catch (_) { /* storage blocked */ }
@@ -116,9 +134,8 @@ const stageDate = document.getElementById('stage-date');
 const stageTime = document.getElementById('stage-time');
 function tickClock() {
   const now = new Date();
-  clock.textContent = now.toLocaleString('en-CA', {
-    month: 'short', day: '2-digit', year: 'numeric',
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true,
+  clock.textContent = now.toLocaleString('en-GB', {
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
   });
   if (stageDate) stageDate.textContent = now.toLocaleString('en-US', { weekday: 'short', month: 'long', day: 'numeric' });
   if (stageTime) stageTime.textContent = now.toLocaleString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
@@ -726,6 +743,19 @@ function addMessage(sender, text) {
     div.className = 'msg msg-sys';
     div.textContent = `  ◈  ${text}`;
     insertEl = div;
+    const errLine = document.getElementById('companion-error');
+    if (errLine) { errLine.textContent = text; errLine.hidden = false; }
+    const errLog = document.getElementById('error-log');
+    if (errLog) {
+      const line = document.createElement('div');
+      line.className = 'elog-line';
+      const t = new Date();
+      const ts = [t.getHours(), t.getMinutes(), t.getSeconds()].map(n => String(n).padStart(2, '0')).join(':');
+      line.textContent = ts + '  ' + text;
+      errLog.appendChild(line);
+      while (errLog.children.length > 40) errLog.removeChild(errLog.firstChild);
+      errLog.scrollTop = errLog.scrollHeight;   // newest at bottom, older scroll up
+    }
   }
   chatPanel.insertBefore(insertEl, toolStatus);
   scrollBottom();
@@ -776,11 +806,16 @@ function flushStream() {
 function scrollBottom() { content.scrollTop = content.scrollHeight; }
 
 const transcriptToggle = document.getElementById('transcript-toggle');
-if (transcriptToggle) transcriptToggle.addEventListener('click', () => {
-  transcriptVisible = !transcriptVisible;
-  transcriptToggle.classList.toggle('on', transcriptVisible);
+const transcriptStore = document.getElementById('transcript-store');
+function setTranscriptVisible(v) {
+  transcriptVisible = v;
+  if (transcriptToggle) transcriptToggle.classList.toggle('on', v);
+  if (transcriptStore) transcriptStore.hidden = !v;
   renderTranscript();
-});
+}
+if (transcriptToggle) transcriptToggle.addEventListener('click', () => setTranscriptVisible(!transcriptVisible));
+const tsClose = document.getElementById('ts-close');
+if (tsClose) tsClose.addEventListener('click', () => setTranscriptVisible(false));
 
 // ── vitals ────────────────────────────────────────────────────────────────
 function applyVitals(v) {
@@ -845,6 +880,58 @@ function getTtsAnalyser() {
   return ttsAnalyser;
 }
 
+// ── voice waveform: her live TTS audio, drawn next to the stage clock ──
+// Flat idle line when she is quiet; dancing bars while she speaks, fed by
+// the same TTS analyser node that drives lip-sync.
+const voiceWaveCvs = [document.getElementById('voice-wave'), document.getElementById('speech-wave')].filter(Boolean);
+const VOICE_BARS = 26;
+let voiceWaveFreq = null;
+let voiceWaveMax = 0;
+const voiceBarLevels = new Array(VOICE_BARS).fill(0);
+function drawVoiceWave() {
+  let freq = null;
+  if (ttsPlaying && ttsAnalyser) {
+    if (!voiceWaveFreq || voiceWaveFreq.length !== ttsAnalyser.frequencyBinCount)
+      voiceWaveFreq = new Uint8Array(ttsAnalyser.frequencyBinCount);
+    ttsAnalyser.getByteFrequencyData(voiceWaveFreq);
+    freq = voiceWaveFreq;
+  }
+  let peak = 0;
+  for (let i = 0; i < VOICE_BARS; i++) {
+    let target = 0.07; // idle floor: a calm flat line
+    if (freq) {
+      const b0 = 2 + Math.floor(i * 44 / VOICE_BARS);
+      const v = ((freq[b0] || 0) + (freq[b0 + 1] || 0)) / 2 / 255;
+      target = 0.07 + Math.min(1, v * 1.7);
+    }
+    const lv = voiceBarLevels[i];
+    const nv = lv + (target - lv) * (target > lv ? 0.55 : 0.3);
+    voiceBarLevels[i] = nv;
+    if (nv > peak) peak = nv;
+  }
+  voiceWaveMax = peak;
+  for (const cv of voiceWaveCvs) {
+    const ctx = cv.getContext('2d');
+    const W = cv.width, H = cv.height;
+    ctx.clearRect(0, 0, W, H);
+    const mid = H / 2, bw = W / VOICE_BARS;
+    for (let i = 0; i < VOICE_BARS; i++) {
+      const nv = voiceBarLevels[i];
+      const h = Math.max(1.5, nv * (H - 2));
+      const grad = ctx.createLinearGradient(0, mid - h / 2, 0, mid + h / 2);
+      const lt = document.documentElement.dataset.theme === 'light';
+      grad.addColorStop(0, lt ? '#F8A9C6' : '#7de9ff');
+      grad.addColorStop(1, lt ? '#F06292' : '#1a9ec4');
+      ctx.fillStyle = grad;
+      ctx.shadowColor = lt ? 'rgba(240,98,146,.55)' : 'rgba(53,224,255,.7)';
+      ctx.shadowBlur = 4;
+      ctx.fillRect(i * bw + bw * 0.22, mid - h / 2, Math.max(1, bw * 0.56), h);
+      ctx.shadowBlur = 0;
+    }
+  }
+}
+drawVoiceWave(); // one idle frame before any TTS has played
+
 function startMouthAnalyserLoop() {
   if (ttsMouthLoop) return;
   ttsMouthLoop = true;
@@ -865,8 +952,9 @@ function startMouthAnalyserLoop() {
     const coeff = target > ttsMouthLevel ? 0.65 : 0.28;
     ttsMouthLevel += (target - ttsMouthLevel) * coeff;
     if (window.aikoSetMouthOpen) window.aikoSetMouthOpen(ttsMouthLevel);
+    drawVoiceWave();
 
-    if (!ttsPlaying && ttsMouthLevel < 0.01) {
+    if (!ttsPlaying && ttsMouthLevel < 0.01 && voiceWaveMax < 0.09) {
       ttsMouthLoop = false;
       ttsMouthLevel = 0;
       if (window.aikoSetMouthOpen) window.aikoSetMouthOpen(0);

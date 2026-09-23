@@ -36,7 +36,13 @@
         if (st && st.xp) return st;
       }
     } catch (_) {}
-    return { xp: { intelligence: 0, sensitivity: 0, morality: 0, bond: 0 }, bondDay: '', bondCount: 0, focusMinutesTotal: 0 };
+    const base = { xp: { intelligence: 0, sensitivity: 0, morality: 0, bond: 0 }, bondDay: '', bondCount: 0, focusMinutesTotal: 0, focusHistory: [] };
+    // backfill for older saves
+    try {
+      const raw = localStorage.getItem(STORE_KEY);
+      if (raw) { const st = JSON.parse(raw); if (st && st.xp) { st.focusHistory = Array.isArray(st.focusHistory) ? st.focusHistory : []; return st; } }
+    } catch (_) {}
+    return base;
   }
   let state = loadState();
   function save() { try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (_) {} }
@@ -46,24 +52,83 @@
   const trainSel = document.getElementById('train-stat');
 
   const SG_SHORT = { intelligence: 'INT', sensitivity: 'SEN', morality: 'MOR' };
-  function render() {
-    if (grid) {
-      grid.innerHTML = '';
-      for (const st of STATS) {
-        const xp = state.xp[st.id] || 0;
-        const { level, fill } = levelProgress(xp);
-        const el = document.createElement('div');
-        el.className = 'growth-stat';
-        el.dataset.stat = st.id;
-        el.innerHTML =
-          `<div class="growth-top"><span class="growth-name">${st.label}</span>` +
-          `<span class="growth-lv">Lv ${level}</span></div>` +
-          `<div class="growth-bar"><div class="growth-fill" style="width:${Math.round(fill * 100)}%"></div></div>`;
-        el.title = `${st.label}: ${xp} XP`;
-        grid.appendChild(el);
-      }
+  const BOND_TITLES = [
+    [1, 'First Hello',   'Aiko is getting to know you.'],
+    [2, 'Warming Up',    'Aiko looks forward to seeing you.'],
+    [4, 'Deep Connection', 'Aiko feels safe, understood, and truly seen.'],
+    [6, 'True Partners', 'Aiko lights up whenever you are near.'],
+    [99, 'Soulbound',    'Aiko would cross worlds to stay by your side.'],
+  ];
+  function bondTitle(level) {
+    for (const [cap, title, line] of BOND_TITLES) if (level <= cap) return { title, line };
+    return { title: 'Soulbound', line: 'Aiko would cross worlds to stay by your side.' };
+  }
+
+  // build the 10 bond segments once
+  const bondSegs = document.getElementById('bond-segs');
+  if (bondSegs && !bondSegs.children.length) {
+    for (let i = 0; i < 10; i++) { const d = document.createElement('span'); d.className = 'seg'; bondSegs.appendChild(d); }
+  }
+
+  function drawSparkline() {
+    const cv = document.getElementById('phase-spark');
+    if (!cv) return;
+    const ctx = cv.getContext('2d');
+    const W = cv.width, H = cv.height;
+    ctx.clearRect(0, 0, W, H);
+    const hist = (state.focusHistory || []).slice(-40);
+    ctx.strokeStyle = 'rgba(53,224,255,0.14)';
+    ctx.lineWidth = 1;
+    for (let g = 1; g < 4; g++) { ctx.beginPath(); ctx.moveTo(0, H * g / 4); ctx.lineTo(W, H * g / 4); ctx.stroke(); }
+    if (hist.length < 2) {
+      ctx.strokeStyle = 'rgba(53,224,255,0.35)';
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.moveTo(0, H - 6); ctx.lineTo(W, H - 6); ctx.stroke();
+      ctx.setLineDash([]);
+      return;
     }
-    // Fenestra-style mini HUD on the stage: thin bars + phase
+    const max = Math.max(...hist, 1);
+    ctx.beginPath();
+    hist.forEach((v, i) => {
+      const x = 4 + (i / (hist.length - 1)) * (W - 8);
+      const y = H - 6 - (v / max) * (H - 14);
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.strokeStyle = '#35e0ff';
+    ctx.lineWidth = 1.6;
+    ctx.shadowColor = 'rgba(53,224,255,0.8)';
+    ctx.shadowBlur = 6;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+  }
+
+  function render() {
+    // GROW panel: stat bars (level progress) + values
+    for (const st of STATS) {
+      if (st.id === 'bond') continue;
+      const row = document.querySelector(`.grow-row[data-stat="${st.id}"]`);
+      if (!row) continue;
+      const xp = state.xp[st.id] || 0;
+      const { level, fill } = levelProgress(xp);
+      const fillEl = row.querySelector('.grow-fill');
+      const valEl = row.querySelector('.grow-val');
+      if (fillEl) fillEl.style.width = `${Math.round(fill * 100)}%`;
+      if (valEl) valEl.textContent = `Lv ${level}`;
+      row.title = `${st.label}: ${xp} XP`;
+    }
+    // bond row
+    const bondLevel = levelOf(state.xp.bond || 0);
+    const bondFill = Math.min(10, bondLevel);
+    if (bondSegs) [...bondSegs.children].forEach((d, i) => d.classList.toggle('on', i < bondFill));
+    const bondVal = document.getElementById('bond-val');
+    if (bondVal) bondVal.textContent = `${bondFill} /10`;
+    const { title, line } = bondTitle(bondLevel);
+    const bst = document.getElementById('bond-status-text');
+    if (bst) bst.textContent = title;
+    const blt = document.getElementById('bond-line-text');
+    if (blt) blt.textContent = line;
+
+    // stage mini HUD: plain level numbers like the reference
     const stage = document.getElementById('stage-growth');
     if (stage) {
       for (const id of ['intelligence', 'sensitivity', 'morality']) {
@@ -74,18 +139,20 @@
         const fillEl = row.querySelector('.sg-fill');
         const valEl = row.querySelector('.sg-val');
         if (fillEl) fillEl.style.width = `${Math.round(fill * 100)}%`;
-        if (valEl) valEl.textContent = `Lv${level}`;
+        if (valEl) valEl.textContent = `${level}`;
         row.title = `${SG_SHORT[id]}: ${xp} XP`;
       }
-      const totalMin = Math.floor(state.focusMinutesTotal || 0);
-      const phase = Math.floor(totalMin / 100);
-      const phaseText = document.getElementById('sg-phase-text');
-      const phaseFill = document.getElementById('sg-phase-fill');
-      const phaseVal = document.getElementById('sg-phase-val');
-      if (phaseText) phaseText.textContent = `PHASE ${phase}`;
-      if (phaseFill) phaseFill.style.width = `${totalMin % 100}%`;
-      if (phaseVal) phaseVal.textContent = `${totalMin % 100}m/100m`;
     }
+    // phase block
+    const totalMin = Math.floor(state.focusMinutesTotal || 0);
+    const phase = Math.floor(totalMin / 100);
+    const phaseNum = document.getElementById('phase-num');
+    if (phaseNum) phaseNum.textContent = String(phase).padStart(2, '0');
+    const phaseFill = document.getElementById('sg-phase-fill');
+    if (phaseFill) phaseFill.style.width = `${totalMin % 100}%`;
+    const phaseVal = document.getElementById('sg-phase-val');
+    if (phaseVal) phaseVal.textContent = `${totalMin % 100}m/100m`;
+    drawSparkline();
   }
 
   function levelUpCelebration(statId, level) {
@@ -132,6 +199,7 @@
     const { seconds = 0, routine = 'coding' } = e.detail || {};
     const minutes = seconds / 60;
     state.focusMinutesTotal = (state.focusMinutesTotal || 0) + minutes;
+    state.focusHistory = [...(state.focusHistory || []), Math.round(minutes * 10) / 10].slice(-40);
     const train = (trainSel && trainSel.value) || 'intelligence';
     const main = Math.max(1, Math.round(minutes));
     addXp(train, main, `${Math.round(minutes)} min focus`);

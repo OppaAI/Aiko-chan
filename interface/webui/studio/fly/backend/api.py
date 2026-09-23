@@ -27,7 +27,6 @@ app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="
 _CATALOG_LAYOUT: list[dict] | None = None
 _CATALOG_SUMMARY: dict | None = None
 
-# Functional graph: not a full MaleCNS render — motif nodes + live signal strengths.
 _CIRCUIT = {
     "nodes": [
         {"id": "sensory", "label": "Sensory", "x": 80, "y": 200, "group": "in"},
@@ -76,7 +75,6 @@ def _modes() -> dict:
 
 
 def _weights() -> dict:
-    """Stage 1: expose live ranking / teach weights for Studio."""
     try:
         from system.config import env_str
         keys = (
@@ -102,15 +100,12 @@ def _load_catalog() -> tuple[list[dict], dict]:
         from cognition.fly_runtime.service import _configured_catalog
         from cognition.fly_runtime.layout import compute_layout, group_color
 
-        # Reuse the runtime indexed SQLite catalog; parsing the canonical JSON
-        # here causes a multi-minute, ~1 GB heap spike on the Jetson.
         if not os.getenv("AIKO_FLY_CATALOG_PATH"):
             default_path = Path(__file__).resolve().parents[5] / "data" / "fly_catalog" / "male-cns-v1.0-w5.json"
             os.environ["AIKO_FLY_CATALOG_PATH"] = str(default_path)
         catalog = _configured_catalog()
         if catalog is None:
             raise RuntimeError("Fly catalog is not configured")
-
 
         nodes_data = [{"id": n.id, "type": n.type, "region": n.region} for n in catalog.nodes.values()]
         layout = compute_layout(nodes_data)
@@ -179,6 +174,12 @@ def fly_state(request: Request) -> JSONResponse:
             mb_summary = mb.summary()
     except Exception:
         mb_summary = {}
+    body = {}
+    try:
+        from interface.webui.studio.fly.backend.body_routes import build_body_payload
+        body = build_body_payload(uid).get("body") or {}
+    except Exception:
+        body = {}
     return JSONResponse(
         {
             "user_id": uid,
@@ -186,7 +187,8 @@ def fly_state(request: Request) -> JSONResponse:
             "modes": _modes(),
             "weights": _weights(),
             "mb_summary": mb_summary,
-            "stage": "1",
+            "body": body,
+            "stage": "6.1",
         },
         headers={"Cache-Control": "no-store"},
     )
@@ -239,16 +241,12 @@ def fly_circuit(request: Request) -> JSONResponse:
 
 @app.get("/api/trace")
 def fly_trace(request: Request, node_limit: int = Query(160, ge=1, le=500), edge_limit: int = Query(260, ge=1, le=1000)) -> JSONResponse:
-    """Return the identity-scoped active-subgraph trace, if one was evaluated."""
     uid = _uid(request)
     try:
         from cognition.fly_runtime import peek_fly_runtime
         from cognition.neural_state import peek_neural_state
         runtime = peek_fly_runtime(uid)
         trace = dict(runtime.trace) if runtime is not None else {}
-        # The runtime may evaluate thousands of cells.  Studio receives a
-        # deterministic, bounded projection instead of an accidental 20k-node
-        # browser payload; counts in the trace retain the full evaluation size.
         if trace:
             nodes = list(trace.get("nodes", ()))
             shown_nodes = sorted(nodes, key=lambda node: (-float(node.get("rate", 0)), str(node.get("id", ""))))[:node_limit]
@@ -285,7 +283,6 @@ def fly_trace(request: Request, node_limit: int = Query(160, ge=1, le=500), edge
 
 @app.get("/api/catalog")
 def fly_catalog(request: Request, limit: int = Query(50000, ge=1, le=250000), offset: int = Query(0, ge=0)) -> JSONResponse:
-    """Return paginated full catalog with computed 2D layout positions."""
     layout, summary = _load_catalog()
     total = len(layout)
     page = layout[offset:offset + limit]
@@ -302,10 +299,29 @@ def fly_catalog(request: Request, limit: int = Query(50000, ge=1, le=250000), of
 
 @app.get("/api/catalog/summary")
 def fly_catalog_summary(request: Request) -> JSONResponse:
-    """Return catalog summary without node list."""
     _, summary = _load_catalog()
     return JSONResponse({"user_id": _uid(request), "summary": summary}, headers={"Cache-Control": "no-store"})
 
+
+@app.get("/api/body")
+def fly_body(request: Request) -> JSONResponse:
+    """Stage 6.1: DN body drive packet for Studio + avatar clients."""
+    uid = _uid(request)
+    try:
+        from interface.webui.studio.fly.backend.body_routes import build_body_payload
+        payload = build_body_payload(uid)
+    except Exception as exc:
+        logger.debug("body payload failed: %s", exc)
+        payload = {"body": {"mode": "off", "error": str(exc)}, "avatar_intents": []}
+    return JSONResponse(
+        {
+            "user_id": uid,
+            "body": payload.get("body") or {},
+            "avatar_intents": payload.get("avatar_intents") or [],
+            "stage": "6.1",
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/causal")

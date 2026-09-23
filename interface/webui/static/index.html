@@ -12,6 +12,7 @@
   <link rel="stylesheet" href="./style-dark.css" id="theme-style-dark">
   <link rel="stylesheet" href="./style.css" id="theme-style-light">
   <link rel="stylesheet" href="./companion.css">
+  <link rel="stylesheet" href="./hud-cyber.css">
   <script>
     (function () {
       var dark = false;
@@ -123,6 +124,25 @@
 
     <div class="avatar-glow"></div>
 
+    <!-- Fenestra-style stage HUD: status · growth · floating caption · talk -->
+    <div id="stage-status" aria-label="Aiko presence"><span id="stage-dot"></span><span id="stage-status-text">IDLE</span></div>
+
+    <div id="stage-growth" aria-label="Aiko growth">
+      <div class="sg-row" data-stat="intelligence"><span class="sg-name">INT</span><div class="sg-bar"><div class="sg-fill"></div></div><span class="sg-val"></span></div>
+      <div class="sg-row" data-stat="sensitivity"><span class="sg-name">SEN</span><div class="sg-bar"><div class="sg-fill"></div></div><span class="sg-val"></span></div>
+      <div class="sg-row" data-stat="morality"><span class="sg-name">MOR</span><div class="sg-bar"><div class="sg-fill"></div></div><span class="sg-val"></span></div>
+      <div class="sg-row sg-phase"><span class="sg-name" id="sg-phase-text">PHASE 0</span><div class="sg-bar"><div class="sg-fill" id="sg-phase-fill"></div></div><span class="sg-val" id="sg-phase-val"></span></div>
+    </div>
+
+    <div id="stage-clock" aria-label="clock"><span id="stage-date"></span><span id="stage-time"></span></div>
+
+    <div id="caption-scrim"></div>
+    <div id="caption-box" class="caption-hidden" aria-live="polite">
+      <div id="caption-name"><span id="caption-name-text">AIKO</span><span id="caption-emotion"></span></div>
+      <div id="caption-text"><span class="caption-idle-hint">…</span></div>
+    </div>
+    <button id="talk-btn" type="button" title="Talk to Aiko (microphone)"><span class="talk-glyph">▷</span><span>TALK</span></button>
+
     <div id="vrm-hud">
       <div id="vrm-title">AI Waifu: <span id="vrm-ai-name">Aiko</span></div>
       <div id="vrm-user-line">User: <span id="vrm-user-name">Guest</span></div>
@@ -178,41 +198,43 @@
   <!-- ── right panel ──────────────────────────────────────────────────────── -->
   <div id="panel">
 
-    <!-- Studio Toolbar -->
-    <div id="studio-toolbar" aria-label="Aiko Studios">
-      <a href="/studio/memory/stm/" target="_blank" class="studio-btn" title="Memory Studio (STM · LTM · ITM · KB)">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3"></circle><circle cx="5" cy="18" r="2"></circle><circle cx="19" cy="18" r="2"></circle><path d="M12 15v-3M7 17l3.2-3.2M16.8 13.8L20 17M4 7h16M7 4h10"></path></svg>
-      </a>
-      <a href="/studio/codebase/" target="_blank" class="studio-btn" title="Codebase Studio">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 6l-5 6 5 6"></path><path d="M16 6l5 6-5 6"></path><path d="M14 4l-4 16"></path></svg>
-      </a>
-      <a href="/studio/spec/" target="_blank" class="studio-btn" title="Spec Studio">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect><path d="M10 10h4M10 10v4"></path></svg>
-      </a>
-      <a href="/studio/mcp/" target="_blank" class="studio-btn" title="MCP Server Status">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="20" rx="2"></rect><path d="M7 12l3 3 7-7"></path><circle cx="12" cy="12" r="1"></circle></svg>
-      </a>
-      <a href="/studio/approval/" target="_blank" class="studio-btn" title="Approval Studio">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 12l2 2 4-4"></path><path d="M21 12c0 4.97-4.03 9-9 9s-9-4.03-9-9 4.03-9 9-9 9 4.03 9 9z"></path></svg>
-      </a>
-      <a href="/studio/log/" target="_blank" class="studio-btn" title="Log Studio">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 4h16v16H4z"></path><path d="M8 8h8M8 12h8M8 16h5"></path></svg>
-      </a>
-      <a href="/studio/calendar/" target="_blank" class="studio-btn" title="Calendar Studio — agenda, tasks, reminders & workflows">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="5" width="18" height="16" rx="2"></rect><path d="M16 3v4M8 3v4M3 10h18"></path><path d="M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"></path></svg>
-      </a>
-      <a href="/studio/fly/" target="_blank" class="studio-btn" title="Fly Circuit Studio — neural motif + NeuralState">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="6" cy="12" r="2"/><circle cx="12" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><circle cx="18" cy="12" r="2"/><path d="M8 12h2M12 8v2M12 14v2M14 12h2"/></svg>
-      </a>
-      <button type="button" id="theme-toggle" class="studio-btn" title="Switch to dark mode">
-        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path></svg>
-        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
-      </button>
+    <div id="panel-header">
+      <div id="panel-title">Aiko Link</div>
+      <div id="panel-clock">—</div>
+      <button id="transcript-toggle" class="input-btn" title="Show/hide full transcript">☰</button>
     </div>
 
-    <div id="panel-header">
-      <div id="panel-title">Chat Interface</div>
-      <div id="panel-clock">—</div>
+    <!-- Aiko status: presence, emotion, growth -->
+    <section id="aiko-status" aria-label="Aiko status">
+      <div class="status-head">
+        <div class="status-presence"><span id="presence-dot"></span><span id="presence-text">IDLE</span></div>
+        <div class="status-emotion" id="status-emotion">—</div>
+      </div>
+      <div class="growth-grid" id="growth-grid"></div>
+      <div class="train-row">
+        <label for="train-stat">TRAIN</label>
+        <select id="train-stat" class="companion-select" aria-label="Stat to train during focus">
+          <option value="intelligence">Intelligence</option>
+          <option value="sensitivity">Sensitivity</option>
+          <option value="morality">Morality</option>
+        </select>
+      </div>
+      <div id="growth-flash" class="growth-flash" hidden></div>
+    </section>
+
+    <!-- Studio Toolbar -->
+    <div id="studio-toolbar" aria-label="Aiko Studios">
+      <a href="/studio/memory/stm/" target="_blank" class="studio-btn" title="Memory Studio (STM · LTM · ITM · KB)"><span class="studio-ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3"></circle><circle cx="5" cy="18" r="2"></circle><circle cx="19" cy="18" r="2"></circle><path d="M12 15v-3M7 17l3.2-3.2M16.8 13.8L20 17M4 7h16M7 4h10"></path></svg></span><span class="studio-label">Memory</span></a>
+      <a href="/studio/codebase/" target="_blank" class="studio-btn" title="Codebase Studio"><span class="studio-ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 6l-5 6 5 6"></path><path d="M16 6l5 6-5 6"></path><path d="M14 4l-4 16"></path></svg></span><span class="studio-label">Codebase</span></a>
+      <a href="/studio/spec/" target="_blank" class="studio-btn" title="Spec Studio"><span class="studio-ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect><path d="M10 10h4M10 10v4"></path></svg></span><span class="studio-label">Spec</span></a>
+      <a href="/studio/mcp/" target="_blank" class="studio-btn" title="MCP Server Status"><span class="studio-ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="20" rx="2"></rect><path d="M7 12l3 3 7-7"></path><circle cx="12" cy="12" r="1"></circle></svg></span><span class="studio-label">MCP</span></a>
+      <a href="/studio/approval/" target="_blank" class="studio-btn" title="Approval Studio"><span class="studio-ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 12l2 2 4-4"></path><path d="M21 12c0 4.97-4.03 9-9 9s-9-4.03-9-9 4.03-9 9-9 9 4.03 9 9z"></path></svg></span><span class="studio-label">Approval</span></a>
+      <a href="/studio/log/" target="_blank" class="studio-btn" title="Log Studio"><span class="studio-ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 4h16v16H4z"></path><path d="M8 8h8M8 12h8M8 16h5"></path></svg></span><span class="studio-label">Logs</span></a>
+      <a href="/studio/calendar/" target="_blank" class="studio-btn" title="Calendar Studio — agenda, tasks, reminders & workflows"><span class="studio-ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="5" width="18" height="16" rx="2"></rect><path d="M16 3v4M8 3v4M3 10h18"></path><path d="M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"></path></svg></span><span class="studio-label">Calendar</span></a>
+      <a href="/studio/fly/" target="_blank" class="studio-btn" title="Fly Circuit Studio — neural motif + NeuralState"><span class="studio-ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="6" cy="12" r="2"/><circle cx="12" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><circle cx="18" cy="12" r="2"/><path d="M8 12h2M12 8v2M12 14v2M14 12h2"/></svg></span><span class="studio-label">Fly Brain</span></a>
+      <button type="button" id="theme-toggle" class="studio-btn" title="Switch to dark mode"><svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path></svg>
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
+      <span class="studio-label">Theme</span></button>
     </div>
 
     <div id="content">
@@ -295,6 +317,7 @@
   <!-- ── Chat UI + WebSocket ─────────────────────────────────────────────── -->
   <script src="./script.js"></script>
   <script src="./companion.js"></script>
+  <script src="./growth.js"></script>
 
 </body>
 

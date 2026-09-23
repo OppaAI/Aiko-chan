@@ -61,14 +61,19 @@ The motion director does the same:
   `leanIn`.
 
 New VRM gestures (`interface/webui/static/vrm.js`): `wave`, `giggle`,
-`bow`, `clap` (also in the idle pool), `dance` (reactive-only, 4.2 s
+`bow`, `clap` (clap also in the speaking pool), `dance` (reactive-only, 3.5 s
 happy bounce), plus young-girl idle fidgets — `hairTwirl`, `handsBehindBack`,
 `footTap`, `skirtSmooth`, `hugSelf`, `happyBounce` — picked from the idle
-pool every few seconds. All follow the existing bone/blend conventions and are
+pool every few seconds. Motion is layered additively: a vitality layer
+(3.5 s breathing, micro-sway, 120 ms blinks, eye saccades) + an eased state
+pose (idle/thinking/listening/speaking) + event gestures (1–3.5 s, cubic
+envelopes that start and end at exactly zero, amplitudes ~1/3 of the old
+ones). `window.aikoSetThinking(b)` sets the sustained thinking state
+(10° head tilt, up/sideways gaze, relaxed 0.5, hand-to-chin drift); all are
 validated by `KNOWN_GESTURES` on both ends.
 
-Camera defaults frame her full body (FOV 10, pulled back, target at
-mid-torso); orbit/zoom still available.
+Camera defaults frame her close (FOV 8, target at head height, zoom
+range 1.0–3.2 m); orbit/zoom still available.
 
 ## Tuning
 

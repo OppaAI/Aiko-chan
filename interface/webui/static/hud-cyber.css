@@ -1,0 +1,586 @@
+/* ── AIKO CYBER HUD ───────────────────────────────────────────────────
+   Fenestra-inspired cyber companion theme: deep-space stage, holographic
+   panels, neon accents, game-style karaoke caption. Loaded last so it
+   wins over the light/dark skins. */
+
+:root {
+  --cy-bg: #04060c;
+  --cy-bg2: #070b16;
+  --cy-panel: rgba(8, 14, 28, 0.82);
+  --cy-panel2: rgba(12, 20, 38, 0.66);
+  --cy-line: rgba(53, 224, 255, 0.22);
+  --cy-line-soft: rgba(53, 224, 255, 0.12);
+  --cy-cyan: #35e0ff;
+  --cy-cyan-dim: #1a9ec4;
+  --cy-magenta: #ff4fd8;
+  --cy-violet: #9d7bff;
+  --cy-text: #d7e9f5;
+  --cy-dim: #7d93ab;
+  --cy-warn: #ffb347;
+}
+
+html, body {
+  background: var(--cy-bg) !important;
+  color: var(--cy-text) !important;
+}
+
+/* faint perspective grid over the whole app */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    linear-gradient(rgba(53, 224, 255, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(53, 224, 255, 0.05) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse 90% 80% at 50% 40%, black 30%, transparent 100%);
+}
+
+/* ══ VRM stage ═══════════════════════════════════════════════════════ */
+#vrm-side {
+  position: relative;
+  background: radial-gradient(ellipse 75% 65% at 50% 42%, #0a1226 0%, #05080f 62%, #02040a 100%) !important;
+  overflow: hidden;
+  border-right: 1px solid var(--cy-line-soft);
+}
+
+/* scanlines */
+#vrm-side::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0px, transparent 3px,
+    rgba(0, 0, 0, 0.14) 4px
+  );
+  mix-blend-mode: multiply;
+}
+
+/* corner brackets */
+#vrm-side::before {
+  content: "";
+  position: absolute;
+  inset: 14px;
+  pointer-events: none;
+  z-index: 6;
+  border: 1px solid transparent;
+  background:
+    linear-gradient(var(--cy-cyan), var(--cy-cyan)) left top / 26px 2px,
+    linear-gradient(var(--cy-cyan), var(--cy-cyan)) left top / 2px 26px,
+    linear-gradient(var(--cy-cyan), var(--cy-cyan)) right top / 26px 2px,
+    linear-gradient(var(--cy-cyan), var(--cy-cyan)) right top / 2px 26px,
+    linear-gradient(var(--cy-cyan), var(--cy-cyan)) left bottom / 26px 2px,
+    linear-gradient(var(--cy-cyan), var(--cy-cyan)) left bottom / 2px 26px,
+    linear-gradient(var(--cy-cyan), var(--cy-cyan)) right bottom / 26px 2px,
+    linear-gradient(var(--cy-cyan), var(--cy-cyan)) right bottom / 2px 26px;
+  background-repeat: no-repeat;
+  opacity: 0.55;
+}
+
+#vrm-side canvas {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* ── karaoke caption: floating game dialogue (Fenestra style) ── */
+/* No box — her words float over the scene, legible on a soft scrim. */
+#caption-scrim {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 42%;
+  z-index: 7;
+  pointer-events: none;
+  background: linear-gradient(to top, rgba(2, 4, 10, 0.62) 0%, rgba(2, 4, 10, 0.28) 45%, transparent 100%);
+}
+#caption-box {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 96px;
+  width: min(680px, 86%);
+  z-index: 10;
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0 12px;
+  transition: opacity 0.6s ease;
+  pointer-events: none;
+  text-align: center;
+}
+#caption-box.caption-hidden { opacity: 0; }
+/* corner-bracket nameplate: 4 chamfered ticks, no rectangle */
+#caption-name {
+  position: absolute;
+  left: 4px;
+  bottom: calc(100% + 10px);
+  padding: 5px 20px;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.34em;
+  color: var(--cy-cyan);
+  text-shadow: 0 0 14px rgba(53, 224, 255, 0.75);
+  background:
+    linear-gradient(var(--cy-cyan), var(--cy-cyan)) left top / 16px 2px,
+    linear-gradient(var(--cy-cyan), var(--cy-cyan)) left top / 2px 16px,
+    linear-gradient(var(--cy-cyan), var(--cy-cyan)) right top / 16px 2px,
+    linear-gradient(var(--cy-cyan), var(--cy-cyan)) right top / 2px 16px,
+    linear-gradient(var(--cy-cyan), var(--cy-cyan)) left bottom / 16px 2px,
+    linear-gradient(var(--cy-cyan), var(--cy-cyan)) left bottom / 2px 16px,
+    linear-gradient(var(--cy-cyan), var(--cy-cyan)) right bottom / 16px 2px,
+    linear-gradient(var(--cy-cyan), var(--cy-cyan)) right bottom / 2px 16px;
+  background-repeat: no-repeat;
+  opacity: 0.95;
+}
+#caption-name-text { margin-right: 8px; }
+#caption-emotion { font-size: 15px; letter-spacing: 0; }
+#caption-text {
+  font-size: 19px;
+  line-height: 1.6;
+  font-weight: 500;
+  color: #f2f8ff;
+  min-height: 60px;
+  max-height: 150px;
+  overflow-y: auto;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.9), 0 0 18px rgba(0, 0, 0, 0.6);
+}
+#caption-text .w { transition: color 0.18s ease, text-shadow 0.18s ease; }
+#caption-text .w.live {
+  color: #ffffff;
+  text-shadow: 0 0 10px var(--cy-cyan), 0 0 26px rgba(53, 224, 255, 0.65);
+}
+#caption-box.speaking #caption-text .w.live {
+  text-shadow: 0 0 12px var(--cy-magenta), 0 0 30px rgba(255, 79, 216, 0.55);
+}
+#caption-text .caption-idle-hint { color: var(--cy-dim); opacity: 0.4; }
+
+/* primary talk button: dark navy pill, cyan glow, play glyph */
+#talk-btn {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 28px;
+  z-index: 11;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 30px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.3em;
+  color: var(--cy-cyan);
+  background: rgba(13, 22, 40, 0.88);
+  border: 1px solid rgba(53, 224, 255, 0.5);
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: 0 0 20px rgba(53, 224, 255, 0.25), inset 0 0 12px rgba(53, 224, 255, 0.08);
+  transition: box-shadow 0.25s, color 0.2s, border-color 0.2s, transform 0.15s;
+  backdrop-filter: blur(4px);
+}
+#talk-btn:hover {
+  box-shadow: 0 0 34px rgba(53, 224, 255, 0.5), inset 0 0 16px rgba(53, 224, 255, 0.15);
+  transform: translateX(-50%) translateY(-1px);
+}
+#talk-btn .talk-glyph { font-size: 13px; }
+#talk-btn.on {
+  color: #fff;
+  border-color: var(--cy-magenta);
+  box-shadow: 0 0 30px rgba(255, 79, 216, 0.5), inset 0 0 14px rgba(255, 79, 216, 0.2);
+  animation: capPulse 1.4s ease-in-out infinite;
+}
+
+/* stage top-left presence: dot + tracked caps, like Fenestra's chapter title */
+#stage-status {
+  position: absolute;
+  top: 18px;
+  left: 24px;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.32em;
+  color: var(--cy-text);
+  text-transform: uppercase;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.8);
+}
+#stage-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: #3ae374; box-shadow: 0 0 10px #3ae374;
+}
+#stage-dot.thinking { background: var(--cy-warn); box-shadow: 0 0 10px var(--cy-warn); animation: capPulse 1s infinite; }
+#stage-dot.listening { background: var(--cy-cyan); box-shadow: 0 0 10px var(--cy-cyan); animation: capPulse 0.7s infinite; }
+#stage-dot.speaking { background: var(--cy-magenta); box-shadow: 0 0 10px var(--cy-magenta); animation: capPulse 0.9s infinite; }
+#stage-dot.focus { background: var(--cy-violet); box-shadow: 0 0 10px var(--cy-violet); }
+
+/* stage bottom-left growth block: thin labeled bars */
+#stage-growth {
+  position: absolute;
+  left: 24px;
+  bottom: 24px;
+  z-index: 8;
+  width: 208px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.sg-row { display: flex; align-items: center; gap: 8px; }
+.sg-name {
+  width: 52px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  color: var(--cy-dim);
+  text-shadow: 0 1px 4px rgba(0,0,0,.8);
+}
+.sg-phase .sg-name { color: var(--cy-cyan-dim); }
+.sg-bar { flex: 1; height: 3px; border-radius: 2px; background: rgba(53, 224, 255, 0.14); overflow: hidden; }
+.sg-fill {
+  height: 100%; width: 0%;
+  background: linear-gradient(90deg, var(--cy-cyan-dim), var(--cy-cyan));
+  box-shadow: 0 0 6px rgba(53, 224, 255, 0.55);
+  transition: width 0.8s ease;
+}
+.sg-row[data-stat="sensitivity"] .sg-fill { background: linear-gradient(90deg, #c44dff, var(--cy-magenta)); box-shadow: 0 0 6px rgba(255,79,216,.55); }
+.sg-row[data-stat="morality"] .sg-fill { background: linear-gradient(90deg, #2fd48a, #7dffcb); box-shadow: 0 0 6px rgba(47,212,138,.55); }
+.sg-val { width: 34px; text-align: right; font-size: 9.5px; font-weight: 700; color: var(--cy-text); text-shadow: 0 1px 4px rgba(0,0,0,.8); }
+
+/* stage bottom-right clock in corner brackets */
+#stage-clock {
+  position: absolute;
+  right: 24px;
+  bottom: 24px;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  padding: 8px 16px;
+  background:
+    linear-gradient(var(--cy-line), var(--cy-line)) left top / 18px 1px,
+    linear-gradient(var(--cy-line), var(--cy-line)) left top / 1px 18px,
+    linear-gradient(var(--cy-line), var(--cy-line)) right top / 18px 1px,
+    linear-gradient(var(--cy-line), var(--cy-line)) right top / 1px 18px,
+    linear-gradient(var(--cy-line), var(--cy-line)) left bottom / 18px 1px,
+    linear-gradient(var(--cy-line), var(--cy-line)) left bottom / 1px 18px,
+    linear-gradient(var(--cy-line), var(--cy-line)) right bottom / 18px 1px,
+    linear-gradient(var(--cy-line), var(--cy-line)) right bottom / 1px 18px;
+  background-repeat: no-repeat;
+}
+#stage-date { font-size: 9.5px; letter-spacing: 0.22em; color: var(--cy-dim); text-transform: uppercase; }
+#stage-time { font-size: 21px; font-weight: 300; letter-spacing: 0.1em; color: var(--cy-text); text-shadow: 0 0 16px rgba(53,224,255,.35); }
+
+/* slim the old HUD chips into the cyber frame */
+#vrm-hud {
+  top: 54px !important;
+  z-index: 8;
+  color: var(--cy-dim) !important;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+#vrm-hud #vrm-title { color: var(--cy-text); font-weight: 700; }
+#ws-dots { z-index: 8; }
+#ws-dots .status-line {
+  background: var(--cy-panel);
+  border: 1px solid var(--cy-line-soft);
+  border-radius: 6px;
+  padding: 3px 8px;
+  color: var(--cy-dim);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+}
+#vrm-hud #vrm-title { display: none; }
+.emotion-badge {
+  z-index: 8;
+  background: var(--cy-panel) !important;
+  border: 1px solid var(--cy-line) !important;
+  color: var(--cy-text) !important;
+}
+
+/* ══ right panel ═════════════════════════════════════════════════════ */
+#panel {
+  background: linear-gradient(180deg, rgba(6, 10, 20, 0.96), rgba(4, 6, 12, 0.98)) !important;
+  border-left: 1px solid var(--cy-line-soft);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  z-index: 1;
+}
+#panel-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--cy-line-soft);
+  background: linear-gradient(90deg, rgba(53, 224, 255, 0.06), transparent);
+}
+#panel-title {
+  font-size: 13px !important;
+  font-weight: 800;
+  letter-spacing: 0.28em;
+  color: var(--cy-cyan) !important;
+  text-shadow: 0 0 14px rgba(53, 224, 255, 0.5);
+  text-transform: uppercase;
+}
+#panel-clock { color: var(--cy-dim); font-size: 11px; margin-left: auto; }
+#transcript-toggle { margin-left: 4px; }
+
+/* ── Aiko status block ── */
+#aiko-status {
+  margin: 10px 12px 0;
+  padding: 12px 14px;
+  background: var(--cy-panel2);
+  border: 1px solid var(--cy-line-soft);
+  border-radius: 10px;
+  position: relative;
+}
+#aiko-status::before {
+  content: "AIKO // STATUS";
+  position: absolute;
+  top: -8px;
+  left: 12px;
+  font-size: 8.5px;
+  letter-spacing: 0.24em;
+  color: var(--cy-cyan-dim);
+  background: var(--cy-bg2);
+  padding: 0 8px;
+}
+.status-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.status-presence { display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 700; letter-spacing: 0.18em; }
+#presence-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: #3ae374; box-shadow: 0 0 10px #3ae374;
+}
+#presence-dot.thinking { background: var(--cy-warn); box-shadow: 0 0 10px var(--cy-warn); animation: capPulse 1s infinite; }
+#presence-dot.listening { background: var(--cy-cyan); box-shadow: 0 0 10px var(--cy-cyan); animation: capPulse 0.7s infinite; }
+#presence-dot.speaking { background: var(--cy-magenta); box-shadow: 0 0 10px var(--cy-magenta); animation: capPulse 0.9s infinite; }
+#presence-dot.focus { background: var(--cy-violet); box-shadow: 0 0 10px var(--cy-violet); }
+#presence-text { color: var(--cy-text); }
+.status-emotion { font-size: 11px; color: var(--cy-dim); letter-spacing: 0.1em; }
+
+.growth-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; margin-bottom: 10px; }
+.growth-stat { min-width: 0; }
+.growth-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 3px; }
+.growth-name { font-size: 9.5px; letter-spacing: 0.14em; color: var(--cy-dim); text-transform: uppercase; }
+.growth-lv { font-size: 10px; font-weight: 800; color: var(--cy-cyan); }
+.growth-bar { height: 5px; border-radius: 3px; background: rgba(53, 224, 255, 0.12); overflow: hidden; }
+.growth-fill {
+  height: 100%; border-radius: 3px;
+  background: linear-gradient(90deg, var(--cy-cyan-dim), var(--cy-cyan));
+  box-shadow: 0 0 8px rgba(53, 224, 255, 0.6);
+  transition: width 0.8s ease;
+}
+.growth-stat[data-stat="sensitivity"] .growth-fill { background: linear-gradient(90deg, #c44dff, var(--cy-magenta)); box-shadow: 0 0 8px rgba(255, 79, 216, 0.6); }
+.growth-stat[data-stat="sensitivity"] .growth-lv { color: var(--cy-magenta); }
+.growth-stat[data-stat="morality"] .growth-fill { background: linear-gradient(90deg, #2fd48a, #7dffcb); box-shadow: 0 0 8px rgba(47, 212, 138, 0.6); }
+.growth-stat[data-stat="morality"] .growth-lv { color: #7dffcb; }
+.growth-stat[data-stat="bond"] .growth-fill { background: linear-gradient(90deg, #ff9d4d, #ffd166); box-shadow: 0 0 8px rgba(255, 157, 77, 0.6); }
+.growth-stat[data-stat="bond"] .growth-lv { color: #ffd166; }
+
+.train-row { display: flex; align-items: center; gap: 8px; }
+.train-row label { font-size: 9.5px; letter-spacing: 0.2em; color: var(--cy-dim); }
+.train-row select { flex: 1; }
+.growth-flash {
+  margin-top: 8px;
+  font-size: 11px;
+  color: #ffd166;
+  letter-spacing: 0.06em;
+  text-shadow: 0 0 12px rgba(255, 209, 102, 0.6);
+  animation: capPulse 1.2s ease-in-out 3;
+}
+
+/* ── studio grid: professional cards ── */
+#studio-toolbar {
+  display: grid !important;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--cy-line-soft);
+  background: transparent !important;
+}
+.studio-btn {
+  display: flex !important;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 9px 4px 7px !important;
+  background: var(--cy-panel2) !important;
+  border: 1px solid var(--cy-line-soft) !important;
+  border-radius: 8px !important;
+  color: var(--cy-dim) !important;
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s, box-shadow 0.2s, transform 0.15s;
+  width: auto !important;
+  height: auto !important;
+}
+.studio-btn:hover {
+  border-color: var(--cy-line) !important;
+  color: var(--cy-cyan) !important;
+  box-shadow: 0 0 14px rgba(53, 224, 255, 0.18);
+  transform: translateY(-1px);
+}
+.studio-btn .studio-ic { display: flex; color: inherit; }
+.studio-btn .studio-ic svg { width: 17px; height: 17px; }
+.studio-btn .studio-label {
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+#theme-toggle .icon-sun { display: none; }
+
+/* ── chat: slim transcript (her words live in the caption) ── */
+#content {
+  flex: 1;
+  min-height: 120px;
+  overflow-y: auto;
+  padding: 10px 12px;
+}
+#chat-panel .msg { margin: 6px 0; }
+#chat-panel .msg-you .bubble, #chat-panel .bubble-you {
+  background: rgba(53, 224, 255, 0.08) !important;
+  border: 1px solid var(--cy-line-soft) !important;
+  color: var(--cy-text) !important;
+}
+#chat-panel .msg-sys { color: var(--cy-dim); font-size: 10.5px; }
+#chat-panel .transcript-row { opacity: 0.75; }
+#chat-panel .transcript-row .bubble {
+  background: rgba(157, 123, 255, 0.07) !important;
+  border: 1px dashed rgba(157, 123, 255, 0.3) !important;
+}
+#tool-status { color: var(--cy-cyan-dim); font-size: 11px; }
+
+/* ── vitals strip ── */
+#vitals {
+  display: flex;
+  gap: 12px;
+  padding: 6px 14px;
+  border-top: 1px solid var(--cy-line-soft);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--cy-dim);
+  background: rgba(4, 8, 16, 0.6);
+}
+#vitals span { white-space: nowrap; }
+
+/* ── input row ── */
+#input-row {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  align-items: center;
+  background: transparent;
+}
+#prompt-label { color: var(--cy-cyan); font-weight: 800; text-shadow: 0 0 10px rgba(53,224,255,.6); }
+#user-input {
+  flex: 1;
+  background: rgba(8, 14, 28, 0.9) !important;
+  border: 1px solid var(--cy-line-soft) !important;
+  border-radius: 8px !important;
+  color: var(--cy-text) !important;
+  padding: 10px 12px !important;
+  font-size: 13.5px !important;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+#user-input:focus { border-color: var(--cy-cyan) !important; box-shadow: 0 0 16px rgba(53, 224, 255, 0.25); }
+#user-input::placeholder { color: var(--cy-dim); opacity: 0.7; }
+.input-btn {
+  background: var(--cy-panel2) !important;
+  border: 1px solid var(--cy-line-soft) !important;
+  color: var(--cy-dim) !important;
+  border-radius: 8px !important;
+  padding: 9px 11px !important;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+.input-btn:hover { color: var(--cy-cyan) !important; border-color: var(--cy-line) !important; box-shadow: 0 0 12px rgba(53,224,255,.2); }
+#mic-btn.on {
+  color: #fff !important;
+  background: rgba(255, 79, 216, 0.25) !important;
+  border-color: var(--cy-magenta) !important;
+  box-shadow: 0 0 14px rgba(255, 79, 216, 0.45);
+}
+#send-btn {
+  color: var(--cy-bg) !important;
+  background: linear-gradient(135deg, var(--cy-cyan), #7de9ff) !important;
+  border: none !important;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+#send-btn:hover { box-shadow: 0 0 18px rgba(53, 224, 255, 0.55); color: #000 !important; }
+
+#voice-status { padding: 0 14px 4px; font-size: 11px; color: var(--cy-magenta); min-height: 18px; }
+#voice-status.listening { animation: capPulse 1s infinite; }
+
+#panel-footer-legal { padding: 8px 14px 10px; font-size: 9.5px; }
+#panel-footer-legal a { color: var(--cy-dim); }
+
+/* companion HUD inside the stage */
+#ws-dots { top: 16px !important; right: 16px; z-index: 9; }
+#companion-hud {
+  z-index: 8;
+  left: auto !important;
+  right: 16px;
+  top: 158px;
+  bottom: auto !important;
+  max-width: 248px;
+  background: var(--cy-panel) !important;
+  border: 1px solid var(--cy-line-soft) !important;
+  backdrop-filter: blur(6px);
+}
+#companion-hud .companion-wordmark { color: var(--cy-cyan) !important; }
+#companion-hud .companion-status { color: var(--cy-text) !important; }
+.companion-btn {
+  background: var(--cy-panel2) !important;
+  border: 1px solid var(--cy-line-soft) !important;
+  color: var(--cy-text) !important;
+}
+.companion-btn:hover { border-color: var(--cy-cyan) !important; color: var(--cy-cyan) !important; }
+.companion-select, .companion-work-input, #train-stat {
+  background: rgba(8, 14, 28, 0.9) !important;
+  border: 1px solid var(--cy-line-soft) !important;
+  color: var(--cy-text) !important;
+  border-radius: 6px;
+  padding: 6px 8px !important;
+  font-size: 12px;
+}
+
+/* load overlay */
+#load-overlay { background: var(--cy-bg) !important; }
+#load-title { color: var(--cy-cyan) !important; text-shadow: 0 0 24px rgba(53,224,255,.6); }
+#progress-fill { background: linear-gradient(90deg, var(--cy-cyan-dim), var(--cy-cyan)) !important; }
+
+/* auth overlay */
+.auth-overlay { background: rgba(2, 4, 10, 0.92) !important; }
+.auth-panel {
+  background: var(--cy-panel) !important;
+  border: 1px solid var(--cy-line) !important;
+  box-shadow: 0 0 40px rgba(53, 224, 255, 0.15);
+}
+
+/* ── mobile: stage fullscreen, panel bottom sheet ── */
+@media (max-width: 900px) {
+  #caption-box { bottom: 88px; width: 94%; }
+  #caption-text { font-size: 15px; min-height: 44px; }
+  #talk-btn { bottom: 18px; padding: 10px 24px; }
+  #stage-growth { display: none; }
+  #stage-clock { display: none; }
+  #studio-toolbar { grid-template-columns: repeat(3, 1fr); }
+  #aiko-status { margin: 8px 10px 0; }
+}

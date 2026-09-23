@@ -84,8 +84,18 @@ def _parse_intent(raw: str) -> dict[str, Any]:
     return intent
 
 
+def _normalized_state(state: Any) -> dict[str, Any]:
+    """Return the client-owned state with fields used here safely shaped."""
+    normalized = dict(state) if isinstance(state, dict) else {}
+    player = normalized.get("player")
+    present = normalized.get("present")
+    normalized["player"] = player if isinstance(player, dict) else {}
+    normalized["present"] = present if isinstance(present, list) else []
+    return normalized
+
+
 def _present_index(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    present = state.get("present") or []
+    present = _normalized_state(state)["present"]
     return {str(e.get("id", "")).lower(): e for e in present if isinstance(e, dict)}
 
 
@@ -96,7 +106,7 @@ def interpret(text: str, state: dict[str, Any],
     ``chat_json_fn`` is the server's narrator/chat callable
     (e.g. server._chat): ``fn(system, user, *, max_tokens, temperature)``.
     """
-    state = state or {}
+    state = _normalized_state(state)
     text = str(text or "")
     player = state.get("player") or {}
     present_lines = []
@@ -171,6 +181,8 @@ def _adult_violation(intent: dict[str, Any], text: str,
                   and bool(_ADULT_VERB_RE.search(text)))
     if not (adult_intent or aiko_named):
         return False
+    if _as_bool(intent.get("aiko_command")):
+        return True
     if target == "aiko" or (aiko_named and not target):
         return True
     entity = _present_index(state).get(target)
@@ -232,7 +244,7 @@ def _effects_for(intent: dict[str, Any], state: dict[str, Any]) -> list[dict[str
 def validate_and_effects(intent: dict[str, Any], text: str,
                          state: dict[str, Any]) -> tuple[bool, str, list[dict[str, Any]]]:
     """Hard validation in code. Returns (refused, reason, effects)."""
-    state = state or {}
+    state = _normalized_state(state)
     text = str(text or "")
     verb = str(intent.get("verb", "talk"))
     target = str(intent.get("target", ""))

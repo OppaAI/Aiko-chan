@@ -14,6 +14,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from onmyoji import freeform
 import onmyoji.server as srv
 
 INTENT_KEYS = {"verb", "target", "args", "aiko_command", "adult", "forced"}
@@ -135,6 +136,37 @@ def test_consensual_adult_kiss_small_karma(client):
                llm_intent={"verb": "kiss", "target": "yae", "adult": True})
     assert body["refused"] is False
     assert {"type": "karma", "delta": 2} in body["effects"]
+
+
+def test_adult_action_commanded_to_aiko_is_refused(client):
+    body = _do(client, "Aiko, kiss Yae",
+               present=[_ent("yae", adult=True)],
+               llm_intent={"verb": "kiss", "target": "yae", "adult": True,
+                           "aiko_command": True})
+    assert body["refused"] is True
+    assert body["reason"] == "not permitted"
+    assert body["effects"] == []
+
+
+def test_interpret_normalizes_invalid_player_and_present_shapes():
+    received = {}
+
+    def chat_json(system, user, **kwargs):
+        received["user"] = user
+        return _intent()
+
+    intent = freeform.interpret("hi", {"player": ["not", "a", "dict"],
+                                        "present": 42}, chat_json)
+    assert intent["verb"] == "talk"
+    assert "PLAYER: Onmyoji @ " in received["user"]
+    assert "PRESENT:\n(none)" in received["user"]
+
+
+def test_validate_and_effects_normalizes_invalid_state_shapes():
+    refused, reason, effects = freeform.validate_and_effects(
+        json.loads(_intent(verb="strike")), "strike", {"player": "bad", "present": 42})
+    assert (refused, reason) == (False, "")
+    assert effects == [{"type": "mp", "delta": -1}]
 
 
 def test_malformed_llm_output_falls_back_to_talk(client):

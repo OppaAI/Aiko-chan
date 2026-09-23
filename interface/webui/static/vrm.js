@@ -1021,15 +1021,19 @@ function updateExpressions(dt) {
   for (const name of Object.keys(exprTargets)) {
     const target = exprTargets[name];
     const cur = exprCurrent[name] ?? 0;
-    let a = exprAnim[name];
-    if (!a || Math.abs(a.to - target) > 1e-4) {
-      // Capture the CURRENT weight as the lerp start — no popping.
-      const isMouth = MOUTH_KEYS.has(name);
-      a = exprAnim[name] = { from: cur, to: target, t: 0, dur: isMouth ? 0.12 : 0.35 };
+    let next;
+    if (MOUTH_KEYS.has(name)) {
+      next = cur + (target - cur) * (1 - Math.exp(-dt / 0.04));
+    } else {
+      let a = exprAnim[name];
+      if (!a || Math.abs(a.to - target) > 1e-4) {
+        // Capture the CURRENT weight as the lerp start — no popping.
+        a = exprAnim[name] = { from: cur, to: target, t: 0, dur: 0.35 };
+      }
+      a.t += dt;
+      const e = easeInOutCubic(a.t / a.dur);
+      next = a.from + (a.to - a.from) * e;
     }
-    a.t += dt;
-    const e = easeInOutCubic(a.t / a.dur);
-    const next = a.from + (a.to - a.from) * e;
     exprCurrent[name] = next;
     if (name === 'blink') continue; // driven by applyBlink
     // Cap expression weights at 0.8; mouth visemes keep full range for lip-sync.

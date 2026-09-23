@@ -61,7 +61,7 @@ The motion director does the same:
   `leanIn`.
 
 New VRM gestures (`interface/webui/static/vrm.js`): `wave`, `giggle`,
-`bow`, `clap` (clap also in the speaking pool), `dance` (reactive-only, 3.5 s
+`bow`, `clap` (reactive-only), `dance` (reactive-only, 3.5 s
 happy bounce), plus young-girl idle fidgets — `hairTwirl`, `handsBehindBack`,
 `footTap`, `skirtSmooth`, `hugSelf`, `happyBounce` — picked from the idle
 pool every few seconds. Motion is layered additively: a vitality layer

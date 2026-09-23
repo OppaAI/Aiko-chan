@@ -50,6 +50,7 @@
   const grid = document.getElementById('growth-grid');
   const flash = document.getElementById('growth-flash');
   const trainSel = document.getElementById('train-stat');
+  let levelUpFlashUntil = 0;
 
   const SG_SHORT = { intelligence: 'INT', sensitivity: 'SEN', morality: 'MOR' };
   const BOND_TITLES = [
@@ -160,6 +161,8 @@
     if (flash) {
       flash.hidden = false;
       flash.textContent = `✨ ${label} grew to Lv ${level}!`;
+      levelUpFlashUntil = Date.now() + 6000;
+      clearTimeout(addXp._t);
       clearTimeout(levelUpCelebration._t);
       levelUpCelebration._t = setTimeout(() => { flash.hidden = true; }, 6000);
     }
@@ -177,9 +180,10 @@
     save();
     render();
     if (after > before) levelUpCelebration(statId, after);
-    else if (flash && reason) {
+    else if (flash && reason && Date.now() >= levelUpFlashUntil) {
       flash.hidden = false;
       flash.textContent = `+${Math.round(amount)} ${STATS.find(s => s.id === statId).label} — ${reason}`;
+      clearTimeout(levelUpCelebration._t);
       clearTimeout(addXp._t);
       addXp._t = setTimeout(() => { flash.hidden = true; }, 4000);
     }

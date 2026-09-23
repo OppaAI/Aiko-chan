@@ -842,6 +842,7 @@ const VOICE_LABELS = {
 function applyVoice(status) {
   voiceSt.textContent = VOICE_LABELS[status] ?? '';
   voiceSt.className = status === 'idle' ? '' : status;
+  window.aikoSetListening?.(status === 'listening');
   if (status === 'waiting' && chatPhaseActive) showTypingIndicator();
   if (status === 'listening') setPresence('listening');
   else if (status === 'transcribing') setPresence('thinking');
@@ -1026,6 +1027,7 @@ let micStartPromise = null;
 // hardware stays off no matter what the server asks (barge-in / listen
 // loops used to resurrect it right after the user turned it off).
 let micMuted = true;
+let pendingMicStart = null;
 let micGen = 0;
 let asrOn = false;
 
@@ -1230,6 +1232,21 @@ function syncTalkButton() {
   const talk = document.getElementById('talk-btn');
   if (talk) talk.classList.toggle('on', live);
 }
+function handleMicStart(msg) {
+  if (micMuted) { pendingMicStart = msg; return; }
+  const seq = ++micCommandSeq;
+  browserVadGate = msg.browser_vad_gate !== false;
+  window.AIKO_BARGE_IN_ENABLED = !!msg.barge_in_enabled;
+  window.AIKO_BARGE_ECHO_GUARD_MS = msg.echo_guard_ms ?? 450;
+  startMic().then((ok) => {
+    if (!ok || seq !== micCommandSeq) return;
+    if (window.resetVADState) window.resetVADState();
+    micStreamingEnabled = true;
+    vadDot.className = 'dot vad';
+    vadStatus.textContent = browserVadGate ? 'vad active' : 'raw mic';
+    vadStatus.className = 'active';
+  });
+}
 async function toggleMic() {
   if (!wsReady()) {
     addMessage('sys', 'WebSocket bridge is offline. Cannot toggle voice mode.');
@@ -1239,13 +1256,18 @@ async function toggleMic() {
   if (!micMuted) {
     // User wants it OFF — kill switch: stays off until they turn it back on.
     micMuted = true;
+    pendingMicStart = null;
     stopMic();
     if (asrOn) ws.send(JSON.stringify({ type: 'user_input', text: '/listen' }));
   } else {
     micMuted = false;
     const ok = await startMic();
     if (!ok) { micMuted = true; syncTalkButton(); return; }
-    if (!asrOn) ws.send(JSON.stringify({ type: 'user_input', text: '/listen' }));
+    if (pendingMicStart) {
+      const start = pendingMicStart;
+      pendingMicStart = null;
+      handleMicStart(start);
+    } else if (!asrOn) ws.send(JSON.stringify({ type: 'user_input', text: '/listen' }));
   }
   syncTalkButton();
   input.focus();
@@ -1339,25 +1361,15 @@ function connectWS() {
       case 'commit': flushStream(); hideTypingIndicator(); break;
       case 'tool': toolStatus.textContent = msg.status ? `  ⚙  ${msg.status}` : ''; break;
       case 'vitals': applyVitals(msg); break;
-      case 'voice': applyVoice(msg.status); break;
+      case 'voice':
+        if (msg.status === 'idle') pendingMicStart = null;
+        applyVoice(msg.status);
+        break;
       case 'mic':
         if (msg.action === 'start') {
-          if (micMuted) break;   // user turned the mic off — stay off
-          const seq = ++micCommandSeq;
-          browserVadGate = msg.browser_vad_gate !== false;
-          // S0: master barge-in switch from server (BARGE_IN_ENABLED)
-          window.AIKO_BARGE_IN_ENABLED = !!msg.barge_in_enabled;
-          // S3: echo guard window from server (BARGE_IN_ECHO_GUARD_MS)
-          window.AIKO_BARGE_ECHO_GUARD_MS = msg.echo_guard_ms ?? 450;
-          startMic().then((ok) => {
-            if (!ok || seq !== micCommandSeq) return;
-            if (window.resetVADState) window.resetVADState();
-            micStreamingEnabled = true;
-            vadDot.className = 'dot vad';
-            vadStatus.textContent = browserVadGate ? 'vad active' : 'raw mic';
-            vadStatus.className = 'active';
-          });
+          handleMicStart(msg);
         } else if (msg.action === 'stop') {
+          pendingMicStart = null;
           micCommandSeq++;
           micStreamingEnabled = false;
           if (window.resetVADState) window.resetVADState();
@@ -1384,6 +1396,7 @@ function connectWS() {
     ws = null;
     wsDot.className = 'dot';
     wsLabel.textContent = 'ws offline';
+    pendingMicStart = null;
     stopMic();
     if (wsUrl.startsWith("wss:")) {
       toolStatus.textContent = "  ws offline: open " + wsUrl.replace("wss:", "https:") + " once to accept the WSS certificate";

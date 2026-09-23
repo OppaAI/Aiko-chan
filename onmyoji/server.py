@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .gatekeeper import build_aiko_context, build_narrator_context, eligible_figures
+from . import freeform
 from .state import Entity, GameState, GameStore
 
 try:
@@ -69,6 +70,13 @@ class ApiTalkIn(BaseModel):
 
     target: str = "aiko"
     message: str = ""
+
+
+class DoIn(BaseModel):
+    """POST /api/onmyoji/do body. Module level: FastAPI cannot resolve locally-defined models."""
+
+    text: str = ""
+    state: dict[str, Any] = {}
 
 
 def _client():
@@ -404,6 +412,20 @@ def create_app():
     @app.post("/api/onmyoji/talk")
     def api_talk_route(body: ApiTalkIn) -> dict[str, Any]:
         return api_talk(body.target, body.message)
+
+    @app.post("/api/onmyoji/do")
+    def api_do_route(body: DoIn) -> dict[str, Any]:
+        """Freeform action: LLM interprets text -> intent; code validates,
+        computes effect descriptors, and narrates. Never mutates the
+        server's own GameStore — the game client owns its state."""
+        intent = freeform.interpret(body.text, body.state, _chat)
+        refused, reason, effects = freeform.validate_and_effects(
+            intent, body.text, body.state)
+        narration = freeform.narrate(intent, effects, body.state, _chat,
+                                     refused=refused, reason=reason)
+        return {"ok": True, "refused": refused, "reason": reason if refused else "",
+                "intent": freeform.public_intent(intent), "effects": effects,
+                "narration": narration, "journey": _journey_state(_store())}
 
     return app
 

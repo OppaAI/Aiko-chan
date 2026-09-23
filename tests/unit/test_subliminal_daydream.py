@@ -1,4 +1,6 @@
 """Unit tests for subliminal daydream consolidation + spontaneous thoughts."""
+import time
+
 from cognition.subliminal import SubliminalLayer
 
 
@@ -46,15 +48,9 @@ def test_lingering_decays():
 
 def test_spontaneous_thought_surfaces_and_cooldown():
     s = _layer()
-    s.scan("I love spending time talking with you, this is wonderful",
-           {}, __import__("collections").deque())
-    s.daydream(force=True)
-    thought = s.spontaneous_thought()
-    # strong warmth should have queued a wandering thought
-    assert thought is None or isinstance(thought, str)
-    if thought:
-        # cooldown blocks an immediate second surfacing
-        assert s.spontaneous_thought() is None
+    s.restore({"spontaneous": ["A wandering thought", "Another thought"]})
+    assert s.spontaneous_thought() == "A wandering thought"
+    assert s.spontaneous_thought() is None
 
 
 def test_guidance_mentions_lingering():
@@ -74,3 +70,18 @@ def test_snapshot_restore_keeps_daydream_state():
     s2 = _layer()
     s2.restore(snap)
     assert s2.lingering_dispositions() == s.lingering_dispositions()
+
+
+def test_restore_resets_future_monotonic_timestamps():
+    future = time.monotonic() + 60.0
+    s = _layer()
+    s.restore({"last_daydream_t": future, "last_spont_t": future})
+    assert s._last_daydream_t == 0.0
+    assert s._last_spont_t == -1800.0
+
+
+def test_snapshot_includes_spontaneous_cooldown_timestamp():
+    s = _layer()
+    s.restore({"spontaneous": ["A thought"]})
+    assert s.spontaneous_thought() == "A thought"
+    assert s.snapshot_extra()["last_spont_t"] == s._last_spont_t

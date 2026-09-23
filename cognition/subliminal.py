@@ -651,6 +651,7 @@ class SubliminalLayer:
             "lingering": dict(self._lingering),
             "spontaneous": list(self._spontaneous),
             "last_daydream_t": self._last_daydream_t,
+            "last_spont_t": self._last_spont_t,
         }
 
     def restore(self, data: dict) -> None:
@@ -686,6 +687,11 @@ class SubliminalLayer:
         try:
             self._last_daydream_t = float(data.get("last_daydream_t") or 0.0)
         except (TypeError, ValueError):
+            self._last_daydream_t = 0.0
+        now = time.monotonic()
+        if self._last_spont_t > now:
+            self._last_spont_t = -1800.0
+        if self._last_daydream_t > now:
             self._last_daydream_t = 0.0
 
 

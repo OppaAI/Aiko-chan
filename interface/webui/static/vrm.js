@@ -211,11 +211,6 @@ const GESTURES = [
   'gentleStretch',     // subtle chest-opening stretch
   'handsClasp',        // hands clasp together briefly in front
   'thoughtfulLook',    // slow gaze upward with head tilt
-  // ── lively girl motions (presence upgrade) ──
-  'wave',              // cheerful wave hello/goodbye
-  'giggle',            // shoulders shake with laughter
-  'bow',               // polite grateful bow
-  'clap',              // delighted applause
   // ── young-girl idle fidgets ──
   'hairTwirl',         // twirls a strand of hair around a finger
   'handsBehindBack',   // clasps hands behind back, sways
@@ -570,6 +565,13 @@ function applyIdle(dt) {
   const rLA = get('rightLowerArm');
   const lH = get('leftHand');
   const rH = get('rightHand');
+  const lUL = get('leftUpperLeg');
+  const rUL = get('rightUpperLeg');
+
+  // Foot taps animate the upper legs outside the standard idle offsets.
+  // Reset both so an interrupted tap cannot leave either leg lifted.
+  if (lUL) lUL.rotation.x = 0;
+  if (rUL) rUL.rotation.x = 0;
 
   if (lUA) {
     lUA.rotation.x = REST.leftUpperArm.x + io.lUA.x;
@@ -1195,7 +1197,7 @@ function applyGestures(dt) {
       {
         const w = Math.sin(progress * Math.PI * 5) * 0.38 * intensity;
         const lift = holdCurve(progress);
-        if (rUA) { rUA.rotation.x = blend(REST.rightUpperArm.x + io.rUA.x, -0.35 * lift, 1); rUA.rotation.z = blend(REST.rightUpperArm.z + io.rUA.z, -2.30 * lift, 1); }
+        if (rUA) { rUA.rotation.x = blend(REST.rightUpperArm.x + io.rUA.x, -0.35 * lift, 1); rUA.rotation.z = blend(REST.rightUpperArm.z + io.rUA.z, 2.30 * lift, 1); }
         if (rLA) rLA.rotation.x = blend(REST.rightLowerArm.x + io.rLA.x, -0.25 * lift, 1);
         if (rH) rH.rotation.z = blend(REST.rightHand.z + io.rH.z, w, 1);
         if (head) { head.rotation.x = blend(io.head.x, -0.06 * lift, 1); head.rotation.y = blend(io.head.y, 0.12 * lift, 1); }
@@ -1576,7 +1578,8 @@ const KNOWN_GESTURES = new Set([
   ...GESTURES,
   ...SPEAKING_GESTURES,
   ...THINKING_POSES,
-  'dance', 'clap', // reactive-only: not in the idle pools
+  // Reactive-only: deliberately excluded from the idle pools.
+  'dance', 'wave', 'giggle', 'bow', 'clap',
 ]);
 
 window.aikoPlayGesture = (name) => {

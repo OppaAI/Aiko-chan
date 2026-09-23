@@ -364,6 +364,8 @@ class InnerVoice:
                                        else -_ASIDE_COOLDOWN_S)
         except (TypeError, ValueError):
             self._last_aside_t = -_ASIDE_COOLDOWN_S
+        if self._last_aside_t > time.monotonic():
+            self._last_aside_t = -_ASIDE_COOLDOWN_S
         asides = [str(t) for t in (data.get("aside_queue") or [])]
         self._aside_queue = deque((_clip(t) for t in asides[-3:]), maxlen=3)
 

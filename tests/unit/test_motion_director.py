@@ -89,3 +89,8 @@ def test_boring_turn_suggests_nothing():
     d = _director()
     assert d.suggest("the meeting is at 3pm", emotion="neutral",
                      intensity=0.3) is None
+
+
+def test_cues_only_match_at_word_boundaries():
+    d = _director()
+    assert d.suggest("this technical partition describes a musician") is None

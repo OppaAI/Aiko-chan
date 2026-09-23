@@ -1534,6 +1534,7 @@ class EdgeCognitiveState:
                     # Restore subconscious daydream state (lingering moods, etc.)
                     try:
                         self._subliminal.restore(data.get("subliminal") or {})
+                        self._intuitions = self._subliminal._intuitions
                     except Exception:
                         pass
                 if self._inner_voice is not None:
@@ -2037,6 +2038,16 @@ class EdgeCognitiveState:
             inner = self.inner_voice_block()
         except Exception:
             inner = ""
+        try:
+            aside = self.maybe_aside()
+        except Exception:
+            aside = None
+        if aside and inner:
+            closing = "</inner_voice>"
+            if closing in inner:
+                inner = inner.replace(closing, f"- {aside}\n{closing}", 1)
+            else:
+                inner += f"\n- {aside}"
         return block + ("\n\n" + inner if inner else "")
 
     def context(self, query: str = "") -> str:

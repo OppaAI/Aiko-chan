@@ -20,6 +20,7 @@ Design
 
 from __future__ import annotations
 
+import re
 import time
 
 # Every gesture the frontend engine can play (vrm.js gesture switch).
@@ -54,7 +55,7 @@ _CELEBRATION = ("congratulations", "congrats", "yay", "we did it", "birthday",
 
 
 def _contains(low: str, words: tuple[str, ...]) -> bool:
-    return any(w in low for w in words)
+    return any(re.search(rf"\b{re.escape(w)}\b", low) for w in words)
 
 
 class MotionDirector:

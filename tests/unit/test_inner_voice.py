@@ -1,4 +1,6 @@
 """Unit tests for the inner voice (conscious stream). Offline, no LLM."""
+import time
+
 import pytest
 
 from cognition.inner_voice import InnerVoice
@@ -87,3 +89,12 @@ def test_restore_empty_is_safe():
     v.restore(None)
     v.restore({})
     assert "<inner_voice>" in v.prompt_block()
+
+
+def test_restore_resets_future_aside_timestamp():
+    v = _voice()
+    v.restore({
+        "last_aside_t": time.monotonic() + 60.0,
+        "aside_queue": ["a restored thought"],
+    })
+    assert v.maybe_aside() == "a restored thought"

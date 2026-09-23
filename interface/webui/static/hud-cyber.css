@@ -1087,17 +1087,19 @@ body::before {
   font-size: 14px; line-height: 1; cursor: pointer;
 }
 #panel-collapse:hover { border-color: rgba(53,224,255,.5); box-shadow: 0 0 10px rgba(53,224,255,.2); }
-body.panel-collapsed { grid-template-columns: minmax(0, 1fr) 72px !important; }
-body.panel-collapsed #panel-collapse { align-self: center; margin: 8px 0 0; }
-body.panel-collapsed #panel-top { margin: 8px 8px 0; }
-body.panel-collapsed #panel #companion-hud { display: none; }
-body.panel-collapsed #ry-grow,
-body.panel-collapsed #vitals,
-body.panel-collapsed #error-log,
-body.panel-collapsed #panel-footer-legal { display: none; }
-body.panel-collapsed #studio-strip { grid-template-columns: 1fr; }
-body.panel-collapsed .sbtn { flex-direction: column; gap: 4px; padding: 9px 0; justify-content: center; }
-body.panel-collapsed .sbtn-label { display: none; }
+@media (min-width: 901px) {
+  body.panel-collapsed { grid-template-columns: minmax(0, 1fr) 72px !important; }
+  body.panel-collapsed #panel-collapse { align-self: center; margin: 8px 0 0; }
+  body.panel-collapsed #panel-top { margin: 8px 8px 0; }
+  body.panel-collapsed #panel #companion-hud { display: none; }
+  body.panel-collapsed #ry-grow,
+  body.panel-collapsed #vitals,
+  body.panel-collapsed #error-log,
+  body.panel-collapsed #panel-footer-legal { display: none; }
+  body.panel-collapsed #studio-strip { grid-template-columns: 1fr; }
+  body.panel-collapsed .sbtn { flex-direction: column; gap: 4px; padding: 9px 0; justify-content: center; }
+  body.panel-collapsed .sbtn-label { display: none; }
+}
 
 /* error log under the vitals: a few lines, newest at the bottom, auto-scrolls */
 #error-log {
@@ -1230,7 +1232,7 @@ html[data-theme="light"] #panel .grow-val { color: #4E4238 !important; }
 html[data-theme="light"] #panel .grow-bar { background: rgba(240, 98, 146, 0.12) !important; }
 html[data-theme="light"] #panel .grow-fill { background: linear-gradient(90deg, #F8A9C6, #F06292) !important; box-shadow: none !important; }
 html[data-theme="light"] #panel .bond-segs .seg { background: rgba(240, 98, 146, 0.14) !important; }
-html[data-theme="light"] #panel .bond-segs .seg.lit { background: linear-gradient(90deg, #F8A9C6, #F06292) !important; box-shadow: none !important; }
+html[data-theme="light"] #panel .bond-segs .seg.on { background: linear-gradient(90deg, #F8A9C6, #F06292) !important; box-shadow: none !important; }
 html[data-theme="light"] #panel #bond-status-text { color: #F06292 !important; }
 html[data-theme="light"] #panel .bond-line { color: #F06292 !important; }
 html[data-theme="light"] #panel .train-row label { color: #A08E7B !important; }

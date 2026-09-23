@@ -57,11 +57,13 @@ legend i{width:12px;height:12px;border-radius:3px}
 <section class="panel"><h2>Neural state</h2><div id="meters" class="list"></div></section>
 <section class="panel"><h2>Output readouts</h2><div id="outputs" class="list">Waiting for live evaluation…</div></section>
 <section class="panel"><h2>Avatar proposals</h2><div id="intents" class="list">No body-language proposals.</div></section>
+<section class="panel"><h2>DN body drive</h2><div id="body-drive" class="list">Waiting for body packet…</div></section>
 <section class="panel"><h2>Observations</h2><div id="observations" class="list">No observations recorded.</div></section>
 <section class="panel"><h2>Runtime modes</h2><div id="modes" class="list">—</div></section>
 <section class="panel"><h2>Causal trail</h2><div id="causal" class="list">No influence events yet.</div></section>
 </aside>
 </main>
+<script src="/studio/fly/static/dn_body_client.js"></script>
 <script type="importmap">
 {
   "imports": {
@@ -76,8 +78,9 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 const $ = id => document.getElementById(id);
 const clamp = v => Math.max(0, Math.min(1, Number(v) || 0));
-const esc = s => String(s).replace(/[&<>"\x27]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c] || (c === String.fromCharCode(34) ? "&quot;" : "&#39;")));
+const esc = s => String(s).replace(/[&<>"\x27]/g, c => ({"&":"&","<":"<",">":">"}[c] || (c === String.fromCharCode(34) ? """ : "&#39;")));
 const METERS = [['valence','Valence'],['sensory_gain','Sensory gain'],['motion_salience','Motion'],['focus_sharpness','Focus'],['urgency','Urgency'],['action_drive','Action drive'],['motor_vigor','Motor vigor']];
+const BODY_KEYS = [['expression_intensity','Expression'],['gesture_intensity','Gesture'],['gaze_speed','Gaze speed'],['action_vigor','Action vigor'],['rate_mult','Speech rate'],['vol_mult','Speech vol']];
 
 let renderer, scene, camera, controls;
 let pointsMesh, activeMesh, edgesLine;
@@ -118,148 +121,83 @@ function initThree() {
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
   renderer.setSize(canvas.clientWidth, canvas.clientHeight);
   renderer.setPixelRatio(1);
-
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x07101c);
-
   camera = new THREE.PerspectiveCamera(45, canvas.clientWidth / canvas.clientHeight, 1, 10000);
   camera.position.set(WIDTH/2, HEIGHT/2, 1200);
-
   controls = new OrbitControls(camera, canvas);
   controls.enableDamping = true;
   controls.dampingFactor = 0.05;
   controls.enablePan = true;
   controls.enableRotate = false;
-  controls.minZoom = 0.3;
-  controls.maxZoom = 8;
   controls.minDistance = 120;
   controls.maxDistance = 3000;
   controls.target.set(WIDTH / 2, HEIGHT / 2, 0);
   controls.update();
-
-  const ambient = new THREE.AmbientLight(0x404060, 0.6);
-  scene.add(ambient);
+  scene.add(new THREE.AmbientLight(0x404060, 0.6));
   const dir = new THREE.DirectionalLight(0xffffff, 0.4);
   dir.position.set(0, 0, 500);
   scene.add(dir);
-
   const geom = new THREE.BufferGeometry();
   const count = catalogNodes.length;
   const positions = new Float32Array(count * 3);
   const colors = new Float32Array(count * 3);
   const sizes = new Float32Array(count);
-  const types = new Float32Array(count);
-  const groups = new Float32Array(count);
-  const rates = new Float32Array(count);
-
   for (let i = 0; i < count; i++) {
     const n = catalogNodes[i];
-    positions[i*3] = n.x;
-    positions[i*3+1] = n.y;
-    positions[i*3+2] = 0;
+    positions[i*3] = n.x; positions[i*3+1] = n.y; positions[i*3+2] = 0;
     const c = new THREE.Color(n.color);
     colors[i*3] = c.r; colors[i*3+1] = c.g; colors[i*3+2] = c.b;
     sizes[i] = 2.5;
-    types[i] = i;
   }
   geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   geom.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
-  geom.setAttribute('typeIndex', new THREE.BufferAttribute(types, 1));
-  geom.setAttribute('baseRate', new THREE.BufferAttribute(rates, 1));
-
-  const material = new THREE.PointsMaterial({
-    size: 3,
-    vertexColors: true,
-    transparent: true,
-    opacity: 0.6,
-    sizeAttenuation: true,
-    depthWrite: false,
-    depthTest: false,
-  });
-
-  pointsMesh = new THREE.Points(geom, material);
+  pointsMesh = new THREE.Points(geom, new THREE.PointsMaterial({ size: 3, vertexColors: true, transparent: true, opacity: 0.6, sizeAttenuation: true, depthWrite: false, depthTest: false }));
   pointsMesh.frustumCulled = false;
   scene.add(pointsMesh);
-
   const activeGeom = new THREE.BufferGeometry();
   const maxActive = 500;
-  const aPos = new Float32Array(maxActive * 3);
-  const aColor = new Float32Array(maxActive * 3);
-  const aSize = new Float32Array(maxActive);
-  const aRate = new Float32Array(maxActive);
-  activeGeom.setAttribute('position', new THREE.BufferAttribute(aPos, 3));
-  activeGeom.setAttribute('color', new THREE.BufferAttribute(aColor, 3));
-  activeGeom.setAttribute('size', new THREE.BufferAttribute(aSize, 1));
-  activeGeom.setAttribute('rate', new THREE.BufferAttribute(aRate, 1));
+  activeGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(maxActive * 3), 3));
+  activeGeom.setAttribute('color', new THREE.BufferAttribute(new Float32Array(maxActive * 3), 3));
+  activeGeom.setAttribute('size', new THREE.BufferAttribute(new Float32Array(maxActive), 1));
+  activeGeom.setAttribute('rate', new THREE.BufferAttribute(new Float32Array(maxActive), 1));
   activeGeom.setDrawRange(0, 0);
-
-  const activeMat = new THREE.PointsMaterial({
-    size: 8,
-    vertexColors: true,
-    transparent: true,
-    opacity: 1.0,
-    sizeAttenuation: true,
-    depthWrite: false,
-    depthTest: false,
-    blending: THREE.AdditiveBlending,
-  });
-  activeMesh = new THREE.Points(activeGeom, activeMat);
+  activeMesh = new THREE.Points(activeGeom, new THREE.PointsMaterial({ size: 8, vertexColors: true, transparent: true, opacity: 1.0, sizeAttenuation: true, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending }));
   activeMesh.frustumCulled = false;
   scene.add(activeMesh);
-
   const edgeGeom = new THREE.BufferGeometry();
-  const maxEdges = 1000;
-  const ePos = new Float32Array(maxEdges * 2 * 3);
-  const eColor = new Float32Array(maxEdges * 2 * 3);
-  edgeGeom.setAttribute('position', new THREE.BufferAttribute(ePos, 3));
+  edgeGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(1000 * 2 * 3), 3));
+  edgeGeom.setAttribute('color', new THREE.BufferAttribute(new Float32Array(1000 * 2 * 3), 3));
   edgeGeom.setDrawRange(0, 0);
-  edgeGeom.setAttribute('color', new THREE.BufferAttribute(eColor, 3));
-
-  const edgeMat = new THREE.LineBasicMaterial({
-    vertexColors: true,
-    transparent: true,
-    opacity: 0.5,
-    depthWrite: false,
-    depthTest: false,
-  });
-  edgesLine = new THREE.LineSegments(edgeGeom, edgeMat);
+  edgesLine = new THREE.LineSegments(edgeGeom, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.5, depthWrite: false, depthTest: false }));
   edgesLine.renderOrder = 10;
   scene.add(edgesLine);
-
   $('loading').classList.add('hidden');
   animate();
 }
 
 function updateActive(trace) {
   if (!trace || !trace.nodes || !trace.nodes.length) {
-    activeMesh.geometry.attributes.position.needsUpdate = true;
     activeMesh.geometry.setDrawRange(0, 0);
     edgesLine.geometry.setDrawRange(0, 0);
     return;
   }
   const nodes = trace.nodes;
   const edges = trace.edges || [];
-  const nodeIds = new Set(nodes.map(n => n.id));
-  const maxActive = 500;
   const aPos = activeMesh.geometry.attributes.position.array;
   const aColor = activeMesh.geometry.attributes.color.array;
   const aSize = activeMesh.geometry.attributes.size.array;
   const aRate = activeMesh.geometry.attributes.rate.array;
-
   let activeCount = 0;
   for (const n of nodes) {
-    if (activeCount >= maxActive) break;
+    if (activeCount >= 500) break;
     const cat = catalogById.get(n.id);
     if (!cat) continue;
     const rate = clamp(n.rate || 0);
-    aPos[activeCount*3] = cat.x;
-    aPos[activeCount*3+1] = cat.y;
-    aPos[activeCount*3+2] = 5;
+    aPos[activeCount*3] = cat.x; aPos[activeCount*3+1] = cat.y; aPos[activeCount*3+2] = 5;
     const c = new THREE.Color(cat.color);
-    aColor[activeCount*3] = c.r;
-    aColor[activeCount*3+1] = c.g;
-    aColor[activeCount*3+2] = c.b;
+    aColor[activeCount*3] = c.r; aColor[activeCount*3+1] = c.g; aColor[activeCount*3+2] = c.b;
     aSize[activeCount] = 6 + rate * 10;
     aRate[activeCount] = rate;
     activeCount++;
@@ -269,7 +207,6 @@ function updateActive(trace) {
   activeMesh.geometry.attributes.size.needsUpdate = true;
   activeMesh.geometry.attributes.rate.needsUpdate = true;
   activeMesh.geometry.setDrawRange(0, activeCount);
-
   const ePos = edgesLine.geometry.attributes.position.array;
   const eColor = edgesLine.geometry.attributes.color.array;
   let edgeCount = 0;
@@ -278,11 +215,6 @@ function updateActive(trace) {
     const src = catalogById.get(e.source);
     const tgt = catalogById.get(e.target);
     if (!src || !tgt) continue;
-    const rate = Math.max(
-      nodes.find(n => n.id === e.source)?.rate || 0,
-      nodes.find(n => n.id === e.target)?.rate || 0
-    );
-    const hot = clamp(rate);
     const c = new THREE.Color(e.sign === 'inhibitory' ? '#ffbe62' : '#48d8ff');
     ePos[edgeCount*6] = src.x; ePos[edgeCount*6+1] = src.y; ePos[edgeCount*6+2] = 5;
     ePos[edgeCount*6+3] = tgt.x; ePos[edgeCount*6+4] = tgt.y; ePos[edgeCount*6+5] = 5;
@@ -304,26 +236,19 @@ function renderUI(c, p) {
     active ? (t.truncated ? 'budget truncated' : 'complete') : 'motif preview',
     t.checksum && t.checksum !== 'unknown' ? 'verified catalog' : 'awaiting catalog'
   ].map((x, i) => `<span class="badge ${i===0 && x==='live' ? 'live' : ''}">${esc(x)}</span>`).join('');
-
   $('stats').innerHTML = [
     ["Evaluated cells", active ? t.active_nodes : "—"],
     ["Evaluated edges", active ? t.active_edges : "—"],
     ["Drawn cells", active ? t.display_nodes : catalogNodes.length],
     ["Drawn edges", active ? t.display_edges : "—"]
   ].map(([n, v]) => `<div class="stat"><b>${v ?? '—'}</b><span>${n}</span></div>`).join('');
-
   meters(c.neural_state || {});
   updateActive(active ? raw : null);
   neuralState = c.neural_state || {};
   modes = c.modes || {};
-
   $('outputs').innerHTML = textList(
     Object.entries(raw.outputs || {}).map(([k, v]) => `${k.padEnd(18)} ${Number(v).toFixed(4)}`),
     active ? 'No output readouts.' : 'Waiting for a live evaluation.'
-  );
-  $('intents').innerHTML = textList(
-    (raw.avatar_intents || []).map(i => `${i.kind}:${i.name} · ${Number(i.intensity).toFixed(2)} — ${i.reason}`),
-    'No body-language proposals.'
   );
   $('observations').innerHTML = textList(
     (raw.observations || []).map(o => `${o.modality} · ${o.consented ? 'consented' : 'blocked'} · ${(Number(o.salience) || 0).toFixed(2)}`),
@@ -338,6 +263,25 @@ function renderUI(c, p) {
       const dlt = (e.delta != null) ? ` Δ${e.delta}` : '';
       return esc(`${k}${extra ? ' · '+extra : ''}${dlt}`);
     }).join('<br>') : 'No influence events yet.';
+  }).catch(() => {});
+  fetch('/studio/fly/api/body').then(r => r.ok ? r.json() : {}).then(d => {
+    const b = d.body || {};
+    const intents = d.avatar_intents || [];
+    const lines = BODY_KEYS.map(([k, label]) => {
+      const v = b[k];
+      const n = (v == null) ? '—' : Number(v).toFixed(3);
+      return `${label.padEnd(14)} ${n}`;
+    });
+    if (b.cancelled) lines.unshift('CANCELLED (GF interrupt)');
+    lines.push(`mode ${b.mode || '—'}`);
+    const el = $('body-drive');
+    if (el) el.innerHTML = lines.map(esc).join('<br>');
+    if (intents.length && $('intents')) {
+      $('intents').innerHTML = intents.map(i =>
+        esc(`${i.kind}:${i.name} · ${Number(i.intensity).toFixed(2)} — ${i.reason}`)
+      ).join('<br>');
+    }
+    try { if (window.aikoApplyDnBody) window.aikoApplyDnBody(b, intents); } catch (_) {}
   }).catch(() => {});
 }
 
@@ -359,10 +303,7 @@ async function refreshTelemetry() {
 }
 
 async function loadCatalog() {
-  if (catalogReady) {
-    await refreshTelemetry();
-    return;
-  }
+  if (catalogReady) { await refreshTelemetry(); return; }
   try {
     const catalogRes = await fetch("/studio/fly/api/catalog?limit=211577");
     const catalog = await catalogRes.json();
@@ -380,7 +321,6 @@ async function loadCatalog() {
   }
 }
 
-let lastTime = 0;
 function animate(time = performance.now()) {
   animationId = requestAnimationFrame(animate);
   controls.update();

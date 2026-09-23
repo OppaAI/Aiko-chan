@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from cognition.neural_state import clear_neural_state, get_neural_state, peek_neural_state
 from interface.webui import auth
-from interface.webui.studio.fly.backend import api
+from interface.webui.studio.fly.backend import api, body_routes
 
 
 @pytest.mark.parametrize("handler", [api.fly_state, api.fly_circuit, api.fly_trace])
@@ -70,6 +70,37 @@ def test_fly_causal_hides_internal_errors_and_returns_500(monkeypatch, caplog):
         "events": [],
     }
     assert "sensitive detail" not in body["error"]
+    assert "sensitive detail" in caplog.text
+
+
+def test_body_payload_hides_internal_errors_and_logs_details(monkeypatch, caplog):
+    def fail_body_drive(*, user_id):
+        raise RuntimeError(f"sensitive detail for {user_id}")
+
+    monkeypatch.setattr("cognition.fly_behavior.dn_body.body_drive", fail_body_drive)
+
+    with caplog.at_level(logging.ERROR, logger=body_routes.logger.name):
+        payload = body_routes.build_body_payload("studio-error")
+
+    assert payload["body"] == {"mode": "off"}
+    assert "sensitive detail" not in json.dumps(payload)
+    assert "sensitive detail for studio-error" in caplog.text
+
+
+def test_fly_body_fallback_hides_internal_errors_and_logs_details(monkeypatch, caplog):
+    def fail_payload(_user_id):
+        raise RuntimeError("sensitive detail")
+
+    monkeypatch.setattr(api, "_uid", lambda _request: "studio-error")
+    monkeypatch.setattr(body_routes, "build_body_payload", fail_payload)
+
+    with caplog.at_level(logging.DEBUG, logger=api.logger.name):
+        response = api.fly_body(object())
+
+    body = json.loads(response.body)
+    assert body["body"] == {"mode": "off"}
+    assert body["avatar_intents"] == []
+    assert "sensitive detail" not in json.dumps(body)
     assert "sensitive detail" in caplog.text
 
 

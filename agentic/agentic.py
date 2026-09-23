@@ -929,6 +929,9 @@ def invoke_registered_tool(name: str, arguments: dict | None = None):
     entry = _TOOLS.get(name)
     if entry is None or entry[1] is None:
         raise ValueError(f"unknown or non-invocable scheduled tool: {name}")
+    from cognition.fly_behavior.gf_global import should_cancel_tools
+    if should_cancel_tools(current_user_id()):
+        return {"skipped": True, "reason": "gf_interrupt"}
     return entry[1](arguments)
     
 

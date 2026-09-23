@@ -100,7 +100,7 @@ def apply_turn_priors(
                         {"kind": "mb_valence", "mode": mb_mode, "bias": round(bias, 4)}
                     )
             except Exception as exc:
-                log.debug("mb valence skipped: %s", exc)
+                log.debug("mb valence skipped: %s", str(exc))
 
         motion = float(st.motion_salience or 0.0)
         gf = assess_interrupt(
@@ -178,10 +178,18 @@ def apply_turn_priors(
                     affect=float(st.valence or 0.0),
                 )
                 out["motor_vigor"] = drv.get("rate_mult", 1.0)
+                out["dn_drive"] = {
+                    k: drv.get(k)
+                    for k in (
+                        "arousal", "rate_mult", "vol_mult",
+                        "expression_intensity", "gesture_intensity",
+                        "gaze_speed", "action_vigor",
+                    )
+                }
                 if dn_mode == "live":
                     st.publish_dn(
                         arousal=float(drv.get("arousal") or 0.5),
-                        rate_mult=float(drv.get("rate_mult") or 1.0),
+                        rate_mult=float(drv.get("rate_mult", 1.0)),
                         source="turn",
                     )
                 st.record_influence(
@@ -191,10 +199,14 @@ def apply_turn_priors(
                         "arousal": drv.get("arousal"),
                         "rate_mult": drv.get("rate_mult"),
                         "vol_mult": drv.get("vol_mult"),
+                        "expression": drv.get("expression_intensity"),
+                        "gesture": drv.get("gesture_intensity"),
+                        "gaze": drv.get("gaze_speed"),
+                        "action_vigor": drv.get("action_vigor"),
                     }
                 )
             except Exception as exc:
-                log.debug("dn drive skipped: %s", exc)
+                log.debug("dn drive skipped: %s", str(exc))
 
         out["sleep_pressure"] = st.sleep_pressure
 
@@ -212,7 +224,7 @@ def apply_turn_priors(
             bits.append("late/early hours — softer volume of commitment")
         out["tone_bits"] = bits
     except Exception as exc:
-        log.debug("fly turn priors skipped: %s", exc)
+        log.debug("fly turn priors skipped: %s", str(exc))
     return out
 
 

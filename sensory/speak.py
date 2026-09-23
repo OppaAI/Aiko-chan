@@ -901,15 +901,19 @@ class AikoSpeak:
         except Exception:
             pass
 
-    def speak(self, text: str) -> bool:
-        """Synthesize a complete string, non-blocking. Caller prints to console."""
+    def _playback_cancelled(self) -> bool:
+        """Apply current speech controls and report whether playback is blocked."""
         try:
             from cognition.fly_behavior.dn_tts import apply_dn_prosody
             from system.userspace import current_user_id
-            user_id = current_user_id()
-            apply_dn_prosody(self, user_id=user_id)
+            return bool(apply_dn_prosody(self, user_id=current_user_id()).get("cancelled"))
         except Exception:
-            pass
+            return False
+
+    def speak(self, text: str) -> bool:
+        """Synthesize a complete string, non-blocking. Caller prints to console."""
+        if self._playback_cancelled():
+            return False
         clean = extract_dialogue_for_tts(text)
         if not clean:
             return False
@@ -930,13 +934,8 @@ class AikoSpeak:
         speak(). on_word receives each word pre-padded with a leading space
         except the first, e.g. "Hello", " I'm", " Aiko".
         """
-        try:
-            from cognition.fly_behavior.dn_tts import apply_dn_prosody
-            from system.userspace import current_user_id
-            user_id = current_user_id()
-            apply_dn_prosody(self, user_id=user_id)
-        except Exception:
-            pass
+        if self._playback_cancelled():
+            return False
         clean = extract_dialogue_for_tts(text)
         if not clean:
             return False
@@ -964,6 +963,8 @@ class AikoSpeak:
         """Synthesize and play all buffered tokens, then clear the buffer."""
         text = extract_dialogue_for_tts("".join(self._token_buf))
         self._token_buf.clear()
+        if self._playback_cancelled():
+            return
         if not text:
             return
         self._capture_notice_uid()
@@ -979,6 +980,8 @@ class AikoSpeak:
         for token in token_iterator:
             tokens.append(token)
         text = extract_dialogue_for_tts("".join(tokens))
+        if self._playback_cancelled():
+            return
         if not text:
             return
         self._capture_notice_uid()
@@ -990,6 +993,8 @@ class AikoSpeak:
 
     def start_speech_stream(self, on_word=None) -> None:
         """Start sentence-level TTS playback for one streamed response."""
+        if self._playback_cancelled():
+            return
         self._capture_notice_uid()
         self.stop()
         self._first_audio_fired.clear()

@@ -1,14 +1,11 @@
 /* Stage 6.1: poll Fly Studio body drive and drive VRM expression. */
 (function () {
-  if (!window.aikoApplyDnBody) {
-    const s = document.createElement("script");
-    s.src = "/static/dn_body_client.js";
-    s.async = true;
-    document.head.appendChild(s);
-  }
   const url = "/studio/fly/api/body";
   let lastJson = "";
+  let inFlight = false;
   async function tick() {
+    if (inFlight) return;
+    inFlight = true;
     try {
       const r = await fetch(url, { credentials: "same-origin" });
       if (!r.ok) return;
@@ -25,7 +22,19 @@
       }
     } catch (_) {
       /* studio may be offline */
+    } finally {
+      inFlight = false;
     }
+  }
+  if (!window.aikoApplyDnBody) {
+    const s = document.createElement("script");
+    s.src = "/static/dn_body_client.js";
+    s.async = true;
+    s.addEventListener("load", () => {
+      lastJson = "";
+      void tick();
+    });
+    document.head.appendChild(s);
   }
   setInterval(tick, 2500);
   setTimeout(tick, 1200);

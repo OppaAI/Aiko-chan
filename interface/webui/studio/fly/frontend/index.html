@@ -78,7 +78,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 const $ = id => document.getElementById(id);
 const clamp = v => Math.max(0, Math.min(1, Number(v) || 0));
-const esc = s => String(s).replace(/[&<>"\x27]/g, c => ({"&":"&","<":"<",">":">"}[c] || (c === String.fromCharCode(34) ? """ : "&#39;")));
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const METERS = [['valence','Valence'],['sensory_gain','Sensory gain'],['motion_salience','Motion'],['focus_sharpness','Focus'],['urgency','Urgency'],['action_drive','Action drive'],['motor_vigor','Motor vigor']];
 const BODY_KEYS = [['expression_intensity','Expression'],['gesture_intensity','Gesture'],['gaze_speed','Gaze speed'],['action_vigor','Action vigor'],['rate_mult','Speech rate'],['vol_mult','Speech vol']];
 

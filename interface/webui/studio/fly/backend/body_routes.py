@@ -1,7 +1,10 @@
 """Stage 6.1 body route helpers for Fly Studio."""
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def build_body_payload(uid: str | None) -> dict[str, Any]:
@@ -10,8 +13,9 @@ def build_body_payload(uid: str | None) -> dict[str, Any]:
         from cognition.fly_behavior.dn_body import body_drive
 
         body = body_drive(user_id=uid)
-    except Exception as exc:
-        body = {"mode": "off", "error": str(exc)}
+    except Exception:
+        logger.exception("Body drive failed")
+        body = {"mode": "off"}
     intents: list[dict[str, Any]] = []
     try:
         cancelled = bool(body.get("cancelled"))

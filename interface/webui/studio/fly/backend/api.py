@@ -312,7 +312,7 @@ def fly_body(request: Request) -> JSONResponse:
         payload = build_body_payload(uid)
     except Exception as exc:
         logger.debug("body payload failed: %s", exc)
-        payload = {"body": {"mode": "off", "error": str(exc)}, "avatar_intents": []}
+        payload = {"body": {"mode": "off"}, "avatar_intents": []}
     return JSONResponse(
         {
             "user_id": uid,

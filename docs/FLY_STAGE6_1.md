@@ -7,7 +7,7 @@ Wires Stage 6 `body_drive()` into Studio + VRM companion.
 | `/studio/fly/api/body` | Studio API → body packet + avatar_intents |
 | DN body panel | Studio sidebar meters |
 | `window.aikoApplyDnBody` | `vrm.js` expression / gesture amplitude |
-| Companion poll | `companion.js` every ~2.5s |
+| Companion poll | `/static/companion_dn_body.js` every ~2.5s |
 
 ## Observe
 

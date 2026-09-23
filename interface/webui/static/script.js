@@ -1260,8 +1260,10 @@ async function toggleMic() {
     stopMic();
     if (asrOn) ws.send(JSON.stringify({ type: 'user_input', text: '/listen' }));
   } else {
+    const toggleGen = micGen;
     micMuted = false;
     const ok = await startMic();
+    if (toggleGen !== micGen) return;
     if (!ok) { micMuted = true; syncTalkButton(); return; }
     if (pendingMicStart) {
       const start = pendingMicStart;

@@ -937,8 +937,12 @@ class AikoWeb:
         self._broadcast_to_current_user({"type": "voice", "status": "idle"})
         # Instant "I'm listening" — the avatar leans in the moment she starts
         # waiting for input, so attention lands in <100 ms (presence upgrade).
+        waiting_for_reactive_gesture = False
         try:
-            if not (getattr(self, "_no_voice", False) and self._gesture_is_active()):
+            waiting_for_reactive_gesture = (
+                getattr(self, "_no_voice", False) and self._gesture_is_active()
+            )
+            if not waiting_for_reactive_gesture:
                 self.play_gesture("leanIn")
         except Exception:
             pass
@@ -958,6 +962,13 @@ class AikoWeb:
                 return text
             except queue.Empty:
                 idle_ticks += 1
+                if waiting_for_reactive_gesture:
+                    try:
+                        if not self._gesture_is_active():
+                            waiting_for_reactive_gesture = False
+                            self.play_gesture("leanIn")
+                    except Exception:
+                        pass
                 if idle_ticks % 10 == 0:
                     self._push_vitals()
 

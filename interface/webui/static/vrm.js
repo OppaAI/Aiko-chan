@@ -211,6 +211,11 @@ const GESTURES = [
   'gentleStretch',     // subtle chest-opening stretch
   'handsClasp',        // hands clasp together briefly in front
   'thoughtfulLook',    // slow gaze upward with head tilt
+  // ── lively girl motions (presence upgrade) ──
+  'wave',              // cheerful wave hello/goodbye
+  'giggle',            // shoulders shake with laughter
+  'bow',               // polite grateful bow
+  'clap',              // delighted applause
 ];
 
 const SPEAKING_GESTURES = [
@@ -252,6 +257,12 @@ const GESTURE_DURATION = {
   bothHandsExplain: 2.8,
   contemplativeNod: 3.4,
   tapFinger: 3.6,
+  // lively girl motions (presence upgrade)
+  wave: 2.6,
+  giggle: 2.4,
+  bow: 2.6,
+  clap: 2.8,
+  dance: 4.2,
 };
 
 function easeInOutSine(v) {
@@ -1161,6 +1172,84 @@ function applyGestures(dt) {
         applyFingerCurl(1, Math.abs(explain) * 0.4);
       }
       break;
+
+    case 'wave':
+      // Cheerful wave — right arm up, hand swaying side to side
+      {
+        const w = Math.sin(progress * Math.PI * 5) * 0.38 * intensity;
+        const lift = holdCurve(progress);
+        if (rUA) { rUA.rotation.x = blend(REST.rightUpperArm.x + io.rUA.x, -0.35 * lift, 1); rUA.rotation.z = blend(REST.rightUpperArm.z + io.rUA.z, -2.30 * lift, 1); }
+        if (rLA) rLA.rotation.x = blend(REST.rightLowerArm.x + io.rLA.x, -0.25 * lift, 1);
+        if (rH) rH.rotation.z = blend(REST.rightHand.z + io.rH.z, w, 1);
+        if (head) { head.rotation.x = blend(io.head.x, -0.06 * lift, 1); head.rotation.y = blend(io.head.y, 0.12 * lift, 1); }
+        if (spine) spine.rotation.x = blend(io.spine.x, -0.03 * lift, 1);
+        applyFingerCurl(1, 0.12 * lift);
+      }
+      break;
+
+    case 'giggle':
+      // Shoulders shake with laughter, head dips and tilts
+      {
+        const g = Math.abs(Math.sin(progress * Math.PI * 4)) * 0.11 * intensity;
+        const lift = holdCurve(progress);
+        if (lUA) lUA.rotation.x = blend(REST.leftUpperArm.x + io.lUA.x, -g * 2.0, 1);
+        if (rUA) rUA.rotation.x = blend(REST.rightUpperArm.x + io.rUA.x, -g * 2.0, 1);
+        if (head) { head.rotation.x = blend(io.head.x, 0.13 * lift + g * 0.5, 1); head.rotation.z = blend(io.head.z, side * 0.10 * lift, 1); }
+        if (chest) chest.rotation.x = blend(io.chest.x, g * 1.3, 1);
+        if (spine) spine.rotation.x = blend(io.spine.x, g * 0.7, 1);
+      }
+      break;
+
+    case 'bow':
+      // Polite grateful bow — spine folds forward and rises back
+      {
+        const b = Math.sin(progress * Math.PI) * 0.52;
+        if (spine) spine.rotation.x = blend(io.spine.x, b, 1);
+        if (chest) chest.rotation.x = blend(io.chest.x, b * 0.7, 1);
+        if (head) head.rotation.x = blend(io.head.x, b * 0.45, 1);
+        if (neck) neck.rotation.x = blend(io.neck.x, b * 0.3, 1);
+        if (lUA) lUA.rotation.x = blend(REST.leftUpperArm.x + io.lUA.x, b * 0.22, 1);
+        if (rUA) rUA.rotation.x = blend(REST.rightUpperArm.x + io.rUA.x, b * 0.22, 1);
+      }
+      break;
+
+    case 'clap':
+      // Delighted applause — hands meet in front, three claps
+      {
+        const c = Math.sin(progress * Math.PI * 3);
+        const lift = holdCurve(progress);
+        const spread = (0.55 + c * 0.38) * lift;
+        if (lUA) { lUA.rotation.x = blend(REST.leftUpperArm.x + io.lUA.x, -0.85 * lift, 1); lUA.rotation.z = blend(REST.leftUpperArm.z + io.lUA.z, -spread * 0.55, 1); }
+        if (rUA) { rUA.rotation.x = blend(REST.rightUpperArm.x + io.rUA.x, -0.85 * lift, 1); rUA.rotation.z = blend(REST.rightUpperArm.z + io.rUA.z, spread * 0.55, 1); }
+        if (lLA) lLA.rotation.x = blend(REST.leftLowerArm.x + io.lLA.x, -0.55 * lift, 1);
+        if (rLA) rLA.rotation.x = blend(REST.rightLowerArm.x + io.rLA.x, -0.55 * lift, 1);
+        if (head) { head.rotation.x = blend(io.head.x, -0.08 * lift, 1); head.rotation.y = blend(io.head.y, c * 0.06 * lift, 1); }
+        if (spine) spine.rotation.x = blend(io.spine.x, -0.05 * lift + Math.abs(c) * 0.02, 1);
+        applyFingerCurl(-1, 0.25 * lift);
+        applyFingerCurl(1, 0.25 * lift);
+      }
+      break;
+
+    case 'dance':
+      // Happy little dance — bouncing sway, arms pumping alternately
+      {
+        const beat = progress * Math.PI * 4;
+        const bounce = Math.abs(Math.sin(beat)) * 0.085 * intensity;
+        const swayD = Math.sin(beat * 0.5) * 0.15 * intensity;
+        const armL = Math.max(0, Math.sin(beat)) * 1.1;
+        const armR = Math.max(0, Math.sin(beat + Math.PI)) * 1.1;
+        const lift = holdCurve(progress, 0.12, 0.18);
+        if (spine) { spine.rotation.x = blend(io.spine.x, -bounce * 0.6, 1); spine.rotation.z = blend(io.spine.z, swayD * 0.5, 1); }
+        if (chest) chest.rotation.z = blend(io.chest.z, swayD * 0.7, 1);
+        if (head) { head.rotation.z = blend(io.head.z, swayD * 0.9, 1); head.rotation.x = blend(io.head.x, -0.06 * lift, 1); }
+        if (lUA) { lUA.rotation.z = blend(REST.leftUpperArm.z + io.lUA.z, -armL * lift, 1); lUA.rotation.x = blend(REST.leftUpperArm.x + io.lUA.x, -0.25 * lift, 1); }
+        if (rUA) { rUA.rotation.z = blend(REST.rightUpperArm.z + io.rUA.z, armR * lift, 1); rUA.rotation.x = blend(REST.rightUpperArm.x + io.rUA.x, -0.25 * lift, 1); }
+        if (lLA) lLA.rotation.z = blend(REST.leftLowerArm.z + io.lLA.z, -armL * 0.35 * lift, 1);
+        if (rLA) rLA.rotation.z = blend(REST.rightLowerArm.z + io.rLA.z, armR * 0.35 * lift, 1);
+        applyFingerCurl(-1, 0.1);
+        applyFingerCurl(1, 0.1);
+      }
+      break;
   }
 
   if (progress >= 1) {
@@ -1362,4 +1451,30 @@ window.aikoSetPose = (name, active = true) => {
     gestureState = 'none';
     gestureCooldown = 1.2 + Math.random() * 2.0;
   }
+};
+
+// ── Reactive gesture playback (presence upgrade) ───────────────────────
+// Called from the backend motion director via {"type":"gesture","name"}.
+// Plays a single gesture immediately, blending out whatever was running.
+const KNOWN_GESTURES = new Set([
+  ...GESTURES,
+  ...SPEAKING_GESTURES,
+  ...THINKING_POSES,
+  'dance', 'clap', // reactive-only: not in the idle pools
+]);
+
+window.aikoPlayGesture = (name) => {
+  if (typeof name !== 'string' || !KNOWN_GESTURES.has(name)) return;
+  if (gestureState !== 'none') startBlendOut();
+  const side = Math.random() < 0.5 ? -1 : 1;
+  gestureState = name;
+  gestureT = 0;
+  gestureBlendIn = 0; // reset blend-in ramp
+  gestureDuration = GESTURE_DURATION[name] ?? 3.0;
+  gestureTarget = {
+    side,
+    look: side * 0.3,
+    tilt: side * 0.12,
+    sway: side * 0.02,
+  };
 };

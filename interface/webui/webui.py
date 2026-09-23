@@ -896,6 +896,17 @@ class AikoWeb:
         """Broadcast a vetted avatar pose intent to the current user."""
         self._broadcast_to_current_user({"type": "pose", "name": name, "active": bool(active)})
 
+    def play_gesture(self, name: str) -> None:
+        """Broadcast a one-shot avatar gesture to the current user.
+
+        The frontend (vrm.js ``window.aikoPlayGesture``) validates the name
+        against its gesture engine and ignores unknown names, so this is
+        safe to call speculatively from the motion director.
+        """
+        if not name or not isinstance(name, str):
+            return
+        self._broadcast_to_current_user({"type": "gesture", "name": name})
+
     def get_input(self) -> str:
         """Fetch text input from the queue, binding the source user's identity.
         
@@ -905,6 +916,12 @@ class AikoWeb:
         the entire turn. Caller is responsible for cleanup via reset_current_user_id/reset_current_display_name.
         """
         self._broadcast_to_current_user({"type": "voice", "status": "idle"})
+        # Instant "I'm listening" — the avatar leans in the moment she starts
+        # waiting for input, so attention lands in <100 ms (presence upgrade).
+        try:
+            self.play_gesture("leanIn")
+        except Exception:
+            pass
         idle_ticks = 0
         while True:
             try:

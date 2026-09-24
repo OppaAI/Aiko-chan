@@ -1106,6 +1106,14 @@ loader.load(VRM_URL,
     window._vrm = vrm;
     window._REST = REST;
 
+    // three-vrm v3's humanoid.update() rewrites EVERY raw humanoid bone
+    // from its internal normalized rig each frame, wiping the direct
+    // bone.rotation writes composePose() makes below (model froze in
+    // T-pose). We drive the bones ourselves, so disable the auto rig.
+    // (Pinned CDN @pixiv/three-vrm@3 now resolves to 3.5.x, where the
+    // wiper runs; older 3.x left raw bones alone.)
+    if (vrm.humanoid) vrm.humanoid.autoUpdateHumanBones = false;
+
     VRMUtils.removeUnnecessaryVertices(vrm.scene);
     vrm.scene.traverse(o => { if (o.frustumCulled) o.frustumCulled = false; });
     scene.add(vrm.scene);

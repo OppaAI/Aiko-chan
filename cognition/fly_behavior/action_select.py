@@ -312,7 +312,8 @@ def score_tool_call(
     """Fly vote on one proposed tool call. Returns votes + veto flag.
 
     Used by conscience gating: a richer, component-attributed version of the
-    plain valence check — the trail shows *which* circuit objected.
+    plain valence check — the trail shows *which* circuit objected. A proposal
+    is not a feedback target until the tool actually runs.
     """
     cand = Candidate(
         id=tool,
@@ -334,9 +335,16 @@ def score_tool_call(
     }
     if user_id:
         _trail_for(user_id).append(record)
-        _last_action[user_id] = {
-            "id": tool,
-            "description": cand.description,
-            "ts": record["ts"],
-        }
     return record
+
+
+def record_completed_tool_call(*, tool: str, args_text: str, user_id: str | None) -> None:
+    """Make a dispatched tool call eligible for subsequent user feedback."""
+    if user_id:
+        ts = time.time()
+        with _trail_lock:
+            _last_action[user_id] = {
+                "id": tool,
+                "description": f"tool {tool} {args_text or ''}".strip(),
+                "ts": ts,
+            }

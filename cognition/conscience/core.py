@@ -396,7 +396,8 @@ class ConscienceCircuitCore:
         #
         # Phase 5: the per-tool fly vote (MB + CX + DN + GF) is recorded to the
         # action trail with component attribution, so the studio can show
-        # *which* circuit objected. A fly veto on an external tool also
+        # *which* circuit objected. Scoring only records a proposal; feedback
+        # targets are set after dispatch. A fly veto on an external tool also
         # downgrades a clean ALLOW to CAUTION here.
         try:
             from cognition.fly_behavior.action_select import score_tool_call

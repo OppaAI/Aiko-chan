@@ -140,6 +140,7 @@ def gate_tool(*, name: str, args: dict, llm_client=None, embedder=None, social_p
     """Evaluate act=tool. Returns a dict payload to block, or None to proceed."""
     try:
         from cognition.conscience import conscience_for, REFUSE, ESCALATE, CAUTION
+        from cognition.conscience.schema import GATE_ERROR, GATE_MB_VALENCE
         from agentic.registry import TOOLS, registry
         social = social_post_tools or set()
         spec = registry.get(name) or TOOLS.get(name)
@@ -172,7 +173,10 @@ def gate_tool(*, name: str, args: dict, llm_client=None, embedder=None, social_p
             embedder=embedder,
             surface="agentic",
         )
-        if verdict.decision in (REFUSE, ESCALATE, CAUTION):
+        if verdict.decision in (REFUSE, ESCALATE) or (
+            verdict.decision == CAUTION
+            and (verdict.gate in (GATE_MB_VALENCE, GATE_ERROR) or getattr(verdict, "fail_mode", ""))
+        ):
             payload = {
                 "status": ("conscience_blocked" if verdict.decision == REFUSE
                            else "waiting_for_approval" if verdict.decision == ESCALATE

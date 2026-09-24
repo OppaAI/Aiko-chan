@@ -10,7 +10,7 @@ from agentic.agentic import AgentContext, TaskState, dispatch_tool_checked, exec
 from agentic.registry import registry
 from cognition.conscience import hooks
 from cognition.conscience.core import ConscienceCircuitCore
-from cognition.conscience.schema import ALLOW, CAUTION, ESCALATE, GATE_HITL, GATE_MB_VALENCE, Verdict
+from cognition.conscience.schema import ALLOW, CAUTION, ESCALATE, REFUSE, GATE_ERROR, GATE_GUARDRAIL, GATE_HITL, GATE_MB_VALENCE, Verdict
 from cognition.think import AikoThink
 
 
@@ -78,18 +78,57 @@ def test_tool_vote_records_resolved_user_and_arguments_but_shadow_veto_is_observ
     context = {"tool": "adaptive_search", "scope": "network", "args_text": args_text}
     monkeypatch.setattr(action_select, "_MODE", "shadow")
     monkeypatch.setattr(action_select, "_votes_for", lambda *_args, **_kwargs: {"mb": -0.9, "cx": 0.0, "dn": 0.0, "gf": 0.0})
+    action_select._last_action.pop("vote-user", None)
 
     shadow = core._apply_tool_policy(Verdict(decision=ALLOW), context)
     assert shadow.decision == ALLOW
     assert action_select.recent_trail("vote-user", 1)[0]["tool"] == "adaptive_search"
     assert action_select.recent_trail("vote-user", 1)[0]["veto"] is True
-    assert action_select._last_action["vote-user"]["description"] == f"tool adaptive_search {args_text}"
+    assert "vote-user" not in action_select._last_action
 
     monkeypatch.setattr(action_select, "_MODE", "live")
     live = core._apply_tool_policy(Verdict(decision=ALLOW), context)
     assert live.decision == CAUTION
     assert live.gate == GATE_MB_VALENCE
     assert live.constraint
+    assert "vote-user" not in action_select._last_action
+
+
+def test_refused_and_escalated_proposals_leave_feedback_target_unchanged(monkeypatch):
+    from cognition.fly_behavior import action_select
+    from cognition.flymemory import teach_api
+
+    uid = "blocked-proposal-user"
+    core = ConscienceCircuitCore(uid)
+    previous = {"id": "completed", "description": "previous completed action", "ts": 1.0}
+    monkeypatch.setitem(action_select._last_action, uid, previous)
+    monkeypatch.setattr(action_select, "_votes_for", lambda *_args, **_kwargs: {"mb": 0.0, "cx": 0.0, "dn": 0.0, "gf": 0.0})
+    before = len(action_select.recent_trail(uid))
+
+    for decision in (REFUSE, ESCALATE):
+        verdict = core._apply_tool_policy(Verdict(decision=decision), {"tool": "save_note", "args_text": "blocked"})
+        assert verdict.decision == decision
+        assert action_select._last_action[uid] is previous
+
+    assert len(action_select.recent_trail(uid)) == before + 2
+    taught = []
+    monkeypatch.setattr(teach_api, "teach_preference", lambda topic, **_kwargs: taught.append(topic) or {"taught": True})
+    assert action_select.note_feedback(uid, "praise")["taught"]
+    assert taught == ["previous completed action"]
+
+
+def test_completed_tool_call_becomes_feedback_target(monkeypatch):
+    from cognition.fly_behavior import action_select
+
+    uid = "completed-tool-user"
+    monkeypatch.delitem(action_select._last_action, uid, raising=False)
+    monkeypatch.setattr(agentic, "_gate_tool_call", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(agentic, "dispatch_tool", lambda *_args, **_kwargs: "completed")
+
+    result = dispatch_tool_checked("save_note", {"content": "draft"}, owner=SimpleNamespace(user_id=uid))
+
+    assert result.ok
+    assert action_select._last_action[uid]["description"] == 'tool save_note {"content": "draft"}'
 
 
 def test_caution_tool_gate_returns_constraint_and_prevents_dispatch(monkeypatch):
@@ -109,6 +148,26 @@ def test_caution_tool_gate_returns_constraint_and_prevents_dispatch(monkeypatch)
     assert result.error_type == "conscience_caution"
     assert json.loads(result.content)["constraint"] == constraint
     assert dispatched == []
+
+
+def test_constrained_guardrail_caution_proceeds_but_fail_closed_caution_blocks(monkeypatch):
+    verdict = Verdict(decision=CAUTION, gate=GATE_GUARDRAIL, constraint="Remove private details.")
+
+    class Core:
+        def evaluate(self, **_kwargs):
+            return verdict
+
+    monkeypatch.setattr("cognition.conscience.conscience_for", lambda *_args, **_kwargs: Core())
+    assert hooks.gate_tool(name="save_note", args={"content": "safe"}) is None
+
+    verdict.gate = GATE_ERROR
+    blocked = hooks.gate_tool(name="save_note", args={"content": "safe"})
+    assert blocked["status"] == "conscience_caution"
+
+    verdict.gate = GATE_GUARDRAIL
+    verdict.fail_mode = "evaluator unavailable"
+    blocked = hooks.gate_tool(name="save_note", args={"content": "safe"})
+    assert blocked["status"] == "conscience_caution"
 
 
 def test_dispatch_tool_checked_does_not_dispatch_when_gate_is_unavailable(monkeypatch):

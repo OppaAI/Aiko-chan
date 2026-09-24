@@ -375,7 +375,8 @@ def run_replay(user_id: str | None = None, *, force: bool = False) -> dict:
                     item["reward_source"] = reward_source
                     res = pulse(
                         reward, user_id=user_id, kc=kc,
-                        weight=cand["elig"], source="replay",
+                        weight=cand["elig"],
+                        source="flyworld-replay" if cand["simulated"] else "replay",
                     )
                     if res.get("reason") == "dedup":
                         skipped_dedup += 1

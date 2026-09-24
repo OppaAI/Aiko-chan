@@ -12,6 +12,7 @@ import ast
 import os
 import sqlite3
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -28,21 +29,21 @@ FLYWORLD_DIR = Path(__file__).resolve().parents[2] / "cognition" / "flyworld"
 # ── helpers ────────────────────────────────────────────────────────────────
 
 @pytest.fixture()
-def live_mb(monkeypatch):
+def live_mb(monkeypatch, tmp_path):
     """Live MB layer (pulses apply) with a fresh user id per test."""
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "live")
-    uid = f"flyworld-test-{os.getpid()}-{id(object()) % 100000}"
-    # Fresh MB: drop any cached singleton for this uid.
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("USER_SPACE_ROOT", str(state_root))
+    monkeypatch.setenv("USER_STATE_ROOT", str(state_root))
+    monkeypatch.setenv("AIKO_USER_STATE_ROOT", str(state_root))
+    monkeypatch.setenv("FLY_PLASTICITY_DB", str(tmp_path / "plasticity"))
+    monkeypatch.setenv("SQLITE_MEMORY_PATH", str(tmp_path / "memory.db"))
+    uid = f"flyworld-test-{uuid4().hex}"
+    loop.clear_episodes(uid)
     try:
-        from cognition import fly_registry as reg
-        for cache_name in ("_MB", "_MB_CACHE", "_STORE", "_STORE_CACHE"):
-            cache = getattr(reg, cache_name, None)
-            if isinstance(cache, dict):
-                cache.pop(uid, None)
-                cache.pop(("default", uid), None)
-    except Exception:
-        pass
-    return uid
+        yield uid
+    finally:
+        loop.clear_episodes(uid)
 
 
 def _plastic_mass(uid):
@@ -253,6 +254,28 @@ class TestSandbox:
 # ── shadow vs live ─────────────────────────────────────────────────────────
 
 class TestShadowLive:
+    @pytest.mark.parametrize("mode", ["off", "shadow"])
+    def test_force_runs_without_applying_pulses(self, monkeypatch, live_mb, mode):
+        monkeypatch.setenv("AIKO_FLYWORLD_MODE", mode)
+        before = _plastic_mass(live_mb)
+        ep = loop.run_episode(live_mb, seed=13, max_steps=3, force=True)
+        assert ep["ran"] is True
+        assert ep["n_pulsed"] == 0
+        assert _plastic_mass(live_mb) == pytest.approx(before)
+        assert all(not pulse["applied"] for step in ep["steps"] for pulse in step["pulsed"])
+
+    def test_episode_scoring_keeps_real_action_state(self, monkeypatch, live_mb):
+        from cognition.fly_behavior import action_select
+
+        monkeypatch.setenv("AIKO_FLYWORLD_MODE", "shadow")
+        previous = {"id": "real-action", "description": "real action", "ts": 1.0}
+        monkeypatch.setitem(action_select._last_action, live_mb, previous)
+        trail_before = action_select.recent_trail(live_mb)
+        ep = loop.run_episode(live_mb, seed=13, max_steps=3)
+        assert ep["ran"] is True
+        assert action_select._last_action[live_mb] is previous
+        assert action_select.recent_trail(live_mb) == trail_before
+
     def test_shadow_computes_but_writes_nothing(self, monkeypatch, live_mb):
         monkeypatch.setenv("AIKO_FLYWORLD_MODE", "shadow")
         before = _plastic_mass(live_mb)
@@ -272,6 +295,12 @@ class TestShadowLive:
         assert ep["ran"] is True
         assert ep["n_pulsed"] > 0
         assert _plastic_mass(live_mb) > before
+        assert all(
+            len(step["pulsed"]) == 1
+            and step["pulsed"][0]["age"] == 0
+            and step["pulsed"][0]["weight"] == 1.0
+            for step in ep["steps"]
+        )
 
     def test_all_records_tagged_simulated(self, monkeypatch, live_mb):
         monkeypatch.setenv("AIKO_FLYWORLD_MODE", "shadow")
@@ -329,15 +358,28 @@ class TestIntegration:
         loop.run_episode(live_mb, seed=41, max_steps=3)
         assert replay_bridge.collect_sim_episodes(live_mb)
 
+        real = {"id": 1, "trace": "real episode", "salience": 0.5, "age_h": 0.1}
+        monkeypatch.setattr(_replay, "_recent_episodes", lambda _uid, _now: [real])
+        monkeypatch.setattr(_replay, "_mb_valence_of", lambda _mb: lambda _trace: 0.5)
+        sources = []
+        monkeypatch.setattr(
+            "cognition.flymemory.dopamine.pulse",
+            lambda _reward, **kwargs: sources.append(kwargs["source"]) or {"applied": False},
+        )
+
         monkeypatch.delenv("FLY_REPLAY_INCLUDE_SIM", raising=False)
         out_off = _replay.run_replay(live_mb, force=True)
         sim_items_off = [i for i in out_off["items"] if i.get("simulated")]
         assert sim_items_off == []
+        assert sources == ["replay"]
 
         monkeypatch.setenv("FLY_REPLAY_INCLUDE_SIM", "1")
+        sources.clear()
         out_on = _replay.run_replay(live_mb, force=True)
         sim_items_on = [i for i in out_on["items"] if i.get("simulated")]
         assert sim_items_on, "opt-in hook must surface sim candidates"
+        assert "flyworld-replay" in sources
+        assert "replay" in sources
         # Still bounded by the Phase 8 cap.
         assert len(out_on["items"]) <= 50
 

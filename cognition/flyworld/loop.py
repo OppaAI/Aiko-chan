@@ -10,13 +10,9 @@ The loop:
      This isolates what the fly policy itself learns — which is exactly what
      the transfer test measures.
   4. sim.step(action) -> outcome + reward.
-  5. Credit: sim-local eligibility buffer with the same decay math as
-     eligibility.py (w = decay**age, cutoff 0.05). Each credited step gets
-     dopamine.pulse(reward, kc=kc, weight=w, source="flyworld-sim") — the
-     canonical teaching path. The shared real-turn eligibility trail is
-     NEVER touched: synthetic steps must not pollute real credit assignment.
-     (Unlike eligibility.assign_credit, age-0 IS included here at w=1.0 —
-     there is no separate immediate-reinforce path in sim.)
+  5. Credit: each outcome teaches only its own step's KC through
+     dopamine.pulse(reward, kc=kc, weight=1, source="flyworld-sim").
+     The shared real-turn eligibility trail is never touched.
   6. One flush_mb at episode end (Phase 2 convention).
 
 Mode AIKO_FLYWORLD_MODE=off|shadow|live (default shadow):
@@ -65,13 +61,6 @@ def flyworld_mode() -> str:
     """AIKO_FLYWORLD_MODE: off | shadow | live (default shadow)."""
     m = (_env_str("AIKO_FLYWORLD_MODE", "shadow") or "shadow").strip().lower()
     return m if m in ("off", "shadow", "live") else "shadow"
-
-
-def _elig_decay() -> float:
-    try:
-        return max(0.0, min(1.0, float(os.getenv("FLY_ELIGIBILITY_DECAY", "0.7"))))
-    except Exception:
-        return 0.7
 
 
 def _max_steps() -> int:
@@ -182,8 +171,8 @@ def run_episode(
 ) -> dict:
     """Run one closed-loop sim episode. Never raises.
 
-    force=True bypasses the mode gate for tests/harness (still fail-soft;
-    pulses apply only when the MB layer itself is live).
+    force=True bypasses the off gate for tests/harness (still fail-soft).
+    Pulses apply only when FlyWorld and the MB layer are live.
     """
     mode = flyworld_mode()
     out: dict = {
@@ -194,7 +183,7 @@ def run_episode(
     if mode == "off" and not force:
         out["reason"] = "mode_off"
         return out
-    live = (mode == "live") or force
+    live = mode == "live"
     try:
         from . import sim as _sim
         from cognition.fly_behavior.action_select import score_candidates
@@ -205,15 +194,9 @@ def run_episode(
         rng = _sim.new_rng(seed)
         state = _sim.initial_state(rng)
         n_steps = max_steps or _max_steps()
-        decay = _elig_decay()
-
         mb = get_flymb(user_id)
         mb_ok = mb is not None and hasattr(mb, "encode")
 
-        # Sim-local eligibility buffer: [(kc, trace_text)]. Same decay math
-        # as eligibility.py; kept local so synthetic steps never pollute the
-        # real turn trail.
-        elig_buf: list = []
         steps: list[dict] = []
         total = 0.0
         n_pulsed = 0
@@ -226,6 +209,7 @@ def run_episode(
                     cands, user_id=user_id,
                     context_text=str(state.get("request", "")),
                     source="flyworld",
+                    record_state=False,
                 )
                 scored = rec.get("candidates", {}) or {}
             except Exception as exc:
@@ -251,40 +235,36 @@ def run_episode(
             if mb_ok:
                 try:
                     kc = mb.encode(text_features(trace))
-                    elig_buf.append((kc, trace))
                 except Exception as exc:
                     log.debug("flyworld encode skipped: %s", exc)
                     kc = None
 
-            # Delayed credit over the sim-local trail (age-0 included at
-            # w=1.0). Shadow mode records what WOULD be taught.
+            # Scenario transitions are action-independent, so only this
+            # step's KC receives its outcome. Shadow records what would apply.
             pulsed_here: list[dict] = []
-            for age, (bkc, _btrace) in enumerate(reversed(elig_buf)):
-                w = decay ** age
-                if w < 0.05:
-                    break
+            if kc is not None:
                 if live and mb_ok:
                     try:
                         res = pulse(
-                            outcome.reward, user_id=user_id, kc=bkc,
-                            weight=w, source="flyworld-sim",
+                            outcome.reward, user_id=user_id, kc=kc,
+                            weight=1.0, source="flyworld-sim",
                         )
                         if res.get("applied"):
                             n_pulsed += 1
                         pulsed_here.append({
-                            "age": age, "weight": round(w, 4),
+                            "age": 0, "weight": 1.0,
                             "applied": bool(res.get("applied")),
                             "reason": str(res.get("reason") or ""),
                         })
                     except Exception as exc:
                         pulsed_here.append({
-                            "age": age, "weight": round(w, 4),
+                            "age": 0, "weight": 1.0,
                             "applied": False,
                             "reason": f"error: {exc}",
                         })
                 else:
                     pulsed_here.append({
-                        "age": age, "weight": round(w, 4),
+                        "age": 0, "weight": 1.0,
                         "applied": False,
                         "reason": "would_pulse" if mb_ok else "mb_unavailable",
                     })

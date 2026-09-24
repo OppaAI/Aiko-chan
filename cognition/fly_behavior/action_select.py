@@ -205,12 +205,13 @@ def score_candidates(
     user_id: str | None = None,
     context_text: str = "",
     source: str = "router",
+    record_state: bool = True,
 ) -> dict:
     """Score candidates; blend fly votes with LLM priors; pick a winner.
 
-    Returns a record dict (also appended to the per-user trail). In shadow
-    mode (or off) the LLM prior alone decides; the fly scores are computed
-    and logged regardless so the trail is useful for validation.
+    Returns a record dict (also appended to the per-user trail when
+    record_state=True). In shadow mode (or off) the LLM prior alone decides;
+    the fly scores are computed regardless.
     """
     mode = _MODE if _MODE in ("off", "shadow", "live") else "shadow"
     cx_live, cx_w = _cx_drive_live()
@@ -274,7 +275,7 @@ def score_candidates(
         "context": (context_text or "")[:120],
         "candidates": scored,
     }
-    if user_id:
+    if user_id and record_state:
         _trail_for(user_id).append(record)
         _last_action[user_id] = {
             "id": winner,

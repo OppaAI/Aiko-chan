@@ -455,27 +455,80 @@ function layoutOrganic(nodes, links, w, h) {
     };
   })];
 
-  // 3. Seeded scatter inside each component disc.
+  // 3. Hub-cloud scatter: entity hubs (boosted) and top-degree nodes become
+  //    sub-cluster centers; their 1–2 hop neighbors form a soft gaussian
+  //    cloud around them, so similar nodes clump together. Unattached nodes
+  //    fill the disc. All jitter is isotropic — clumps form, but straight
+  //    lines cannot.
+  const adj = new Map(nodes.map(n => [n.id, []]));
+  const deg = new Map(nodes.map(n => [n.id, 0]));
+  for (const l of links) {
+    const s = idOf(l.source), t = idOf(l.target);
+    if (s === t || !adj.has(s) || !adj.has(t)) continue;
+    adj.get(s).push(t); adj.get(t).push(s);
+    deg.set(s, deg.get(s) + 1); deg.set(t, deg.get(t) + 1);
+  }
+  const gauss = () => {
+    let u = 0, v = 0;
+    while (u === 0) u = rnd();
+    while (v === 0) v = rnd();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
   for (let i = 0; i < comps.length; i++) {
-    const c = centers[i];
-    for (const n of comps[i]) {
-      const a = rnd() * Math.PI * 2;
-      const rr = Math.sqrt(rnd()) * Math.max(6, c.r - nodeRadius(n));
-      n.x = c.x + Math.cos(a) * rr;
-      n.y = c.y + Math.sin(a) * rr;
-      n.vx = 0; n.vy = 0;
-      n._ax = n.x; n._ay = n.y;
+    const c = centers[i], comp = comps[i];
+    if (comp.length === 1) {
+      const n = comp[0];
+      n.x = n._ax = c.x; n.y = n._ay = c.y; n.vx = n.vy = 0;
+      continue;
+    }
+    const score = n => deg.get(n.id) + (n.type === 'entity' ? 100000 : 0);
+    const hubs = [...comp].sort((a, b) => score(b) - score(a))
+      .slice(0, Math.max(1, Math.min(5, Math.round(comp.length / 6))));
+    const hubSet = new Set(hubs.map(h => h.id));
+    const hubOf = new Map(hubs.map(h => [h.id, h]));
+    hubs.forEach((h, hi) => {
+      const a = hi * GOLDEN + (rnd() - 0.5) * 0.9;
+      const rr = c.r * 0.38 * Math.sqrt((hi + 1) / hubs.length);
+      h._ax = c.x + Math.cos(a) * rr;
+      h._ay = c.y + Math.sin(a) * rr;
+    });
+    for (const n of comp) {
+      if (hubSet.has(n.id)) continue;
+      let hid = null, hd = -1;
+      const consider = id => {
+        if (hubSet.has(id) && deg.get(id) > hd) { hd = deg.get(id); hid = id; }
+      };
+      for (const nb of adj.get(n.id)) consider(nb);
+      if (!hid) for (const nb of adj.get(n.id)) for (const nn of adj.get(nb)) consider(nn);
+      const hub = hid ? hubOf.get(hid) : null;
+      if (hub) {
+        const spread = Math.min(c.r * 0.45, 12 + 6 * Math.sqrt(adj.get(hub.id).length));
+        n._ax = hub._ax + gauss() * spread * 0.40;
+        n._ay = hub._ay + gauss() * spread * 0.40;
+      } else {
+        const a = rnd() * Math.PI * 2;
+        const rr = Math.sqrt(rnd()) * Math.max(6, c.r - nodeRadius(n));
+        n._ax = c.x + Math.cos(a) * rr;
+        n._ay = c.y + Math.sin(a) * rr;
+      }
+    }
+    for (const n of comp) {
+      const maxR = Math.max(6, c.r - nodeRadius(n));
+      const dx = n._ax - c.x, dy = n._ay - c.y;
+      const d = Math.hypot(dx, dy);
+      if (d > maxR) { n._ax = c.x + dx / d * maxR; n._ay = c.y + dy / d * maxR; }
+      n.x = n._ax; n.y = n._ay; n.vx = 0; n.vy = 0;
     }
   }
 
   // 4. Relax overlaps (collision only) around each node's anchor.
   const sim = d3.forceSimulation(nodes)
     .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 5).iterations(4))
-    .force('x', d3.forceX(d => d._ax).strength(0.12))
-    .force('y', d3.forceY(d => d._ay).strength(0.12))
+    .force('x', d3.forceX(d => d._ax).strength(0.30))
+    .force('y', d3.forceY(d => d._ay).strength(0.30))
     .randomSource(mulberry32(1777))
     .stop();
-  for (let i = 0; i < 80; i++) sim.tick();
+  for (let i = 0; i < 60; i++) sim.tick();
   sim.stop();
   for (const n of nodes) { delete n._ax; delete n._ay; }
 

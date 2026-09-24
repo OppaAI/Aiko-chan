@@ -38,10 +38,14 @@ def assess_interrupt(
     priority: float = 0.0,
     subliminal_urgency: float = 0.0,
     motion_salience: float = 0.0,
+    voice_urgency: float = 0.0,
 ) -> dict:
     """Return urgency in [0,1] and whether interrupt should fire.
 
     Shadow: compute + log via caller. Live: caller should honor interrupt.
+
+    Phase 6: voice_urgency carries the loudness→urgency vote from the
+    sensory pathways (0 when no voice prosody was available).
     """
     mode = _mode()
     if mode not in ("shadow", "live"):
@@ -78,6 +82,12 @@ def assess_interrupt(
         ms_u = 0.35 + 0.25 * ms
         sources["motion"] = round(ms_u, 4)
         u = max(u, ms_u)
+    vu = max(0.0, min(1.0, float(voice_urgency or 0.0)))
+    if vu > 0:
+        # Loud voice is a nudge, never an interrupt by itself (capped at
+        # 0.45 upstream — below the 0.65 interrupt line).
+        sources["voice"] = round(vu, 4)
+        u = max(u, vu)
 
     interrupt = u >= 0.65
     return {

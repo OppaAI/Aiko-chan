@@ -664,6 +664,13 @@ class AikoWeb:
             observe_fly_runtime(uid, visual_observation(salience=1.0, consented=True), seed_types=("sensory", "T4", "T5", "visual"))
         except Exception:
             log.debug("fly visual observation skipped", exc_info=True)
+        # Phase 6: feed the frame into the sensory motion pathway — scalar
+        # motion energy only. Bytes are decoded transiently, never retained.
+        try:
+            from cognition.flysense.pathways import note_visual_frame
+            note_visual_frame(uid, image)
+        except Exception:
+            log.debug("fly visual pathway skipped", exc_info=True)
         self._broadcast({"type": "vision", "status": "working", "source": source}, user_id=uid)
         try:
             answer = await asyncio.to_thread(self._infer_image, image, question, source)

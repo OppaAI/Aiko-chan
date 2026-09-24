@@ -104,6 +104,20 @@ def test_fly_body_fallback_hides_internal_errors_and_logs_details(monkeypatch, c
     assert "sensitive detail" in caplog.text
 
 
+def test_fly_activity_preserves_zero_arousal_and_circadian(monkeypatch):
+    user_id = "studio-zero"
+    state = get_neural_state(user_id)
+    state.action_drive = 0.0
+    state.circadian_phase = 0.0
+    monkeypatch.setattr(api, "_uid", lambda _request: user_id)
+
+    activity = json.loads(api.fly_activity(object()).body)["activity"]
+
+    assert activity["arousal"] == 0.0
+    assert activity["circadian"] == 0.0
+    clear_neural_state(user_id)
+
+
 def test_mounted_fly_api_requires_session():
     client = TestClient(auth.app)
 

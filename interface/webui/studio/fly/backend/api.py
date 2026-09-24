@@ -479,11 +479,11 @@ def fly_activity(request: Request) -> JSONResponse:
         if st is not None:
             activity = {
                 "valence": float(st.valence or 0.0),
-                "arousal": float(st.action_drive or 0.5),
+                "arousal": float(st.action_drive if st.action_drive is not None else 0.5),
                 "urgency": float(st.urgency or 0.0),
                 "focus": float(st.focus_sharpness or 0.0),
                 "vigor": float(st.motor_vigor or 1.0),
-                "circadian": float(st.circadian_phase or 0.5),
+                "circadian": float(st.circadian_phase if st.circadian_phase is not None else 0.5),
             }
     except Exception as exc:
         logger.debug("fly_activity failed: %s", exc)

@@ -403,16 +403,21 @@ class ConscienceCircuitCore:
             fly_vote = score_tool_call(
                 tool=tool,
                 args_text=str(ctx.get("args_text") or ctx.get("summary") or ""),
-                user_id=ctx.get("user_id"),
+                user_id=self._user_id,
                 external=external,
             )
             if (
                 fly_vote.get("veto")
+                and fly_vote.get("mode") == "live"
                 and verdict.decision == ALLOW
                 and external
             ):
                 verdict.decision = CAUTION
                 verdict.gate = GATE_MB_VALENCE
+                verdict.constraint = (
+                    "Revise this tool call to avoid the learned aversion, or ask the user "
+                    "for direction before retrying."
+                )
                 verdict.reasons.insert(
                     0,
                     f"fly veto on tool {tool or 'tool'} "
@@ -430,6 +435,10 @@ class ConscienceCircuitCore:
             ):
                 verdict.decision = CAUTION
                 verdict.gate = GATE_MB_VALENCE
+                verdict.constraint = (
+                    "Revise this tool call to avoid the learned aversion, or ask the user "
+                    "for direction before retrying."
+                )
                 verdict.reasons.insert(
                     0,
                     f"mushroom-body valence {float(mb_v):.2f} — learned "

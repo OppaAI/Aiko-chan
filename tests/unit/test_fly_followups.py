@@ -63,3 +63,30 @@ def test_online_teach_credits_trace(monkeypatch):
     assert out.get("taught") is True
     assert out.get("credit_steps", 0) >= 1
     eligibility.clear(uid)
+
+
+def test_action_feedback_retries_failure_and_does_not_mark_newer_action(monkeypatch):
+    from cognition.fly_behavior import action_select
+    from cognition.flymemory import teach_api
+
+    uid = "feedback-retry"
+    first = {"id": "old", "description": "old action", "ts": 1.0}
+    monkeypatch.setitem(action_select._last_action, uid, first)
+    attempts = []
+
+    def teach(topic, **_kwargs):
+        attempts.append(topic)
+        if len(attempts) == 1:
+            return {"taught": False, "reason": "unavailable"}
+        if len(attempts) == 2:
+            action_select._last_action[uid] = {"id": "new", "description": "new action", "ts": 2.0}
+        return {"taught": True, "reason": "ok"}
+
+    monkeypatch.setattr(teach_api, "teach_preference", teach)
+    assert action_select.note_feedback(uid, "praise")["taught"] is False
+    assert "taught_fb" not in first
+    assert action_select.note_feedback(uid, "praise")["taught"] is True
+    assert "taught_fb" not in action_select._last_action[uid]
+    assert action_select.note_feedback(uid, "praise")["taught"] is True
+    assert action_select._last_action[uid]["taught_fb"] == "praise"
+    assert attempts == ["old action", "old action", "new action"]

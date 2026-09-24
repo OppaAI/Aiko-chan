@@ -222,6 +222,22 @@ def test_ambiguous_semantic_scores_fall_back_to_quaternary_tiebreak(monkeypatch)
     assert intent == "webchat"
 
 
+def test_ambiguous_semantic_scores_pass_current_user_to_fly(monkeypatch):
+    think = _bare_think(FakeEmbedder())
+    monkeypatch.setenv("ROUTE_WEBCHAT_THRESHOLD", "0.60")
+    monkeypatch.setattr(think_module, "_SEMANTIC_ROUTE_MIN_GAP", 0.05)
+    monkeypatch.setattr(think_module, "current_user_id", lambda: "route-user")
+    monkeypatch.setattr(think, "_semantic_example_vectors", lambda *_args: (["webchat", "agentic"], np.zeros((2, 2), dtype=np.float32)))
+    monkeypatch.setattr(think_module.reason, "label_scores_topk", lambda *args, **kwargs: {"webchat": 0.65, "agentic": 0.63})
+    seen = []
+    monkeypatch.setattr(think, "_fly_route_tiebreak", lambda _text, _scores, uid, _ctx, _vec: seen.append(uid) or "webchat")
+
+    intent, _ = think._route_intent("what does PNE stand for")
+
+    assert intent == "webchat"
+    assert seen == ["route-user"]
+
+
 def test_recall_query_resolves_pronouns_from_recent_history():
     think = _bare_think()
     think._history_lock = threading.Lock()

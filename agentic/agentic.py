@@ -1194,6 +1194,8 @@ def _tool_gate_result(name: str, args: dict, blocked: dict) -> ToolResult:
             if decision == "refuse"
             else "needs_approval"
             if decision == "escalate"
+            else "conscience_caution"
+            if decision == "caution"
             else "conscience_unavailable"
         ),
         retryable=False,

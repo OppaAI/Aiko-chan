@@ -1409,7 +1409,7 @@ class AikoThink:
                 # routes; when decisive in live mode it resolves the tie without
                 # spending an LLM call. Otherwise fall through to the tiebreaks.
                 fly_label = self._fly_route_tiebreak(
-                    user_input, scores, user_id, ctx, query_vec
+                    user_input, scores, current_user_id(), ctx, query_vec
                 )
                 if fly_label is not None:
                     return fly_label, query_vec

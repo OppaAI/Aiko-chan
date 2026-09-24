@@ -480,14 +480,19 @@ function renderSlowPanels(causal, body, actions) {
     fa.innerHTML = recs.length ? recs.map(r => {
       const cands = r.candidates || {};
       const win = r.winner;
-      const rows = Object.entries(cands).map(([id, c]) => {
+      const rows = r.tool ? (() => {
+        const v = r.votes || {};
+        const veto = r.veto ? '<b>VETO</b><br>' : '';
+        return veto +
+          `&nbsp;&nbsp;&nbsp;&nbsp;mb ${esc(v.mb)} cx ${esc(v.cx)} dn ${esc(v.dn)} gf ${esc(v.gf)}`;
+      })() : Object.entries(cands).map(([id, c]) => {
         const v = c.votes || {};
         const mark = id === win ? '&#9733; ' : '&nbsp;&nbsp;';
         const veto = c.veto ? ' <b>VETO</b>' : '';
         return `${mark}${esc(c.label)} prior ${c.llm_prior} fly ${c.fly} final ${c.final}${veto}<br>` +
           `&nbsp;&nbsp;&nbsp;&nbsp;mb ${v.mb} cx ${v.cx} dn ${v.dn} gf ${v.gf}`;
       }).join('<br>');
-      const tag = r.tool ? `tool ${esc(r.tool)}`
+      const tag = r.tool ? `tool ${r.tool}`
         : r.applied ? 'APPLIED'
         : (r.mode === 'shadow' ? 'shadow' : (r.ambiguous ? 'ambiguous' : (r.source || '')));
       const head = r.tool ? `<b>${esc(r.source || '')}</b> · ${esc(tag)}`

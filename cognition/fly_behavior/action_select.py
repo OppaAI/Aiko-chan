@@ -290,9 +290,10 @@ def note_feedback(user_id: str | None, feedback: str) -> dict:
         )
         out["taught"] = bool(r.get("taught"))
         out["reason"] = r.get("reason", "")
-        with _trail_lock:
-            if user_id in _last_action:
-                _last_action[user_id]["taught_fb"] = feedback
+        if out["taught"]:
+            with _trail_lock:
+                if _last_action.get(user_id) is last:
+                    last["taught_fb"] = feedback
     except Exception as exc:
         out["reason"] = f"teach_failed: {exc}"
         log.debug("action_select note_feedback skipped: %s", exc)

@@ -27,6 +27,7 @@ def test_gate_tool_evaluates_complete_serialized_args(monkeypatch):
 
     assert hooks.gate_tool(name="save_note", args={"content": long_value}) is None
     assert json.dumps({"content": long_value}) in captured["content"]
+    assert captured["context"]["args_text"] == json.dumps({"content": long_value})
     assert len(captured["content"]) > 1800
 
 
@@ -67,6 +68,47 @@ def test_external_valence_caution_requires_approval_if_irreversible(monkeypatch)
     assert verdict.decision == ESCALATE
     assert verdict.gate == GATE_HITL
     assert "irreversible external action" in verdict.reasons[0]
+
+
+def test_tool_vote_records_resolved_user_and_arguments_but_shadow_veto_is_observational(monkeypatch):
+    from cognition.fly_behavior import action_select
+
+    core = ConscienceCircuitCore("vote-user")
+    args_text = json.dumps({"query": "specific subject"})
+    context = {"tool": "adaptive_search", "scope": "network", "args_text": args_text}
+    monkeypatch.setattr(action_select, "_MODE", "shadow")
+    monkeypatch.setattr(action_select, "_votes_for", lambda *_args, **_kwargs: {"mb": -0.9, "cx": 0.0, "dn": 0.0, "gf": 0.0})
+
+    shadow = core._apply_tool_policy(Verdict(decision=ALLOW), context)
+    assert shadow.decision == ALLOW
+    assert action_select.recent_trail("vote-user", 1)[0]["tool"] == "adaptive_search"
+    assert action_select.recent_trail("vote-user", 1)[0]["veto"] is True
+    assert action_select._last_action["vote-user"]["description"] == f"tool adaptive_search {args_text}"
+
+    monkeypatch.setattr(action_select, "_MODE", "live")
+    live = core._apply_tool_policy(Verdict(decision=ALLOW), context)
+    assert live.decision == CAUTION
+    assert live.gate == GATE_MB_VALENCE
+    assert live.constraint
+
+
+def test_caution_tool_gate_returns_constraint_and_prevents_dispatch(monkeypatch):
+    constraint = "Revise the proposed call before retrying."
+
+    class Core:
+        def evaluate(self, **_kwargs):
+            return Verdict(decision=CAUTION, gate=GATE_MB_VALENCE, constraint=constraint)
+
+    monkeypatch.setattr("cognition.conscience.conscience_for", lambda *_args, **_kwargs: Core())
+    dispatched = []
+    monkeypatch.setattr(agentic, "dispatch_tool", lambda *args, **kwargs: dispatched.append(args))
+
+    result = dispatch_tool_checked("save_note", {"content": "draft"})
+
+    assert result.ok is False
+    assert result.error_type == "conscience_caution"
+    assert json.loads(result.content)["constraint"] == constraint
+    assert dispatched == []
 
 
 def test_dispatch_tool_checked_does_not_dispatch_when_gate_is_unavailable(monkeypatch):

@@ -670,7 +670,7 @@ def ensure_schedule_graphs(user_id: str | None = None) -> None:
                 "graph_id": "owner_email",
                 "enabled": True,
                 "next_due": _schedule_graph_next_due(
-                    {"trigger": {"frequency": "interval", "interval_seconds": 600}}, after=now
+                    {"trigger": {"frequency": "interval", "interval_seconds": OWNER_EMAIL_POLL_S}}, after=now
                 ).isoformat(),
                 "last_ran_at": None,
             })
@@ -1599,7 +1599,7 @@ class ScheduleRunner:
         # calculated once at startup, updated after each fire
         self._next_daily   = _next_daily_reflect_and_dream()
         self._next_monthly = _next_monthly_consolidate()
-        self._next_ledger_prune = _next_ledger_prune()
+        self._next_ledger_prune = bioclock.local_now()
 
         # catch-up state — checked on start(). NOTE: if _owner_user_id is
         # still "guest" at this point (pre-auth boot), the monthly check
@@ -1834,8 +1834,8 @@ class ScheduleRunner:
                             self._run_monthly_consolidate()
                             self._next_monthly = _next_monthly_consolidate()
                         else:
-                            self._run_ledger_prune()
-                            self._next_ledger_prune = _next_ledger_prune()
+                            if self._run_ledger_prune():
+                                self._next_ledger_prune = _next_ledger_prune()
                     except Exception:
                         # Transient store failure (e.g. sqlite hiccup on a
                         # network home dir) must not kill the scheduler
@@ -1885,6 +1885,8 @@ class ScheduleRunner:
 
             # ── sleep until soonest next target across all users ──────────────
             candidates = [self._next_daily, self._next_monthly]
+            if self._owner_promoted.is_set():
+                candidates.append(self._next_ledger_prune)
             for uid in all_user_ids():
                 candidates.extend(
                     datetime.fromisoformat(j["next_due"])
@@ -2094,7 +2096,7 @@ class ScheduleRunner:
         except Exception as e:
             log.error("monthly_consolidate failed: %s", e)
 
-    def _run_ledger_prune(self) -> None:
+    def _run_ledger_prune(self) -> bool:
         """Weekly conscience-ledger maintenance. Not in schedule.json.
 
         prune() drops unreviewed rows older than LEDGER_RETAIN_DAYS
@@ -2103,13 +2105,15 @@ class ScheduleRunner:
         """
         try:
             from cognition.conscience.ledger import ledger_for
-            removed = ledger_for(self._owner_user_id).prune()
+            removed = sum(ledger_for(user_id).prune() for user_id in all_user_ids())
             if removed:
                 log.info("ledger_prune: removed %d expired row(s).", removed)
             else:
                 log.debug("ledger_prune: nothing expired.")
+            return True
         except Exception:
             log.exception("ledger_prune failed")
+            return False
 
     # ── user job runner ───────────────────────────────────────────────────────
 

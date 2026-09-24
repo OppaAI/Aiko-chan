@@ -1468,6 +1468,9 @@ def run_session(ui, args) -> None:
                         think.set_speak(speak)
                         proactive.set_speak(speak)
                         _wire_speak_sink(speak)
+                        typewriter = TypewriterSync(ui, speak)
+                        if hasattr(speak, "set_first_audio_callback"):
+                            speak.set_first_audio_callback(_on_first_audio)
                         if hasattr(ui, "set_voice_backends"):
                             ui.set_voice_backends(speak, listen)
                         tts_enabled = True
@@ -1489,11 +1492,18 @@ def run_session(ui, args) -> None:
                     if listen is None:
                         ui.add_message('sys', 'ASR unavailable — voice subsystem failed to start.')
                     else:
-                        if hasattr(ui, "set_voice_backends"):
-                            ui.set_voice_backends(speak, listen)
-                        asr_enabled = True
-                        ui._stats['asr_on'] = True
-                        ui.add_message('sys', 'Voice input  (ASR): ON  🎤')
+                        listen.ensure_ready()
+                        if listen._voice_error:
+                            ui.add_message('sys', f'ASR unavailable — {listen._voice_error}')
+                            listen = None
+                            asr_enabled = False
+                            ui._stats['asr_on'] = False
+                        else:
+                            if hasattr(ui, "set_voice_backends"):
+                                ui.set_voice_backends(speak, listen)
+                            asr_enabled = True
+                            ui._stats['asr_on'] = True
+                            ui.add_message('sys', 'Voice input  (ASR): ON  🎤')
                 else:
                     asr_enabled = not asr_enabled
                     ui._stats['asr_on'] = asr_enabled

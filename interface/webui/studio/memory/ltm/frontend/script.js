@@ -149,7 +149,7 @@ function hueColor(hue) {
 /** Translucent glass fill — dim nodes ghost into the background. */
 function nodeOpacity(d) {
   let r = retainOf(d);
-  let o = 0.22 + Math.pow(r, 0.9) * 0.55;
+  let o = 0.18 + Math.pow(r, 0.9) * 0.55;
   const hue = valenceHue(d);
   if (hue === 'pos' || hue === 'neg') o = Math.min(1, o + 0.08);
   if (d.pinned) o = Math.max(o, 0.92);
@@ -626,7 +626,7 @@ function buildGraph() {
     .attr('rx', d => nodeRadius(d) * 0.48)
     .attr('ry', d => nodeRadius(d) * 0.30)
     .attr('fill', 'url(#glare)')
-    .attr('opacity', d => 0.12 + 0.30 * retainOf(d))
+    .attr('opacity', d => 0.10 + 0.28 * retainOf(d))
     .attr('pointer-events', 'none');
 
   nodeSel.append('text').attr('class', 'node-label')
@@ -660,18 +660,17 @@ function defs_(svg) {
   defs.append('marker').attr('id','arrow-sup').attr('viewBox','0 0 10 10')
     .attr('refX', 9).attr('refY', 5).attr('markerWidth', 5).attr('markerHeight', 5).attr('orient','auto')
     .append('path').attr('d','M 0 1 L 10 5 L 0 9 Z').attr('fill', '#a68b4f').attr('opacity', 0.8);
-  // Reference-matched spheres: soft bright core, sheen peak ~28% out,
-  // mid body, darker rim feathering into the background.
+  // Glassy orbs: soft sheen, feathered edge that melts into
+  // the dark background (outer stop fades to transparent).
   for (const h of HUES) {
     const base = hueColor(h);
     const g = defs.append('radialGradient')
       .attr('id', 'gloss-' + h)
       .attr('cx', '34%').attr('cy', '28%').attr('r', '78%');
     g.append('stop').attr('offset', '0%').attr('stop-color', shade(base, 0.38));
-    g.append('stop').attr('offset', '28%').attr('stop-color', shade(base, 0.50));
-    g.append('stop').attr('offset', '55%').attr('stop-color', base);
-    g.append('stop').attr('offset', '80%').attr('stop-color', shade(base, -0.28));
-    g.append('stop').attr('offset', '100%').attr('stop-color', shade(base, -0.42)).attr('stop-opacity', 0.32);
+    g.append('stop').attr('offset', '40%').attr('stop-color', shade(base, 0.10));
+    g.append('stop').attr('offset', '72%').attr('stop-color', base);
+    g.append('stop').attr('offset', '100%').attr('stop-color', base).attr('stop-opacity', 0.30);
   }
   // Shared specular glare dabbed on hot nodes.
   const glare = defs.append('radialGradient').attr('id', 'glare').attr('cx', '50%').attr('cy', '50%').attr('r', '50%');

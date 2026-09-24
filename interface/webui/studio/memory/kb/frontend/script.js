@@ -42,7 +42,7 @@ function nodeRadius(d) {
 }
 
 function nodeOpacity(d) {
-  return 0.20 + importanceOf(d) * 0.55;
+  return 0.15 + importanceOf(d) * 0.55;
 }
 
 /* Edge brightness follows both endpoint sizes — dim when both ends are small. */
@@ -365,17 +365,16 @@ function ensureScene() {
   if (viewport) return;
   const svg = d3.select('#svg');
   const defs = svg.append('defs');
-  // Reference-matched spheres: soft bright core, sheen peak ~28% out,
-  // mid body, darker rim feathering into the background.
+  // Glassy orbs: soft sheen, feathered edge that melts into
+  // the dark background (outer stop fades to transparent).
   for (const [key, base] of [['chunk', COL_CHUNK], ['entity', COL_ENTITY]]) {
     const g = defs.append('radialGradient')
       .attr('id', 'gloss-' + key)
       .attr('cx', '34%').attr('cy', '28%').attr('r', '78%');
     g.append('stop').attr('offset', '0%').attr('stop-color', shade(base, 0.38));
-    g.append('stop').attr('offset', '28%').attr('stop-color', shade(base, 0.50));
-    g.append('stop').attr('offset', '55%').attr('stop-color', base);
-    g.append('stop').attr('offset', '80%').attr('stop-color', shade(base, -0.28));
-    g.append('stop').attr('offset', '100%').attr('stop-color', shade(base, -0.42)).attr('stop-opacity', 0.32);
+    g.append('stop').attr('offset', '40%').attr('stop-color', shade(base, 0.10));
+    g.append('stop').attr('offset', '72%').attr('stop-color', base);
+    g.append('stop').attr('offset', '100%').attr('stop-color', base).attr('stop-opacity', 0.30);
   }
   const glare = defs.append('radialGradient').attr('id', 'kb-glare').attr('cx', '50%').attr('cy', '50%').attr('r', '50%');
   glare.append('stop').attr('offset', '0%').attr('stop-color', '#ffffff').attr('stop-opacity', 0.85);
@@ -482,7 +481,7 @@ function update() {
     .attr('cy', d => -nodeRadius(d) * 0.32)
     .attr('rx', d => nodeRadius(d) * 0.48)
     .attr('ry', d => nodeRadius(d) * 0.30)
-    .attr('opacity', d => 0.12 + 0.30 * importanceOf(d));
+    .attr('opacity', d => 0.10 + 0.28 * importanceOf(d));
   entered.select('text.node-label')
     .attr('dy', d => -(nodeRadius(d) + 6))
     .style('opacity', d => hotIds.has(d.id) ? 0.85 : 0)

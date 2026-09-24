@@ -390,6 +390,151 @@ TEMPLATES: list[dict[str, Any]] = [
                   ["draft"], 2, 0),
         ],
     },
+
+    # ── studio phase 2 templates ────────────────────────────────────────────
+
+    # 8 ── agentic chat assistant (n8n-style composite agent) ─────────────────
+    {
+        "id": "tpl_agent_chat",
+        "name": "Agentic chat assistant",
+        "category": "Agentic",
+        "description": "Chat trigger → AI Agent with attached Chat Model, Memory and Calendar tool sub-nodes — the n8n Tools Agent pattern.",
+        "goal": "Conversational agent with memory and tools",
+        "capabilities": ["ai"],
+        "nodes": [
+            _node("chat", "trigger_chat",
+                  {"message": "$prompt", "from_user": "user", "to_state": "items"}, [], 0, 0),
+            _node("agent", "ai_agent",
+                  {"prompt": "$prompt",
+                   "system_prompt": "You are Aiko, a helpful on-device assistant. Answer concisely.",
+                   "chat_model_json": "$result:chat_model",
+                   "tools_json": '["calendar_create"]',
+                   "memory_key": "chat_memory",
+                   "items_json": "$result:chat", "from_state": "", "to_state": "items"},
+                  ["chat", "chat_model", "memory"], 1, 0),
+            _node("chat_model", "chat_model",
+                  {"model": "ministral-3b", "temperature": 0.7, "max_tokens": 1024},
+                  [], 1, 1, attached_to="agent"),
+            _node("memory", "memory_buffer",
+                  {"memory_key": "chat_memory", "window_size": 10, "mode": "read",
+                   "to_state": "memory_window"},
+                  [], 1, 2, attached_to="agent"),
+            _node("calendar", "calendar_create",
+                  {"title": "$prompt", "start": "", "end": "", "description": ""},
+                  ["agent"], 1, 3, attached_to="agent", sub_kind="tool"),
+            _sticky("note_agent",
+                    "Composite AI Agent: Chat Model, Memory and the Calendar tool ride along as attached sub-nodes. "
+                    "The agent reads the model config via $result:chat_model and keeps context in the chat_memory window.",
+                    2, 1),
+        ],
+    },
+
+    # 9 ── social inbox triage ────────────────────────────────────────────────
+    {
+        "id": "tpl_social_triage",
+        "name": "Social inbox triage",
+        "category": "Social",
+        "description": "On a schedule, check email and social mentions, summarize with the AI Agent, and send yourself a digest.",
+        "goal": "Scheduled inbox + social digest",
+        "capabilities": ["social", "scheduling"],
+        "nodes": [
+            _node("schedule", "trigger_schedule",
+                  {"cron": "0 8 * * *", "timezone": "America/Los_Angeles", "to_state": "items"}, [], 0, 0),
+            _node("email", "email_check",
+                  {"max_results": 10, "to_state": "email_items"}, ["schedule"], 1, 0),
+            _node("social", "social_read",
+                  {"services": "threads", "max_results": 10, "to_state": "social_items"}, ["schedule"], 1, 1),
+            # $result: only substitutes whole-string references, so fan-in goes
+            # through merge_items with distinct state keys rather than a
+            # literal "[..., ...]" string (which would never be substituted).
+            _node("merge", "merge_items",
+                  {"mode": "append", "from_states": "email_items,social_items", "to_state": "triage_items"},
+                  ["email", "social"], 2, 0),
+            _node("summarize", "ai_agent",
+                  {"prompt": "Summarize the new emails and social mentions below. Lead with anything urgent, then a 5-bullet digest.",
+                   "chat_model_json": "$result:chat_model",
+                   "tools_json": "[]", "memory_key": "",
+                   "items_json": "$result:merge", "from_state": "", "to_state": "items"},
+                  ["merge", "chat_model"], 3, 0),
+            _node("chat_model", "chat_model",
+                  {"model": "ministral-3b", "temperature": 0.5, "max_tokens": 1024},
+                  [], 2, 1, attached_to="summarize"),
+            _node("digest", "notify_user",
+                  {"title": "Inbox triage", "message": "$result:summarize", "channel": "app",
+                   "items_json": "$result:summarize", "from_state": "", "to_state": "items"},
+                  ["summarize"], 4, 0),
+        ],
+    },
+
+    # 10 ── morning briefing ──────────────────────────────────────────────────
+    {
+        "id": "tpl_morning_briefing",
+        "name": "Morning briefing",
+        "category": "Everyday",
+        "description": "Every morning: pull your calendar and the news, compose a briefing with the AI Agent, and notify yourself.",
+        "goal": "Daily morning briefing",
+        "capabilities": ["scheduling", "research"],
+        "nodes": [
+            _node("schedule", "trigger_schedule",
+                  {"cron": "0 7 * * *", "timezone": "America/Los_Angeles", "to_state": "items"}, [], 0, 0),
+            _node("cal", "calendar_list",
+                  {"max_results": 10, "time_min": "", "to_state": "cal_items"}, ["schedule"], 1, 0),
+            _node("news", "rss_read",
+                  {"url": "https://feeds.bbci.co.uk/news/rss.xml", "max_items": 15, "to_state": "news_items"},
+                  ["schedule"], 1, 1),
+            # $result: only substitutes whole-string references, so fan-in goes
+            # through merge_items with distinct state keys rather than a
+            # literal "[..., ...]" string (which would never be substituted).
+            _node("merge", "merge_items",
+                  {"mode": "append", "from_states": "cal_items,news_items", "to_state": "brief_items"},
+                  ["cal", "news"], 2, 0),
+            _node("brief", "ai_agent",
+                  {"prompt": "Write my morning briefing: today's calendar events first, then the 5 most important headlines with one line each. Keep it skimmable.",
+                   "chat_model_json": "$result:chat_model",
+                   "tools_json": "[]", "memory_key": "",
+                   "items_json": "$result:merge", "from_state": "", "to_state": "items"},
+                  ["merge", "chat_model"], 3, 0),
+            _node("chat_model", "chat_model",
+                  {"model": "ministral-3b", "temperature": 0.5, "max_tokens": 1500},
+                  [], 2, 1, attached_to="brief"),
+            _node("send", "notify_user",
+                  {"title": "Morning briefing", "message": "$result:brief", "channel": "email",
+                   "items_json": "$result:brief", "from_state": "", "to_state": "items"},
+                  ["brief"], 4, 0),
+        ],
+    },
+
+    # 11 ── email auto-drafter ────────────────────────────────────────────────
+    {
+        "id": "tpl_email_autodrafter",
+        "name": "Email auto-drafter",
+        "category": "Email",
+        "description": "Check the inbox, draft replies with the AI Agent, and park them for review — nothing is sent.",
+        "goal": "Draft email replies automatically",
+        "capabilities": ["email"],
+        "nodes": [
+            _node("inbox", "email_check",
+                  {"max_results": 5, "to_state": "items"}, [], 0, 0),
+            _node("drafter", "ai_agent",
+                  {"prompt": "For each email below, draft a short, polite reply in my voice. Return one draft per email with the original subject.",
+                   "system_prompt": "You are Aiko drafting email replies. Be brief, warm, and professional.",
+                   "chat_model_json": "$result:chat_model",
+                   "tools_json": "[]", "memory_key": "",
+                   "items_json": "$result:inbox", "from_state": "", "to_state": "items"},
+                  ["inbox", "chat_model"], 1, 0),
+            _node("chat_model", "chat_model",
+                  {"model": "ministral-3b", "temperature": 0.7, "max_tokens": 1024},
+                  [], 1, 1, attached_to="drafter"),
+            _node("drafts", "email_draft",
+                  {"to": "", "subject": "", "body": "$result:drafter", "drafts_key": "email_drafts",
+                   "items_json": "$result:drafter", "from_state": "", "to_state": "items"},
+                  ["drafter"], 2, 0),
+            _sticky("note_drafts",
+                    "Drafts are parked under the email_drafts state key — nothing is sent. "
+                    "Review them, then send via the Email: Reply node or by hand.",
+                    3, 1),
+        ],
+    },
 ]
 
 

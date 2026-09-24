@@ -15,6 +15,12 @@ let lastState = null;
 let liveOn = true;           // Live is the default
 let livePollTimer = null;
 let lastTurnSeen = null;
+/* Idle backoff: unchanged payloads slow the poll loop 600ms → 5s max. */
+let pollDelayMs = 600;
+let pollUnchangedStreak = 0;
+let lastPollSig = "";
+const POLL_BASE_MS = 600;
+const POLL_MAX_MS = 5000;
 
 let demoRunning = false;     // Demo default stopped
 let demoAbort = false;
@@ -665,6 +671,16 @@ async function pollLive() {
     const state = data.state || data;
     const turn = Number(state.turn_counter ?? 0);
     const live = state.mode === "live";
+    // Signature of the payload that matters: unchanged → back off.
+    const sig = `${turn}|${(state.slots || []).length}|${(state.slots || []).map((s) => s.id ?? s.created_turn ?? "").join(",")}`;
+    if (sig === lastPollSig) {
+      pollUnchangedStreak += 1;
+      pollDelayMs = Math.min(POLL_MAX_MS, POLL_BASE_MS * Math.pow(2, pollUnchangedStreak));
+    } else {
+      lastPollSig = sig;
+      pollUnchangedStreak = 0;
+      pollDelayMs = POLL_BASE_MS;
+    }
     if (!live) return;
     if (live && lastTurnSeen !== null && turn > lastTurnSeen) {
       const slot = (state.slots || []).reduce(
@@ -686,6 +702,30 @@ async function pollLive() {
   }
 }
 
+/* Self-scheduling poll loop with idle backoff + hidden-tab pause. */
+function schedulePoll() {
+  if (livePollTimer) clearTimeout(livePollTimer);
+  livePollTimer = setTimeout(async () => {
+    if (!document.hidden) {
+      await pollLive();
+    } else {
+      // Tab hidden: hold at max backoff instead of hammering the API.
+      pollDelayMs = POLL_MAX_MS;
+    }
+    schedulePoll();
+  }, pollDelayMs);
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && pollDelayMs > POLL_BASE_MS) {
+    // Returning to the tab: snap back to fast polling once.
+    pollDelayMs = POLL_BASE_MS;
+    pollUnchangedStreak = 0;
+    lastPollSig = "";
+    schedulePoll();
+  }
+});
+
 // Default: Live ON, Demo stopped
 setLiveUI(true);
 setDemoUI(false);
@@ -695,4 +735,4 @@ refresh().catch((e) => {
   console.error(e);
 });
 
-livePollTimer = setInterval(pollLive, 600);
+schedulePoll();

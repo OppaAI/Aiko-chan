@@ -74,7 +74,7 @@ _PASSTHROUGH_NODE_FIELDS = (
     "position", "notes", "label", "disabled", "pinned_data", "color",
     "run_if", "when", "loop_to", "loop_condition", "max_visits", "interrupt",
     "timeout_seconds", "max_retries", "retry_backoff_seconds", "fallback_to",
-    "needs_approval",
+    "needs_approval", "attached_to",
 )
 
 # Populate the registry (toolkit @tool decorators + shared workflow nodes +

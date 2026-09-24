@@ -3,11 +3,11 @@
    the LTM graph nodes use a distinct neural-valence scheme that other studios
    don't share, so it stays scoped to this file. */
 :root {
-  --neg: #3de0ff;
-  --pos: #f0c14a;
-  --neutral: #8a9bb8;
-  --entity: #c9a0ff;
-  --episode: #51d4c8;
+  --neg: #385c70;
+  --pos: #796a3c;
+  --neutral: #646c7a;
+  --entity: #554f7a;
+  --episode: #4a6b70;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
@@ -54,6 +54,18 @@ header h1 {
     radial-gradient(ellipse at 50% 40%, #0c1830 0%, #080812 40%, #050510 75%);
 }
 .canvas-area svg { width: 100%; height: 100%; display: block; }
+
+/* Reference-style overlays: title top-left, stats top-right */
+.graph-title {
+  position: absolute; top: 14px; left: 18px;
+  font-size: 11px; letter-spacing: .22em; font-weight: 600;
+  color: var(--cyan); pointer-events: none;
+}
+.graph-stats {
+  position: absolute; top: 14px; right: 18px;
+  font-size: 10px; letter-spacing: .08em;
+  color: var(--dim); pointer-events: none;
+}
 .details {
   position: absolute; top: 14px; right: 14px; width: 320px; max-height: calc(100% - 28px);
   overflow-y: auto; background: var(--glass); backdrop-filter: blur(14px);
@@ -95,14 +107,18 @@ header h1 {
   opacity: 0.95;
 }
 
-/* Neural pulse animation for active nodes */
-@keyframes neuralPulse {
-  0%, 100% { opacity: 0.12; transform: scale(1); }
-  50% { opacity: 0.28; transform: scale(1.06); }
+/* Layered neural-network column labels */
+.layer-label {
+  fill: var(--dim);
+  font-size: 11px;
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  pointer-events: none;
+  opacity: 0.85;
 }
-.pulse-glow {
-  animation: neuralPulse 3s ease-in-out infinite;
-}
+
+/* Straight connector lines between neurons */
+.edge { pointer-events: none; }
 
 /* Shared STM / LTM / KB studio tabs, styled like Approval Studio filters. */
 .memory-studio-tabs {

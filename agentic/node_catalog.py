@@ -107,6 +107,8 @@ _DOMAIN_TO_CATEGORY = {
     "multi_agent": "multi_agent",
     "graph": "flow",
     "weather": "research",
+    "trigger": "trigger",
+    "ai": "ai",
 }
 
 
@@ -412,14 +414,330 @@ NODE_SPECS: dict[str, dict[str, Any]] = {
         ]),
         "defaults": {"method": "GET", "url": "https://", "max_items": 50},
     },
+
+    # ── studio phase 2: triggers ────────────────────────────────────────────
+    "trigger_chat": {
+        "label": "Chat Trigger", "subtitle": "Chat message", "category": "trigger", "icon": "💬",
+        "summary": "Start the workflow from a chat message (n8n Chat Trigger).",
+        "params": [
+            _p("message", "Message", "textarea", "$prompt",
+               "The incoming message. $prompt is replaced by the run prompt."),
+            _p("from_user", "From", "string", "user"),
+            _p("to_state", "Write state key", "string", "items", advanced=True),
+        ],
+        "defaults": {"message": "$prompt", "from_user": "user", "to_state": "items"},
+    },
+    "trigger_webhook": {
+        "label": "Webhook Trigger", "subtitle": "Webhook", "category": "trigger", "icon": "🔗",
+        "summary": "Start the workflow from an HTTP call. Emits the test payload.",
+        "params": [
+            _p("path", "Path", "string", "/webhook/studio"),
+            _p("method", "Method", "select", "POST", options=["GET", "POST", "PUT", "PATCH", "DELETE"]),
+            _p("payload_json", "Test payload (JSON)", "json", "[{}]",
+               "Items emitted when the workflow runs from the studio."),
+            _p("to_state", "Write state key", "string", "items", advanced=True),
+        ],
+        "defaults": {"path": "/webhook/studio", "method": "POST", "payload_json": "[{}]"},
+    },
+    "trigger_schedule": {
+        "label": "Schedule Trigger", "subtitle": "Cron", "category": "trigger", "icon": "⏰",
+        "summary": "Start the workflow on a cron timetable. Emits one timestamped item.",
+        "params": [
+            _p("cron", "Cron expression", "string", "0 9 * * *",
+               "Minute hour day month weekday, e.g. 0 9 * * * = daily 09:00.", required=True),
+            _p("timezone", "Timezone", "string", "America/Los_Angeles"),
+            _p("to_state", "Write state key", "string", "items", advanced=True),
+        ],
+        "defaults": {"cron": "0 9 * * *", "timezone": "America/Los_Angeles"},
+    },
+
+    # ── studio phase 2: agentic ─────────────────────────────────────────────
+    "ai_agent": {
+        "label": "AI Agent", "subtitle": "Tools Agent", "category": "ai", "icon": "🤖",
+        "summary": "Composite agent: runs the chat model over your prompt with memory and tools (n8n Tools Agent).",
+        "composite": True,
+        "params": _with_stream([
+            _p("prompt", "Prompt", "textarea", "$prompt",
+               "What to ask. $prompt is replaced by the run prompt.", required=True),
+            _p("system_prompt", "System prompt", "textarea", "",
+               "Persona and instructions for the agent."),
+            _p("chat_model_json", "Chat model config", "string", "$result:chat_model",
+               "Usually $result:<chat_model node id> — wire the Chat Model sub-node here."),
+            _p("tools_json", "Tools (JSON list)", "json", "[]",
+               "Tool names the agent may call, e.g. [\"calendar_create\"]."),
+            _p("memory_key", "Memory key", "string", "agent_memory",
+               "GraphState key holding the conversation window."),
+            _p("memory_window", "Memory window", "number", 10, advanced=True),
+            _p("temperature", "Temperature", "number", 0.7, advanced=True),
+            _p("max_tokens", "Max tokens", "number", 1024, advanced=True),
+        ]),
+        "defaults": {"prompt": "$prompt", "chat_model_json": "$result:chat_model",
+                     "tools_json": "[]", "memory_key": "agent_memory"},
+    },
+    "chat_model": {
+        "label": "Chat Model", "subtitle": "Model", "category": "ai", "icon": "🧠",
+        "summary": "Sub-node for the AI Agent: model, temperature, max tokens.",
+        "sub_node": True, "sub_kind": "chat_model",
+        "params": [
+            _p("model", "Model", "select", "ministral-3b",
+               options=["ministral-3b", "qwen2.5-7b", "llama3.1-8b", "gpt-4o-mini"]),
+            _p("temperature", "Temperature", "number", 0.7),
+            _p("max_tokens", "Max tokens", "number", 1024),
+            _p("to_state", "Write state key", "string", "items", advanced=True),
+        ],
+        "defaults": {"model": "ministral-3b", "temperature": 0.7, "max_tokens": 1024},
+    },
+    "memory_buffer": {
+        "label": "Memory", "subtitle": "Buffer", "category": "ai", "icon": "💾",
+        "summary": "Sub-node for the AI Agent: sliding-window buffer over a state key.",
+        "sub_node": True, "sub_kind": "memory",
+        "params": _with_stream([
+            _p("memory_key", "Memory key", "string", "agent_memory", required=True),
+            _p("window_size", "Window size", "number", 10),
+            _p("mode", "Mode", "select", "read_write",
+               options=["read_write", "write", "read"]),
+        ]),
+        "defaults": {"memory_key": "agent_memory", "window_size": 10, "mode": "read_write"},
+    },
+
+    # ── studio phase 2: email ───────────────────────────────────────────────
+    "email_check": {
+        "label": "Email: Check Inbox", "subtitle": "Read email", "category": "social", "icon": "📥",
+        "summary": "Poll the owner's inbox via Aiko's email bridge. One item per new message.",
+        "params": _with_stream([
+            _p("max_results", "Max messages", "number", 5),
+        ]),
+        "defaults": {"max_results": 5},
+    },
+    "email_reply": {
+        "label": "Email: Reply", "subtitle": "Send reply", "category": "social", "icon": "📧",
+        "summary": "Generate replies with the LLM and send them via the email bridge.",
+        "params": _with_stream([
+            _p("report_json", "Batch (JSON)", "string", "$result:email_check",
+               "Usually $result:<email_check node id>, or read from state."),
+        ]),
+        "defaults": {"report_json": "$result:email_check"},
+    },
+    "email_draft": {
+        "label": "Email: Draft", "subtitle": "Compose draft", "category": "social", "icon": "✉️",
+        "summary": "Compose a draft and park it under a state key. Nothing is sent.",
+        "params": _with_stream([
+            _p("to", "To", "string", ""),
+            _p("subject", "Subject", "string", ""),
+            _p("body", "Body", "textarea", "$prompt"),
+            _p("drafts_key", "Drafts state key", "string", "email_drafts", advanced=True),
+        ]),
+        "defaults": {"body": "$prompt", "drafts_key": "email_drafts"},
+    },
+    "gmail_search": {
+        "label": "Gmail: Search", "subtitle": "Not connected", "category": "social", "icon": "🔍",
+        "summary": "Search Gmail messages. No Gmail adapter configured — returns not-connected gracefully.",
+        "params": _with_stream([
+            _p("query", "Query", "string", "is:unread", "Gmail search query."),
+            _p("max_results", "Max messages", "number", 5),
+        ]),
+        "defaults": {"query": "is:unread", "max_results": 5},
+    },
+    "gmail_send": {
+        "label": "Gmail: Send", "subtitle": "Not connected", "category": "social", "icon": "📤",
+        "summary": "Send a Gmail message. No Gmail adapter configured — returns not-connected gracefully.",
+        "params": _with_stream([
+            _p("to", "To", "string", "", required=True),
+            _p("subject", "Subject", "string", ""),
+            _p("body", "Body", "textarea", "$prompt", required=True),
+        ]),
+        "defaults": {"body": "$prompt"},
+    },
+    "gmail_draft": {
+        "label": "Gmail: Draft", "subtitle": "Compose draft", "category": "social", "icon": "📝",
+        "summary": "Compose a Gmail draft and park it under a state key. Nothing is sent.",
+        "params": _with_stream([
+            _p("to", "To", "string", ""),
+            _p("subject", "Subject", "string", ""),
+            _p("body", "Body", "textarea", "$prompt"),
+            _p("drafts_key", "Drafts state key", "string", "gmail_drafts", advanced=True),
+        ]),
+        "defaults": {"body": "$prompt", "drafts_key": "gmail_drafts"},
+    },
+
+    # ── studio phase 2: social ──────────────────────────────────────────────
+    "threads_post": {
+        "label": "Threads: Post", "subtitle": "Post", "category": "social", "icon": "@",
+        "summary": "Post text (and an optional image) to Threads via the social bridge.",
+        "params": _with_stream([
+            _p("text", "Text", "textarea", "$prompt", required=True),
+            _p("image_path", "Image path", "string", "", "Workspace-relative image, optional."),
+        ]),
+        "defaults": {"text": "$prompt"},
+    },
+    "instagram_post": {
+        "label": "Instagram: Post", "subtitle": "Not connected", "category": "social", "icon": "📸",
+        "summary": "Post to Instagram. No backend configured — returns not-connected gracefully.",
+        "params": _with_stream([
+            _p("caption", "Caption", "textarea", "$prompt"),
+            _p("image_path", "Image path", "string", ""),
+        ]),
+        "defaults": {"caption": "$prompt"},
+    },
+    "messenger_send": {
+        "label": "Messenger: Send", "subtitle": "Not connected", "category": "social", "icon": "💭",
+        "summary": "Send a Messenger message. No backend configured — returns not-connected gracefully.",
+        "params": _with_stream([
+            _p("recipient", "Recipient", "string", ""),
+            _p("message", "Message", "textarea", "$prompt", required=True),
+        ]),
+        "defaults": {"message": "$prompt"},
+    },
+    "social_read": {
+        "label": "Social: Read", "subtitle": "Not connected", "category": "social", "icon": "📡",
+        "summary": "Read recent social mentions. No read backend configured — returns not-connected gracefully.",
+        "params": _with_stream([
+            _p("services", "Services", "string", "threads", "Comma-separated, e.g. threads,mastodon."),
+            _p("max_results", "Max results", "number", 10),
+        ]),
+        "defaults": {"services": "threads", "max_results": 10},
+    },
+    "instagram_read": {
+        "label": "Instagram: Read", "subtitle": "Not connected", "category": "social", "icon": "📷",
+        "summary": "Read recent Instagram posts or mentions. No backend configured — returns not-connected gracefully.",
+        "params": _with_stream([
+            _p("max_results", "Max results", "number", 10),
+        ]),
+        "defaults": {"max_results": 10},
+    },
+    "threads_read": {
+        "label": "Threads: Read", "subtitle": "Not connected", "category": "social", "icon": "🧵",
+        "summary": "Read recent Threads posts or mentions. No backend configured — returns not-connected gracefully.",
+        "params": _with_stream([
+            _p("max_results", "Max results", "number", 10),
+        ]),
+        "defaults": {"max_results": 10},
+    },
+    "messenger_read": {
+        "label": "Messenger: Read", "subtitle": "Not connected", "category": "social", "icon": "💬",
+        "summary": "Read recent Messenger messages. No backend configured — returns not-connected gracefully.",
+        "params": _with_stream([
+            _p("max_results", "Max results", "number", 10),
+        ]),
+        "defaults": {"max_results": 10},
+    },
+    "whatsapp_send": {
+        "label": "WhatsApp: Send", "subtitle": "Not connected", "category": "social", "icon": "📱",
+        "summary": "Send a WhatsApp message. No backend configured — returns not-connected gracefully.",
+        "params": _with_stream([
+            _p("recipient", "Recipient", "string", "", "Phone number or chat id."),
+            _p("message", "Message", "textarea", "$prompt", required=True),
+        ]),
+        "defaults": {"message": "$prompt"},
+    },
+    "telegram_send": {
+        "label": "Telegram: Send", "subtitle": "Not connected", "category": "social", "icon": "✈️",
+        "summary": "Send a Telegram message. No backend configured — returns not-connected gracefully.",
+        "params": _with_stream([
+            _p("chat_id", "Chat id", "string", ""),
+            _p("message", "Message", "textarea", "$prompt", required=True),
+        ]),
+        "defaults": {"message": "$prompt"},
+    },
+
+    # ── studio phase 2: utilities ───────────────────────────────────────────
+    "calendar_create": {
+        "label": "Calendar: Create Event", "subtitle": "Not connected", "category": "scheduling", "icon": "📅",
+        "summary": "Create a Google Calendar event. No backend configured — returns not-connected gracefully.",
+        "params": _with_stream([
+            _p("title", "Title", "string", "$prompt", required=True),
+            _p("start", "Start", "string", "", "ISO datetime, e.g. 2026-09-24T09:00:00."),
+            _p("end", "End", "string", "", "ISO datetime."),
+            _p("description", "Description", "textarea", ""),
+        ]),
+        "defaults": {"title": "$prompt"},
+    },
+    "calendar_list": {
+        "label": "Calendar: List Events", "subtitle": "Not connected", "category": "scheduling", "icon": "🗓",
+        "summary": "List upcoming Google Calendar events. No backend configured — returns not-connected gracefully.",
+        "params": _with_stream([
+            _p("max_results", "Max events", "number", 10),
+            _p("time_min", "From", "string", "", "ISO datetime; empty = now."),
+        ]),
+        "defaults": {"max_results": 10},
+    },
+    "reminder": {
+        "label": "Reminder", "subtitle": "Schedule", "category": "scheduling", "icon": "⏰",
+        "summary": "Schedule a local reminder (title + message at a time of day, optionally repeating).",
+        "params": _with_stream([
+            _p("title", "Title", "string", "$prompt", required=True),
+            _p("message", "Message", "textarea", ""),
+            _p("time_of_day", "Time of day", "string", "09:00", "HH:MM, 24h."),
+            _p("repeat", "Repeat", "select", "once", options=["once", "daily", "weekly"]),
+        ]),
+        "defaults": {"title": "$prompt", "time_of_day": "09:00", "repeat": "once"},
+    },
+    "tool_router": {
+        "label": "Tool Router", "subtitle": "Route", "category": "flow", "icon": "🔀",
+        "summary": "Send items down the branch whose keyword (or /regex/) matches the input text. First match wins; otherwise the default branch.",
+        "params": _with_stream([
+            _p("input_text", "Input text", "textarea", "$prompt", "Text to match routes against."),
+            _p("routes_json", "Routes (JSON)", "textarea",
+               '[{"name": "social", "match": "threads"}, {"name": "email", "match": "email"}]',
+               'List of {"name", "match"}; match is a keyword or /regex/.'),
+            _p("default_route", "Default route", "string", "default"),
+            _p("case_sensitive", "Case sensitive", "boolean", False, advanced=True),
+        ]),
+        "defaults": {
+            "input_text": "$prompt",
+            "routes_json": '[{"name": "social", "match": "threads"}, {"name": "email", "match": "email"}]',
+            "default_route": "default",
+        },
+    },
+    "rss_read": {
+        "label": "RSS Reader", "subtitle": "Feed", "category": "research", "icon": "📰",
+        "summary": "Fetch an RSS/Atom feed (stdlib only). One item per entry.",
+        "params": _with_stream([
+            _p("url", "Feed URL", "string", "https://feeds.bbci.co.uk/news/rss.xml", required=True),
+            _p("max_items", "Max entries", "number", 20),
+        ]),
+        "defaults": {"url": "https://feeds.bbci.co.uk/news/rss.xml", "max_items": 20},
+    },
+    "file_write": {
+        "label": "File: Write", "subtitle": "Write file", "category": "io", "icon": "📝",
+        "summary": "Write or append a file under Aiko's workspace (jailed, no traversal).",
+        "params": _with_stream([
+            _p("path", "Path", "string", "notes/draft.txt",
+               "Workspace-relative. Parent folders are created.", required=True),
+            _p("content", "Content", "textarea", "$prompt"),
+            _p("mode", "Mode", "select", "write", options=["write", "append"]),
+        ]),
+        "defaults": {"path": "notes/draft.txt", "content": "$prompt", "mode": "write"},
+    },
+    "file_read": {
+        "label": "File: Read", "subtitle": "Read file", "category": "io", "icon": "📖",
+        "summary": "Read a file under Aiko's workspace (jailed, no traversal). Pairs with File: Write.",
+        "params": _with_stream([
+            _p("path", "Path", "string", "notes/draft.txt", "Workspace-relative.", required=True),
+            _p("max_chars", "Max chars", "number", 20000, advanced=True),
+        ]),
+        "defaults": {"path": "notes/draft.txt", "max_chars": 20000},
+    },
+    "notify_user": {
+        "label": "Notify", "subtitle": "Alert owner", "category": "everyday", "icon": "🔔",
+        "summary": "Surface a notification to the owner. Best-effort email delivery; the item is always emitted.",
+        "params": _with_stream([
+            _p("title", "Title", "string", "Aiko notification"),
+            _p("message", "Message", "textarea", "$prompt", required=True),
+            _p("channel", "Channel", "select", "app", options=["app", "email"]),
+        ]),
+        "defaults": {"title": "Aiko notification", "message": "$prompt", "channel": "app"},
+    },
 }
 
 # Nodes worth pinning to the top of the palette — the ones a new workflow
 # almost always starts from.
 FEATURED = (
-    "trigger_manual", "http_request", "if_condition", "switch_route",
-    "filter_items", "set_fields", "merge_items", "split_in_batches",
-    "aggregate_items", "items_to_text", "synthesize_report", "write_report",
+    "trigger_manual", "trigger_chat", "trigger_schedule", "ai_agent", "chat_model",
+    "memory_buffer", "compose_response", "email_check", "email_reply",
+    "http_request", "if_condition", "switch_route", "tool_router", "filter_items",
+    "set_fields", "merge_items", "rss_read", "notify_user", "threads_post",
+    "gmail_search", "reminder", "file_read", "file_write",
 )
 
 
@@ -502,7 +820,8 @@ def node_entry(name: str, spec: Any = None) -> dict[str, Any]:
         "defaults": dict(curated.get("defaults") or {}),
         "curated": True,
     }
-    for optional in ("outputs", "loop_hint", "decorative"):
+    for optional in ("outputs", "loop_hint", "decorative", "composite",
+                       "sub_node", "sub_kind", "subtitle"):
         if optional in curated:
             entry[optional] = curated[optional]
     if spec is not None:

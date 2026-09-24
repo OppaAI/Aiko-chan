@@ -1,20 +1,11 @@
+/* Chrome colors come from shared/css/studio-theme.css (single cross-studio
+   theme). Only n8n-canvas-specific tokens stay local. */
 :root {
-    --bg: #0a0a0f;
-    --bg2: #0e0e17;
-    --border: #1e1428;
-    --pink: #c651a8;
-    --purple: #a888e8;
-    --mauve: #d8bcff;
-    --cyan: #51d4c8;
-    --amber: #e8a13a;
-    --green: #8fd694;
-    --dim: #4a3a6a;
-    --dimmer: #2a1a4a;
-    --text: #cdbfe6;
-    --glass-bg: rgba(24, 16, 36, 0.62);
-    --glass-border: rgba(200, 168, 240, 0.16);
-    --glass-highlight: rgba(255, 255, 255, 0.06);
-    --font-ui: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+    --n8n-card: #15151d;
+    --n8n-card-border: #2a2a3a;
+    --n8n-green: #7dd87d;
+    --n8n-red: #e26d6d;
+    --n8n-sub: #8a8aa3;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -391,6 +382,9 @@ pre.out {
     display: flex; align-items: center; justify-content: center;
     padding: 32px;
 }
+/* The UA [hidden]{display:none} loses to the display:flex above (author beats
+ * UA), which left the template modal permanently visible over the canvas. */
+.modal[hidden] { display: none; }
 .modal-card {
     width: min(960px, 100%); max-height: 84vh; overflow-y: auto;
     background: var(--bg2);
@@ -420,3 +414,178 @@ pre.out {
 .template-card .tpl-name { font-size: 14px; color: var(--text); margin: 5px 0 6px; font-weight: 500; }
 .template-card .tpl-desc { font-size: 11.5px; color: var(--dim); line-height: 1.5; }
 .template-card .tpl-meta { font-size: 10px; color: var(--dim); margin-top: 9px; font-family: monospace; }
+
+/* ── animated data flow on edges ─────────────────────────────────────── */
+.edge-line.edge-flow { animation: edge-flow 1.15s linear infinite; }
+.edge-line.edge-flow.edge-depends,
+.edge-line.edge-flow.edge-fallback { stroke-dasharray: 6 6; }
+@keyframes edge-flow { to { stroke-dashoffset: -12; } }
+
+/* ── gears ─────────────────────────────────────────────────────────────── */
+.gear-static { color: var(--dim); opacity: 0.85; pointer-events: none; }
+.run-gear { color: var(--cyan); pointer-events: none; }
+.node-group.is-running .gear-static { display: none; }
+.gear-spin {
+    animation: gear-spin 1.4s linear infinite;
+    transform-box: fill-box; transform-origin: center;
+}
+@keyframes gear-spin { to { transform: rotate(360deg); } }
+
+/* ── node icon badge / run dot / sticky selection ──────────────────────── */
+.node-icon-badge { pointer-events: none; }
+.node-icon-text {
+    font-family: var(--font-ui); font-size: 12px; font-weight: 600;
+    text-anchor: middle; dominant-baseline: central; pointer-events: none;
+}
+.run-dot { pointer-events: none; }
+.sticky-card.selected {
+    stroke: var(--purple); stroke-width: 2;
+    filter: drop-shadow(0 0 8px rgba(168,136,232,0.3));
+}
+
+/* flow toggle active state */
+.btn.btn-active { border-color: var(--cyan); color: var(--cyan); }
+
+@media (prefers-reduced-motion: reduce) {
+    .edge-line.edge-flow, .gear-spin { animation: none; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PHASE 2 — n8n visual language
+   ═══════════════════════════════════════════════════════════════════════════ */
+:root {
+    --n8n-card: #1c1c28;
+    --n8n-card-border: #34344a;
+    --n8n-dot: #2b2b40;
+    --n8n-green: #31d47d;
+    --n8n-red: #ff5c5c;
+    --n8n-orange: #ff6d5a;
+    --n8n-sub: #8b8ba3;
+}
+
+/* node card */
+.node-card { fill: var(--n8n-card); stroke: var(--n8n-card-border); }
+.node-title {
+    font-family: var(--font-ui); font-size: 12.5px; font-weight: 700;
+    fill: #ffffff; pointer-events: none;
+}
+.node-subtitle {
+    font-family: var(--font-ui); font-size: 10px; font-weight: 400;
+    fill: var(--n8n-sub); pointer-events: none;
+}
+.node-top-accent { pointer-events: none; }
+.node-icon-square { pointer-events: none; }
+.node-icon-glyph {
+    font-family: var(--font-ui); font-size: 14px; font-weight: 700;
+    fill: #ffffff; text-anchor: middle; dominant-baseline: central;
+    pointer-events: none;
+}
+.trigger-badge { pointer-events: none; }
+.node-card.disabled { opacity: 0.45; }
+.node-group.is-running .node-card { animation: node-pulse 1.1s ease-in-out infinite; }
+@keyframes node-pulse {
+    0%, 100% { stroke: var(--n8n-card-border); }
+    50% { stroke: var(--cyan); }
+}
+
+/* attached sub-nodes (AI Agent: Chat Model / Memory / Tool) */
+.sub-card { fill: #20202f; stroke: #3a3a52; stroke-dasharray: 0; }
+.sub-label {
+    font-family: var(--font-ui); font-size: 11px; font-weight: 600;
+    fill: #d7d7e6; pointer-events: none;
+}
+.sub-diamond { fill: var(--n8n-card); stroke: var(--n8n-sub); stroke-width: 1.5; pointer-events: none; }
+.edge-attached {
+    fill: none; stroke: #55556e; stroke-width: 1.5;
+    stroke-dasharray: 5 4; stroke-linecap: round;
+}
+
+/* executed edges: green + item-count pill; flow animates only here */
+.edge-executed { stroke: var(--n8n-green); stroke-width: 2; }
+.edge-count rect { fill: var(--n8n-green); rx: 8; }
+.edge-count text {
+    font-family: var(--font-ui); font-size: 9px; font-weight: 700;
+    fill: #0a0a0f; text-anchor: middle; dominant-baseline: central;
+    pointer-events: none;
+}
+
+/* hover "+" to insert a node on an edge */
+.edge-insert { cursor: pointer; }
+.edge-insert circle { fill: #ffffff; stroke: #c9c9d6; stroke-width: 1.5; }
+.edge-insert text {
+    font-family: var(--font-ui); font-size: 14px; font-weight: 700;
+    fill: #33333f; text-anchor: middle; dominant-baseline: central;
+    pointer-events: none;
+}
+
+/* run badges: n8n check / failure overlays */
+.run-badge-ok circle { fill: var(--n8n-green); }
+.run-badge-fail circle { fill: var(--n8n-red); }
+.run-badge-ok text, .run-badge-fail text {
+    font-family: var(--font-ui); font-size: 11px; font-weight: 800;
+    fill: #ffffff; text-anchor: middle; dominant-baseline: central;
+    pointer-events: none;
+}
+
+/* canvas "+" button */
+.canvas-add-btn {
+    position: absolute; top: 14px; left: 14px;
+    width: 34px; height: 34px; border-radius: 50%;
+    background: var(--glass-bg); border: 1px solid var(--glass-border);
+    color: var(--text); font-size: 20px; line-height: 1; cursor: pointer;
+    backdrop-filter: blur(8px); transition: all 0.15s; z-index: 5;
+}
+.canvas-add-btn:hover { border-color: var(--purple); color: var(--purple); }
+
+/* searchable canvas node picker */
+.node-picker {
+    position: absolute; width: 290px; max-height: 380px;
+    background: #16161f; border: 1px solid var(--n8n-card-border);
+    border-radius: 10px; box-shadow: 0 16px 48px rgba(0,0,0,0.6);
+    z-index: 60; display: flex; flex-direction: column; overflow: hidden;
+    animation: fade-slide-in 0.15s ease-out;
+}
+.node-picker input {
+    margin: 10px; padding: 7px 10px;
+    background: rgba(255,255,255,0.05); border: 1px solid var(--n8n-card-border);
+    border-radius: 6px; color: #fff; font-size: 12px; font-family: var(--font-ui);
+}
+.node-picker input:focus { outline: none; border-color: var(--purple); }
+.node-picker-list { overflow-y: auto; padding: 0 6px 8px; }
+.node-picker-list .cat-head { margin: 8px 4px 3px; }
+.picker-item {
+    display: flex; align-items: center; gap: 9px; width: 100%;
+    padding: 7px 8px; border-radius: 6px; cursor: pointer;
+    background: transparent; border: none; color: inherit;
+    font-family: var(--font-ui); text-align: left;
+}
+.picker-item:hover { background: rgba(168,136,232,0.12); }
+.picker-item .chip-icon {
+    width: 24px; height: 24px; flex: 0 0 24px; border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 700; color: #fff;
+}
+.picker-item .chip-name { font-size: 12px; color: #eeeef6; font-weight: 600; }
+.picker-item .chip-desc {
+    font-size: 10px; color: var(--n8n-sub);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* details panel: n8n-style node header */
+.node-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.node-head .nh-icon {
+    width: 34px; height: 34px; flex: 0 0 34px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px; font-weight: 700; color: #fff;
+}
+.node-head .nh-title { font-size: 13px; font-weight: 700; color: #fff; }
+.node-head .nh-sub { font-size: 10.5px; color: var(--n8n-sub); margin-top: 1px; }
+.node-head .nh-tool { font-size: 9.5px; color: var(--dim); font-family: monospace; margin-top: 1px; }
+.details-panel h3 .node-head, .details-panel h3 .nh-title,
+.details-panel h3 .nh-sub, .details-panel h3 .nh-tool {
+    text-transform: none; letter-spacing: normal;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .node-group.is-running .node-card, .node-picker { animation: none; }
+}

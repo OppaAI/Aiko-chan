@@ -22,7 +22,9 @@ bind_login_session(app)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
+SHARED_DIR = Path(__file__).resolve().parents[2] / "shared"
 app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="fly-frontend")
+app.mount("/shared", StaticFiles(directory=str(SHARED_DIR), html=True), name="fly-shared")
 
 _CATALOG_LAYOUT: list[dict] | None = None
 _CATALOG_SUMMARY: dict | None = None
@@ -301,6 +303,100 @@ def fly_catalog(request: Request, limit: int = Query(50000, ge=1, le=250000), of
 def fly_catalog_summary(request: Request) -> JSONResponse:
     _, summary = _load_catalog()
     return JSONResponse({"user_id": _uid(request), "summary": summary}, headers={"Cache-Control": "no-store"})
+
+
+# ── Lobe atlas: lightweight brain-like 3D view (no connectome parse) ─────────
+# Lobe volumes are anatomical-inspired (dorsal-oblique fly brain):
+# paired optic lobes flank the central brain; antennal lobe sits anterior;
+# mushroom body dorsal-posterior; central complex + lateral horns central;
+# giant-fiber/descending neurons form the stalk down to the VNC.
+_LOBES: list[dict] = [
+    {"id": "optic_l", "name": "Optic lobe (L)", "center": (215, 300, 0), "radii": (145, 175, 125),
+     "color": "#48d8ff", "groups": ["sensory", "T4", "T5", "Tm", "Mi", "C", "L"], "samples": 500},
+    {"id": "optic_r", "name": "Optic lobe (R)", "center": (785, 300, 0), "radii": (145, 175, 125),
+     "color": "#48d8ff", "groups": ["sensory", "T4", "T5", "Tm", "Mi", "C", "L"], "samples": 500},
+    {"id": "al", "name": "Antennal lobe", "center": (500, 445, 60), "radii": (100, 75, 85),
+     "color": "#4ec9b0", "groups": ["AL"], "samples": 250},
+    {"id": "lh_l", "name": "Lateral horn (L)", "center": (360, 305, 30), "radii": (65, 60, 60),
+     "color": "#ffbe62", "groups": ["LH", "LHN"], "samples": 150},
+    {"id": "lh_r", "name": "Lateral horn (R)", "center": (640, 305, 30), "radii": (65, 60, 60),
+     "color": "#ffbe62", "groups": ["LH", "LHN"], "samples": 150},
+    {"id": "cx", "name": "Central complex", "center": (500, 300, 50), "radii": (85, 80, 75),
+     "color": "#ff78b7", "groups": ["CX", "EPG", "PEN", "PFN"], "samples": 200},
+    {"id": "mb", "name": "Mushroom body", "center": (500, 320, -95), "radii": (165, 120, 105),
+     "color": "#a88bff", "groups": ["MB", "MBON", "KC", "DAN", "APL"], "samples": 450},
+    {"id": "desc", "name": "GF / Descending", "center": (500, 150, -40), "radii": (95, 70, 85),
+     "color": "#ff6b6b", "groups": ["GF", "DN", "DNp", "DNg"], "samples": 250},
+    {"id": "vnc", "name": "Ventral nerve cord", "center": (500, 45, -70), "radii": (120, 55, 95),
+     "color": "#6bcbff", "groups": ["VNC", "output", "unknown"], "samples": 250},
+]
+_LOBE_SEED = 20260923
+# Groups split across paired lobes (mirrors the old lateral placement rule).
+_LOBE_LATERAL: dict[str, tuple[int, int]] = {
+    "sensory": (0, 1), "T4": (0, 1), "T5": (0, 1), "Tm": (0, 1),
+    "Mi": (0, 1), "C": (0, 1), "L": (0, 1), "LH": (3, 4), "LHN": (3, 4),
+}
+
+
+def _lobe_atlas() -> dict:
+    """Procedural lobe atlas: seeded neuron samples inside lobe ellipsoids.
+
+    No connectome JSON is parsed — a few thousand deterministic points stand
+    in for the full catalog, which is what makes the old view a RAM hog.
+    """
+    import math
+    import random
+
+    rng = random.Random(_LOBE_SEED)
+    group_lobe: dict[str, int] = {}
+    for idx, lobe in enumerate(_LOBES):
+        for g in lobe["groups"]:
+            if g not in _LOBE_LATERAL:
+                group_lobe[g] = idx
+    neurons: list[list] = []
+    for idx, lobe in enumerate(_LOBES):
+        cx, cy, cz = lobe["center"]
+        rx, ry, rz = lobe["radii"]
+        for _ in range(lobe["samples"]):
+            # Uniform volume sample: gaussian direction × cbrt radius.
+            dx, dy, dz = rng.gauss(0, 1), rng.gauss(0, 1), rng.gauss(0, 1)
+            norm = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
+            r = rng.random() ** (1 / 3)
+            neurons.append([
+                idx,
+                round(cx + dx / norm * r * rx, 1),
+                round(cy + dy / norm * r * ry, 1),
+                round(cz + dz / norm * r * rz, 1),
+            ])
+    return {
+        "seed": _LOBE_SEED,
+        "lobes": [
+            {
+                "id": lobe["id"], "name": lobe["name"],
+                "center": list(lobe["center"]), "radii": list(lobe["radii"]),
+                "color": lobe["color"], "groups": lobe["groups"],
+                "samples": lobe["samples"],
+            }
+            for lobe in _LOBES
+        ],
+        "group_lobe": group_lobe,
+        "lateral": _LOBE_LATERAL,
+        "neurons": neurons,
+        "neuron_count": len(neurons),
+    }
+
+
+@app.get("/api/lobes")
+def fly_lobes(request: Request) -> JSONResponse:
+    """Lightweight lobe atlas for the 3D brain view.
+
+    Procedurally generated — never parses the ~489 MB connectome catalog.
+    The frontend maps live trace nodes onto lobes via the group_lobe table.
+    """
+    return JSONResponse(
+        {"user_id": _uid(request), "atlas": _lobe_atlas()},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/body")

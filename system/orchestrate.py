@@ -79,7 +79,7 @@ import time
 
 from system.bioclock import local_now
 from system.log import get_logger
-from system.turngate import AIKO_BUSY_LOCK
+from system.turngate import acquire_busy, holder_desc, release_busy
 from system.wakeup import AikoWakeup
 from system import brain_trace as _brain_trace
 from agentic.toolkit.websearch import web_search_context
@@ -1531,7 +1531,11 @@ def run_session(ui, args) -> None:
         # get_input()/get_voice_input() only set the current_user_id
         # contextvar; AikoMemorize needs the explicit switch_user() call to
         # actually follow it (see memorize.py get_user_id()/switch_user()).
-        AIKO_BUSY_LOCK.acquire()
+        # The gate has a timeout (system/turngate.py): a wedged holder can no
+        # longer block turns forever — the turn is skipped loudly instead.
+        if not acquire_busy(owner="interactive-turn"):
+            log.error("turn skipped: busy gate timeout — %s", holder_desc())
+            continue
 
         from system.userspace import current_user_id
         turn_uid = current_user_id()
@@ -1794,4 +1798,4 @@ def run_session(ui, args) -> None:
             session_active.clear()
             proactive.touch()
             current_latency = None
-            AIKO_BUSY_LOCK.release()
+            release_busy()

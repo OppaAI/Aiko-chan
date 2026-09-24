@@ -94,7 +94,7 @@ import fcntl
 from system import bioclock
 from system.config import env_int
 from system.log import get_logger
-from system.turngate import AIKO_BUSY_LOCK
+from system.turngate import acquire_busy, holder_desc, release_busy
 from system.userspace import (
     all_known_user_ids, current_user_id, reset_current_user_id,
     set_current_user_id, user_state_path, user_workspace_root,
@@ -1748,7 +1748,12 @@ class ScheduleRunner:
                 key=lambda x: x[0],
             ) if self._owner_promoted.is_set() else []
             for _target, name in system_due:
-                with AIKO_BUSY_LOCK:
+                if not acquire_busy(owner=f"scheduler:system-{name}"):
+                    log.error(
+                        "Scheduler: skipping system job %s — %s",
+                        name, holder_desc())
+                    continue
+                try:
                     self.set_user(self._owner_user_id)
                     # _run() executes on its own daemon thread, which starts
                     # with a fresh contextvars context — current_user_id()
@@ -1772,6 +1777,8 @@ class ScheduleRunner:
                         log.exception("Scheduler: system job %s skipped", name)
                     finally:
                         reset_current_user_id(uid_token)
+                finally:
+                    release_busy()
 
             # ── fire overdue jobs/graphs for EVERY user ───────────────────────
             # Not just self._user_id: a scheduler bound to whoever last
@@ -1785,7 +1792,12 @@ class ScheduleRunner:
                 due_graphs    = self._due_schedule_graphs(uid)
                 if not due_user_jobs and not due_graphs:
                     continue
-                with AIKO_BUSY_LOCK:
+                if not acquire_busy(owner=f"scheduler:user-{uid}"):
+                    log.error(
+                        "Scheduler: skipping jobs for user %s — %s",
+                        uid, holder_desc())
+                    continue
+                try:
                     self.set_user(uid)
                     uid_token = set_current_user_id(uid)
                     try:
@@ -1802,6 +1814,8 @@ class ScheduleRunner:
                         log.exception("Scheduler: user %s tick skipped", uid)
                     finally:
                         reset_current_user_id(uid_token)
+                finally:
+                    release_busy()
 
             # ── sleep until soonest next target across all users ──────────────
             candidates = [self._next_daily, self._next_monthly]
@@ -1861,7 +1875,12 @@ class ScheduleRunner:
                     date = self._catchup_dates.pop(0)
                 except IndexError:
                     break
-                with AIKO_BUSY_LOCK:
+                if not acquire_busy(owner="scheduler:daily-catchup"):
+                    log.error(
+                        "Scheduler: skipping daily catch-up — %s",
+                        holder_desc())
+                    return
+                try:
                     uid = self._resolve_owner()
                     if not uid or uid == "guest":
                         return
@@ -1873,6 +1892,8 @@ class ScheduleRunner:
                         self._run_daily_reflect_and_dream(for_date=date)
                     finally:
                         reset_current_user_id(token)
+                finally:
+                    release_busy()
         finally:
             self._catchup_lock.release()
 

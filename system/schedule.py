@@ -5,7 +5,7 @@ Persistent scheduled jobs, reminders, and wake-up alarms for Aiko.
 
 A scheduled job is a small local record with:
   - time_of_day: local wall-clock time in HH:MM format
-  - frequency: once, interval, hourly, daily, weekdays, weekly, biweekly, monthly, or custom_weekdays
+  - frequency: once, interval, hourly, hourly_window, daily, weekdays, weekly, biweekly, monthly, or custom_weekdays
   - days_of_week: optional weekday names for custom_weekdays/weekly jobs
   - relative_days: optional integer day offset for phrases like tomorrow or the day after tomorrow
   - task: what Aiko should do or say when the job fires
@@ -177,6 +177,16 @@ def schedule_graphs_path(user_id: str | None = None) -> Path:
 # System job timing — env overridable, not user-modifiable via schedule.json
 DAILY_JOB_HOUR   = env_int("DAILY_JOB_HOUR",   0)
 DAILY_JOB_MINUTE = env_int("DAILY_JOB_MINUTE", 0)
+# Phase 3: the owner email poll is env-tunable so a headless box can quiet
+# it without a code change. Default stays at 10 min (it is the owner's
+# interactive bridge).
+OWNER_EMAIL_POLL_S = env_int("AIKO_OWNER_EMAIL_POLL_S", 600)
+# Aurora forecast runs hourly inside the evening window only — the owner
+# asked for 18:00 -> 01:00 (aurora doesn't matter in the morning, and after
+# 1am with low kp they'll likely be asleep).
+AURORA_WINDOW_START = "18:00"
+AURORA_WINDOW_END = "01:00"  # inclusive: last run at 01:05
+AURORA_WINDOW_MINUTE = 5  # :05 past the hour, off the top-of-hour herd
 MONTHLY_JOB_HOUR   = env_int("MONTHLY_JOB_HOUR",   0)
 MONTHLY_JOB_MINUTE = env_int("MONTHLY_JOB_MINUTE", 5)
 
@@ -190,7 +200,7 @@ CATCHUP_MAX_LOOKBACK_DAYS = env_int("CATCHUP_MAX_LOOKBACK_DAYS", 7)
 # It is intentionally separate from the editable task schedule directory.
 MONTHLY_CATCHUP_STATE_PATH_NAME = "monthly_consolidate_state.json"
 
-FREQUENCIES = {"once", "interval", "hourly", "daily", "weekdays", "weekly", "biweekly", "monthly", "custom_weekdays"}
+FREQUENCIES = {"once", "interval", "hourly", "hourly_window", "daily", "weekdays", "weekly", "biweekly", "monthly", "custom_weekdays"}
 RELATIVE_DAY_ALIASES = {
     "today": 0,
     "tonight": 0,
@@ -377,6 +387,37 @@ def _write_last_consolidated_month(month_str: str, user_id: str | None = None) -
     tmp.replace(path)
 
 
+def _next_hourly_window(now: datetime, time_of_day: str, window_start: str, window_end: str) -> datetime:
+    """Next hourly slot at the minute from time_of_day inside [window_start, window_end].
+
+    Window hours are inclusive on both ends and may wrap midnight ("18:00" ->
+    "01:00" covers 18,19,20,21,22,23,0,1). Returns the first slot strictly
+    after now, scanning today and tomorrow so a post-window now lands on the
+    next evening's first slot.
+    """
+    _, minute = _parse_time_of_day(time_of_day)
+    start_h, _ = _parse_time_of_day(window_start)
+    end_h, _ = _parse_time_of_day(window_end)
+    hours = []
+    h = start_h
+    while True:
+        hours.append(h)
+        if h == end_h:
+            break
+        h = (h + 1) % 24
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    slots = sorted(
+        (midnight + timedelta(days=d)).replace(hour=h, minute=minute)
+        for d in (0, 1)
+        for h in hours
+    )
+    for slot in slots:
+        if slot > now:
+            return slot
+    # Unreachable: tomorrow's window always holds a slot after now.
+    return slots[-1] + timedelta(hours=1)
+
+
 def calculate_next_due(
     time_of_day: str,
     frequency: str = "daily",
@@ -386,6 +427,8 @@ def calculate_next_due(
     anchor_day: int | None = None,
     relative_days: int | str | None = None,
     interval_seconds: int | str | None = None,
+    window_start: str | None = None,
+    window_end: str | None = None,
 ) -> datetime:
     """Calculate the next due datetime for a scheduled job."""
     frequency = (frequency or "daily").lower().strip()
@@ -411,6 +454,8 @@ def calculate_next_due(
         if relative_offset:
             hourly_candidate = candidate
         return hourly_candidate if hourly_candidate > now else hourly_candidate + timedelta(hours=1)
+    if frequency == "hourly_window":
+        return _next_hourly_window(now, time_of_day, window_start or "18:00", window_end or "01:00")
     if frequency == "weekdays":
         return _next_for_weekdays(time_of_day, [0, 1, 2, 3, 4], tz_name)
     if frequency == "custom_weekdays":
@@ -534,6 +579,8 @@ def _schedule_graph_next_due(graph_def: dict, after: datetime | None = None) -> 
         days_of_week=trigger.get("days_of_week"),
         after=after,
         interval_seconds=trigger.get("interval_seconds"),
+        window_start=trigger.get("window_start"),
+        window_end=trigger.get("window_end"),
     )
 
 
@@ -559,8 +606,9 @@ def _default_schedule_graphs(user_id: str | None = None) -> list[dict]:
             "last_ran_at": None,
         },
         {
-            "id": "hourly_aurora_forecast",
-            "trigger": {"time": "00:05", "frequency": "hourly"},
+            "id": "aurora_forecast",
+            "trigger": {"frequency": "hourly_window", "time": "00:05",
+                        "window_start": AURORA_WINDOW_START, "window_end": AURORA_WINDOW_END},
             "graph_id": "aurora_forecast",
             "enabled": True,
             "next_due": "",
@@ -568,7 +616,7 @@ def _default_schedule_graphs(user_id: str | None = None) -> list[dict]:
         },
         {
             "id": "owner_email_poll",
-            "trigger": {"frequency": "interval", "interval_seconds": 600},
+            "trigger": {"frequency": "interval", "interval_seconds": OWNER_EMAIL_POLL_S},
             "graph_id": "owner_email",
             "enabled": True,
             "next_due": "",
@@ -585,6 +633,50 @@ def _default_schedule_graphs(user_id: str | None = None) -> list[dict]:
     ]
 
 
+def _aurora_window_trigger() -> dict:
+    """The owner's aurora schedule: hourly inside the 18:00 -> 01:00 window."""
+    return {"frequency": "hourly_window", "time": "00:05",
+            "window_start": AURORA_WINDOW_START, "window_end": AURORA_WINDOW_END}
+
+
+def _migrate_periodic_triggers(graphs: list[dict], now) -> bool:
+    """Migrate stored periodic triggers to current defaults.
+
+    - aurora_forecast: any non-window trigger (legacy ``hourly``, the
+      short-lived 6 h ``interval`` from the unmerged Phase 3 branch, or
+      anything else) -> the owner's evening window (hourly 18:00 -> 01:00).
+      The legacy ``hourly_aurora_forecast`` job id is normalized too.
+    - owner_email_poll: when AIKO_OWNER_EMAIL_POLL_S is explicitly set in the
+      environment, the stored interval is synced to it (operator override
+      for headless boxes). User-customized intervals are otherwise untouched.
+
+    Returns True when any graph was modified.
+    """
+    changed = False
+    email_override = os.getenv("AIKO_OWNER_EMAIL_POLL_S") is not None
+    for g in graphs:
+        gid = g.get("graph_id")
+        jid = g.get("id")
+        trig = dict(g.get("trigger") or {})
+        if gid == "aurora_forecast" or jid == "hourly_aurora_forecast":
+            if jid == "hourly_aurora_forecast":
+                g["id"] = "aurora_forecast"
+                changed = True
+            if trig.get("frequency") != "hourly_window":
+                g["trigger"] = _aurora_window_trigger()
+                g["next_due"] = _schedule_graph_next_due(g, after=now).isoformat()
+                log.info("Migrated aurora_forecast to hourly %s-%s window.",
+                         AURORA_WINDOW_START, AURORA_WINDOW_END)
+                changed = True
+        elif jid == "owner_email_poll" or gid == "owner_email":
+            if email_override and trig.get("frequency") == "interval" and trig.get("interval_seconds") != OWNER_EMAIL_POLL_S:
+                trig["interval_seconds"] = OWNER_EMAIL_POLL_S
+                g["trigger"] = trig
+                g["next_due"] = _schedule_graph_next_due(g, after=now).isoformat()
+                log.info("Set owner_email_poll interval to %ss from environment.", OWNER_EMAIL_POLL_S)
+                changed = True
+    return changed
+
 def ensure_schedule_graphs(user_id: str | None = None) -> None:
     """Initialize schedule graphs file with defaults if it exists, or create it if missing."""
     path = schedule_graphs_path(user_id=user_id)
@@ -597,27 +689,32 @@ def ensure_schedule_graphs(user_id: str | None = None) -> None:
         changed = False
         cfg = _job_post_social_config(user_id)
         # Seed aurora graph if missing (existing installs)
-        if not any(g.get("id") == "hourly_aurora_forecast" or g.get("graph_id") == "aurora_forecast" for g in graphs):
+        if not any(g.get("id") == "aurora_forecast" or g.get("id") == "hourly_aurora_forecast" or g.get("graph_id") == "aurora_forecast" for g in graphs):
             graphs.append({
-                "id": "hourly_aurora_forecast",
-                "trigger": {"time": "00:05", "frequency": "hourly"},
+                "id": "aurora_forecast",
+                "trigger": {"frequency": "hourly_window", "time": "00:05",
+                            "window_start": AURORA_WINDOW_START, "window_end": AURORA_WINDOW_END},
                 "graph_id": "aurora_forecast",
                 "enabled": True,
                 "next_due": _schedule_graph_next_due(
-                    {"trigger": {"time": "00:05", "frequency": "hourly"}}, after=now
+                    {"trigger": {"frequency": "hourly_window", "time": "00:05",
+                                 "window_start": AURORA_WINDOW_START, "window_end": AURORA_WINDOW_END}}, after=now
                 ).isoformat(),
                 "last_ran_at": None,
             })
+            changed = True
+        # Phase 3 migration: hourly aurora -> 6 h interval, env-tunable polls.
+        if _migrate_periodic_triggers(graphs, now):
             changed = True
         # Seed owner email poll if missing (existing installs)
         if not any(g.get("id") == "owner_email_poll" or g.get("graph_id") == "owner_email" for g in graphs):
             graphs.append({
                 "id": "owner_email_poll",
-                "trigger": {"frequency": "interval", "interval_seconds": 600},
+                "trigger": {"frequency": "interval", "interval_seconds": OWNER_EMAIL_POLL_S},
                 "graph_id": "owner_email",
                 "enabled": True,
                 "next_due": _schedule_graph_next_due(
-                    {"trigger": {"frequency": "interval", "interval_seconds": 600}}, after=now
+                    {"trigger": {"frequency": "interval", "interval_seconds": OWNER_EMAIL_POLL_S}}, after=now
                 ).isoformat(),
                 "last_ran_at": None,
             })
@@ -1463,6 +1560,13 @@ def _next_monthly_consolidate() -> datetime:
                             second=0, microsecond=0)
     return first
 
+LEDGER_PRUNE_INTERVAL_DAYS = 7
+
+
+def _next_ledger_prune() -> datetime:
+    """Next weekly conscience-ledger prune (drops expired unreviewed rows)."""
+    return bioclock.local_now() + timedelta(days=LEDGER_PRUNE_INTERVAL_DAYS)
+
 
 # ── scheduler ─────────────────────────────────────────────────────────────────
 
@@ -1470,9 +1574,10 @@ class ScheduleRunner:
     """
     Single daemon thread that sleeps until the next due event.
 
-    Two hardcoded system jobs are managed internally and never written to
+    Three hardcoded system jobs are managed internally and never written to
     schedule.json:
       - daily_reflect_and_dream   every day at DAILY_JOB_HOUR:DAILY_JOB_MINUTE
+      - ledger_prune              weekly conscience-ledger retention
       - monthly_consolidate       every 1st of month at MONTHLY_JOB_HOUR:MONTHLY_JOB_MINUTE
 
     User reminders and scheduled jobs are read from schedule.json. Jobs with
@@ -1538,6 +1643,7 @@ class ScheduleRunner:
         # calculated once at startup, updated after each fire
         self._next_daily   = _next_daily_reflect_and_dream()
         self._next_monthly = _next_monthly_consolidate()
+        self._next_ledger_prune = bioclock.local_now()
 
         # catch-up state — checked on start(). NOTE: if _owner_user_id is
         # still "guest" at this point (pre-auth boot), the monthly check
@@ -1744,6 +1850,7 @@ class ScheduleRunner:
                 [(t, name) for t, name in [
                     (self._next_daily, "daily"),
                     (self._next_monthly, "monthly"),
+                    (self._next_ledger_prune, "ledger-prune"),
                 ] if t <= now],
                 key=lambda x: x[0],
             ) if self._owner_promoted.is_set() else []
@@ -1767,9 +1874,12 @@ class ScheduleRunner:
                         if name == "daily":
                             self._run_daily_reflect_and_dream()
                             self._next_daily = _next_daily_reflect_and_dream()
-                        else:
+                        elif name == "monthly":
                             self._run_monthly_consolidate()
                             self._next_monthly = _next_monthly_consolidate()
+                        else:
+                            if self._run_ledger_prune():
+                                self._next_ledger_prune = _next_ledger_prune()
                     except Exception:
                         # Transient store failure (e.g. sqlite hiccup on a
                         # network home dir) must not kill the scheduler
@@ -1819,6 +1929,8 @@ class ScheduleRunner:
 
             # ── sleep until soonest next target across all users ──────────────
             candidates = [self._next_daily, self._next_monthly]
+            if self._owner_promoted.is_set():
+                candidates.append(self._next_ledger_prune)
             for uid in all_user_ids():
                 candidates.extend(
                     datetime.fromisoformat(j["next_due"])
@@ -2027,6 +2139,25 @@ class ScheduleRunner:
             _write_last_consolidated_month(now.strftime("%Y-%m"), user_id=self._owner_user_id)
         except Exception as e:
             log.error("monthly_consolidate failed: %s", e)
+
+    def _run_ledger_prune(self) -> bool:
+        """Weekly conscience-ledger maintenance. Not in schedule.json.
+
+        prune() drops unreviewed rows older than LEDGER_RETAIN_DAYS
+        (reviewed rows are kept forever as training data). The method
+        existed but nothing ever called it, so the table grew unbounded.
+        """
+        try:
+            from cognition.conscience.ledger import ledger_for
+            removed = sum(ledger_for(user_id).prune() for user_id in all_user_ids())
+            if removed:
+                log.info("ledger_prune: removed %d expired row(s).", removed)
+            else:
+                log.debug("ledger_prune: nothing expired.")
+            return True
+        except Exception:
+            log.exception("ledger_prune failed")
+            return False
 
     # ── user job runner ───────────────────────────────────────────────────────
 

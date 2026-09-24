@@ -1164,6 +1164,8 @@ def run_webui(args) -> None:
         on_loading=_on_loading,
         on_done=_on_done,
         on_skip=_on_skip,
+        enable_tts=not args.text,
+        enable_asr=not args.no_asr,
     )
     ui.set_boot_result(result)
 

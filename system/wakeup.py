@@ -72,7 +72,10 @@ Flow:
   the scheduler thread and all seeded jobs.
 - Voice pipeline (sequential) — TTS warmup, then think_ref.set_speak(speak) (or None),
   then AikoListen() is constructed (non-fatal). ASR/VAD models load lazily on first
-  mic arm via AikoListen.ensure_ready() — not part of boot.
+  mic arm via AikoListen.ensure_ready() — not part of boot. Under --text /
+  --no-asr the voice steps are skipped at boot (enable_tts/enable_asr=False);
+  the /voice and /listen toggles start them on demand via start_speak() /
+  start_listen().
 - Returns BootResult with all four live subsystem refs.
 
 Failure logging policy — one log line per failure, with traceback + context:
@@ -136,6 +139,41 @@ class BootResult:
 
 BootCallback = Callable[[str], None]                        # Callback for boot progress: takes step key (string)
 
+
+def start_speak() -> "AikoSpeak | None":
+    """Construct + warm up the TTS client (MioTTS HTTP client + health ping).
+
+    Never raises: returns None when the subsystem can't start, mirroring the
+    non-fatal voice boot semantics in AikoWakeup.boot(). Used by boot() and
+    by the /voice toggle for on-demand init when --text skipped TTS at boot.
+    """
+    try:
+        speak = AikoSpeak(silent=True)
+    except Exception:
+        log.exception("[wakeup] AikoSpeak construction failed — Aiko will run without voice output.")
+        return None
+    try:
+        speak.warmup()
+    except Exception:
+        log.exception("[wakeup] TTS warmup failed — Aiko will run without voice output.")
+        return None
+    return speak
+
+
+def start_listen() -> "AikoListen | None":
+    """Construct the ASR listener (models stay lazy until first mic arm).
+
+    Never raises: returns None when the subsystem can't start. Used by
+    boot() and by the /listen toggle for on-demand init when --text or
+    --no-asr skipped ASR at boot.
+    """
+    try:
+        return AikoListen()
+    except Exception:
+        log.exception("[wakeup] AikoListen construction failed — Aiko will run without voice input.")
+        return None
+
+
 # ── wakeup ────────────────────────────────────────────────────────────────────
 
 class AikoWakeup:
@@ -161,6 +199,9 @@ class AikoWakeup:
         on_loading: BootCallback,
         on_done:    BootCallback,
         on_skip:    BootCallback,
+        *,
+        enable_tts: bool = True,
+        enable_asr: bool = True,
     ) -> BootResult:
         """
         Execute full boot sequence and return live subsystem references.
@@ -168,6 +209,10 @@ class AikoWakeup:
         Parallel phase: AikoThink + AikoMemorize boot concurrently.
         Sequential phase: TTS warmup → construct AikoListen (ASR/VAD models
         themselves load lazily on first mic arm, not here).
+
+        enable_tts / enable_asr: set False by --text / --no-asr front ends to
+        skip the voice subsystems at boot. The /voice and /listen toggles
+        start them on demand via start_speak()/start_listen().
         """
         mem_ready_evt  = threading.Event()                           # thread-safe boolean flag for blocking until memory system is ready
 
@@ -311,11 +356,15 @@ class AikoWakeup:
         # inside init_think touches it — safe to construct after the parallel
         # phase instead of before it. Construction itself is non-fatal, same as
         # TTS warmup below — Aiko can run text-only if AikoSpeak() itself blows up.
-        try:                                                                                  # attempt to initiate speaking module (sequentially)
-            speak = AikoSpeak(silent=True)                                                    # load speaking module with internal logging inhibited
-        except Exception:                                                                     # if error,
-            log.exception("[wakeup] AikoSpeak construction failed — Aiko will run without voice output.")  # log failure
-            speak = None                                                                      # set to None to indicate failure
+        # Skipped entirely under --text (enable_tts=False); the /voice toggle
+        # starts it on demand via start_speak().
+        speak: AikoSpeak | None = None
+        if enable_tts:
+            try:                                                                                  # attempt to initiate speaking module (sequentially)
+                speak = AikoSpeak(silent=True)                                                    # load speaking module with internal logging inhibited
+            except Exception:                                                                     # if error,
+                log.exception("[wakeup] AikoSpeak construction failed — Aiko will run without voice output.")  # log failure
+                speak = None                                                                      # set to None to indicate failure
 
         # Wakeup now only bootstraps the live subsystems and hands them to
         # system.schedule's scheduler startup helper.
@@ -336,17 +385,25 @@ class AikoWakeup:
             except Exception:                                                                    # if warmup failed,
                 log.exception("[wakeup] TTS boot failed — Aiko will run without voice output.")  # log failure
                 speak = None                                                                     # set handle to None to indicate error
+        elif not enable_tts:
+            _boot_step('speak_skip')                                                             # report the --text skip in boot progress
+            log.info("[wakeup] TTS skipped at boot (--text); /voice starts it on demand.")
 
         think_ref.set_speak(speak)                                                               # inject speak (may be None if TTS boot failed)
 
         # ASR — construction only; models load lazily on first mic arm via
         # AikoListen.ensure_ready() (see sensory/listen.py). Keeps boot fast
-        # and text-mode RAM low. Non-fatal, same as before.
+        # and text-mode RAM low. Non-fatal, same as before. Skipped entirely
+        # under --text/--no-asr (enable_asr=False); /listen starts it on demand.
         listen: AikoListen | None = None
-        try:
-            listen = AikoListen()
-        except Exception:
-            log.exception("[wakeup] AikoListen construction failed — Aiko will run without voice input.")
+        if enable_asr:
+            try:
+                listen = AikoListen()
+            except Exception:
+                log.exception("[wakeup] AikoListen construction failed — Aiko will run without voice input.")
+        else:
+            _boot_step('listen_skip')                                                            # report the --text/--no-asr skip in boot progress
+            log.info("[wakeup] ASR skipped at boot (--text/--no-asr); /listen starts it on demand.")
 
         return BootResult(                                                                        # all four subsystem references
             think    = think_ref,                                                                 # cognitive core (always live; fatal if None)

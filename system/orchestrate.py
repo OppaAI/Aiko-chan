@@ -13,7 +13,11 @@ regardless of transport.
 
 Responsibilities:
     - Boot all subsystems via system.wakeup.AikoWakeup immediately at session
-      start — no login gate; boot is pre-auth safe
+      start — no login gate; boot is pre-auth safe. (The WebUI front end boots
+      once before its servers start; run_session reuses that BootResult
+      instead of booting a second time.)
+    - Honor --text / --no-asr by skipping TTS/ASR at boot; /voice and /listen
+      start them on demand
     - Drive the UI init phase and transition to active chat
     - Run the main input -> inference -> render loop
     - Handle commands (/quit, /reset, /memory, /clear, /remember, /think,
@@ -495,6 +499,10 @@ class ProactiveIdleRunner:
         self._next_checkin_after = self._random_first_idle_delay()
         self._resting = False
         self._thread: threading.Thread | None = None
+
+    def set_speak(self, speak) -> None:
+        """Hot-swap the TTS backend (e.g. after lazy /voice init in --text mode)."""
+        self._speak = speak
 
     def start(self) -> None:
         """Start the proactive message thread if enabled."""
@@ -1015,16 +1023,27 @@ def run_session(ui, args) -> None:
     # ── boot all subsystems via wakeup ────────────────────────────────────────
     # The spinner is daemon, but stop it on boot failure too — otherwise it
     # loops to process exit churning the UI while the traceback prints.
-    try:
-        result = AikoWakeup().boot(
-            on_loading = ui.step_loading,
-            on_done    = ui.step_done,
-            on_skip    = ui.step_skip,
-        )
-    except BaseException:
-        spin_stop.set()
-        spin_t.join(timeout=2.0)
-        raise
+    #
+    # The WebUI front end already booted before its servers started (so
+    # browsers never see a half-booted Aiko) — reuse that BootResult instead
+    # of booting a second time. The old double boot also left a zombie
+    # scheduler thread behind (each boot's ScheduleRunner kept ticking).
+    result = getattr(ui, "_boot_result", None)
+    if result is None:
+        try:
+            result = AikoWakeup().boot(
+                on_loading = ui.step_loading,
+                on_done    = ui.step_done,
+                on_skip    = ui.step_skip,
+                enable_tts = not getattr(args, "text", False),
+                enable_asr = not getattr(args, "no_asr", False),
+            )
+        except BaseException:
+            spin_stop.set()
+            spin_t.join(timeout=2.0)
+            raise
+    else:
+        log.info("[run_session] reusing front-end boot result — skipping second boot")
 
     think    = result.think
     memorize = result.memorize
@@ -1067,12 +1086,16 @@ def run_session(ui, args) -> None:
         except Exception:
             log.exception("Failed to start background messenger adapters.")
 
-    if speak and hasattr(ui, "broadcast_audio_bytes"):
-        speak.set_audio_sink(ui.broadcast_audio_bytes)
-        if hasattr(ui, "set_viseme"):
-            speak.set_viseme_sink(ui.set_viseme)
-        if os.getenv("WEBUI_LOCAL_PLAYBACK", "1").lower() in {"0", "false", "no", "off"}:
-            speak.local_playback = False
+    def _wire_speak_sink(s) -> None:
+        """Attach the WebUI remote-audio sink to a (possibly lazily started) speak backend."""
+        if s and hasattr(ui, "broadcast_audio_bytes"):
+            s.set_audio_sink(ui.broadcast_audio_bytes)
+            if hasattr(ui, "set_viseme"):
+                s.set_viseme_sink(ui.set_viseme)
+            if os.getenv("WEBUI_LOCAL_PLAYBACK", "1").lower() in {"0", "false", "no", "off"}:
+                s.local_playback = False
+
+    _wire_speak_sink(speak)
 
     # ── transition to chat ────────────────────────────────────────────────────
 
@@ -1434,7 +1457,22 @@ def run_session(ui, args) -> None:
 
             elif cmd == '/voice':
                 if speak is None:
-                    ui.add_message('sys', 'TTS unavailable — voice subsystem did not load.')
+                    # --text skips TTS at boot; start it on demand (also retries
+                    # a boot-time failure — the MioTTS server may be up now).
+                    ui.add_message('sys', 'Starting voice output (TTS)…')
+                    from system.wakeup import start_speak
+                    speak = start_speak()
+                    if speak is None:
+                        ui.add_message('sys', 'TTS unavailable — voice subsystem failed to start.')
+                    else:
+                        think.set_speak(speak)
+                        proactive.set_speak(speak)
+                        _wire_speak_sink(speak)
+                        if hasattr(ui, "set_voice_backends"):
+                            ui.set_voice_backends(speak, listen)
+                        tts_enabled = True
+                        ui._stats['tts_on'] = True
+                        ui.add_message('sys', 'Voice output (TTS): ON  🔊')
                 else:
                     tts_enabled = not tts_enabled
                     think.set_speak(speak if tts_enabled else None)
@@ -1444,7 +1482,18 @@ def run_session(ui, args) -> None:
 
             elif cmd == '/listen':
                 if listen is None:
-                    ui.add_message('sys', 'ASR unavailable — voice subsystem did not load.')
+                    # --text/--no-asr skips ASR at boot; start it on demand.
+                    ui.add_message('sys', 'Starting voice input (ASR)…')
+                    from system.wakeup import start_listen
+                    listen = start_listen()
+                    if listen is None:
+                        ui.add_message('sys', 'ASR unavailable — voice subsystem failed to start.')
+                    else:
+                        if hasattr(ui, "set_voice_backends"):
+                            ui.set_voice_backends(speak, listen)
+                        asr_enabled = True
+                        ui._stats['asr_on'] = True
+                        ui.add_message('sys', 'Voice input  (ASR): ON  🎤')
                 else:
                     asr_enabled = not asr_enabled
                     ui._stats['asr_on'] = asr_enabled

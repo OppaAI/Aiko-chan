@@ -154,7 +154,9 @@ def test_episode_direct_writes_and_read_only_touches_commit(tmp_path):
                                "I will remember the hike with Ashley through the forest tomorrow.")
     assert second > 0
     with sqlite3.connect(path) as reader:
-        assert reader.execute("SELECT count(*) FROM emc_staging").fetchone()[0] >= 1
+        assert reader.execute(
+            "SELECT count(*) FROM emc_staging WHERE id = ?", (second,)
+        ).fetchone()[0] == 1
 
     store._conn.execute(
         "INSERT INTO emc_storage (id, user_id, timestamp, date, trace) VALUES (1, ?, ?, ?, ?)",

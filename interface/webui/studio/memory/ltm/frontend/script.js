@@ -167,8 +167,8 @@ function nodeRadius(d) {
     r = Math.min(1, r + 0.06);
   }
   // Continuous, score-proportional radius for every node type.
-  if (d.type === 'entity') return 3.5 + 7 * Math.pow(r, 1.15);
-  return 2.5 + 7.5 * Math.pow(r, 1.2);
+  if (d.type === 'entity') return 3.5 + 10 * Math.pow(r, 1.2);
+  return 2.5 + 10.5 * Math.pow(r, 1.25);
 }
 
 function edgeOpacity(e) {
@@ -435,7 +435,7 @@ function layoutOrganic(nodes, links, w, h) {
   const compRadius = comp => {
     let area = 0;
     for (const n of comp) { const r = nodeRadius(n) + 6; area += r * r; }
-    return Math.sqrt(area / Math.PI) * 1.5 + 8;
+    return Math.sqrt(area / Math.PI) * 1.08 + 4;
   };
 
   // 2. Component centers on a golden-angle spiral.
@@ -488,7 +488,7 @@ function layoutOrganic(nodes, links, w, h) {
     const hubOf = new Map(hubs.map(h => [h.id, h]));
     hubs.forEach((h, hi) => {
       const a = hi * GOLDEN + (rnd() - 0.5) * 0.9;
-      const rr = c.r * 0.38 * Math.sqrt((hi + 1) / hubs.length);
+      const rr = c.r * 0.30 * Math.sqrt((hi + 1) / hubs.length);
       h._ax = c.x + Math.cos(a) * rr;
       h._ay = c.y + Math.sin(a) * rr;
     });
@@ -502,9 +502,9 @@ function layoutOrganic(nodes, links, w, h) {
       if (!hid) for (const nb of adj.get(n.id)) for (const nn of adj.get(nb)) consider(nn);
       const hub = hid ? hubOf.get(hid) : null;
       if (hub) {
-        const spread = Math.min(c.r * 0.45, 12 + 6 * Math.sqrt(adj.get(hub.id).length));
-        n._ax = hub._ax + gauss() * spread * 0.40;
-        n._ay = hub._ay + gauss() * spread * 0.40;
+        const spread = Math.min(c.r * 0.35, 10 + 5 * Math.sqrt(adj.get(hub.id).length));
+        n._ax = hub._ax + gauss() * spread * 0.30;
+        n._ay = hub._ay + gauss() * spread * 0.30;
       } else {
         const a = rnd() * Math.PI * 2;
         const rr = Math.sqrt(rnd()) * Math.max(6, c.r - nodeRadius(n));
@@ -523,12 +523,12 @@ function layoutOrganic(nodes, links, w, h) {
 
   // 4. Relax overlaps (collision only) around each node's anchor.
   const sim = d3.forceSimulation(nodes)
-    .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 5).iterations(4))
-    .force('x', d3.forceX(d => d._ax).strength(0.30))
-    .force('y', d3.forceY(d => d._ay).strength(0.30))
+    .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 1.5).iterations(4))
+    .force('x', d3.forceX(d => d._ax).strength(0.45))
+    .force('y', d3.forceY(d => d._ay).strength(0.45))
     .randomSource(mulberry32(1777))
     .stop();
-  for (let i = 0; i < 60; i++) sim.tick();
+  for (let i = 0; i < 150; i++) sim.tick();
   sim.stop();
   for (const n of nodes) { delete n._ax; delete n._ay; }
 
@@ -575,10 +575,15 @@ function buildGraph() {
 
   layoutOrganic(nodes, links, w, h);
 
-  // Which nodes carry visible labels: hottest ~40 by retain (reference style:
-  // labels ride on the bright nodes, not the whole field).
+  const nebR = Math.min(w, h) * 0.58;
+  g.append('circle')
+    .attr('cx', w / 2).attr('cy', h / 2).attr('r', nebR)
+    .attr('fill', 'url(#nebula)').attr('pointer-events', 'none');
+
+  // Which nodes carry visible labels: hottest ~75 by retain, small and dim
+  // like the reference (labels ride on the bright nodes, not the whole field).
   const hotIds = new Set(
-    [...nodes].sort((a, b) => retainOf(b) - retainOf(a)).slice(0, 40).map(n => n.id)
+    [...nodes].sort((a, b) => retainOf(b) - retainOf(a)).slice(0, 75).map(n => n.id)
   );
 
   // dotted synapse connectors — brightness follows both endpoint sizes
@@ -632,7 +637,7 @@ function buildGraph() {
   nodeSel.append('text').attr('class', 'node-label')
     .attr('dy', d => -(nodeRadius(d) + 6))
     .attr('text-anchor', 'middle')
-    .style('opacity', d => (hotIds.has(d.id) || d.pinned) ? 0.85 : 0)
+    .style('opacity', d => (hotIds.has(d.id) || d.pinned) ? 0.6 : 0)
     .text(nodeLabel);
 
   // free drag without a force simulation — move node + its edges
@@ -676,6 +681,11 @@ function defs_(svg) {
   const glare = defs.append('radialGradient').attr('id', 'glare').attr('cx', '50%').attr('cy', '50%').attr('r', '50%');
   glare.append('stop').attr('offset', '0%').attr('stop-color', '#ffffff').attr('stop-opacity', 0.85);
   glare.append('stop').attr('offset', '100%').attr('stop-color', '#ffffff').attr('stop-opacity', 0);
+  // Soft nebula glow behind the node cluster (reference style).
+  const neb = defs.append('radialGradient').attr('id', 'nebula').attr('cx', '50%').attr('cy', '50%').attr('r', '50%');
+  neb.append('stop').attr('offset', '0%').attr('stop-color', '#2c3c58').attr('stop-opacity', 0.34);
+  neb.append('stop').attr('offset', '55%').attr('stop-color', '#1b2540').attr('stop-opacity', 0.14);
+  neb.append('stop').attr('offset', '100%').attr('stop-color', '#1b2540').attr('stop-opacity', 0);
 }
 
 /* ── re-filter: organic re-layout of the visible set (full rebuild) ─────── */

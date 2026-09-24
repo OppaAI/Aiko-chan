@@ -44,25 +44,28 @@ def test_malloc_trim_returns_bool():
 
 
 def test_companion_rss_matches_case_insensitive_override(monkeypatch):
+    companion_pid = os.getpid() + 1
     psutil = ModuleType("psutil")
     psutil.NoSuchProcess = type("NoSuchProcess", (Exception,), {})
     psutil.ZombieProcess = type("ZombieProcess", (Exception,), {})
     psutil.process_iter = lambda _attrs: [SimpleNamespace(
-        pid=123, info={"pid": 123, "cmdline": ["/opt/miotts/server"],
+        pid=companion_pid, info={"pid": companion_pid, "cmdline": ["/opt/miotts/server"],
                        "memory_info": SimpleNamespace(rss=1024 * 1024)},
     )]
     monkeypatch.setitem(sys.modules, "psutil", psutil)
 
-    assert ram.companion_rss_mb(patterns=("MioTTS",)) == {"miotts:123": 1.0}
+    assert ram.companion_rss_mb(patterns=("MioTTS",)) == {f"miotts:{companion_pid}": 1.0}
 
 
 def test_companion_rss_logs_missing_memory_but_ignores_exit_race(monkeypatch, caplog):
+    exited_pid = os.getpid() + 1
+    missing_pid = os.getpid() + 2
     psutil = ModuleType("psutil")
     psutil.NoSuchProcess = type("NoSuchProcess", (Exception,), {})
     psutil.ZombieProcess = type("ZombieProcess", (Exception,), {})
 
     class Exited:
-        pid = 123
+        pid = exited_pid
 
         @property
         def info(self):
@@ -70,12 +73,12 @@ def test_companion_rss_logs_missing_memory_but_ignores_exit_race(monkeypatch, ca
 
     exited = Exited()
     missing = SimpleNamespace(
-        pid=124, info={"pid": 124, "cmdline": ["miotts"], "memory_info": None},
+        pid=missing_pid, info={"pid": missing_pid, "cmdline": ["miotts"], "memory_info": None},
     )
     psutil.process_iter = lambda _attrs: [exited, missing]
     monkeypatch.setitem(sys.modules, "psutil", psutil)
 
     assert ram.companion_rss_mb(patterns=("miotts",)) == {}
-    assert "companion process 124" in caplog.text
+    assert f"companion process {missing_pid}" in caplog.text
     assert "memory_info is unavailable" in caplog.text
-    assert "companion process 123" not in caplog.text
+    assert f"companion process {exited_pid}" not in caplog.text

@@ -183,7 +183,7 @@ function edgeOpacity(e) {
   if (e.type === 'mentions' || e.type === 'grounded_in' || e.type === 'practiced_in' || e.type === 'distilled_into') {
     return Math.min(0.8, (0.06 + mid * 0.75) * wBoost);
   }
-  return Math.min(0.6, (0.04 + mid * 0.55) * wBoost);
+  return Math.min(0.9, (0.10 + mid * 0.75) * wBoost);
 }
 
 function edgeColor(e) {
@@ -590,13 +590,13 @@ function buildGraph() {
   // (dim when both ends are small); supersede edges stay solid + directed.
   linkSel = g.append('g').selectAll('line').data(links).join('line')
     .attr('class', 'edge')
-    .attr('stroke', d => d.type === 'supersedes' ? '#a68b4f' : shade(edgeColor(d), -0.30))
+    .attr('stroke', d => d.type === 'supersedes' ? '#a68b4f' : shade(edgeColor(d), 0.12))
     .attr('stroke-width', d => {
       if (d.type === 'supersedes') return 1.2;
       const wgt = Math.max(0, Math.min(1, Number(d.weight) || 0.4));
       return 0.5 + wgt * 0.6;
     })
-    .attr('stroke-opacity', d => edgeOpacity(d) * 0.6)
+    .attr('stroke-opacity', d => edgeOpacity(d) * 0.9)
     .attr('stroke-linecap', 'round')
     .attr('stroke-dasharray', d => d.type === 'supersedes' ? null : '1.5,2.5')
     .attr('marker-end', d => d.type === 'supersedes' ? 'url(#arrow-sup)' : null)

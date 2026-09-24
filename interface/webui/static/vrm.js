@@ -324,14 +324,11 @@ function computeVitality() {
 }
 
 function updateSaccades(dt) {
-  sacT -= dt;
-  if (sacT <= 0) {
-    // While thinking her gaze holds up/sideways — damp the saccades.
-    const damp = 1 - easeInOutCubic(stateBlend.thinking) * 0.7;
-    sacTarget.x = (Math.random() - 0.5) * 0.06 * damp;
-    sacTarget.y = (Math.random() - 0.5) * 0.10 * damp;
-    sacT = 0.8 + Math.random() * 1.7;
-  }
+  // She holds your gaze — steady eye contact with the viewer. The old
+  // random saccade jumps made her eyes dart around, which read as
+  // shifty instead of attentive. Ease any residual offset back to zero.
+  sacTarget.x = 0;
+  sacTarget.y = 0;
   const k = Math.min(1, dt * 10);
   sacCur.x += (sacTarget.x - sacCur.x) * k;
   sacCur.y += (sacTarget.y - sacCur.y) * k;

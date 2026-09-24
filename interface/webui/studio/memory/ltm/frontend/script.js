@@ -136,20 +136,20 @@ function valenceHue(d) {
 }
 
 function hueColor(hue) {
-  if (hue === 'entity') return '#c9b8f7';
-  if (hue === 'knowledge') return '#a9e8b8';
-  if (hue === 'experience') return '#f9c795';
-  if (hue === 'episode') return '#a5e8e0';
-  if (hue === 'imprint') return '#e0a3cc';
-  if (hue === 'neg') return '#a5ecff';
-  if (hue === 'pos') return '#f6d789';
-  return '#a8b6cf';
+  if (hue === 'entity') return '#554f7a';
+  if (hue === 'knowledge') return '#5f7d6b';
+  if (hue === 'experience') return '#7d6b57';
+  if (hue === 'episode') return '#4a6b70';
+  if (hue === 'imprint') return '#6e5a70';
+  if (hue === 'neg') return '#385c70';
+  if (hue === 'pos') return '#796a3c';
+  return '#646c7a';
 }
 
 /** Translucent glass fill — dim nodes ghost into the background. */
 function nodeOpacity(d) {
   let r = retainOf(d);
-  let o = 0.18 + Math.pow(r, 0.9) * 0.55;
+  let o = 0.22 + Math.pow(r, 0.9) * 0.55;
   const hue = valenceHue(d);
   if (hue === 'pos' || hue === 'neg') o = Math.min(1, o + 0.08);
   if (d.pinned) o = Math.max(o, 0.92);
@@ -187,9 +187,9 @@ function edgeOpacity(e) {
 }
 
 function edgeColor(e) {
-  if (e.type === 'supersedes') return '#f2c063';
-  if (e.type === 'distilled_into') return '#a5e8e0';
-  return '#a5ecff';
+  if (e.type === 'supersedes') return '#a68b4f';
+  if (e.type === 'distilled_into') return '#4a6b70';
+  return '#54606f';
 }
 
 function lineageText(d, graph) {
@@ -585,7 +585,7 @@ function buildGraph() {
   // (dim when both ends are small); supersede edges stay solid + directed.
   linkSel = g.append('g').selectAll('line').data(links).join('line')
     .attr('class', 'edge')
-    .attr('stroke', d => d.type === 'supersedes' ? '#f2c063' : shade(edgeColor(d), -0.30))
+    .attr('stroke', d => d.type === 'supersedes' ? '#a68b4f' : shade(edgeColor(d), -0.30))
     .attr('stroke-width', d => {
       if (d.type === 'supersedes') return 1.2;
       const wgt = Math.max(0, Math.min(1, Number(d.weight) || 0.4));
@@ -626,7 +626,7 @@ function buildGraph() {
     .attr('rx', d => nodeRadius(d) * 0.48)
     .attr('ry', d => nodeRadius(d) * 0.30)
     .attr('fill', 'url(#glare)')
-    .attr('opacity', d => 0.10 + 0.28 * retainOf(d))
+    .attr('opacity', d => 0.12 + 0.30 * retainOf(d))
     .attr('pointer-events', 'none');
 
   nodeSel.append('text').attr('class', 'node-label')
@@ -659,18 +659,19 @@ function defs_(svg) {
   const defs = svg.append('defs');
   defs.append('marker').attr('id','arrow-sup').attr('viewBox','0 0 10 10')
     .attr('refX', 9).attr('refY', 5).attr('markerWidth', 5).attr('markerHeight', 5).attr('orient','auto')
-    .append('path').attr('d','M 0 1 L 10 5 L 0 9 Z').attr('fill', '#f2c063').attr('opacity', 0.8);
-  // Translucent glass marbles: soft sheen, feathered edge that melts into
-  // the dark background (outer stop fades to transparent).
+    .append('path').attr('d','M 0 1 L 10 5 L 0 9 Z').attr('fill', '#a68b4f').attr('opacity', 0.8);
+  // Reference-matched spheres: soft bright core, sheen peak ~28% out,
+  // mid body, darker rim feathering into the background.
   for (const h of HUES) {
     const base = hueColor(h);
     const g = defs.append('radialGradient')
       .attr('id', 'gloss-' + h)
       .attr('cx', '34%').attr('cy', '28%').attr('r', '78%');
     g.append('stop').attr('offset', '0%').attr('stop-color', shade(base, 0.38));
-    g.append('stop').attr('offset', '40%').attr('stop-color', shade(base, 0.10));
-    g.append('stop').attr('offset', '72%').attr('stop-color', base);
-    g.append('stop').attr('offset', '100%').attr('stop-color', base).attr('stop-opacity', 0.30);
+    g.append('stop').attr('offset', '28%').attr('stop-color', shade(base, 0.50));
+    g.append('stop').attr('offset', '55%').attr('stop-color', base);
+    g.append('stop').attr('offset', '80%').attr('stop-color', shade(base, -0.28));
+    g.append('stop').attr('offset', '100%').attr('stop-color', shade(base, -0.42)).attr('stop-opacity', 0.32);
   }
   // Shared specular glare dabbed on hot nodes.
   const glare = defs.append('radialGradient').attr('id', 'glare').attr('cx', '50%').attr('cy', '50%').attr('r', '50%');

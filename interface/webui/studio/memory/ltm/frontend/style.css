@@ -3,11 +3,11 @@
    the LTM graph nodes use a distinct neural-valence scheme that other studios
    don't share, so it stays scoped to this file. */
 :root {
-  --neg: #a5ecff;
-  --pos: #f6d789;
-  --neutral: #a8b6cf;
-  --entity: #c9b8f7;
-  --episode: #a5e8e0;
+  --neg: #385c70;
+  --pos: #796a3c;
+  --neutral: #646c7a;
+  --entity: #554f7a;
+  --episode: #4a6b70;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {

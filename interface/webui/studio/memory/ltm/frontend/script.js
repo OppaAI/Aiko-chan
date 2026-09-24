@@ -397,39 +397,96 @@ function shade(hex, amt) {
   return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
 }
 
+/* Organic neural-field layout — deterministic, one-shot, no live loop.
+ *
+ * Connected components are placed on a golden-angle spiral (organic by
+ * construction — never rows, columns, or chains) and members are
+ * scattered inside their component disc. Overlaps relax with collision
+ * forces only: there is no link force, so edge chains can never pull
+ * nodes into straight lines. */
 function layoutOrganic(nodes, links, w, h) {
   const cx = w / 2, cy = h / 2;
-  const R = Math.min(w, h) * 0.30;
-  // Seed: random scatter inside a disc (not type clusters) so hues mix
-  // through the blob instead of separating into bands or chains.
-  const rnd = mulberry32(1337);
-  for (const n of nodes) {
-    const a = rnd() * Math.PI * 2;
-    const r = Math.sqrt(rnd()) * R * 0.7;
-    n.x = cx + Math.cos(a) * r;
-    n.y = cy + Math.sin(a) * r;
-    n.vx = 0; n.vy = 0;
-  }
-  const byId = new Set(nodes.map(n => n.id));
-  const fl = [];
+  const R = Math.min(w, h) * 0.34;
+
+  // 1. Connected components (union-find) over visible nodes/links.
+  const parent = new Map(nodes.map(n => [n.id, n.id]));
+  const find = x => {
+    let r = x;
+    while (parent.get(r) !== r) r = parent.get(r);
+    let c = x;
+    while (parent.get(c) !== r) { const nx = parent.get(c); parent.set(c, r); c = nx; }
+    return r;
+  };
+  const idOf = v => (v && typeof v === 'object' ? v.id : v);
+  const live = new Set(nodes.map(n => n.id));
   for (const l of links) {
-    const s = typeof l.source === 'object' ? l.source.id : l.source;
-    const t = typeof l.target === 'object' ? l.target.id : l.target;
-    if (byId.has(s) && byId.has(t)) fl.push({ source: s, target: t });
+    const s = idOf(l.source), t = idOf(l.target);
+    if (s !== t && live.has(s) && live.has(t)) parent.set(find(s), find(t));
   }
-  // Tight link pull + gentle repulsion + radial gravity: connected nodes
-  // collapse into clusters inside a round blob; nothing stretches into
-  // vertical/horizontal chains. One-shot, bounded ticks, no live loop.
+  const byRoot = new Map();
+  for (const n of nodes) {
+    const r = find(n.id);
+    if (!byRoot.has(r)) byRoot.set(r, []);
+    byRoot.get(r).push(n);
+  }
+  const comps = [...byRoot.values()].sort((a, b) => b.length - a.length);
+  if (!comps.length) return;
+
+  const compRadius = comp => {
+    let area = 0;
+    for (const n of comp) { const r = nodeRadius(n) + 6; area += r * r; }
+    return Math.sqrt(area / Math.PI) * 1.5 + 8;
+  };
+
+  // 2. Component centers on a golden-angle spiral.
+  const GOLDEN = Math.PI * (3 - Math.sqrt(5));
+  const rnd = mulberry32(90210);
+  const c0 = { x: cx, y: cy, r: compRadius(comps[0]) };
+  const centers = [c0, ...comps.slice(1).map((comp, j) => {
+    const i = j + 1;
+    const cr = compRadius(comp);
+    const a = i * GOLDEN + (rnd() - 0.5) * 0.6;
+    const dist = c0.r + cr + R * 0.10 * Math.sqrt(i) + 12;
+    const m = 14;
+    return {
+      x: Math.max(cr + m, Math.min(w - cr - m, cx + Math.cos(a) * dist)),
+      y: Math.max(cr + m, Math.min(h - cr - m, cy + Math.sin(a) * dist)),
+      r: cr,
+    };
+  })];
+
+  // 3. Seeded scatter inside each component disc.
+  for (let i = 0; i < comps.length; i++) {
+    const c = centers[i];
+    for (const n of comps[i]) {
+      const a = rnd() * Math.PI * 2;
+      const rr = Math.sqrt(rnd()) * Math.max(6, c.r - nodeRadius(n));
+      n.x = c.x + Math.cos(a) * rr;
+      n.y = c.y + Math.sin(a) * rr;
+      n.vx = 0; n.vy = 0;
+      n._ax = n.x; n._ay = n.y;
+    }
+  }
+
+  // 4. Relax overlaps (collision only) around each node's anchor.
   const sim = d3.forceSimulation(nodes)
-    .force('link', d3.forceLink(fl).id(d => d.id).distance(26).strength(1.0))
-    .force('charge', d3.forceManyBody().strength(-50))
-    .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 6).iterations(3))
-    .force('radial', d3.forceRadial(R * 0.35, cx, cy).strength(0.3))
-    .randomSource(mulberry32(4242))
+    .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 5).iterations(4))
+    .force('x', d3.forceX(d => d._ax).strength(0.12))
+    .force('y', d3.forceY(d => d._ay).strength(0.12))
+    .randomSource(mulberry32(1777))
     .stop();
-  const ticks = nodes.length > 900 ? 60 : nodes.length > 400 ? 120 : 250;
-  for (let i = 0; i < ticks; i++) sim.tick();
+  for (let i = 0; i < 80; i++) sim.tick();
   sim.stop();
+  for (const n of nodes) { delete n._ax; delete n._ay; }
+
+  // 5. Scale the field to fill the canvas disc.
+  const ds = nodes.map(n => Math.hypot(n.x - cx, n.y - cy)).sort((a, b) => a - b);
+  const p90 = ds[Math.floor(ds.length * 0.9)] || 1;
+  const k = (R * 0.95) / Math.max(1, p90);
+  for (const n of nodes) {
+    n.x = cx + (n.x - cx) * k;
+    n.y = cy + (n.y - cy) * k;
+  }
 }
 
 function nodeLabel(d) {

@@ -82,6 +82,24 @@ function applyTheme(theme) {
   }
 }
 
+// ── right sidebar collapse ─────────────────────────────────────────────
+(function initPanelCollapse() {
+  const btn = document.getElementById('panel-collapse');
+  if (!btn) return;
+  const apply = (collapsed) => {
+    document.body.classList.toggle('panel-collapsed', collapsed);
+    btn.innerHTML = collapsed ? '&#10217;' : '&#10218;';
+    btn.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+    btn.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+  };
+  btn.addEventListener('click', () => {
+    const next = !document.body.classList.contains('panel-collapsed');
+    apply(next);
+    try { localStorage.setItem('aiko-panel-collapsed', next ? '1' : '0'); } catch (_) {}
+  });
+  try { if (localStorage.getItem('aiko-panel-collapsed') === '1') apply(true); } catch (_) {}
+})();
+
 function initTheme() {
   let saved = null;
   try { saved = localStorage.getItem(THEME_KEY); } catch (_) { /* storage blocked */ }
@@ -112,12 +130,15 @@ if (window.visualViewport) {
 window.addEventListener('orientationchange', () => setTimeout(setAppHeight, 100));
 
 // ── clock ─────────────────────────────────────────────────────────────────
+const stageDate = document.getElementById('stage-date');
+const stageTime = document.getElementById('stage-time');
 function tickClock() {
   const now = new Date();
-  clock.textContent = now.toLocaleString('en-CA', {
-    month: 'short', day: '2-digit', year: 'numeric',
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true,
+  clock.textContent = now.toLocaleString('en-GB', {
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
   });
+  if (stageDate) stageDate.textContent = now.toLocaleString('en-US', { weekday: 'short', month: 'long', day: 'numeric' });
+  if (stageTime) stageTime.textContent = now.toLocaleString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 tickClock();
 setInterval(tickClock, 1000);
@@ -165,7 +186,7 @@ function switchToChat() {
 }
 
 // ── chat rendering ────────────────────────────────────────────────────────
-let streamDiv = null;
+let streamActive = false;
 let streamRawText = '';
 let streamExprApplied = null;  // expression name applied once per stream turn
 let sourcesRow = null;
@@ -218,6 +239,171 @@ if (!document.getElementById('shoujo-animations')) {
   document.head.appendChild(style);
 }
 
+// ── karaoke caption (game dialogue box) ─────────────────────────────────
+// Aiko's words appear as a game-style caption with karaoke word reveal,
+// paced by the backend typewriter sync. The chat panel stays a slim log;
+// her full history lives in the transcript (toggle in the header).
+const captionBox = document.getElementById('caption-box');
+const captionEmotionEl = document.getElementById('caption-emotion');
+const captionTextEl = document.getElementById('caption-text');
+const presenceDot = document.getElementById('presence-dot');
+const presenceText = document.getElementById('presence-text');
+const statusEmotion = document.getElementById('status-emotion');
+let captionHideTimer = null;
+let captionLastDialogue = null;
+let currentPresence = 'idle';
+const transcriptLog = [];
+let transcriptVisible = false;
+
+function captionShow() {
+  if (!captionBox) return;
+  captionBox.classList.remove('caption-hidden');
+  clearTimeout(captionHideTimer);
+  captionHideTimer = null;
+}
+function captionRender(dialogue, emoji) {
+  if (!captionTextEl) return;
+  if (dialogue === captionLastDialogue) { captionShow(); return; }
+  captionLastDialogue = dialogue;
+  if (emoji && captionEmotionEl) captionEmotionEl.textContent = emoji;
+  captionTextEl.innerHTML = '';
+  const frag = document.createDocumentFragment();
+  const wordSpans = [];
+  for (const p of String(dialogue).split(/(\s+)/)) {
+    if (!p) continue;
+    const sp = document.createElement('span');
+    const isWord = /\S/.test(p);
+    sp.className = isWord ? 'w' : 'wsp';
+    sp.textContent = p;
+    frag.appendChild(sp);
+    if (isWord) wordSpans.push(sp);
+  }
+  // karaoke: the two freshest words glow as if being spoken
+  wordSpans.slice(-2).forEach(sp => sp.classList.add('live'));
+  captionTextEl.appendChild(frag);
+  captionTextEl.scrollTop = captionTextEl.scrollHeight;
+  captionShow();
+}
+function captionCommit(dialogue, emoji, holdMs = 14000) {
+  captionRender(dialogue, emoji);
+  clearTimeout(captionHideTimer);
+  captionHideTimer = setTimeout(() => {
+    if (captionBox) captionBox.classList.add('caption-hidden');
+  }, holdMs);
+}
+function captionSpeaking(on) {
+  if (captionBox) captionBox.classList.toggle('speaking', !!on);
+}
+
+// ── presence ──
+const stageDot = document.getElementById('stage-dot');
+const stageStatusText = document.getElementById('stage-status-text');
+function setPresence(state) {
+  currentPresence = state;
+  const label = state.toUpperCase();
+  const cls = state === 'idle' ? '' : state;
+  if (presenceText) presenceText.textContent = label;
+  if (presenceDot) presenceDot.className = cls;
+  if (stageStatusText) stageStatusText.textContent = label;
+  if (stageDot) stageDot.className = cls;
+}
+window.setPresence = setPresence; // growth.js signals focus start/stop through this
+function setThinkingMotion(on) {
+  if (window.aikoSetThinking) window.aikoSetThinking(on);
+  else if (window.aikoSetPose) window.aikoSetPose('thinking', on);
+}
+
+// her words land here: caption + transcript + body language
+function applyAikoEmotion(emoji) {
+  if (!window.aikoSetExpression) return;
+  const exprName = EMOJI_EXPRESSIONS[emoji] || emoji;
+  window.aikoSetExpression(exprName, 1.0);
+  spawnEmotionParticles(exprName);
+  updateEmotionBadge(exprName);
+  if (statusEmotion) statusEmotion.textContent = exprName;
+}
+let lastAikoCommit = { text: null, t: 0 };
+function aikoCommitFresh(text) {
+  // Guard against backend double-sends (e.g. stream commit + complete
+  // chat message for the same turn): same text within 3s commits once.
+  const now = Date.now();
+  if (lastAikoCommit.text === text && now - lastAikoCommit.t < 3000) return false;
+  lastAikoCommit = { text, t: now };
+  return true;
+}
+function deliverAikoMessage(parsed) {
+  hideTypingIndicator();
+  if (!aikoCommitFresh(parsed.dialogueText)) return;
+  if (parsed.emoji) applyAikoEmotion(parsed.emoji);
+  captionCommit(parsed.dialogueText, parsed.emoji);
+  transcriptLog.push({ t: Date.now(), emoji: parsed.emoji, text: parsed.dialogueText,
+                       action: parsed.action, nonVerbal: parsed.nonVerbalText });
+  if (transcriptVisible) renderTranscript();
+  postResponseBehavior(parsed);
+}
+function addSysLine(text) {
+  const div = document.createElement('div');
+  div.className = 'msg msg-sys';
+  div.textContent = `  ◈  ${text}`;
+  chatPanel.insertBefore(div, toolStatus);
+  scrollBottom();
+}
+
+// emoji + ACTION: + *stage directions* drive her body after she speaks
+const ACTION_GESTURE_MAP = [
+  [/\bwav(?:e|es|ing)\b/i, 'wave'],
+  [/\bgiggl\w*|\blaugh\w*|\bchuckl\w*/i, 'giggle'],
+  [/\bnod(?:s|ded)?\b/i, 'headNod'],
+  [/\bbow(?:s|ed|ing)?\b/i, 'bow'],
+  [/\bclap(?:s|ped|ping)?\b/i, 'clap'],
+  [/\bshrug(?:s|ged|ging)?\b/i, 'shoulderRoll'],
+  [/\bthink(?:s|ing)?\b|\bponder\w*|\bcontemplat\w*/i, 'chinThink'],
+  [/\bglanc\w*|\blooks? (?:up|away|around)\b/i, 'lookAround'],
+  [/\btilts? (?:her |his |their |the )?head\b|\bhead tilt\b/i, 'curiousTilt'],
+  [/\bbounc\w*|\bexcited\w*|\bjump\w* with joy\b/i, 'happyBounce'],
+  [/\bhug\w* (?:herself|himself|herself)/i, 'hugSelf'],
+  [/\bsigh\w*|\bstretch\w*/i, 'gentleStretch'],
+];
+const EMOJI_GESTURE = {
+  '😂': 'giggle', '🤣': 'giggle', '👋': 'wave', '🙏': 'bow',
+  '👏': 'clap', '😭': 'hugSelf', '🥺': 'hugSelf', '🤔': 'chinThink',
+};
+function postResponseBehavior(parsed) {
+  const hay = [parsed.action || '', parsed.nonVerbalText || ''].join(' ');
+  let played = false;
+  if (hay.trim() && window.aikoPlayGesture) {
+    for (const [re, gesture] of ACTION_GESTURE_MAP) {
+      if (re.test(hay)) { window.aikoPlayGesture(gesture); played = true; break; }
+    }
+  }
+  if (!played && parsed.emoji && EMOJI_GESTURE[parsed.emoji] && window.aikoPlayGesture) {
+    window.aikoPlayGesture(EMOJI_GESTURE[parsed.emoji]);
+  }
+  const bits = [];
+  if (parsed.action) bits.push(`*${parsed.action}*`);
+  if (parsed.nonVerbalText) bits.push(parsed.nonVerbalText);
+  if (bits.length) addSysLine('Aiko ' + bits.join(' '));
+}
+
+// transcript (her full history, on demand)
+function renderTranscript() {
+  document.querySelectorAll('#chat-panel .transcript-row').forEach(el => el.remove());
+  if (!transcriptVisible) return;
+  for (const entry of transcriptLog) {
+    const { row, bubble } = createMessageRow('aiko');
+    row.classList.add('transcript-row');
+    const head = document.createElement('div');
+    head.className = 'msg-prefix';
+    head.textContent = new Date(entry.t).toLocaleTimeString() + (entry.emoji ? ' ' + entry.emoji : '');
+    bubble.appendChild(head);
+    const body = document.createElement('div');
+    body.innerHTML = esc(entry.text).replace(/\n/g, '<br>');
+    bubble.appendChild(body);
+    chatPanel.insertBefore(row, toolStatus);
+  }
+  scrollBottom();
+}
+
 function updateEmotionBadge(exprName) {
   if (!emotionBadge) return;
   const emojiMap = {
@@ -251,6 +437,8 @@ function showTypingIndicator() {
   row.appendChild(bubble);
   chatPanel.insertBefore(row, toolStatus);
   typingIndicator = row;
+  setPresence('thinking');
+  setThinkingMotion(true);
   scrollBottom();
 }
 
@@ -259,6 +447,8 @@ function hideTypingIndicator() {
     typingIndicator.remove();
     typingIndicator = null;
   }
+  setThinkingMotion(false);
+  if (currentPresence === 'thinking') setPresence('idle');
 }
 
 function ensureAuxRow(kind) {
@@ -546,21 +736,26 @@ function addMessage(sender, text) {
     bubble.appendChild(body);
     insertEl = row;
   } else if (sender === 'aiko') {
-    const { row, bubble } = createMessageRow('aiko');
-    const parsed = parseAikoMessage(text);
-    if (parsed.emoji && window.aikoSetExpression) {
-      const exprName = EMOJI_EXPRESSIONS[parsed.emoji] || parsed.emoji;
-      window.aikoSetExpression(exprName, 1.0);
-      spawnEmotionParticles(exprName);
-      updateEmotionBadge(exprName);
-    }
-    renderAikoContent(bubble, parsed, false);
-    insertEl = row;
+    deliverAikoMessage(parseAikoMessage(text));
+    return;   // her words live in the caption; the chat stays a slim log
   } else {
     const div = document.createElement('div');
     div.className = 'msg msg-sys';
     div.textContent = `  ◈  ${text}`;
     insertEl = div;
+    const errLine = document.getElementById('companion-error');
+    if (errLine) { errLine.textContent = text; errLine.hidden = false; }
+    const errLog = document.getElementById('error-log');
+    if (errLog) {
+      const line = document.createElement('div');
+      line.className = 'elog-line';
+      const t = new Date();
+      const ts = [t.getHours(), t.getMinutes(), t.getSeconds()].map(n => String(n).padStart(2, '0')).join(':');
+      line.textContent = ts + '  ' + text;
+      errLog.appendChild(line);
+      while (errLog.children.length > 40) errLog.removeChild(errLog.firstChild);
+      errLog.scrollTop = errLog.scrollHeight;   // newest at bottom, older scroll up
+    }
   }
   chatPanel.insertBefore(insertEl, toolStatus);
   scrollBottom();
@@ -568,43 +763,40 @@ function addMessage(sender, text) {
 
 function appendToken(text) {
   if (text == null || text === '') return;
-  // Drop pure control chunks (status/search) so they never typewrite into the bubble.
+  // Drop pure control chunks (status/search) so they never typewrite into the caption.
   if (isControlTokenChunk(text) && !streamRawText) return;
-  if (!streamDiv) {
+  if (!streamActive) {
     hideTypingIndicator();
-    const { row, bubble } = createMessageRow('aiko');
-    streamDiv = bubble;
+    streamActive = true;
     streamRawText = '';
     streamExprApplied = null;
-    chatPanel.insertBefore(row, toolStatus);
+    captionTextEl.innerHTML = '';
+    captionLastDialogue = '';
+    if (captionEmotionEl) captionEmotionEl.textContent = '';
+    captionShow();
   }
   streamRawText += text;
-  // Soft parse while streaming: single dialogue line + cursor, no action/nv boxes.
+  // Soft parse while streaming: dialogue words reveal karaoke-style, paced by TTS.
   const parsed = parseAikoMessage(streamRawText, true);
-  if (parsed.emoji && window.aikoSetExpression) {
-    const exprName = EMOJI_EXPRESSIONS[parsed.emoji] || parsed.emoji;
-    if (exprName && exprName !== streamExprApplied) {
-      streamExprApplied = exprName;
-      window.aikoSetExpression(exprName, 1.0);
-    }
+  if (parsed.emoji && parsed.emoji !== streamExprApplied) {
+    streamExprApplied = parsed.emoji;
+    applyAikoEmotion(parsed.emoji);
   }
-  renderAikoContent(streamDiv, parsed, true);
-  scrollBottom();
+  captionRender(parsed.dialogueText, parsed.emoji);
 }
 
 function flushStream() {
-  if (streamDiv) {
+  if (streamActive) {
     // Full parse only when the turn is complete.
     const parsed = parseAikoMessage(streamRawText, false);
-    if (parsed.emoji && window.aikoSetExpression) {
-      const exprName = EMOJI_EXPRESSIONS[parsed.emoji] || parsed.emoji;
-      if (exprName && exprName !== streamExprApplied) {
-        streamExprApplied = exprName;
-        window.aikoSetExpression(exprName, 1.0);
-      }
-    }
-    renderAikoContent(streamDiv, parsed, false);
-    streamDiv = null;
+    if (!aikoCommitFresh(parsed.dialogueText)) { streamActive = false; streamRawText = ''; streamExprApplied = null; toolStatus.textContent = ''; return; }
+    if (parsed.emoji && parsed.emoji !== streamExprApplied) applyAikoEmotion(parsed.emoji);
+    captionCommit(parsed.dialogueText, parsed.emoji);
+    transcriptLog.push({ t: Date.now(), emoji: parsed.emoji, text: parsed.dialogueText,
+                         action: parsed.action, nonVerbal: parsed.nonVerbalText });
+    if (transcriptVisible) renderTranscript();
+    postResponseBehavior(parsed);
+    streamActive = false;
     streamRawText = '';
     streamExprApplied = null;
   }
@@ -613,8 +805,21 @@ function flushStream() {
 
 function scrollBottom() { content.scrollTop = content.scrollHeight; }
 
+const transcriptToggle = document.getElementById('transcript-toggle');
+const transcriptStore = document.getElementById('transcript-store');
+function setTranscriptVisible(v) {
+  transcriptVisible = v;
+  if (transcriptToggle) transcriptToggle.classList.toggle('on', v);
+  if (transcriptStore) transcriptStore.hidden = !v;
+  renderTranscript();
+}
+if (transcriptToggle) transcriptToggle.addEventListener('click', () => setTranscriptVisible(!transcriptVisible));
+const tsClose = document.getElementById('ts-close');
+if (tsClose) tsClose.addEventListener('click', () => setTranscriptVisible(false));
+
 // ── vitals ────────────────────────────────────────────────────────────────
 function applyVitals(v) {
+  asrOn = !!v.asr;
   vTok.textContent = `${(v.tokens || 0).toLocaleString()} tok`;
   vToks.textContent = v.tok_s > 0 ? `${v.tok_s} t/s` : '— t/s';
   vRam.textContent = `RAM ${v.ram || '—'}`;
@@ -637,7 +842,13 @@ const VOICE_LABELS = {
 function applyVoice(status) {
   voiceSt.textContent = VOICE_LABELS[status] ?? '';
   voiceSt.className = status === 'idle' ? '' : status;
+  window.aikoSetListening?.(status === 'listening');
   if (status === 'waiting' && chatPhaseActive) showTypingIndicator();
+  if (status === 'listening') setPresence('listening');
+  else if (status === 'transcribing') setPresence('thinking');
+  else if (status === 'idle' && (currentPresence === 'listening' || currentPresence === 'thinking')) {
+    if (!typingIndicator) setPresence('idle');
+  }
 }
 
 // ── TTS playback (binary WAV frames from server) ──────────────────────────
@@ -670,6 +881,58 @@ function getTtsAnalyser() {
   return ttsAnalyser;
 }
 
+// ── voice waveform: her live TTS audio, drawn next to the stage clock ──
+// Flat idle line when she is quiet; dancing bars while she speaks, fed by
+// the same TTS analyser node that drives lip-sync.
+const voiceWaveCvs = [document.getElementById('voice-wave'), document.getElementById('speech-wave')].filter(Boolean);
+const VOICE_BARS = 26;
+let voiceWaveFreq = null;
+let voiceWaveMax = 0;
+const voiceBarLevels = new Array(VOICE_BARS).fill(0);
+function drawVoiceWave() {
+  let freq = null;
+  if (ttsPlaying && ttsAnalyser) {
+    if (!voiceWaveFreq || voiceWaveFreq.length !== ttsAnalyser.frequencyBinCount)
+      voiceWaveFreq = new Uint8Array(ttsAnalyser.frequencyBinCount);
+    ttsAnalyser.getByteFrequencyData(voiceWaveFreq);
+    freq = voiceWaveFreq;
+  }
+  let peak = 0;
+  for (let i = 0; i < VOICE_BARS; i++) {
+    let target = 0.07; // idle floor: a calm flat line
+    if (freq) {
+      const b0 = 2 + Math.floor(i * 44 / VOICE_BARS);
+      const v = ((freq[b0] || 0) + (freq[b0 + 1] || 0)) / 2 / 255;
+      target = 0.07 + Math.min(1, v * 1.7);
+    }
+    const lv = voiceBarLevels[i];
+    const nv = lv + (target - lv) * (target > lv ? 0.55 : 0.3);
+    voiceBarLevels[i] = nv;
+    if (nv > peak) peak = nv;
+  }
+  voiceWaveMax = peak;
+  for (const cv of voiceWaveCvs) {
+    const ctx = cv.getContext('2d');
+    const W = cv.width, H = cv.height;
+    ctx.clearRect(0, 0, W, H);
+    const mid = H / 2, bw = W / VOICE_BARS;
+    for (let i = 0; i < VOICE_BARS; i++) {
+      const nv = voiceBarLevels[i];
+      const h = Math.max(1.5, nv * (H - 2));
+      const grad = ctx.createLinearGradient(0, mid - h / 2, 0, mid + h / 2);
+      const lt = document.documentElement.dataset.theme === 'light';
+      grad.addColorStop(0, lt ? '#F8A9C6' : '#7de9ff');
+      grad.addColorStop(1, lt ? '#F06292' : '#1a9ec4');
+      ctx.fillStyle = grad;
+      ctx.shadowColor = lt ? 'rgba(240,98,146,.55)' : 'rgba(53,224,255,.7)';
+      ctx.shadowBlur = 4;
+      ctx.fillRect(i * bw + bw * 0.22, mid - h / 2, Math.max(1, bw * 0.56), h);
+      ctx.shadowBlur = 0;
+    }
+  }
+}
+drawVoiceWave(); // one idle frame before any TTS has played
+
 function startMouthAnalyserLoop() {
   if (ttsMouthLoop) return;
   ttsMouthLoop = true;
@@ -690,8 +953,9 @@ function startMouthAnalyserLoop() {
     const coeff = target > ttsMouthLevel ? 0.65 : 0.28;
     ttsMouthLevel += (target - ttsMouthLevel) * coeff;
     if (window.aikoSetMouthOpen) window.aikoSetMouthOpen(ttsMouthLevel);
+    drawVoiceWave();
 
-    if (!ttsPlaying && ttsMouthLevel < 0.01) {
+    if (!ttsPlaying && ttsMouthLevel < 0.01 && voiceWaveMax < 0.09) {
       ttsMouthLoop = false;
       ttsMouthLevel = 0;
       if (window.aikoSetMouthOpen) window.aikoSetMouthOpen(0);
@@ -711,9 +975,11 @@ let ttsCurrentSource = null;
 
 async function playNextTts() {
   const buf = ttsQueue.shift();
-  if (!buf) { ttsPlaying = false; window.aikoIsSpeaking = false; return; }
+  if (!buf) { ttsPlaying = false; window.aikoIsSpeaking = false; captionSpeaking(false); if (!typingIndicator && currentPresence === 'speaking') setPresence('idle'); return; }
   ttsPlaying = true;
   window.aikoIsSpeaking = true;
+  captionSpeaking(true);
+  setPresence('speaking');
   window.AIKO_TTS_STARTED_AT = performance.now();  // S3 echo guard
   try {
     const ctx = getTtsContext();
@@ -740,6 +1006,8 @@ function stopTtsPlayback() {
   }
   ttsPlaying = false;
   window.aikoIsSpeaking = false;
+  captionSpeaking(false);
+  if (!typingIndicator && currentPresence === 'speaking') setPresence('idle');
 }
 window.stopTtsPlayback = stopTtsPlayback;
 
@@ -755,12 +1023,42 @@ let micCommandSeq = 0;
 let micSecureContextWarned = false;
 
 let micStartPromise = null;
+// User intent: the mic button is a kill switch. When micMuted is true the
+// hardware stays off no matter what the server asks (barge-in / listen
+// loops used to resurrect it right after the user turned it off).
+let micMuted = true;
+let pendingMicStart = null;
+let micGen = 0;
+let asrOn = false;
 
 async function startMic() {
   if (micContext) return true;
   if (micStartPromise) return micStartPromise;   // <- dedupe concurrent callers
+  const gen = micGen;
   micStartPromise = _startMicInner().finally(() => { micStartPromise = null; });
-  return micStartPromise;
+  const ok = await micStartPromise;
+  // A stopMic() (or mute) that landed while getUserMedia/AudioContext were
+  // still pending must win: tear down instead of leaving the mic hot.
+  if (!ok || gen !== micGen || micMuted) {
+    if (micContext) stopMicHardware();
+    return false;
+  }
+  return true;
+}
+
+// Hardware teardown without touching intent state (used internally when a
+// start that was already in flight loses a generation race).
+function stopMicHardware() {
+  micStreamingEnabled = false;
+  if (window.resetVADState) window.resetVADState();
+  if (micWorklet) {
+    if (micWorklet.port) micWorklet.port.onmessage = null;
+    try { micWorklet.disconnect(); } catch (_) {}
+    micWorklet = null;
+  }
+  if (micSource) { try { micSource.disconnect(); } catch (_) {} micSource = null; }
+  if (micContext) { try { micContext.close(); } catch (_) {} micContext = null; }
+  if (micStream) { micStream.getTracks().forEach(t => { try { t.stop(); } catch (_) {} }); micStream = null; }
 }
 
 async function _startMicInner() {
@@ -773,7 +1071,7 @@ async function _startMicInner() {
       const secureUrl = 'https://' + location.hostname + ':' + uiPort + '/';
       addMessage('sys', 'Microphone blocked — browsers only allow mic access on localhost or HTTPS. Open ' + localUrl + ' on this machine, or restart with WEBUI_HTTPS=1 and use ' + secureUrl + '.');
     }
-    micBtn.classList.remove('on');
+    syncTalkButton();
     return false;
   }
   try {
@@ -841,38 +1139,31 @@ async function _startMicInner() {
     vadDot.className = 'dot on';
     vadStatus.textContent = 'mic ready';
     vadStatus.className = 'ready';
-    micBtn.classList.add('on');
+    syncTalkButton();
     return true;
   } catch (err) {
     console.error('[mic] getUserMedia/AudioWorklet failed:', err);
     addMessage('sys', 'Microphone access failed — check browser permissions.');
-    micBtn.classList.remove('on');
+    syncTalkButton();
     return false;
   }
 }
 
 function stopMic() {
-  micCommandSeq++;
-  micStreamingEnabled = false;
-  if (window.resetVADState) window.resetVADState();
-  if (micWorklet) {
-    if (micWorklet.port) micWorklet.port.onmessage = null;
-    micWorklet.disconnect();
-    micWorklet = null;
-  }
-  if (micSource) { micSource.disconnect(); micSource = null; }
-  if (micContext) { micContext.close(); micContext = null; }
-  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  micCommandSeq++;   // cancel any in-flight server-driven start
+  micGen++;          // cancel any in-flight _startMicInner
+  stopMicHardware();
   vadDot.className = 'dot on';
   vadStatus.textContent = 'vad ready';
   vadStatus.className = 'ready';
-  micBtn.classList.remove('on');
+  syncTalkButton();
 }
 
 // ── text input ────────────────────────────────────────────────────────────
 function submitInput() {
   const text = input.value.trim();
   if (!text || !wsReady()) return;
+  window.dispatchEvent(new CustomEvent('aiko:msg-sent'));
   clearAuxRows();
   flushStream();
   showTypingIndicator();
@@ -935,24 +1226,57 @@ input.addEventListener('keydown', e => {
 });
 sendBtn.addEventListener('click', submitInput);
 cameraBtn.addEventListener('click', captureImage);
-micBtn.addEventListener('click', async () => {
+function syncTalkButton() {
+  const live = !micMuted && !!micContext;
+  micBtn.classList.toggle('on', live);
+  const talk = document.getElementById('talk-btn');
+  if (talk) talk.classList.toggle('on', live);
+}
+function handleMicStart(msg) {
+  if (micMuted) { pendingMicStart = msg; return; }
+  const seq = ++micCommandSeq;
+  browserVadGate = msg.browser_vad_gate !== false;
+  window.AIKO_BARGE_IN_ENABLED = !!msg.barge_in_enabled;
+  window.AIKO_BARGE_ECHO_GUARD_MS = msg.echo_guard_ms ?? 450;
+  startMic().then((ok) => {
+    if (!ok || seq !== micCommandSeq) return;
+    if (window.resetVADState) window.resetVADState();
+    micStreamingEnabled = true;
+    vadDot.className = 'dot vad';
+    vadStatus.textContent = browserVadGate ? 'vad active' : 'raw mic';
+    vadStatus.className = 'active';
+  });
+}
+async function toggleMic() {
   if (!wsReady()) {
     addMessage('sys', 'WebSocket bridge is offline. Cannot toggle voice mode.');
     return;
   }
 
-  const asrEnabled = vMode.textContent.includes('ASR');
-
-  if (micContext) {
+  if (!micMuted) {
+    // User wants it OFF — kill switch: stays off until they turn it back on.
+    micMuted = true;
+    pendingMicStart = null;
     stopMic();
-    if (asrEnabled) ws.send(JSON.stringify({ type: 'user_input', text: '/listen' }));
+    if (asrOn) ws.send(JSON.stringify({ type: 'user_input', text: '/listen' }));
   } else {
+    const toggleGen = micGen;
+    micMuted = false;
     const ok = await startMic();
-    if (!ok) return;
-    if (!asrEnabled) ws.send(JSON.stringify({ type: 'user_input', text: '/listen' }));
+    if (toggleGen !== micGen) return;
+    if (!ok) { micMuted = true; syncTalkButton(); return; }
+    if (pendingMicStart) {
+      const start = pendingMicStart;
+      pendingMicStart = null;
+      handleMicStart(start);
+    } else if (!asrOn) ws.send(JSON.stringify({ type: 'user_input', text: '/listen' }));
   }
+  syncTalkButton();
   input.focus();
-});
+}
+micBtn.addEventListener('click', toggleMic);
+const talkBtn = document.getElementById('talk-btn');
+if (talkBtn) talkBtn.addEventListener('click', toggleMic);
 
 // ── WebSocket ─────────────────────────────────────────────────────────────
 let ws = null;
@@ -1039,24 +1363,15 @@ function connectWS() {
       case 'commit': flushStream(); hideTypingIndicator(); break;
       case 'tool': toolStatus.textContent = msg.status ? `  ⚙  ${msg.status}` : ''; break;
       case 'vitals': applyVitals(msg); break;
-      case 'voice': applyVoice(msg.status); break;
+      case 'voice':
+        if (msg.status === 'idle') pendingMicStart = null;
+        applyVoice(msg.status);
+        break;
       case 'mic':
         if (msg.action === 'start') {
-          const seq = ++micCommandSeq;
-          browserVadGate = msg.browser_vad_gate !== false;
-          // S0: master barge-in switch from server (BARGE_IN_ENABLED)
-          window.AIKO_BARGE_IN_ENABLED = !!msg.barge_in_enabled;
-          // S3: echo guard window from server (BARGE_IN_ECHO_GUARD_MS)
-          window.AIKO_BARGE_ECHO_GUARD_MS = msg.echo_guard_ms ?? 450;
-          startMic().then((ok) => {
-            if (!ok || seq !== micCommandSeq) return;
-            if (window.resetVADState) window.resetVADState();
-            micStreamingEnabled = true;
-            vadDot.className = 'dot vad';
-            vadStatus.textContent = browserVadGate ? 'vad active' : 'raw mic';
-            vadStatus.className = 'active';
-          });
+          handleMicStart(msg);
         } else if (msg.action === 'stop') {
+          pendingMicStart = null;
           micCommandSeq++;
           micStreamingEnabled = false;
           if (window.resetVADState) window.resetVADState();
@@ -1083,6 +1398,7 @@ function connectWS() {
     ws = null;
     wsDot.className = 'dot';
     wsLabel.textContent = 'ws offline';
+    pendingMicStart = null;
     stopMic();
     if (wsUrl.startsWith("wss:")) {
       toolStatus.textContent = "  ws offline: open " + wsUrl.replace("wss:", "https:") + " once to accept the WSS certificate";

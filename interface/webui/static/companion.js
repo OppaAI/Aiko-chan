@@ -59,16 +59,19 @@
   function renderTasks() { if (!taskList || !Array.isArray(state.tasks)) return; taskList.replaceChildren(...state.tasks.map(task => { const li = document.createElement('li'); li.className = task.done ? 'done' : ''; const check = document.createElement('input'); check.type = 'checkbox'; check.checked = task.done === true; check.setAttribute('aria-label', `Mark “${task.title}” done`); check.addEventListener('change', () => { task.done = check.checked; if (task.done) celebrateTask(task.title); saveState(); renderTasks(); }); const text = document.createElement('span'); text.textContent = task.title; const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'companion-task-delete'; remove.textContent = '×'; remove.setAttribute('aria-label', `Delete ${task.title}`); remove.addEventListener('click', () => { state.tasks = state.tasks.filter(item => item.id !== task.id); saveState(); renderTasks(); }); li.append(check, text, remove); return li; })); }
   function renderSummaries() { if (!summaryList || !Array.isArray(state.summaries)) return; summaryList.replaceChildren(...state.summaries.map(summary => { const li = document.createElement('li'); li.textContent = `${format(summary.seconds)} · ${summary.routine}${summary.workingOn ? ` · ${summary.workingOn}` : ''}`; return li; })); }
   function notify(title, body) { if ('Notification' in window && Notification.permission === 'granted') new Notification(title, { body, tag: 'aiko-companion' }); }
-  function celebrateTask(title) { if (status) status.textContent = `nice work — “${title}” is complete`; setAvatarMood('happy'); window.aikoSetPose?.('raiseHand', true); setTimeout(() => window.aikoSetPose?.('raiseHand', false), 1500); notify('Aiko', `Completed: ${title}`); }
+  function celebrateTask(title) { if (status) status.textContent = `nice work — “${title}” is complete`; window.dispatchEvent(new CustomEvent('aiko:task-done', { detail: { title } })); setAvatarMood('happy'); window.aikoPlayGesture?.('raiseHand'); notify('Aiko', `Completed: ${title}`); }
   const routineCopy = { coding: 'I’ll keep the noise down while you build.', study: 'Study mode: steady pace, gentle reminders.', writing: 'Writing mode: keep the thread, protect the flow.', gaming: 'Game mode: I’m here for the win.', quiet: 'Quiet company mode: I’ll stay subtle.' };
   function toggleFocus() {
     if (focusTicker) {
       const seconds = Math.max(1, Math.floor((Date.now() - focusStartedAt) / 1000));
       clearInterval(focusTicker); focusTicker = 0; focusState.textContent = 'READY'; focusButton.textContent = 'Start focus';
       state.summaries = [{ endedAt: new Date().toISOString(), seconds, routine: state.routine, workingOn: state.workingOn }, ...state.summaries].slice(0, 30); saveState(); renderSummaries();
-      status.textContent = `focus session saved locally (${format(seconds)})`; setAvatarMood('neutral'); return;
+      status.textContent = `focus session saved locally (${format(seconds)})`; setAvatarMood('neutral');
+      window.dispatchEvent(new CustomEvent('aiko:focus-stop', { detail: { seconds, routine: state.routine } }));
+      return;
     }
     focusStartedAt = Date.now(); updateFocus(); focusTicker = setInterval(updateFocus, 1000); focusState.textContent = 'FOCUS'; focusButton.textContent = 'End focus'; status.textContent = routineCopy[state.routine] || routineCopy.coding; setAvatarMood('thinking'); if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
+    window.dispatchEvent(new CustomEvent('aiko:focus-start', { detail: { routine: state.routine } }));
   }
   focusButton?.addEventListener('click', toggleFocus);
   routine?.addEventListener('change', () => { if (!routineCopy[routine.value]) return; state.routine = routine.value; saveState(); status.textContent = routineCopy[state.routine]; setAvatarMood(state.routine === 'gaming' ? 'happy' : 'thinking'); });

@@ -3,6 +3,7 @@ import json
 import sqlite3
 
 from cognition import attention
+from cognition import attention_train
 from cognition.attention import EdgeCognitiveState
 
 
@@ -10,6 +11,48 @@ def test_attention_module_is_singleton():
     """Sanity: importing cognition.attention twice returns the same module."""
     again = importlib.import_module("cognition.attention")
     assert again is attention
+
+
+def test_detector_keeps_regex_hits_when_model_predicts_negative(monkeypatch):
+    class Detector:
+        def __init__(self, prediction):
+            self.prediction = prediction
+
+        def predict(self, features):
+            return [self.prediction]
+
+    monkeypatch.setitem(attention._DETECTOR_MODELS, "critical", Detector(0.0))
+    assert attention.is_critical_task("This is an emergency")
+    assert not attention.is_critical_task("This is a routine update")
+    monkeypatch.setitem(attention._DETECTOR_MODELS, "question", Detector(1.0))
+    assert attention._gated_match("question", "A routine statement", attention._QUESTION_RE)
+
+
+def test_pending_training_uses_own_turn_tool_outcomes(monkeypatch):
+    labels = []
+    monkeypatch.setattr(attention_train, "log_example", lambda _features, label, **_kwargs: labels.append(label))
+    state = EdgeCognitiveState()
+
+    state.record_tool_outcome("first", ok=True)
+    state.record("first turn", "")
+    first_mark = state._pending_train["outcome_mark"]
+    state.record("second turn", "")
+    assert labels == [1.0]
+    assert state._pending_train["outcome_mark"] is first_mark
+
+    state.record_tool_outcome("third", ok=False)
+    state.record_tool_outcome("third", ok=True)
+    state.record("third turn", "")
+    assert labels == [1.0, 0.5]
+    state.record("fourth turn", "")
+    assert labels == [1.0, 0.5, 0.0]
+
+
+def test_training_feedback_failure_precedes_success():
+    state = EdgeCognitiveState()
+    assert state._outcome_label_for_previous_turn("Thanks, but that is wrong", 1.0) == 0.0
+    assert state._outcome_label_for_previous_turn("Thanks", 0.0) == 1.0
+    assert state._outcome_label_for_previous_turn("That is wrong", 1.0) == 0.0
 
 
 def test_attention_state_is_bounded_and_retrieves_current_focus():

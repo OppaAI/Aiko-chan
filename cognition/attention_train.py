@@ -90,17 +90,18 @@ def _maybe_schedule_retrain() -> None:
 
 # Per-detector self-distillation: user-input detectors whose raw regex hits
 # are logged per row. self_* detectors fire on assistant text (never logged)
-# and are excluded. Feature order MUST match _gated_match() inference in
+# and are excluded. Critical needs lexical features before self-distillation.
+# Feature order MUST match _gated_match() inference in
 # attention.py: [len(text), len(tokens), "?" in text].
 _DETECTOR_NAMES = (
-    "critical", "time_sensitive", "question", "commitment", "task",
+    "time_sensitive", "question", "commitment", "task",
     "identity_query", "done", "uncertain", "energy_low", "energy_high",
     "outcome_fail", "outcome_ok", "negation", "goal",
 )
 _DETECTOR_FEATURES = ("input_length", "token_count", "is_question")
 _DETECTOR_MIN_ROWS = 50
 _DETECTOR_MIN_POS = 5
-_DETECTOR_DIR = Path("models/detectors")
+_DETECTOR_DIR = Path(__file__).resolve().parent.parent / "models" / "detectors"
 
 
 def _train_detector_models(rows: list[dict]) -> None:

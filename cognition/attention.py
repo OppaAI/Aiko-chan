@@ -541,7 +541,7 @@ _intent_classifier = IntentConfidenceClassifier()
 
 # ── Gated regex → LightGBM detectors (train-and-keep-regex-as-fallback) ──
 # Each detector optionally loads a per-task LightGBM model from
-# models/detectors/<name>.lgb. When absent, the compiled regex is used.
+# models/detectors/<name>.lgb. Regex hits always count; models can add matches.
 _DETECTOR_MODELS: dict[str, Any] = {}
 _DETECTOR_REGEX: dict[str, re.Pattern] = {}
 
@@ -566,13 +566,15 @@ def _load_detector_models() -> None:
 
 
 def _gated_match(name: str, text: str, fallback_re: re.Pattern) -> bool:
-    """Try LightGBM detector for *name*; fallback to regex.
+    """Keep regex hits and use the LightGBM detector for additional matches.
 
     Model features are leak-free surface stats only — the per-detector
     models are trained with raw regex hits as labels, so feeding the regex
     hit back in as a feature would teach the model the identity function.
     """
     _maybe_reload_detector_models()
+    if fallback_re.search(text or ""):
+        return True
     mdl = _DETECTOR_MODELS.get(name)
     if mdl is not None:
         try:
@@ -586,7 +588,7 @@ def _gated_match(name: str, text: str, fallback_re: re.Pattern) -> bool:
             return pred >= 0.5
         except Exception:
             pass
-    return bool(fallback_re.search(text or ""))
+    return False
 
 
 # Throttled hot-reload of per-detector models: the background trainer in
@@ -707,8 +709,8 @@ class EdgeCognitiveState:
         self._motion_director = MotionDirector() if MotionDirector is not None else None
         self._last_tick = time.monotonic()
         # Delayed weak-supervision: previous turn's (features, regex_hits) are
-        # stashed here and labeled on the NEXT record() call, when the outcome
-        # of that turn is actually known (user feedback + tool outcomes).
+        # stashed here with that turn's tool label and logged on the NEXT
+        # record() call, when the user's feedback is available.
         self._pending_train: dict | None = None
 
     def _scrub_style_junk(self) -> None:
@@ -779,11 +781,22 @@ class EdgeCognitiveState:
             # label now uses the user's verbal feedback (thanks / that's
             # wrong) plus tool outcomes instead of defaulting to 0.5.
             try:
+                previous_mark = self._pending_train.get("outcome_mark") if self._pending_train else None
+                current_outcomes = []
+                for outcome in self._tool_outcomes:
+                    if outcome is previous_mark:
+                        break
+                    current_outcomes.append(outcome)
+                tool_label = (0.0 if any(outcome.get("ok") is False for outcome in current_outcomes)
+                              else 1.0 if any(outcome.get("ok") is True for outcome in current_outcomes)
+                              else None)
+                outcome_mark = current_outcomes[0] if current_outcomes else previous_mark
                 self._flush_pending_train(user)
                 self._pending_train = {
                     "features": self._feature_vector_for_intent(user),
                     "regex_hits": _raw_regex_hits(user),
-                    "outcome_mark": self._tool_outcomes[0] if self._tool_outcomes else None,
+                    "tool_label": tool_label,
+                    "outcome_mark": outcome_mark,
                 }
             except Exception:
                 pass
@@ -1189,35 +1202,26 @@ class EdgeCognitiveState:
         self._pending_train = None
         if not pending or not pending.get("features"):
             return
-        label = self._outcome_label_for_previous_turn(user, pending.get("outcome_mark"))
+        label = self._outcome_label_for_previous_turn(user, pending.get("tool_label"))
         try:
             from cognition.attention_train import log_example
             log_example(pending["features"], label, regex_hits=pending.get("regex_hits"))
         except Exception:
             pass
 
-    def _outcome_label_for_previous_turn(self, user: str, mark) -> float:
+    def _outcome_label_for_previous_turn(self, user: str, tool_label: float | None) -> float:
         """Weak label for the previous turn: 1.0 good / 0.0 bad / 0.5 unknown.
 
         Signal order: the user's verbal feedback in the CURRENT message
         ("thanks" / "that's wrong" refer to the previous turn) beats tool
-        outcomes recorded since the previous turn was stashed.
+        outcomes saved with that previous turn.
         """
         u = user or ""
-        if _OUTCOME_OK_RE.search(u):
-            return 1.0
         if _OUTCOME_FAIL_RE.search(u):
             return 0.0
-        seen_ok = False
-        for oc in self._tool_outcomes:
-            if mark is not None and oc is mark:
-                break
-            ok = oc.get("ok") if isinstance(oc, dict) else None
-            if ok is False:
-                return 0.0
-            if ok is True:
-                seen_ok = True
-        return 1.0 if seen_ok else 0.5
+        if _OUTCOME_OK_RE.search(u):
+            return 1.0
+        return tool_label if tool_label is not None else 0.5
 
     def _feature_vector_for_intent(self, user_input: str) -> dict:
         """Extract gated features for LightGBM intent confidence scoring.

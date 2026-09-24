@@ -131,7 +131,7 @@ def assign_credit(user_id: str | None, reward: float) -> dict:
 
             mb = get_flymb(user_id)
             store = get_fly_store(user_id)
-            if store is not None and mb is not None:
+            if res.get("applied") and store is not None and mb is not None:
                 store.flush_mb(mb)
                 out["flushed"] = True
         except Exception:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 from collections import deque
+from types import SimpleNamespace
 
 import pytest
 
@@ -102,6 +103,32 @@ def test_assign_credit_requires_successful_applied_pulse(monkeypatch, pulse_resu
     assert result["delta"] == 0.0
     assert mb.reinforce_calls == 0
     eligibility.clear(uid)
+
+
+@pytest.mark.parametrize("applied, reason", [
+    (True, "ok"), (False, "shadow"), (False, "dedup"),
+    (False, "mb_unavailable"),
+])
+def test_assign_credit_flushes_only_applied_events(monkeypatch, applied, reason):
+    from cognition import fly_registry
+    from cognition.flymemory import credit, eligibility
+
+    flushed = []
+    mb = _MB()
+    monkeypatch.setattr(eligibility, "_enabled", lambda: True)
+    monkeypatch.setattr(eligibility, "_mb_mode", lambda: "live")
+    monkeypatch.setattr(credit, "credit_event", lambda *_args, **_kwargs: {
+        "applied": applied, "reason": reason, "n_applied_traces": int(applied),
+        "delta": 0.25 if applied else 0.0,
+    })
+    monkeypatch.setattr(fly_registry, "get_flymb", lambda _uid: mb)
+    store = SimpleNamespace(flush_mb=lambda value: flushed.append(value))
+    monkeypatch.setattr(fly_registry, "get_fly_store", lambda _uid: store)
+
+    result = eligibility.assign_credit("stage4-flush", 0.5)
+
+    assert result["flushed"] is applied
+    assert flushed == ([mb] if applied else [])
 
 
 def test_assign_credit_fails_soft_when_engine_raises(monkeypatch):

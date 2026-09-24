@@ -82,6 +82,23 @@ class TestMode:
 # ── determinism ────────────────────────────────────────────────────────────
 
 class TestDeterminism:
+    def test_episode_resets_only_sim_credit_state(self, monkeypatch, live_mb):
+        from cognition.flymemory import credit
+
+        monkeypatch.setenv("AIKO_FLYWORLD_MODE", "shadow")
+        credit.mark_trace(live_mb, [1.0, 0.0], scope="flyworld-sim")
+        credit.credit_event(live_mb, 0.5, scope="flyworld-sim", apply=False)
+        credit.mark_trace(live_mb, [0.0, 1.0], scope="real")
+
+        ep = loop.run_episode(live_mb, seed=42, max_steps=1)
+
+        assert ep["ran"] is True
+        sim = credit.stats(live_mb, scope="flyworld-sim")
+        assert sim["clock"] == 1
+        assert sim["n_traces"] == 1
+        assert sim["baseline"] == pytest.approx(round(ep["steps"][0]["reward"] * 0.2, 4))
+        assert credit.stats(live_mb, scope="real")["n_traces"] == 1
+
     def test_same_seed_same_trajectory(self, monkeypatch, live_mb):
         monkeypatch.setenv("AIKO_FLYWORLD_MODE", "shadow")
         a = loop.run_episode(live_mb, seed=42, max_steps=5)

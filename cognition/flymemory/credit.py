@@ -29,9 +29,10 @@ the prediction error is surprising, so pe ← clip(pe·ρ, −1, 1) with
 Scopes: traces and dopamine state are keyed by (user_id, scope). The real
 turn path uses scope="real"; the FlyWorld simulator uses
 scope="flyworld-sim" so synthetic experience never pollutes real credit
-(Phase 9 invariant). scope != "real" is reported as simulated=True.
+(Phase 9 invariant). The "replay" scope holds real offline replay.
 
-Mode AIKO_FLY_DOPAMINE_MODE=off|shadow|live (default shadow):
+Mode AIKO_FLY_DOPAMINE_MODE=off|shadow|live (defaults to live when MB is live,
+otherwise shadow):
   off    : no-op, zero overhead, no state changes.
   shadow : full computation + trail logging, zero weight changes.
   live   : the rate path applies — but still only when MEMORY_FLYMB_MODE
@@ -77,8 +78,9 @@ def _str_env(name: str, default: str) -> str:
 
 
 def dopamine_mode() -> str:
-    """AIKO_FLY_DOPAMINE_MODE: off | shadow | live (default shadow)."""
-    m = (_str_env("AIKO_FLY_DOPAMINE_MODE", "shadow") or "shadow").strip().lower()
+    """AIKO_FLY_DOPAMINE_MODE: off | shadow | live (defaults from MB mode)."""
+    default = "live" if _mb_mode() == "live" else "shadow"
+    m = (_str_env("AIKO_FLY_DOPAMINE_MODE", default) or default).strip().lower()
     return m if m in ("off", "shadow", "live") else "shadow"
 
 
@@ -286,6 +288,7 @@ def credit_event(
     source: str = "credit",
     scope: str | None = "real",
     apply: bool | None = None,
+    broadcast: bool = True,
 ) -> dict:
     """One reward event through the rate-based credit path. Never raises.
 
@@ -295,11 +298,12 @@ def credit_event(
     apply: None → decided by modes; True/False forces the caller's intent,
       but AIKO_FLY_DOPAMINE_MODE=live AND MEMORY_FLYMB_MODE=live are still
       required for any write.
+    broadcast=False: credit only the trace marked by this event.
     """
     da_mode = dopamine_mode()
     mb_mode = _mb_mode()
     scope_name = (scope or "real").strip() or "real"
-    simulated = scope_name != "real"
+    simulated = scope_name not in ("real", "replay")
     out: dict = {
         "ran": False,
         "mode": "shadow",
@@ -374,8 +378,9 @@ def credit_event(
             st = _state_for(key)
 
             # 1. Mark the current pattern's trace (the "action now").
+            target_tid = None
             if kc_arr is not None:
-                mark_trace(user_id, kc_arr, value=mark_value, scope=scope_name)
+                target_tid = mark_trace(user_id, kc_arr, value=mark_value, scope=scope_name)
 
             # 2. Prediction error against the running baseline.
             E = float(st["baseline"])
@@ -421,6 +426,8 @@ def credit_event(
             # 7. Credit backward: each live trace gets da·e_i, strongest first.
             items = sorted(st["traces"].items(),
                            key=lambda kv: float(kv[1]["e"]), reverse=True)
+            if not broadcast:
+                items = [(tid, tr) for tid, tr in items if tid == target_tid]
             out["n_traces"] = len(items)
             lr = _lr()
             total = 0.0

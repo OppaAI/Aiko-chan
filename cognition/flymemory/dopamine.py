@@ -17,7 +17,7 @@ Separates *reward* (outcome signal) from *dopamine* (PAM / PPL1 drive):
             × eligibility trace value
             → KC→MBON reinforce, scaled by the dopamine signal
 
-Mode AIKO_FLY_DOPAMINE_MODE=off|shadow|live (default shadow) gates the
+Mode AIKO_FLY_DOPAMINE_MODE=off|shadow|live (defaults from MB mode) gates the
 whole path; live application additionally requires MEMORY_FLYMB_MODE=live.
 Never raises.
 """
@@ -80,6 +80,8 @@ def pulse(
         if kc is None and not text:
             out["reason"] = "no_kc"
             return out
+        replay = source in ("replay", "flyworld-replay")
+        scope = "flyworld-sim" if source == "flyworld-replay" else "replay" if replay else "real"
         res = _credit.credit_event(
             user_id,
             reward,
@@ -87,7 +89,8 @@ def pulse(
             mark_value=weight,
             text=text,
             source=source,
-            scope="real",
+            scope=scope,
+            broadcast=not replay,
         )
     except Exception as exc:
         log.debug("dopamine pulse skipped: %s", exc)

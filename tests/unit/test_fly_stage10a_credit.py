@@ -186,9 +186,28 @@ def test_trace_store_bounded(live_credit, fake_mb):
 
 # ── modes ────────────────────────────────────────────────────────────────
 
+@pytest.mark.parametrize("mb_mode, expected", [
+    ("live", "live"), ("shadow", "shadow"), ("off", "shadow"),
+])
+def test_dopamine_mode_defaults_from_mb(monkeypatch, mb_mode, expected):
+    monkeypatch.setenv("MEMORY_FLYMB_MODE", mb_mode)
+    monkeypatch.delenv("AIKO_FLY_DOPAMINE_MODE", raising=False)
+    assert credit.dopamine_mode() == expected
+
+
+@pytest.mark.parametrize("mode, expected", [
+    ("LIVE", "live"), ("shadow", "shadow"), ("off", "off"),
+    ("invalid", "shadow"),
+])
+def test_dopamine_mode_override_and_invalid_fallback(monkeypatch, mode, expected):
+    monkeypatch.setenv("MEMORY_FLYMB_MODE", "live")
+    monkeypatch.setenv("AIKO_FLY_DOPAMINE_MODE", mode)
+    assert credit.dopamine_mode() == expected
+
+
 def test_shadow_computes_but_writes_nothing(monkeypatch, fake_mb):
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "live")
-    # AIKO_FLY_DOPAMINE_MODE left at default "shadow".
+    monkeypatch.setenv("AIKO_FLY_DOPAMINE_MODE", "shadow")
     uid = f"phase10a-shadow-{time.time_ns()}"
     credit.clear(uid, scope=None)
     mb = fake_mb
@@ -243,7 +262,43 @@ def test_sim_scope_never_touches_real_traces(live_credit, fake_mb):
     assert credit.stats(uid, scope="real")["n_traces"] == 1
 
 
+def test_real_replay_scope_is_not_simulated(live_credit, fake_mb):
+    res = credit.credit_event(live_credit, 0.5, kc=_fake_kc(0),
+                              scope="replay", broadcast=False)
+    assert res["simulated"] is False
+
+
 # ── legacy pulse() compatibility ─────────────────────────────────────────
+
+@pytest.mark.parametrize("source, scope", [
+    ("replay", "replay"), ("flyworld-replay", "flyworld-sim"),
+])
+def test_replay_pulse_credits_only_selected_kc(live_credit, fake_mb, source, scope):
+    uid = live_credit
+    old_kc = _fake_kc(0)
+    target_kc = _fake_kc(1)
+    credit.mark_trace(uid, old_kc, scope=scope)
+    credit.mark_trace(uid, _fake_kc(2), scope="real")
+
+    res = dopamine_mod.pulse(0.5, user_id=uid, kc=target_kc, source=source)
+
+    assert res["applied"] is True
+    assert res["scope"] == scope
+    assert [kc for kc, _ in fake_mb.calls] == [target_kc.tobytes()]
+    assert credit.stats(uid, scope="real")["n_traces"] == 1
+
+
+def test_online_pulse_still_broadcasts_real_traces(live_credit, fake_mb):
+    uid = live_credit
+    old_kc = _fake_kc(0)
+    target_kc = _fake_kc(1)
+    credit.mark_trace(uid, old_kc, scope="real")
+
+    res = dopamine_mod.pulse(0.5, user_id=uid, kc=target_kc, source="online_teach")
+
+    assert res["scope"] == "real"
+    assert {kc for kc, _ in fake_mb.calls} == {old_kc.tobytes(), target_kc.tobytes()}
+
 
 def test_pulse_shim_keeps_signature_and_keys(live_credit, fake_mb):
     uid = live_credit
@@ -274,8 +329,9 @@ def test_pulse_shim_no_kc_no_text(live_credit, fake_mb):
     assert res["applied"] is False
 
 
-def test_pulse_shim_shadow_by_default(monkeypatch, fake_mb):
+def test_pulse_shim_explicit_shadow(monkeypatch, fake_mb):
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "live")
+    monkeypatch.setenv("AIKO_FLY_DOPAMINE_MODE", "shadow")
     uid = f"phase10a-pulseshadow-{time.time_ns()}"
     res = dopamine_mod.pulse(0.5, user_id=uid, kc=_fake_kc(4))
     assert res["mode"] == "shadow"

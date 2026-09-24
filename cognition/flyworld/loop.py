@@ -190,8 +190,10 @@ def run_episode(
         from . import sim as _sim
         from cognition.fly_behavior.action_select import score_candidates
         from cognition.fly_registry import get_flymb, get_fly_store
+        from cognition.flymemory import credit as _credit
         from cognition.flymemory.circuit import text_features
 
+        _credit.clear(user_id, scope="flyworld-sim")
         rng = _sim.new_rng(seed)
         state = _sim.initial_state(rng)
         n_steps = max_steps or _max_steps()
@@ -248,8 +250,6 @@ def run_episode(
             pulsed_here: list[dict] = []
             if kc is not None and mb_ok:
                 try:
-                    from cognition.flymemory import credit as _credit
-
                     tid = _credit.mark_trace(
                         user_id, kc, value=1.0, scope="flyworld-sim")
                     res = _credit.credit_event(

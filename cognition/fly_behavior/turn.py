@@ -300,7 +300,8 @@ def apply_turn_priors(
 
             cxm = cx_mode()
             if cxm in ("shadow", "live"):
-                _s_voice = ((out.get("senses") or {}).get("voice")) or {}
+                _senses = out.get("senses") or {}
+                _s_voice = (_senses.get("voice") or {}) if _senses.get("mode") == "live" else {}
                 try:
                     _venergy = max(0.0, min(1.0, float(_s_voice.get("energy") or 0.0)))
                 except Exception:

@@ -140,14 +140,33 @@ def gate_tool(*, name: str, args: dict, llm_client=None, embedder=None, social_p
     """Evaluate act=tool. Returns a dict payload to block, or None to proceed."""
     try:
         from cognition.conscience import conscience_for, REFUSE, ESCALATE
+        from agentic.registry import TOOLS, registry
         social = social_post_tools or set()
-        scope = "external" if name in social or name.startswith("post_") else "local"
+        spec = registry.get(name) or TOOLS.get(name)
+        scope = spec.scope if spec and spec.scope is not None else (
+            "external" if name in social or name.startswith("post_") else "local"
+        )
         serialized_args = json.dumps(args, ensure_ascii=False, default=str)
         content = f"tool={name} args={serialized_args}"
+        # MB valence (Phase 4): the fly brain's learned approach/avoid signal
+        # rides along so the conscience can weigh caution when valence is
+        # strongly negative (learned aversion to the current context).
+        mb_valence = None
+        try:
+            from cognition.neural_state import get_neural_state
+            from system.userspace import current_user_id
+            try:
+                _uid = current_user_id()
+            except Exception:
+                _uid = None
+            mb_valence = float(get_neural_state(_uid).valence or 0.0)
+        except Exception:
+            mb_valence = None
         verdict = conscience_for().evaluate(
             act="tool",
             content=content,
-            context={"tool": name, "scope": scope, "surface": "agentic"},
+            context={"tool": name, "scope": scope, "surface": "agentic",
+                     "mb_valence": mb_valence},
             llm_client=llm_client,
             embedder=embedder,
             surface="agentic",

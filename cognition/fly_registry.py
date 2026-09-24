@@ -191,6 +191,17 @@ def get_flycx_lock(user_id: str | None = None) -> threading.RLock:
         return _cx_locks.setdefault(key, threading.RLock())
 
 
+def get_fullbrain():
+    """Process-wide whole-brain singleton (Phase 4). Identity-agnostic:
+    the connectome is anatomy, not memory — no per-user state lives here."""
+    try:
+        from cognition.flymemory.fullbrain import get_fullbrain as _gfb
+        return _gfb()
+    except Exception as exc:
+        log.debug("fullbrain unavailable: %s", exc)
+        return None
+
+
 def flush_all(user_id: str | None = None) -> dict[str, int | bool]:
     """Force-write pending MB plastic deltas and CX sleep pressure for one identity.
 

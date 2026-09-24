@@ -56,7 +56,9 @@ def apply_turn_priors(
         from cognition.fly_behavior.lateral_horn import context_prior
 
         st = get_neural_state(user_id)
-        st.publish_circadian(_circadian_phase_now(), source="wallclock")
+        # Circadian is ticked after the MB / whole-brain block below so the
+        # real clock-neuron drive can set the rhythm gain (Phase 4).
+        _clock_wall_phase = _circadian_phase_now()
 
         try:
             from cognition.flymemory.soul_teach import ensure_soul_bootstrap
@@ -92,6 +94,7 @@ def apply_turn_priors(
 
                 mb = get_flymb(user_id)
                 if mb is not None:
+                    kc = mb.encode(text_features(text or ""))
                     bias = float(mb.valence_bias(text_features(text or "")))
                     out["valence"] = bias
                     if mb_mode == "live":
@@ -99,8 +102,46 @@ def apply_turn_priors(
                     st.record_influence(
                         {"kind": "mb_valence", "mode": mb_mode, "bias": round(bias, 4)}
                     )
+                    # Whole-brain step (Phase 4): seed slice KCs into the full
+                    # connectome. DN drive becomes motor vigor; clock-neuron
+                    # drive gates the circadian rhythm gain below.
+                    try:
+                        from cognition.fly_registry import get_fullbrain
+
+                        fb = get_fullbrain()
+                        if fb is not None:
+                            step = fb.step(kc, mb.kc_body_ids)
+                            dn = float(step.get("dn_drive", 0.0))
+                            # DN drive is O(5e-5) (measured 4.6e-5..5.4e-5);
+                            # map gently around the 1.0 baseline — a real
+                            # neural signal, never a wild swing.
+                            out["motor_vigor"] = round(
+                                max(0.8, min(1.2, 1.0 + 3000.0 * (dn - 50e-6))), 3
+                            )
+                            out["clock_drive"] = round(
+                                float(step.get("clock_drive", 0.0)), 5
+                            )
+                            out["brain_arousal"] = round(
+                                float(step.get("arousal", 0.0)), 5
+                            )
+                            out["whole_brain"] = True
+                    except Exception as exc:
+                        log.debug("whole-brain step skipped: %s", str(exc))
             except Exception as exc:
                 log.debug("mb valence skipped: %s", str(exc))
+
+        # Real circadian clock circuit (Phase 4): wall clock is the zeitgeber;
+        # clock-neuron drive from the whole-brain step sets the rhythm gain.
+        try:
+            from cognition.fly_behavior import circadian as _circ
+
+            out["circadian"] = _circ.circadian_now(
+                _clock_wall_phase,
+                user_id=user_id,
+                clock_drive=out.get("clock_drive"),
+            )
+        except Exception as exc:
+            log.debug("circadian tick skipped: %s", str(exc))
 
         motion = float(st.motion_salience or 0.0)
         gf = assess_interrupt(

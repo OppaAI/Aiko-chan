@@ -9,6 +9,8 @@ from agentic import agentic
 from agentic.agentic import AgentContext, TaskState, dispatch_tool_checked, execute_tool_with_policy
 from agentic.registry import registry
 from cognition.conscience import hooks
+from cognition.conscience.core import ConscienceCircuitCore
+from cognition.conscience.schema import ALLOW, CAUTION, ESCALATE, GATE_HITL, GATE_MB_VALENCE, Verdict
 from cognition.think import AikoThink
 
 
@@ -26,6 +28,45 @@ def test_gate_tool_evaluates_complete_serialized_args(monkeypatch):
     assert hooks.gate_tool(name="save_note", args={"content": long_value}) is None
     assert json.dumps({"content": long_value}) in captured["content"]
     assert len(captured["content"]) > 1800
+
+
+def test_gate_tool_uses_registered_scope_and_preserves_fallback(monkeypatch):
+    contexts = []
+
+    class Core:
+        def evaluate(self, **kwargs):
+            contexts.append(kwargs["context"])
+            return SimpleNamespace(decision=ALLOW)
+
+    monkeypatch.setattr("cognition.conscience.conscience_for", lambda *_args, **_kwargs: Core())
+    for name in ("adaptive_search", "deep_read", "deep_research", "save_note", "reply_owner_email", "post_custom"):
+        assert hooks.gate_tool(name=name, args={}) is None
+    assert [ctx["scope"] for ctx in contexts] == ["network", "network", "network", "local", "external", "external"]
+
+
+def test_external_valence_caution_requires_approval_if_irreversible(monkeypatch):
+    import cognition.conscience.core as policy
+
+    core = ConscienceCircuitCore("policy-test")
+    monkeypatch.setattr(policy, "ESCALATE_IRREVERSIBLE_EXTERNAL", False)
+    monkeypatch.setattr(policy, "IRREVERSIBLE_REQUIRES_APPROVAL", True)
+    context = {"tool": "irreversible_test", "scope": "network", "reversible": False, "mb_valence": -0.8}
+    verdict = core._apply_tool_policy(Verdict(decision=ALLOW), context)
+    assert verdict.decision == ESCALATE
+    assert verdict.gate == GATE_HITL
+    assert any("mushroom-body valence" in reason for reason in verdict.reasons)
+
+    context["reversible"] = True
+    verdict = core._apply_tool_policy(Verdict(decision=ALLOW), context)
+    assert verdict.decision == CAUTION
+    assert verdict.gate == GATE_MB_VALENCE
+
+    monkeypatch.setattr(policy, "ESCALATE_IRREVERSIBLE_EXTERNAL", True)
+    context["reversible"] = False
+    verdict = core._apply_tool_policy(Verdict(decision=ALLOW), context)
+    assert verdict.decision == ESCALATE
+    assert verdict.gate == GATE_HITL
+    assert "irreversible external action" in verdict.reasons[0]
 
 
 def test_dispatch_tool_checked_does_not_dispatch_when_gate_is_unavailable(monkeypatch):

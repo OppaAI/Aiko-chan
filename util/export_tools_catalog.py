@@ -80,6 +80,9 @@ def _spec_to_entry(name: str, spec: object, fallback_handler: str | None) -> dic
     domain = getattr(spec, "domain", None)
     if domain is not None:
         entry["domain"] = domain
+    scope = getattr(spec, "scope", None)
+    if scope is not None:
+        entry["scope"] = scope
     if getattr(spec, "always_on", False):
         entry["always_on"] = True
     entry["react"] = bool(getattr(spec, "react", True))

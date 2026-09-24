@@ -10,6 +10,7 @@ Stage 2: teach_preference / extract_topic for explicit do-or-don't teaching.
 Stage 3: eligibility trail. Stage 4: dopamine PAM/PPL1 + MB sleep consolidation.
 """
 from .circuit import FlyMB, load_circuit, text_features
+from .fullbrain import FullBrain, get_fullbrain, load_fullbrain
 from .soul_teach import ensure_soul_bootstrap, soul_episodes
 from .online_teach import teach_from_user_text, teach_interrupt_honored
 from .teach_api import teach_preference, extract_topic
@@ -21,6 +22,9 @@ __all__ = [
     "FlyMB",
     "load_circuit",
     "text_features",
+    "FullBrain",
+    "get_fullbrain",
+    "load_fullbrain",
     "ensure_soul_bootstrap",
     "soul_episodes",
     "teach_from_user_text",

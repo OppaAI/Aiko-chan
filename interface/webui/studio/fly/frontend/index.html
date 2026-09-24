@@ -1,44 +1,47 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Aiko · Neural Observatory</title>
+<link rel="stylesheet" href="/studio/fly/shared/css/studio-theme.css">
 <style>
-:root{--bg:#070b14;--panel:#0d1422;--line:#26334a;--text:#edf4ff;--muted:#91a1ba;--cyan:#48d8ff;--violet:#a88bff;--pink:#ff78b7;--amber:#ffbe62}
+:root{--bg:#0c0614;--panel:#160e22;--line:#3d2f4f;--text:#e8e0f0;--muted:#8b7a9e;--cyan:#51d4c8;--violet:#a78bfa;--pink:#c651a8;--amber:#e8a13a}
 *{box-sizing:border-box}
-body{margin:0;background:radial-gradient(circle at 20% -10%,#182b50 0,transparent 32%),var(--bg);color:var(--text);font:14px Inter,ui-sans-serif,system-ui,sans-serif}
-header{height:66px;display:flex;align-items:center;gap:14px;padding:0 28px;border-bottom:1px solid var(--line);background:#09101ddd;backdrop-filter:blur(16px);position:sticky;top:0;z-index:5}
+body{margin:0;background:radial-gradient(circle at 20% -10%,#2a1a4a 0,transparent 32%),var(--bg);color:var(--text);font:14px Inter,ui-sans-serif,system-ui,sans-serif}
+header{height:66px;display:flex;align-items:center;gap:14px;padding:0 28px;border-bottom:1px solid var(--line);background:#120c1ddd;backdrop-filter:blur(16px);position:sticky;top:0;z-index:5}
 .brand{font-weight:750;letter-spacing:.02em}
 .kicker,.sub{font-size:11px;color:var(--muted);letter-spacing:.1em;text-transform:uppercase}
 .sub{letter-spacing:0;text-transform:none}
 .back{color:var(--cyan);text-decoration:none}
-button{margin-left:auto;border:1px solid #395071;border-radius:7px;background:#13233a;color:var(--text);padding:8px 13px;font-weight:600;cursor:pointer}
+button{margin-left:auto;border:1px solid var(--border);border-radius:7px;background:#1a1028;color:var(--text);padding:8px 13px;font-weight:600;cursor:pointer}
 .shell{max-width:1540px;margin:auto;padding:22px;display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:18px}
-.panel{background:linear-gradient(145deg,#111b2d,#0b1220);border:1px solid var(--line);border-radius:14px;box-shadow:0 16px 35px #0004}
+.panel{background:linear-gradient(145deg,#1a1226,#120c1d);border:1px solid var(--line);border-radius:14px;box-shadow:0 16px 35px #0004}
 .main{padding:18px;position:relative}
 .topline{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}
 .title{font-size:18px;font-weight:700}
 .badges{display:flex;gap:7px;flex-wrap:wrap}
-.badge{font-size:11px;border:1px solid #334763;border-radius:99px;padding:4px 8px;color:#b7c7e3}
+.badge{font-size:11px;border:1px solid #3d2f4f;border-radius:99px;padding:4px 8px;color:#b7a6d6}
 .badge.live{border-color:#2c8f9e;color:#69eaff}
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:16px 0}
-.stat{padding:12px;border-radius:10px;background:#091323;border:1px solid #1f3049}
+.stat{padding:12px;border-radius:10px;background:#120c1d;border:1px solid #3d2f4f}
 .stat b{font-size:22px;display:block}
 .stat span{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
-#canvas{width:100%;height:580px;border-radius:12px;background:radial-gradient(circle at 50% 42%,#12233c,#07101c 70%);border:1px solid #1d2d44;display:block}
+#canvas{width:100%;height:580px;border-radius:12px;background:radial-gradient(circle at 50% 42%,#1c1430,#0c0614 70%);border:1px solid #3d2f4f;display:block}
 .note{font-size:11px;color:var(--muted);margin-top:8px}
 .side{display:flex;flex-direction:column;gap:16px}
 .panel h2{margin:0 0 12px;padding:12px 16px;border-bottom:1px solid var(--line);font-size:14px;font-weight:600}
 .panel .list{padding:12px 16px;font-size:12px;line-height:1.6;color:var(--muted);max-height:200px;overflow:auto}
 .panel .list b{color:var(--text)}
-.meter{margin:10px 16px}
-.meter .row{display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px}
-.meter .bar{height:6px;background:#0a1526;border-radius:3px;overflow:hidden}
+.meter{margin:6px 16px}
+.meter .row{display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px}
+.meter .bar{height:6px;background:#1a1028;border-radius:3px;overflow:hidden}
+/* Neural-state meters need all 7 rows visible so Urgency's bar+value fit */
+#meters.list{max-height:320px}
 .meter .bar i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--violet));transition:width .3s}
 .meter .bar i.warn{background:linear-gradient(90deg,var(--amber),#ff9944)}
 .meter .bar i.danger{background:linear-gradient(90deg,#ff6b6b,#ff4444)}
 legend{display:flex;flex-wrap:wrap;gap:10px;padding:10px 16px;font-size:11px;color:var(--muted);border-top:1px solid var(--line)}
 legend span{display:flex;align-items:center;gap:6px}
 legend i{width:12px;height:12px;border-radius:3px}
-#loading{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(7,11,20,.95);z-index:10;gap:12px;color:var(--text)}
+#loading{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(12,6,20,.95);z-index:10;gap:12px;color:var(--text)}
 #loading .spinner{width:40px;height:40px;border:3px solid var(--line);border-top-color:var(--cyan);border-radius:50%;animation:spin 1s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 #loading.hidden{display:none}

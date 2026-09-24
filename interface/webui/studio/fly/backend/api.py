@@ -22,7 +22,9 @@ bind_login_session(app)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
+SHARED_DIR = Path(__file__).resolve().parents[2] / "shared"
 app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="fly-frontend")
+app.mount("/shared", StaticFiles(directory=str(SHARED_DIR), html=True), name="fly-shared")
 
 _CATALOG_LAYOUT: list[dict] | None = None
 _CATALOG_SUMMARY: dict | None = None

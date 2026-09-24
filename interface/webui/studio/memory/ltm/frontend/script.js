@@ -1,21 +1,11 @@
-/* Neural LTM — layered neural-network view.
+/* Neural LTM — organic neural-field view (reference: neural memory demo).
  *
- * Deterministic column layout (input → hidden → output), one flat-filled
- * circle per node, straight connector lines. No force simulation, no
- * per-node gradients/filters, no decorative DOM — the whole graph is
- * N circles + M lines + K layer labels.
+ * Deterministic one-shot force layout (seeded, bounded ticks, no live
+ * simulation loop), glossy 3D sphere nodes via one shared radial gradient
+ * per hue, straight connector lines whose brightness follows both endpoint
+ * sizes. Size + brightness track score / tendency to retain.
  */
 const API_BASE = GraphBoot.apiBase();
-
-/* Layers left → right: raw traces in, distilled knowledge middle, entity hubs out. */
-const LAYERS = [
-  { key: 'memory',     label: 'Episodic Memory' },
-  { key: 'episode',    label: 'Episodes' },
-  { key: 'experience', label: 'Experience' },
-  { key: 'knowledge',  label: 'Knowledge' },
-  { key: 'entity',     label: 'Entity Hubs' },
-];
-const LAYER_INDEX = Object.fromEntries(LAYERS.map((l, i) => [l.key, i]));
 
 let graph = { nodes: [], edges: [], meta: {} };
 let zoomBehavior = null;
@@ -25,7 +15,6 @@ let currentUsername = 'OppaAI';
 /* Live selections — rebuilt only when new data arrives. */
 let nodeSel = null;   // d3 selection of node <g> elements
 let linkSel = null;   // d3 selection of edge <line> elements
-let labelSel = null;  // d3 selection of layer label <text> elements
 let visibleNodes = [];
 let nodeById = new Map();
 
@@ -66,6 +55,8 @@ async function loadGraph() {
       `neurons: ${m.memory_count ?? 0}<br/>entities: ${m.entity_count ?? 0}<br/>knowledge: ${(graph.nodes||[]).filter(n=>n.type==='knowledge').length}<br/>experience: ${(graph.nodes||[]).filter(n=>n.type==='experience').length}<br/>episodes: ${m.episode_count ?? 0}<br/>synapses: ${m.edge_count ?? 0}`;
     document.getElementById('status').textContent =
       `${(graph.nodes||[]).length} nodes · ${(graph.edges||[]).length} edges`;
+    document.getElementById('graph-stats').textContent =
+      `${(graph.nodes||[]).length} neurons · ${(graph.edges||[]).length} synapses · drag nodes · scroll zoom`;
     await getCurrentUser();
     userEntityId = `ent:${currentUsername.toLowerCase()}`;
     buildGraph();
@@ -80,6 +71,11 @@ function retainOf(d) {
   if (d._dispRetain != null) return d._dispRetain;
   const sc = d.scores || {};
   if (sc.retain != null) return Math.max(0, Math.min(1, Number(sc.retain)));
+  // Entities carry importance/access scores instead of a retain estimate.
+  if (d.type === 'entity') {
+    if (sc.importance != null) return Math.max(0, Math.min(1, Number(sc.importance)));
+    if (sc.access != null) return Math.max(0, Math.min(1, Number(sc.access)));
+  }
   if (d.size != null) {
     // backend size ≈ 0.18 + 1.27 * retain^1.18 → approximate invert
     const s = Math.max(0.18, Number(d.size));
@@ -90,30 +86,34 @@ function retainOf(d) {
 }
 
 /**
- * Contrast-stretch memory retain values across the visible node set, so
- * size/brightness differences are actually visible when scores cluster
+ * Contrast-stretch score values per node type across the visible node set,
+ * so size/brightness differences are actually visible when scores cluster
  * (raw retain is often ~flat, e.g. 0.48 for half the nodes).
  * Stronger curve + slight valence lift so cyan/gold nodes don't stay tiny/dim.
  */
 function stretchRetain(nodes) {
   for (const n of nodes) if (n._dispRetain != null) delete n._dispRetain;
-  const mem = (nodes || []).filter(n => n.type === 'memory');
-  const r = mem.map(retainOf).filter(v => isFinite(v));
-  if (r.length < 3) return;
-  let lo = Math.min.apply(null, r);
-  let hi = Math.max.apply(null, r);
-  // Force a usable dynamic range even when scores are tightly clustered
-  if (hi - lo < 0.18) { lo = Math.max(0, lo - 0.22); hi = Math.min(1, hi + 0.22); }
-  const span = (hi - lo) || 1;
-  for (const n of mem) {
-    const v = retainOf(n);
-    // Power curve expands mid/high retain; floor keeps low nodes visible
-    let stretched = 0.08 + 0.92 * Math.pow((v - lo) / span, 0.72);
-    // Mild valence lift so pos/neg still read larger/brighter than pure neutrals
-    const hue = valenceHue(n);
-    if (hue === 'pos' || hue === 'neg') stretched = Math.min(1, stretched + 0.07);
-    if (n.pinned) stretched = Math.max(stretched, 0.78);
-    n._dispRetain = Math.max(0.08, Math.min(1, stretched));
+  // Contrast-stretch per node type so size/brightness differences stay
+  // visible when scores cluster (raw retain is often ~flat).
+  for (const t of ['memory', 'entity']) {
+    const grp = (nodes || []).filter(n => n.type === t);
+    const r = grp.map(retainOf).filter(v => isFinite(v));
+    if (r.length < 3) continue;
+    let lo = Math.min.apply(null, r);
+    let hi = Math.max.apply(null, r);
+    // Force a usable dynamic range even when scores are tightly clustered
+    if (hi - lo < 0.18) { lo = Math.max(0, lo - 0.22); hi = Math.min(1, hi + 0.22); }
+    const span = (hi - lo) || 1;
+    for (const n of grp) {
+      const v = retainOf(n);
+      // Power curve expands mid/high retain; floor keeps low nodes visible
+      let stretched = 0.08 + 0.92 * Math.pow((v - lo) / span, 0.72);
+      // Mild valence lift so pos/neg still read larger/brighter than pure neutrals
+      const hue = valenceHue(n);
+      if (hue === 'pos' || hue === 'neg') stretched = Math.min(1, stretched + 0.07);
+      if (n.pinned) stretched = Math.max(stretched, 0.78);
+      n._dispRetain = Math.max(0.08, Math.min(1, stretched));
+    }
   }
 }
 
@@ -375,32 +375,61 @@ function hashStr(s) {
   return (h >>> 0) / 4294967295;
 }
 
-/* Deterministic layered layout: fixed x per column, even vertical spread
- * with stable jitter. Highest-retain nodes sit nearest the column center. */
-function layoutLayered(nodes, w, h) {
-  const topPad = 64, botPad = 30, sidePad = 70;
-  const usableH = Math.max(120, h - topPad - botPad);
-  const cols = LAYERS.map(l => ({ ...l, x: 0, nodes: [] }));
-  for (const n of nodes) {
-    const idx = LAYER_INDEX[n.type] ?? 0;
-    cols[idx].nodes.push(n);
-    n._col = idx;
-  }
-  cols.forEach((c, i) => {
-    c.x = cols.length === 1 ? w / 2
-      : sidePad + i * ((w - 2 * sidePad) / (cols.length - 1));
+/* Deterministic organic layout — reference style: type clusters relax into a
+ * neural field. One-shot force simulation (bounded ticks, seeded RNG, no
+ * live tick loop): positions are computed synchronously, then the
+ * simulation is stopped. Drag/zoom/pan stay fully interactive. */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* Lighten (amt>0) or darken (amt<0) a #rrggbb color, amt in [-1, 1]. */
+function shade(hex, amt) {
+  const n = parseInt(String(hex).slice(1), 16);
+  let r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  const t = amt < 0 ? 0 : 255, p = Math.abs(Math.max(-1, Math.min(1, amt)));
+  r = Math.round(r + (t - r) * p); g = Math.round(g + (t - g) * p); b = Math.round(b + (t - b) * p);
+  return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+}
+
+function layoutOrganic(nodes, links, w, h) {
+  const cx = w / 2, cy = h / 2;
+  const R = Math.min(w, h) * 0.30;
+  // Seed: type clusters arranged on a ring + deterministic hash jitter.
+  const types = [...new Set(nodes.map(n => n.type))];
+  const slot = (Math.PI * 2) / Math.max(1, types.length);
+  const center = {};
+  types.forEach((t, i) => {
+    center[t] = { x: cx + Math.cos(i * slot) * R * 0.55, y: cy + Math.sin(i * slot) * R * 0.55 };
   });
-  for (const c of cols) {
-    c.nodes.sort((a, b) => retainOf(b) - retainOf(a));
-    const n = c.nodes.length;
-    c.nodes.forEach((d, j) => {
-      const slot = usableH / Math.max(1, n);
-      const jitter = (hashStr(d.id) - 0.5) * slot * 0.55;
-      d.x = c.x + (hashStr(d.id + ':x') - 0.5) * 26;
-      d.y = topPad + slot * (j + 0.5) + jitter;
-    });
+  for (const n of nodes) {
+    const c = center[n.type] || { x: cx, y: cy };
+    n.x = c.x + (hashStr(n.id + ':jx') - 0.5) * R * 1.1;
+    n.y = c.y + (hashStr(n.id + ':jy') - 0.5) * R * 1.1;
+    n.vx = 0; n.vy = 0;
   }
-  return cols;
+  const byId = new Set(nodes.map(n => n.id));
+  const fl = [];
+  for (const l of links) {
+    const s = typeof l.source === 'object' ? l.source.id : l.source;
+    const t = typeof l.target === 'object' ? l.target.id : l.target;
+    if (byId.has(s) && byId.has(t)) fl.push({ source: s, target: t });
+  }
+  const sim = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(fl).id(d => d.id).distance(58).strength(0.35))
+    .force('charge', d3.forceManyBody().strength(-150))
+    .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 6).iterations(2))
+    .force('center', d3.forceCenter(cx, cy))
+    .randomSource(mulberry32(1337))
+    .stop();
+  const ticks = nodes.length > 900 ? 50 : nodes.length > 400 ? 90 : 150;
+  for (let i = 0; i < ticks; i++) sim.tick();
+  sim.stop();
 }
 
 function nodeLabel(d) {
@@ -430,22 +459,20 @@ function buildGraph() {
   if (!nodes.length) {
     svg.append('text').attr('x', w/2).attr('y', h/2).attr('text-anchor','middle')
       .attr('fill','var(--dim)').text('No memories yet');
-    nodeSel = linkSel = labelSel = null;
+    nodeSel = linkSel = null;
     return;
   }
 
-  layoutLayered(nodes, w, h);
+  layoutOrganic(nodes, links, w, h);
 
-  // layer labels
-  const cols = LAYERS.map((l, i) => ({ ...l, i }));
-  labelSel = g.append('g').selectAll('text').data(cols).join('text')
-    .attr('class', 'layer-label')
-    .attr('x', (c) => columnX(c.i, w))
-    .attr('y', 30)
-    .attr('text-anchor', 'middle')
-    .text(c => `${c.label} (${countByLayer(nodes, c.key)})`);
+  // Which nodes carry visible labels: hottest ~40 by retain (reference style:
+  // labels ride on the bright nodes, not the whole field).
+  const hotIds = new Set(
+    [...nodes].sort((a, b) => retainOf(b) - retainOf(a)).slice(0, 40).map(n => n.id)
+  );
 
-  // straight connector lines — one <line> per edge
+  // faint connector lines — brightness follows both endpoint sizes
+  // (dim when both ends are small); supersede edges stay directed + orange.
   linkSel = g.append('g').selectAll('line').data(links).join('line')
     .attr('class', 'edge')
     .attr('stroke', edgeColor)
@@ -457,12 +484,13 @@ function buildGraph() {
     .attr('stroke-opacity', edgeOpacity)
     .attr('stroke-linecap', 'round')
     .attr('stroke-dasharray', d => d.type === 'supersedes' ? '5,3' : null)
+    .attr('marker-end', d => d.type === 'supersedes' ? 'url(#arrow-sup)' : null)
     .attr('x1', d => nodeById.get(d.source).x)
     .attr('y1', d => nodeById.get(d.source).y)
     .attr('x2', d => nodeById.get(d.target).x)
     .attr('y2', d => nodeById.get(d.target).y);
 
-  // one flat-filled circle per node
+  // glossy 3D spheres — one shared gradient per hue, brightness from retain
   nodeSel = g.append('g').selectAll('g').data(nodes, d => d.id).join('g')
     .attr('class', 'node-group')
     .style('cursor', 'pointer')
@@ -470,18 +498,31 @@ function buildGraph() {
     .on('click', (event, d) => { event.stopPropagation(); showDetails(d); });
 
   nodeSel.append('circle')
+    .attr('class', 'sphere')
     .attr('r', nodeRadius)
-    .attr('fill', d => hueColor(valenceHue(d)))
+    .attr('fill', d => `url(#gloss-${valenceHue(d)})`)
     .attr('fill-opacity', nodeOpacity)
-    .attr('stroke', d => d.pinned ? '#ffffff' : hueColor(valenceHue(d)))
+    .attr('stroke', d => d.pinned ? '#ffffff' : shade(hueColor(valenceHue(d)), -0.45))
     .attr('stroke-width', d => d.pinned ? 2 : 1)
-    .attr('stroke-opacity', d => d.pinned ? 0.9 : 0.55)
+    .attr('stroke-opacity', d => d.pinned ? 0.9 : 0.6)
     .attr('stroke-dasharray', d =>
       (d.type === 'memory' && (d.status === 'superseded' || d.is_tip === false)) ? '3,2' : null);
 
+  // specular glare on hot nodes — the "more 3D" read
+  nodeSel.append('ellipse')
+    .attr('class', 'glare')
+    .attr('cx', d => -nodeRadius(d) * 0.30)
+    .attr('cy', d => -nodeRadius(d) * 0.36)
+    .attr('rx', d => nodeRadius(d) * 0.42)
+    .attr('ry', d => nodeRadius(d) * 0.28)
+    .attr('fill', 'url(#glare)')
+    .attr('opacity', d => 0.12 + 0.55 * retainOf(d))
+    .attr('pointer-events', 'none');
+
   nodeSel.append('text').attr('class', 'node-label')
-    .attr('dy', d => nodeRadius(d) + 11)
+    .attr('dy', d => -(nodeRadius(d) + 6))
     .attr('text-anchor', 'middle')
+    .style('opacity', d => (hotIds.has(d.id) || d.pinned) ? 0.85 : 0)
     .text(nodeLabel);
 
   // free drag without a force simulation — move node + its edges
@@ -501,62 +542,34 @@ function buildGraph() {
   svg.on('click', () => { document.getElementById('details').style.display = 'none'; });
 }
 
-/* Shared defs: one arrowhead marker only. No per-node gradients or filters. */
+/* Shared defs: one arrowhead marker + one radial gloss gradient per hue
+ * (reused by every node — no per-node defs) + one shared white glare. */
+const HUES = ['neg', 'pos', 'neutral', 'entity', 'knowledge', 'experience', 'episode', 'imprint'];
 function defs_(svg) {
   const defs = svg.append('defs');
   defs.append('marker').attr('id','arrow-sup').attr('viewBox','0 0 10 10')
     .attr('refX', 9).attr('refY', 5).attr('markerWidth', 5).attr('markerHeight', 5).attr('orient','auto')
     .append('path').attr('d','M 0 1 L 10 5 L 0 9 Z').attr('fill', '#f59e0b').attr('opacity', 0.8);
+  // Glossy 3D sphere per hue: bright top-left highlight → base → dark rim.
+  for (const h of HUES) {
+    const base = hueColor(h);
+    const g = defs.append('radialGradient')
+      .attr('id', 'gloss-' + h)
+      .attr('cx', '34%').attr('cy', '28%').attr('r', '78%');
+    g.append('stop').attr('offset', '0%').attr('stop-color', shade(base, 0.85));
+    g.append('stop').attr('offset', '22%').attr('stop-color', shade(base, 0.38));
+    g.append('stop').attr('offset', '52%').attr('stop-color', base);
+    g.append('stop').attr('offset', '100%').attr('stop-color', shade(base, -0.62));
+  }
+  // Shared specular glare dabbed on hot nodes.
+  const glare = defs.append('radialGradient').attr('id', 'glare').attr('cx', '50%').attr('cy', '50%').attr('r', '50%');
+  glare.append('stop').attr('offset', '0%').attr('stop-color', '#ffffff').attr('stop-opacity', 0.85);
+  glare.append('stop').attr('offset', '100%').attr('stop-color', '#ffffff').attr('stop-opacity', 0);
 }
 
-function columnX(i, w) {
-  const sidePad = 70;
-  return LAYERS.length === 1 ? w / 2 : sidePad + i * ((w - 2 * sidePad) / (LAYERS.length - 1));
-}
-
-function countByLayer(nodes, key) {
-  let c = 0;
-  for (const n of nodes) if (n.type === key) c++;
-  return c;
-}
-
-/* ── re-filter in place (no data reload, no DOM rebuild) ────────────── */
+/* ── re-filter: organic re-layout of the visible set (full rebuild) ─────── */
 function refilter() {
-  if (!nodeSel) { buildGraph(); return; }
-  const area = document.getElementById('canvas-area');
-  const w = area.clientWidth || 1000;
-  const h = area.clientHeight || 700;
-
-  const { nodes, links } = filteredNodes();
-  visibleNodes = nodes;
-  nodeById = new Map(nodes.map(n => [n.id, n]));
-  const keepIds = new Set(nodes.map(n => n.id));
-
-  layoutLayered(nodes, w, h);
-
-  // nodes: toggle visibility, move to new slots
-  nodeSel.each(function (d) { d._keepTransform = d3.select(this).attr('transform'); });
-  nodeSel
-    .style('display', d => keepIds.has(d.id) ? null : 'none')
-    .transition().duration(280)
-    .attr('transform', d => keepIds.has(d.id) ? `translate(${d.x},${d.y})` : d._keepTransform);
-
-  // edges: keep only edges whose endpoints are visible, update endpoints
-  const keepLinks = new Set(links.map(l => l.source + '→' + l.target));
-  linkSel
-    .style('display', d => (keepLinks.has(d.source + '→' + d.target)) ? null : 'none')
-    .transition().duration(280)
-    .attr('x1', d => nodeById.get(d.source)?.x ?? 0)
-    .attr('y1', d => nodeById.get(d.source)?.y ?? 0)
-    .attr('x2', d => nodeById.get(d.target)?.x ?? 0)
-    .attr('y2', d => nodeById.get(d.target)?.y ?? 0)
-    .attr('stroke-opacity', edgeOpacity);
-
-  // layer counts
-  labelSel.text(c => `${c.label} (${countByLayer(nodes, c.key)})`);
-
-  document.getElementById('status').textContent =
-    `${nodes.length} nodes · ${links.length} edges`;
+  buildGraph();
 }
 
 document.getElementById('refresh').onclick = loadGraph;

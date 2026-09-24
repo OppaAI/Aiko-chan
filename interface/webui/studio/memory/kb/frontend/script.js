@@ -1,11 +1,10 @@
 /* Knowledge Graph Studio — knowledge + entity nodes only.
  *
- * Neural-net layered view: knowledge chunks form the left column, entity
- * hubs the right column, joined by thin straight connectors. Layout is
- * fully deterministic (no force simulation): fixed x per column, y spread
- * evenly by importance, so re-filtering is instant and costs no per-tick
- * DOM churn. One flat circle per node, one shared subtle glow, no
- * per-node gradient defs.
+ * Organic neural-field view (reference: graph-explorer hairball):
+ * deterministic one-shot force layout (seeded, bounded ticks, no live
+ * simulation loop), glossy 3D spheres via one shared radial gradient per
+ * type, straight connectors whose brightness follows both endpoint sizes.
+ * Size + brightness track importance.
  */
 const API_BASE = (window.KNOWLEDGE_API_BASE || GraphBoot.apiBase()).replace(/\/+$/, '');
 const API_ROOT = API_BASE.endsWith('/api') ? API_BASE : API_BASE + '/api';
@@ -15,7 +14,6 @@ let zoomBeh = null;
 let viewport = null;   // zoom target group
 let edgesG = null;     // lines layer
 let nodesG = null;     // node layer
-let labelsG = null;    // layer labels
 let linkSel = null;    // current line selection (for drag updates)
 let currentNodes = [];
 let currentLinks = [];
@@ -24,8 +22,6 @@ const COL_CHUNK = '#4ade80';
 const COL_ENTITY = '#a78bfa';
 const EDGE_ABOUT = '#6ee7a8';
 const EDGE_SAMEDOC = '#5b4a6e';
-const LAYER_TOP = 70;
-const LAYER_BOTTOM_PAD = 48;
 
 function importanceOf(d) {
   const sc = d.scores || {};
@@ -47,6 +43,16 @@ function nodeRadius(d) {
 
 function nodeOpacity(d) {
   return 0.22 + importanceOf(d) * 0.78;
+}
+
+/* Edge brightness follows both endpoint sizes — dim when both ends are small. */
+function edgeOpacity(l) {
+  const rs = importanceOf(l.source);
+  const rt = importanceOf(l.target);
+  const mid = Math.pow(Math.max(0.05, rs * rt), 0.45);
+  const base = l.type === 'about' ? 0.05 : 0.03;
+  const gain = l.type === 'about' ? 0.60 : 0.45;
+  return Math.min(0.65, base + mid * gain);
 }
 
 function nodeColor(d) {
@@ -151,28 +157,63 @@ function filteredNodesEdges() {
   return { nodes, links };
 }
 
-/* Deterministic layered layout: fixed x per column, y spread evenly by
- * importance (most important near the top). O(n), runs once per update. */
-function layoutLayered(nodes, w, h) {
-  const chunks = [];
-  const ents = [];
-  for (const n of nodes) (n.type === 'entity' ? ents : chunks).push(n);
-  chunks.sort((a, b) => importanceOf(b) - importanceOf(a));
-  ents.sort((a, b) => importanceOf(b) - importanceOf(a));
-  const top = LAYER_TOP;
-  const bottom = Math.max(top + 60, h - LAYER_BOTTOM_PAD);
-  placeColumn(chunks, w * 0.32, top, bottom);
-  placeColumn(ents, w * 0.68, top, bottom);
-  return { chunks: chunks.length, ents: ents.length };
+/* Deterministic hash for stable jitter (no Math.random per render). */
+function hashStr(s) {
+  let h = 2166136261;
+  const str = String(s);
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0) / 4294967295;
 }
 
-function placeColumn(list, x, top, bottom) {
-  const n = list.length;
-  for (let i = 0; i < n; i++) {
-    const d = list[i];
-    d.x = x;
-    d.y = n === 1 ? (top + bottom) / 2 : top + ((bottom - top) * i) / (n - 1);
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* Lighten (amt>0) or darken (amt<0) a #rrggbb color, amt in [-1, 1]. */
+function shade(hex, amt) {
+  const n = parseInt(String(hex).slice(1), 16);
+  let r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  const t = amt < 0 ? 0 : 255, p = Math.abs(Math.max(-1, Math.min(1, amt)));
+  r = Math.round(r + (t - r) * p); g = Math.round(g + (t - g) * p); b = Math.round(b + (t - b) * p);
+  return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+}
+
+/* Deterministic organic layout: type clusters seeded on a ring, relaxed by
+ * a one-shot bounded force simulation (no live tick loop). */
+function layoutOrganic(nodes, links, w, h) {
+  const cx = w / 2, cy = h / 2;
+  const R = Math.min(w, h) * 0.30;
+  const types = [...new Set(nodes.map(n => n.type))];
+  const slot = (Math.PI * 2) / Math.max(1, types.length);
+  const center = {};
+  types.forEach((t, i) => {
+    center[t] = { x: cx + Math.cos(i * slot) * R * 0.55, y: cy + Math.sin(i * slot) * R * 0.55 };
+  });
+  for (const n of nodes) {
+    const c = center[n.type] || { x: cx, y: cy };
+    n.x = c.x + (hashStr(n.id + ':jx') - 0.5) * R * 1.1;
+    n.y = c.y + (hashStr(n.id + ':jy') - 0.5) * R * 1.1;
+    n.vx = 0; n.vy = 0;
   }
+  const fl = links.map(l => ({ source: l.source.id, target: l.target.id }));
+  const sim = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(fl).id(d => d.id).distance(58).strength(0.35))
+    .force('charge', d3.forceManyBody().strength(-150))
+    .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 6).iterations(2))
+    .force('center', d3.forceCenter(cx, cy))
+    .randomSource(mulberry32(2024))
+    .stop();
+  const ticks = nodes.length > 400 ? 60 : 120;
+  for (let i = 0; i < ticks; i++) sim.tick();
+  sim.stop();
 }
 
 function showDetails(d) {
@@ -207,17 +248,26 @@ function ensureScene() {
   if (viewport) return;
   const svg = d3.select('#svg');
   const defs = svg.append('defs');
-  // One shared subtle glow for the whole node layer — a single offscreen
-  // pass instead of per-node filters.
-  GraphBoot.addGlowFilter(defs, 'netglow', 2.2);
+  // One shared glossy-sphere gradient per node type + one shared glare.
+  for (const [key, base] of [['chunk', COL_CHUNK], ['entity', COL_ENTITY]]) {
+    const g = defs.append('radialGradient')
+      .attr('id', 'gloss-' + key)
+      .attr('cx', '34%').attr('cy', '28%').attr('r', '78%');
+    g.append('stop').attr('offset', '0%').attr('stop-color', shade(base, 0.85));
+    g.append('stop').attr('offset', '22%').attr('stop-color', shade(base, 0.38));
+    g.append('stop').attr('offset', '52%').attr('stop-color', base);
+    g.append('stop').attr('offset', '100%').attr('stop-color', shade(base, -0.62));
+  }
+  const glare = defs.append('radialGradient').attr('id', 'kb-glare').attr('cx', '50%').attr('cy', '50%').attr('r', '50%');
+  glare.append('stop').attr('offset', '0%').attr('stop-color', '#ffffff').attr('stop-opacity', 0.85);
+  glare.append('stop').attr('offset', '100%').attr('stop-color', '#ffffff').attr('stop-opacity', 0);
 
   viewport = svg.append('g').attr('id', 'viewport');
   zoomBeh = GraphBoot.makeZoom({ scaleExtent: [0.15, 4], target: viewport });
   svg.call(zoomBeh);
 
-  labelsG = viewport.append('g').attr('id', 'layer-labels');
   edgesG = viewport.append('g').attr('id', 'edges');
-  nodesG = viewport.append('g').attr('id', 'nodes').attr('filter', 'url(#netglow)');
+  nodesG = viewport.append('g').attr('id', 'nodes');
 
   nodesG.append('title').text('Drag nodes to rearrange · scroll to zoom');
 }
@@ -256,57 +306,32 @@ function update() {
   const { nodes, links } = filteredNodesEdges();
   currentNodes = nodes;
   currentLinks = links;
-  const counts = layoutLayered(nodes, w, h);
+  layoutOrganic(nodes, links, w, h);
+  const nChunks = nodes.filter(n => n.type !== 'entity').length;
+  const nEnts = nodes.length - nChunks;
+  const statsEl = document.getElementById('graph-stats');
+  if (statsEl) statsEl.textContent = `${nodes.length} nodes · ${links.length} edges · drag nodes · scroll zoom`;
 
-  // Layer labels + faint column guides.
-  const labelData = [
-    { x: w * 0.32, text: `KNOWLEDGE · ${counts.chunks}` },
-    { x: w * 0.68, text: `ENTITIES · ${counts.ents}` },
-  ];
-  const labels = labelsG.selectAll('text.layer-label').data(labelData, d => d.text.split(' ·')[0]);
-  labels.join(
-    enter => enter.append('text')
-      .attr('class', 'layer-label')
-      .attr('text-anchor', 'middle')
-      .attr('y', 34)
-      .attr('fill', '#8b7a9e')
-      .attr('font-size', '11px')
-      .attr('letter-spacing', '0.18em')
-      .attr('font-weight', '600'),
-    updateLbl => updateLbl,
-    exit => exit.remove()
-  )
-    .attr('x', d => d.x)
-    .text(d => d.text);
-
-  const guides = labelsG.selectAll('line.col-guide').data(labelData, d => d.text.split(' ·')[0]);
-  guides.join(
-    enter => enter.append('line')
-      .attr('class', 'col-guide')
-      .attr('stroke', '#3d2f4f')
-      .attr('stroke-width', 1)
-      .attr('stroke-dasharray', '3 6')
-      .attr('stroke-opacity', 0.5),
-    updateG => updateG,
-    exit => exit.remove()
-  )
-    .attr('x1', d => d.x).attr('x2', d => d.x)
-    .attr('y1', LAYER_TOP - 18)
-    .attr('y2', Math.max(LAYER_TOP + 42, h - LAYER_BOTTOM_PAD));
-
-  // Edges: one thin straight line each.
+  // Edges: thin straight connectors — brightness follows both endpoint
+  // sizes (dim when both ends are small).
   linkSel = edgesG.selectAll('line').data(links, edgeKey);
   linkSel = linkSel.join(
     enter => enter.append('line')
       .attr('stroke', l => (l.type === 'about' ? EDGE_ABOUT : EDGE_SAMEDOC))
-      .attr('stroke-width', l => (l.type === 'about' ? 1.1 : 0.7))
-      .attr('stroke-opacity', 0.30),
+      .attr('stroke-width', l => (l.type === 'about' ? 1.1 : 0.7)),
     updateE => updateE,
     exit => exit.remove()
   );
+  linkSel.attr('stroke-opacity', edgeOpacity);
   positionEdges(linkSel);
 
-  // Nodes: one flat circle each.
+  // Hot nodes carry visible labels (reference style); the rest reveal on hover.
+  const hotIds = new Set(
+    [...nodes].sort((a, b) => importanceOf(b) - importanceOf(a)).slice(0, 30).map(n => n.id)
+  );
+
+  // Nodes: glossy 3D spheres — one shared gradient per type, brightness
+  // from importance.
   const nodeSel = nodesG.selectAll('g.node').data(nodes, d => d.id);
   const entered = nodeSel.join(
     enter => {
@@ -315,7 +340,9 @@ function update() {
         .style('cursor', 'grab')
         .call(makeNodeDrag())
         .on('click', (ev, d) => { ev.stopPropagation(); showDetails(d); });
-      g.append('circle');
+      g.append('circle').attr('class', 'sphere');
+      g.append('ellipse').attr('class', 'glare').attr('fill', 'url(#kb-glare)').attr('pointer-events', 'none');
+      g.append('text').attr('class', 'node-label').attr('text-anchor', 'middle');
       g.append('title');
       return g;
     },
@@ -324,13 +351,23 @@ function update() {
   );
   entered
     .attr('transform', d => `translate(${d.x},${d.y})`);
-  entered.select('circle')
+  entered.select('circle.sphere')
     .attr('r', nodeRadius)
-    .attr('fill', nodeColor)
+    .attr('fill', d => `url(#gloss-${d.type === 'entity' ? 'entity' : 'chunk'})`)
     .attr('fill-opacity', nodeOpacity)
-    .attr('stroke', nodeColor)
+    .attr('stroke', d => shade(nodeColor(d), -0.45))
     .attr('stroke-width', 1)
-    .attr('stroke-opacity', 0.85);
+    .attr('stroke-opacity', 0.6);
+  entered.select('ellipse.glare')
+    .attr('cx', d => -nodeRadius(d) * 0.30)
+    .attr('cy', d => -nodeRadius(d) * 0.36)
+    .attr('rx', d => nodeRadius(d) * 0.42)
+    .attr('ry', d => nodeRadius(d) * 0.28)
+    .attr('opacity', d => 0.12 + 0.55 * importanceOf(d));
+  entered.select('text.node-label')
+    .attr('dy', d => -(nodeRadius(d) + 6))
+    .style('opacity', d => hotIds.has(d.id) ? 0.85 : 0)
+    .text(d => nodeLabel(d).slice(0, 24));
   entered.select('title')
     .text(d => `${nodeLabel(d)} — importance ${importanceOf(d).toFixed(2)}`);
 }

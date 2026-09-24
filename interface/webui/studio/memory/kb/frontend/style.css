@@ -161,6 +161,24 @@ svg {
   border-radius: 2px;
 }
 
+/* Reference-style overlays: title top-left, stats top-right */
+.graph-title {
+  position: absolute; top: 14px; left: 18px;
+  font-size: 11px; letter-spacing: .22em; font-weight: 600;
+  color: var(--green); pointer-events: none;
+}
+.graph-stats {
+  position: absolute; top: 14px; right: 18px;
+  font-size: 10px; letter-spacing: .08em;
+  color: var(--muted); pointer-events: none;
+}
+
+.node-label {
+  fill: var(--text); font-size: 9px; pointer-events: none;
+  transition: opacity 0.12s ease-out;
+}
+.node:hover .node-label { opacity: 0.95; }
+
 .zoom-ctl {
   position: absolute;
   right: 12px;

@@ -54,6 +54,18 @@ header h1 {
     radial-gradient(ellipse at 50% 40%, #0c1830 0%, #080812 40%, #050510 75%);
 }
 .canvas-area svg { width: 100%; height: 100%; display: block; }
+
+/* Reference-style overlays: title top-left, stats top-right */
+.graph-title {
+  position: absolute; top: 14px; left: 18px;
+  font-size: 11px; letter-spacing: .22em; font-weight: 600;
+  color: var(--cyan); pointer-events: none;
+}
+.graph-stats {
+  position: absolute; top: 14px; right: 18px;
+  font-size: 10px; letter-spacing: .08em;
+  color: var(--dim); pointer-events: none;
+}
 .details {
   position: absolute; top: 14px; right: 14px; width: 320px; max-height: calc(100% - 28px);
   overflow-y: auto; background: var(--glass); backdrop-filter: blur(14px);

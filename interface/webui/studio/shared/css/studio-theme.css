@@ -105,3 +105,19 @@ header h1,
   border-bottom-color: transparent;
   background: var(--panel);
 }
+
+/* ── cross-studio compatibility aliases ────────────────────────────────
+   DAG Studio and Fly Studio predate this file; these aliases let them use
+   the same theme without renaming every var() reference. */
+:root {
+  /* DAG canvas chrome */
+  --amber:  #e8a13a;
+  --mauve:  #d8bcff;
+  --font-ui: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+  --glass-bg: rgba(24, 16, 36, 0.62);
+  --glass-border: rgba(200, 168, 240, 0.16);
+  --glass-highlight: rgba(255, 255, 255, 0.06);
+  /* Fly Studio chrome */
+  --line:   var(--border);
+  --violet: var(--accent2);
+}

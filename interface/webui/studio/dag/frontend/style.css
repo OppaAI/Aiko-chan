@@ -1,20 +1,11 @@
+/* Chrome colors come from shared/css/studio-theme.css (single cross-studio
+   theme). Only n8n-canvas-specific tokens stay local. */
 :root {
-    --bg: #0a0a0f;
-    --bg2: #0e0e17;
-    --border: #1e1428;
-    --pink: #c651a8;
-    --purple: #a888e8;
-    --mauve: #d8bcff;
-    --cyan: #51d4c8;
-    --amber: #e8a13a;
-    --green: #8fd694;
-    --dim: #4a3a6a;
-    --dimmer: #2a1a4a;
-    --text: #cdbfe6;
-    --glass-bg: rgba(24, 16, 36, 0.62);
-    --glass-border: rgba(200, 168, 240, 0.16);
-    --glass-highlight: rgba(255, 255, 255, 0.06);
-    --font-ui: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+    --n8n-card: #15151d;
+    --n8n-card-border: #2a2a3a;
+    --n8n-green: #7dd87d;
+    --n8n-red: #e26d6d;
+    --n8n-sub: #8a8aa3;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }

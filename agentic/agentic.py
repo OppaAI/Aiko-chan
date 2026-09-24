@@ -1194,6 +1194,8 @@ def _tool_gate_result(name: str, args: dict, blocked: dict) -> ToolResult:
             if decision == "refuse"
             else "needs_approval"
             if decision == "escalate"
+            else "conscience_caution"
+            if decision == "caution"
             else "conscience_unavailable"
         ),
         retryable=False,
@@ -1222,6 +1224,17 @@ def dispatch_tool_checked(name: str, args: dict, owner=None, *, conscience_check
             error_type="tool_exception",
             retryable=False,
         )
+    try:
+        from cognition.fly_behavior.action_select import record_completed_tool_call
+        from system.userspace import current_user_id
+
+        record_completed_tool_call(
+            tool=name,
+            args_text=json.dumps(args, ensure_ascii=False, default=str),
+            user_id=getattr(owner, "user_id", None) or getattr(owner, "_user_id", None) or current_user_id(),
+        )
+    except Exception as exc:
+        log.debug("[agentic] tool feedback target skipped: %s", exc)
     return _classify_result(name, args, str(content))
 
 

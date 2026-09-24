@@ -444,6 +444,55 @@ def fly_causal(request: Request, limit: int = Query(32, ge=1, le=48)) -> JSONRes
     )
 
 
+@app.get("/api/fly_actions")
+def fly_actions(request: Request, n: int = Query(20, ge=1, le=50)) -> JSONResponse:
+    """Phase 5: why-this-action-won trail — per-candidate fly votes."""
+    uid = _uid(request)
+    try:
+        from cognition.fly_behavior.action_select import recent_trail
+        records = recent_trail(uid, n=n)
+    except Exception as exc:
+        logger.debug("fly_actions trail failed: %s", exc)
+        records = []
+    return JSONResponse(
+        {"user_id": uid, "records": records, "count": len(records), "stage": "5"},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/fly_activity")
+def fly_activity(request: Request) -> JSONResponse:
+    """Phase 5: live region activity for the impulse visualization.
+
+    Real NeuralState readouts per turn (valence, arousal, urgency, focus,
+    vigor, circadian phase). The frontend animates pulse traffic between
+    lobes from these values — the signals are real, spatially coarse.
+    """
+    uid = _uid(request)
+    activity = {
+        "valence": 0.0, "arousal": 0.5, "urgency": 0.0,
+        "focus": 0.0, "vigor": 1.0, "circadian": 0.5,
+    }
+    try:
+        from cognition.neural_state import get_neural_state
+        st = get_neural_state(uid)
+        if st is not None:
+            activity = {
+                "valence": float(st.valence or 0.0),
+                "arousal": float(st.action_drive if st.action_drive is not None else 0.5),
+                "urgency": float(st.urgency or 0.0),
+                "focus": float(st.focus_sharpness or 0.0),
+                "vigor": float(st.motor_vigor or 1.0),
+                "circadian": float(st.circadian_phase if st.circadian_phase is not None else 0.5),
+            }
+    except Exception as exc:
+        logger.debug("fly_activity failed: %s", exc)
+    return JSONResponse(
+        {"user_id": uid, "activity": activity, "stage": "5"},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.get("/")
 def index():
     return FileResponse(FRONTEND_DIR / "index.html")

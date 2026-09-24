@@ -185,7 +185,7 @@ def _recent_episodes(user_id: str, now: float) -> list[dict]:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
         try:
             rows = conn.execute(
-                "SELECT id, trace, salience_score, timestamp FROM emc_storage"
+                "SELECT id, trace, salience_score, timestamp, valence_tag FROM emc_storage"
                 " WHERE user_id = ? AND timestamp >= ?"
                 " AND (superseded_by IS NULL)"
                 " ORDER BY id ASC",
@@ -312,7 +312,7 @@ def run_replay(user_id: str | None = None, *, force: bool = False) -> dict:
                     kc = mb.encode(text_features(cand["trace"]))
                     before = float(mb.valence_bias(text_features(cand["trace"])))
                     res = pulse(
-                        cand["valence"], user_id=user_id, kc=kc,
+                        cand["recorded_valence"], user_id=user_id, kc=kc,
                         weight=cand["elig"], source="replay",
                     )
                     if res.get("reason") == "dedup":

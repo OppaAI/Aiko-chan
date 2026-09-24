@@ -157,12 +157,6 @@ def teach_from_user_text(
             )
         except Exception:
             pass
-        store = get_fly_store(user_id)
-        if store is not None:
-            try:
-                store.flush_mb(mb)
-            except Exception:
-                pass
         out["taught"] = True
         out["delta"] = round(delta, 4)
         try:
@@ -171,7 +165,15 @@ def teach_from_user_text(
             _record_eligibility(out, user_id, teach_text)
             out["credit_steps"] = credit.get("steps", 0)
         except Exception:
-            pass
+            # assign_credit() persists the whole event (direct pulse + trail)
+            # with one flush at the end of the trail. If it failed, persist
+            # the direct teach here so the weight change isn't lost.
+            try:
+                store = get_fly_store(user_id)
+                if store is not None:
+                    store.flush_mb(mb)
+            except Exception:
+                pass
         log.debug("online_teach live reason=%s reward=%+.2f delta=%.4f", reason, reward, delta)
     except Exception as exc:
         log.debug("online_teach failed: %s", exc)

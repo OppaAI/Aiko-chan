@@ -9,6 +9,7 @@ import sqlite3
 
 from cognition.memory.vecstore import rank_by_id, rrf_score, user_scoped_fts_search, user_scoped_vec_knn, utc_now_iso
 from cognition.memory.memorize import entities_from_json, entity_overlap_score
+from cognition import reason
 from system.log import get_logger
 from system.userspace import current_user_id
 
@@ -39,6 +40,13 @@ _KNOWLEDGE_SEARCH_CACHE: OrderedDict[
 _KNOWLEDGE_SEARCH_CACHE_LOCK = threading.RLock()
 _KNOWLEDGE_SEARCH_CACHE_TTL: float = 20.0
 _KNOWLEDGE_SEARCH_CACHE_MAX: int = 128
+
+# Phase 2: access-count touches accumulate per user; flush_access_counts()
+# writes them in one UPDATE + single commit at the turn boundary. The
+# threshold bounds memory for non-turn callers (background jobs).
+_PENDING_ACCESS: dict[str, set[str]] = {}
+_PENDING_ACCESS_LOCK = threading.RLock()
+_ACCESS_FLUSH_THRESHOLD: int = 200
 
 def _cache_key(query: str, user_id: str, limit: int, embedder_id: str) -> tuple[str, str, int, str]:
     return (user_id, query or "", limit, embedder_id)
@@ -115,7 +123,9 @@ class KnowledgeSearch:
 def _knn(conn: sqlite3.Connection, query: str, embedder: Embedder | None, uid: str, limit: int) -> list[sqlite3.Row]:
     if embedder is None or not (query or "").strip():
         return []
-    vector = embedder.embed_query(query, instruct=KNOWLEDGE_QUERY_INSTRUCT)
+    # Phase 2: shared module cache — identical (text, instruct) pairs embed
+    # once per process instead of once per call site.
+    vector = reason.cached_embed_query(embedder, query, instruct=KNOWLEDGE_QUERY_INSTRUCT)
     return user_scoped_vec_knn(
         conn,
         vec_table="learned_chunks_vec",
@@ -268,9 +278,8 @@ def knowledge_context_for(
 
     cached = _search_cache_get(query, uid, limit, embedder_id)
     if cached is not None:
-        # Track access for cached results too
-        chunk_ids = [r["id"] for r in cached]
-        _increment_access_count(chunk_ids, uid)
+        # Phase 2: no touch on cache hits — a cached read must not issue a
+        # write. Counts were bumped on the uncached search.
         return _format_knowledge_context(cached, remaining)
 
     hits = search_knowledge(query, limit=limit, embedder=embedder, user_id=uid)
@@ -289,11 +298,28 @@ def knowledge_context_for(
 
 
 def _increment_access_count(chunk_ids: list[str], user_id: str | None = None) -> None:
-    """Increment access count and update last_accessed for given chunk IDs."""
+    """Accumulate access-count touches; flushed in one UPDATE at turn end.
+
+    Pure ranking bookkeeping — losing a crash-window batch is harmless.
+    """
     if not chunk_ids:
         return
     uid = user_id or current_user_id()
-    conn = connect(uid)
+    with _PENDING_ACCESS_LOCK:
+        pending = _PENDING_ACCESS.setdefault(uid, set())
+        pending.update(str(c) for c in chunk_ids)
+        if len(pending) >= _ACCESS_FLUSH_THRESHOLD:
+            ids = sorted(pending)
+            pending.clear()
+        else:
+            return
+    _write_access_counts(uid, ids)
+
+
+def _write_access_counts(user_id: str, chunk_ids: list[str]) -> None:
+    if not chunk_ids:
+        return
+    conn = connect(user_id)
     try:
         now = utc_now_iso()
         placeholders = ",".join("?" * len(chunk_ids))
@@ -306,6 +332,15 @@ def _increment_access_count(chunk_ids: list[str], user_id: str | None = None) ->
         log.warning("increment access count failed: %s", exc)
     finally:
         conn.close()
+
+
+def flush_access_counts(user_id: str | None = None) -> int:
+    """Turn-boundary flush: one UPDATE + single commit for pending touches."""
+    uid = user_id or current_user_id()
+    with _PENDING_ACCESS_LOCK:
+        pending = _PENDING_ACCESS.pop(uid, set())
+    _write_access_counts(uid, sorted(pending))
+    return len(pending)
 
 
 def _format_knowledge_context(results: list[dict], max_chars: int) -> str:

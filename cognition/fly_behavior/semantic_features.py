@@ -52,8 +52,10 @@ def _embed(text: str) -> list[float] | None:
     except Exception:
         pass
     try:
-        from cognition.memory.vecstore import HarrierEmbedder
-        vec = list(HarrierEmbedder(timeout=1.5).embed([t]))[0]
+        # Phase 2: shared singleton — a fresh HarrierEmbedder per call meant
+        # a new requests.Session and an empty TTL cache every time.
+        from cognition.memory.preference_store import _shared_embedder
+        vec = list(_shared_embedder().embed([t]))[0]
         return [float(x) for x in vec]
     except Exception as exc:
         log.debug("semantic embed skipped: %s", exc)

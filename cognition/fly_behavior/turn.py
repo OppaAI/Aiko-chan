@@ -169,10 +169,10 @@ def apply_turn_priors(
             dn_mode = "off"
         if dn_mode in ("shadow", "live"):
             try:
-                from cognition.flysense.dn import FlyDN
+                from cognition.flysense.dn import get_flydn
 
                 energy = max(0.0, min(1.0, 1.0 - float(st.sleep_pressure or 0.0)))
-                drv = FlyDN().drive(
+                drv = get_flydn().drive(
                     energy=energy,
                     decisiveness=float(st.decisiveness or 0.5),
                     affect=float(st.valence or 0.0),

@@ -6,7 +6,7 @@
 See README.md for real-vs-synthetic accounting.
 """
 from .al import FlyAL
-from .dn import FlyDN
+from .dn import FlyDN, get_flydn
 from .motion import FlyMotion, emd_energy
 
-__all__ = ["FlyAL", "FlyDN", "FlyMotion", "emd_energy"]
+__all__ = ["FlyAL", "FlyDN", "FlyMotion", "emd_energy", "get_flydn"]

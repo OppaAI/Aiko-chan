@@ -100,7 +100,10 @@ def _semantic_rank(
     if not items:
         return []
     try:
-        query_vec = np.asarray(embedder.embed_query(query, instruct=_WIKI_INSTRUCT), dtype=np.float32)
+        # Phase 2: route through the shared module cache — _relevant_excerpt()
+        # below embeds the identical (query, _WIKI_INSTRUCT) pair via
+        # cached_embed_query, so this must hit the same cache, not bypass it.
+        query_vec = reason.cached_embed_query(embedder, query, instruct=_WIKI_INSTRUCT)
         item_vecs = np.stack([_get_item_embedding(item, embedder) for item in items])
         scores = reason.batch_cosine_scores(query_vec, item_vecs)
         order = np.argsort(-scores)

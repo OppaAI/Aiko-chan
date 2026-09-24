@@ -24,7 +24,8 @@ from pathlib import Path
 
 from system import bioclock
 from system import brain_trace as _brain_trace
-from cognition.memory.vecstore import initialize_store_db
+from cognition import reason
+from cognition.memory.vecstore import initialize_store_db, _QUERY_INSTRUCT
 from system.userspace import current_display_name, current_user_id
 import sqlite_vec
 from openai import OpenAI
@@ -394,7 +395,10 @@ class _MemoryBackend:
     def _embed(self, text: str, *, query: bool = False) -> list[float]:
         """Embed a single string with HarrierEmbedder. Returns a plain float list."""
         if query:
-            return self._embedder.embed_query(text).tolist()
+            # Phase 2: shared module cache; explicit instruct to match
+            # embed_query's default exactly. Keeps the list return type.
+            return reason.cached_embed_query(
+                self._embedder, text, instruct=_QUERY_INSTRUCT).tolist()
         return list(self._embedder.embed([text]))[0].tolist()
 
     def _embed_batch(self, texts: list[str]) -> list[list[float]]:

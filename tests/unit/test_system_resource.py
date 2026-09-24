@@ -33,7 +33,7 @@ def test_rss_mb_positive_or_none():
 def test_release_ram_survives_broken_gc(monkeypatch):
     monkeypatch.setenv("RAM_RELEASE_MIN_INTERVAL_S", "0")
     ram._last_release_at = 0.0
-    monkeypatch.setattr(ram.gc, "collect", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(ram.gc, "collect", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
     out = ram.release_ram("test")
     assert out["ok"] is True
     assert out["gc_collected"] == -1

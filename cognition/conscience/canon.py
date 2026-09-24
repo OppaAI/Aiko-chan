@@ -284,8 +284,10 @@ class CanonStore:
         vectors = self._ensure_vectors(embedder, np)
         if vectors is None:
             return scored
-        q_vec = embedder.embed_query(
-            query, instruct="Retrieve moral norms relevant to this situation"
+        # Phase 2: shared module cache — identical (text, instruct) pairs
+        # embed once per process instead of once per call site.
+        q_vec = reason.cached_embed_query(
+            embedder, query, instruct="Retrieve moral norms relevant to this situation"
         )
         sims = reason.batch_cosine_scores(np.asarray(q_vec, dtype=np.float32), vectors)
         existing = {norm.id for _, norm in scored}

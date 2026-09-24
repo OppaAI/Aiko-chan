@@ -1652,7 +1652,10 @@ def run_session(ui, args) -> None:
         _fly_priors = {}
         try:
             from cognition.fly_behavior import apply_turn_priors
-            _fly_priors = apply_turn_priors(user_input, user_id=turn_uid) or {}
+            # Phase 6: voice prosody (if this turn came through ASR) becomes
+            # neural activity in the sensory pathways.
+            _prosody = voice_info.get("prosody") if isinstance(voice_info, dict) else None
+            _fly_priors = apply_turn_priors(user_input, user_id=turn_uid, prosody=_prosody) or {}
             if _fly_priors.get("interrupt"):
                 current_latency["fly_interrupt"] = True
                 note = (

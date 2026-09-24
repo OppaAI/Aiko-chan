@@ -1,16 +1,41 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import os
 import queue
 import threading
 
 import pytest
 
-from interface.webui.webui import AikoWeb, _validate_image_data_uri, _vision_base_url
+from interface.webui.webui import AikoWeb, _note_visual_frame_bounded, _validate_image_data_uri, _vision_base_url
 from interface.webui.studio.session_binding import _relative_path
 from system.prepare import run_post_auth
 from system.userspace import current_display_name, current_user_id, reset_current_display_name, reset_current_user_id
+
+
+def test_image_motion_runs_in_thread_with_source(monkeypatch):
+    from cognition.flysense import pathways
+    from interface.webui import webui
+
+    web = AikoWeb.__new__(AikoWeb)
+    web._broadcast = lambda *_args, **_kwargs: None
+    web._infer_image = lambda *_args: "description"
+    monkeypatch.setattr(webui, "observe_fly_runtime", lambda *_args, **_kwargs: None)
+    seen = []
+    caller_thread = threading.get_ident()
+
+    def note_frame(uid, image, source):
+        seen.append((uid, image, source, threading.get_ident()))
+
+    monkeypatch.setattr(pathways, "note_visual_frame", note_frame)
+
+    asyncio.run(web._handle_image_input("image", "question", "alice", source="screen"))
+
+    assert len(seen) == 1
+    assert seen[0][:3] == ("alice", "image", "screen")
+    assert seen[0][3] != caller_thread
 
 
 class DummyMemorize:
@@ -134,18 +159,23 @@ def test_text_only_get_input_plays_lean_in_once_after_reactive_gesture_ends():
     assert played == ["leanIn"]
 
 
+def _image_header(mime: str, width: int, height: int) -> bytes:
+    if mime == "image/jpeg":
+        return b"\xff\xd8\xff\xc0\x00\x0b\x08" + height.to_bytes(2, "big") + width.to_bytes(2, "big") + b"\x01\x01\x11\x00"
+    if mime == "image/png":
+        return b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + width.to_bytes(4, "big") + height.to_bytes(4, "big")
+    return b"RIFF\x16\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00\x00\x00\x00\x00" + (width - 1).to_bytes(3, "little") + (height - 1).to_bytes(3, "little")
+
+
 def test_camera_image_validation_accepts_small_jpeg_data_uri():
-    image = "data:image/jpeg;base64,/9j/2Q=="
+    image = f"data:image/jpeg;base64,{base64.b64encode(_image_header('image/jpeg', 1, 1)).decode()}"
 
     assert _validate_image_data_uri(image) == image
 
 
-@pytest.mark.parametrize(("mime", "raw"), [
-    ("image/png", b"\x89PNG\r\n\x1a\n"),
-    ("image/webp", b"RIFF\x04\x00\x00\x00WEBP"),
-])
-def test_camera_image_validation_accepts_matching_image_signatures(mime, raw):
-    image = f"data:{mime};base64,{base64.b64encode(raw).decode()}"
+@pytest.mark.parametrize("mime", ["image/png", "image/webp"])
+def test_camera_image_validation_accepts_matching_image_signatures(mime):
+    image = f"data:{mime};base64,{base64.b64encode(_image_header(mime, 1, 1)).decode()}"
 
     assert _validate_image_data_uri(image) == image
 
@@ -168,6 +198,40 @@ def test_camera_image_validation_rejects_mismatched_image_signatures(mime, raw):
 ])
 def test_camera_image_validation_rejects_unsafe_or_invalid_payloads(image):
     assert _validate_image_data_uri(image) is None
+
+
+@pytest.mark.parametrize("mime", ["image/jpeg", "image/png", "image/webp"])
+def test_camera_image_validation_rejects_oversized_pixel_count(mime):
+    image = f"data:{mime};base64,{base64.b64encode(_image_header(mime, 4096, 2049)).decode()}"
+
+    assert _validate_image_data_uri(image) is None
+
+
+def test_visual_decode_budget_is_shared_across_connections(monkeypatch):
+    from cognition.flysense import pathways
+
+    started = threading.Event()
+    release = threading.Event()
+    seen = []
+
+    def note_frame(uid, image, source):
+        seen.append(uid)
+        if uid == "alice":
+            started.set()
+            release.wait(timeout=5)
+
+    monkeypatch.setattr(pathways, "note_visual_frame", note_frame)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(_note_visual_frame_bounded, "alice", "image", "camera")
+        try:
+            assert started.wait(timeout=2)
+            pool.submit(_note_visual_frame_bounded, "bob", "image", "screen").result(timeout=2)
+        finally:
+            release.set()
+        first.result(timeout=2)
+
+    _note_visual_frame_bounded("carol", "image", "camera")
+    assert seen == ["alice", "carol"]
 
 
 @pytest.mark.parametrize(("webui_url", "vision_url", "llm_url", "expected"), [

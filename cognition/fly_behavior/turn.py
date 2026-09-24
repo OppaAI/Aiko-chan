@@ -32,8 +32,13 @@ def apply_turn_priors(
     priority: float = 0.0,
     prior_assistant: str | None = None,
     subliminal_urgency: float = 0.0,
+    prosody: dict | None = None,
 ) -> dict:
     """Run Stage-1 fly priors; return a compact summary for the turn.
+
+    Phase 6: prosody carries ASR voice features (see
+    sensory/listen.py::_prosody_features); sensory pathways encode voice /
+    motion / visual channels into neural activity before the GF line.
 
     Never raises. Safe to call on every turn.
     """
@@ -49,6 +54,7 @@ def apply_turn_priors(
         "gf_sources": {},
         "soul_teach": None,
         "online_teach": None,
+        "senses": None,
     }
     try:
         from cognition.neural_state import get_neural_state
@@ -143,13 +149,35 @@ def apply_turn_priors(
         except Exception as exc:
             log.debug("circadian tick skipped: %s", str(exc))
 
-        motion = float(st.motion_salience or 0.0)
+        motion = 0.0
+        motion_sudden = False
+        voice_urgency = 0.0
+        try:
+            # Phase 6: encode voice / motion / visual channels into neural
+            # activity before the GF line reads motion salience.
+            from cognition.flysense.pathways import encode_turn_senses
+
+            senses = encode_turn_senses(
+                text or "", user_id=user_id, prosody=prosody
+            )
+            out["senses"] = senses
+            motion = float(st.motion_salience or 0.0)
+            motion_sudden = bool(
+                (senses or {}).get("mode") == "live"
+                and ((senses or {}).get("motion") or {}).get("sudden")
+            )
+            voice = ((senses or {}).get("voice") or {}) if (senses or {}).get("mode") == "live" else {}
+            voice_urgency = float(voice.get("urgency") or 0.0)
+        except Exception as exc:
+            log.debug("sensory pathways skipped: %s", str(exc))
         gf = assess_interrupt(
             text or "",
             system_error=system_error,
             priority=priority,
             subliminal_urgency=float(subliminal_urgency or 0.0),
             motion_salience=motion,
+            motion_sudden=motion_sudden,
+            voice_urgency=voice_urgency,
         )
         st.publish_gf(float(gf.get("urgency") or 0.0), bool(gf.get("interrupt")), source="turn")
         out["urgency"] = gf.get("urgency", 0.0)
@@ -213,6 +241,18 @@ def apply_turn_priors(
                 from cognition.flysense.dn import get_flydn
 
                 energy = max(0.0, min(1.0, 1.0 - float(st.sleep_pressure or 0.0)))
+                # Phase 6: voice speech-rate energy blends with rest energy —
+                # a tired body can still hear an urgent voice.
+                _senses = out.get("senses") or {}
+                _voice = (_senses.get("voice") or {}) if _senses.get("mode") == "live" else {}
+                if _voice.get("energy") is not None:
+                    try:
+                        energy = max(
+                            0.0,
+                            min(1.0, 0.6 * energy + 0.4 * float(_voice["energy"])),
+                        )
+                    except Exception:
+                        pass
                 drv = get_flydn().drive(
                     energy=energy,
                     decisiveness=float(st.decisiveness or 0.5),

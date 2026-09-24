@@ -467,11 +467,21 @@ def fly_activity(request: Request) -> JSONResponse:
     Real NeuralState readouts per turn (valence, arousal, urgency, focus,
     vigor, circadian phase). The frontend animates pulse traffic between
     lobes from these values — the signals are real, spatially coarse.
+
+    Phase 6: adds the `senses` block — per-channel sensory drive from the
+    sensory pathways (voice prosody, motion, visual events), sourced from
+    the latest `senses` influence event plus live motion salience.
     """
     uid = _uid(request)
     activity = {
         "valence": 0.0, "arousal": 0.5, "urgency": 0.0,
         "focus": 0.0, "vigor": 1.0, "circadian": 0.5,
+    }
+    senses = {
+        "mode": "off",
+        "motion_salience": 0.0,
+        "voice": None,
+        "motion": None,
     }
     try:
         from cognition.neural_state import get_neural_state
@@ -485,10 +495,22 @@ def fly_activity(request: Request) -> JSONResponse:
                 "vigor": float(st.motor_vigor or 1.0),
                 "circadian": float(st.circadian_phase if st.circadian_phase is not None else 0.5),
             }
+            senses["motion_salience"] = float(st.motion_salience or 0.0)
+            # Latest per-turn sensory encoding, if any.
+            try:
+                snap = st.snapshot() or {}
+                for ev in reversed(snap.get("influence") or []):
+                    if isinstance(ev, dict) and ev.get("kind") == "senses":
+                        senses["mode"] = ev.get("mode") or senses["mode"]
+                        senses["voice"] = ev.get("voice")
+                        senses["motion"] = ev.get("motion")
+                        break
+            except Exception:
+                pass
     except Exception as exc:
         logger.debug("fly_activity failed: %s", exc)
     return JSONResponse(
-        {"user_id": uid, "activity": activity, "stage": "5"},
+        {"user_id": uid, "activity": activity, "senses": senses, "stage": "6"},
         headers={"Cache-Control": "no-store"},
     )
 

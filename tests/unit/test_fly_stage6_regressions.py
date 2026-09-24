@@ -221,3 +221,51 @@ def test_turn_publishes_speech_rate_not_action_vigor(monkeypatch):
 
     assert get_neural_state(user_id).motor_vigor == 0.9
     clear_neural_state(user_id)
+
+
+def test_sudden_motion_bumps_gf_without_changing_regular_salience(monkeypatch):
+    from cognition.fly_behavior.giant_fiber import assess_interrupt
+
+    monkeypatch.setenv("MEMORY_FLYGF_MODE", "live")
+    regular = assess_interrupt("", motion_salience=0.6)
+    sudden = assess_interrupt("", motion_salience=0.6, motion_sudden=True)
+
+    assert regular["sources"]["motion"] == 0.5
+    assert sudden["sources"]["motion"] == 0.7
+
+
+@pytest.mark.parametrize("mode", ["off", "shadow", "live"])
+def test_turn_only_uses_live_voice_and_sudden_motion(monkeypatch, mode):
+    from cognition.fly_behavior import giant_fiber
+    from cognition.fly_behavior.turn import apply_turn_priors
+    from cognition.flysense import dn, pathways
+    from cognition.neural_state import clear_neural_state
+
+    user_id = f"stage6-senses-{mode}"
+    clear_neural_state(user_id)
+    monkeypatch.setenv("MEMORY_FLYDN_MODE", "live")
+    monkeypatch.setenv("MEMORY_FLYMB_MODE", "off")
+    monkeypatch.setenv("MEMORY_FLYGF_MODE", "live")
+    monkeypatch.setattr(pathways, "encode_turn_senses", lambda *_args, **_kwargs: {
+        "mode": mode,
+        "voice": {"urgency": 0.4, "energy": 0.0},
+        "motion": {"sudden": True},
+    })
+    gf_inputs = []
+    real_assess = giant_fiber.assess_interrupt
+
+    def capture_assess(*args, **kwargs):
+        gf_inputs.append(kwargs)
+        return real_assess(*args, **kwargs)
+
+    monkeypatch.setattr(giant_fiber, "assess_interrupt", capture_assess)
+    energies = []
+    monkeypatch.setattr(dn.FlyDN, "drive", lambda self, **kwargs: energies.append(kwargs["energy"]) or {"rate_mult": 1.0})
+
+    apply_turn_priors("hello", user_id=user_id)
+
+    assert len(gf_inputs) == 1 and len(energies) == 1
+    assert gf_inputs[0]["voice_urgency"] == (0.4 if mode == "live" else 0.0)
+    assert gf_inputs[0]["motion_sudden"] is (mode == "live")
+    assert energies[0] == (0.6 if mode == "live" else 1.0)
+    clear_neural_state(user_id)

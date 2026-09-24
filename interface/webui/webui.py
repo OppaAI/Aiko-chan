@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import json
 import logging
 import os
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
 from system.config import load_config
 from system.userspace import current_user_id, reset_current_display_name, reset_current_user_id, set_current_user_id, set_current_display_name
 from cognition.fly_runtime import observe as observe_fly_runtime, visual_observation
+from cognition.flysense.pathways import image_dimensions_within_limit
 load_config()
 
 from system import bioclock
@@ -69,6 +71,7 @@ SSL_KEY = os.getenv("SSL_KEY", "")
 WEBUI_BROWSER_VAD_GATE = os.getenv("WEBUI_BROWSER_VAD_GATE", "1").lower() in {"1", "true", "yes", "on"}
 WEBUI_VISION_MAX_IMAGE_BYTES = 8 * 1024 * 1024
 WEBUI_VISION_MAX_IN_FLIGHT = 1
+_VISUAL_DECODE_SLOT = threading.BoundedSemaphore(1)
 
 
 def _validate_image_data_uri(value: object) -> str | None:
@@ -90,7 +93,7 @@ def _validate_image_data_uri(value: object) -> str | None:
         if len(encoded) > (WEBUI_VISION_MAX_IMAGE_BYTES * 4 // 3) + 4:
             return None
         raw = base64.b64decode(encoded, validate=True)
-    except (ValueError, UnicodeEncodeError):
+    except (ValueError, UnicodeEncodeError, binascii.Error):
         return None
     if not raw or len(raw) > WEBUI_VISION_MAX_IMAGE_BYTES:
         return None
@@ -99,9 +102,20 @@ def _validate_image_data_uri(value: object) -> str | None:
         "image/png": raw.startswith(b"\x89PNG\r\n\x1a\n"),
         "image/webp": len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP",
     }
-    if not signatures_match[mime]:
+    if not signatures_match[mime] or not image_dimensions_within_limit(raw):
         return None
     return value
+
+
+def _note_visual_frame_bounded(uid: str, image: str, source: str) -> None:
+    """Limit transient frame decoding across every WebSocket connection."""
+    if not _VISUAL_DECODE_SLOT.acquire(blocking=False):
+        return
+    try:
+        from cognition.flysense.pathways import note_visual_frame
+        note_visual_frame(uid, image, source)
+    finally:
+        _VISUAL_DECODE_SLOT.release()
 
 
 def _vision_base_url() -> str:
@@ -664,6 +678,12 @@ class AikoWeb:
             observe_fly_runtime(uid, visual_observation(salience=1.0, consented=True), seed_types=("sensory", "T4", "T5", "visual"))
         except Exception:
             log.debug("fly visual observation skipped", exc_info=True)
+        # Phase 6: feed the frame into the sensory motion pathway — scalar
+        # motion energy only. Bytes are decoded transiently, never retained.
+        try:
+            await asyncio.to_thread(_note_visual_frame_bounded, uid, image, source)
+        except Exception:
+            log.debug("fly visual pathway skipped", exc_info=True)
         self._broadcast({"type": "vision", "status": "working", "source": source}, user_id=uid)
         try:
             answer = await asyncio.to_thread(self._infer_image, image, question, source)

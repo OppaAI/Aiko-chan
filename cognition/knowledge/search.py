@@ -47,6 +47,8 @@ _KNOWLEDGE_SEARCH_CACHE_MAX: int = 128
 _PENDING_ACCESS: dict[str, set[str]] = {}
 _PENDING_ACCESS_LOCK = threading.RLock()
 _ACCESS_FLUSH_THRESHOLD: int = 200
+_ACCESS_FLUSH_SECONDS: float = 30.0
+_ACCESS_TIMERS: dict[str, threading.Timer] = {}
 
 def _cache_key(query: str, user_id: str, limit: int, embedder_id: str) -> tuple[str, str, int, str]:
     return (user_id, query or "", limit, embedder_id)
@@ -308,9 +310,15 @@ def _increment_access_count(chunk_ids: list[str], user_id: str | None = None) ->
     with _PENDING_ACCESS_LOCK:
         pending = _PENDING_ACCESS.setdefault(uid, set())
         pending.update(str(c) for c in chunk_ids)
+        if uid not in _ACCESS_TIMERS:
+            timer = threading.Timer(_ACCESS_FLUSH_SECONDS, flush_access_counts, args=(uid,))
+            timer.daemon = True
+            _ACCESS_TIMERS[uid] = timer
+            timer.start()
         if len(pending) >= _ACCESS_FLUSH_THRESHOLD:
             ids = sorted(pending)
             pending.clear()
+            _ACCESS_TIMERS.pop(uid).cancel()
         else:
             return
     _write_access_counts(uid, ids)
@@ -339,6 +347,9 @@ def flush_access_counts(user_id: str | None = None) -> int:
     uid = user_id or current_user_id()
     with _PENDING_ACCESS_LOCK:
         pending = _PENDING_ACCESS.pop(uid, set())
+        timer = _ACCESS_TIMERS.pop(uid, None)
+        if timer is not None:
+            timer.cancel()
     _write_access_counts(uid, sorted(pending))
     return len(pending)
 
@@ -357,4 +368,3 @@ def _format_knowledge_context(results: list[dict], max_chars: int) -> str:
         )
         remaining -= len(body)
     return "<knowledge_context>\n" + "\n\n".join(blocks) + "\n</knowledge_context>"
-

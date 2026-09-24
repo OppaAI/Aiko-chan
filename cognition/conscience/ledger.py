@@ -92,6 +92,8 @@ class ConscienceLedger:
     def close(self) -> None:
         with self._lock:
             self.flush()
+            if self._pending:
+                return
             if self._conn is not None:
                 try:
                     self._conn.close()
@@ -102,15 +104,14 @@ class ConscienceLedger:
     def flush(self) -> int:
         """Write buffered record() rows in one executemany + single commit.
 
-        Best-effort like record(): a failure logs and drops the batch rather
-        than raising. Returns the number of rows written.
+        Best-effort like record(): failures are rolled back and retried at the
+        next boundary. Returns the number of rows written.
         """
         with self._lock:
             if not self._pending:
                 return 0
-            batch, self._pending = self._pending, []
-        try:
-            with self._lock:
+            batch = self._pending
+            try:
                 self._db().executemany(
                     """
                     INSERT INTO conscience_ledger (
@@ -123,10 +124,16 @@ class ConscienceLedger:
                     batch,
                 )
                 self._db().commit()
-            return len(batch)
-        except Exception as exc:
-            log.warning("[ccc] ledger flush failed (%d rows dropped): %s", len(batch), exc)
-            return 0
+                self._pending = []
+                return len(batch)
+            except Exception as exc:
+                if self._conn is not None:
+                    try:
+                        self._conn.rollback()
+                    except Exception:
+                        log.exception("[ccc] ledger rollback failed")
+                log.warning("[ccc] ledger flush failed (%d rows retained): %s", len(batch), exc)
+                return 0
 
     # ── writing ───────────────────────────────────────────────────────────
 
@@ -180,9 +187,11 @@ class ConscienceLedger:
         """Record a human decision on a pending escalation."""
         if state not in (HITL_APPROVED, HITL_DENIED, HITL_TIMEOUT):
             raise ValueError(f"unknown hitl state: {state!r}")
-        self.flush()  # a same-turn escalation may still be buffered
         try:
             with self._lock:
+                self.flush()  # a same-turn escalation may still be buffered
+                if self._pending:
+                    return False
                 cur = self._db().execute(
                     """
                     UPDATE conscience_ledger
@@ -199,9 +208,11 @@ class ConscienceLedger:
 
     def pending(self, limit: int = 10) -> list[dict]:
         """Open escalations, oldest first — what the human still owes an answer to."""
-        self.flush()  # a same-turn escalation may still be buffered
         try:
             with self._lock:
+                self.flush()  # a same-turn escalation may still be buffered
+                if self._pending:
+                    return []
                 rows = self._db().execute(
                     """
                     SELECT id, created_at, act, surface, decision, reasons, norms,
@@ -263,6 +274,9 @@ class ConscienceLedger:
                "pending": 0, "avg_latency_ms": 0.0}
         try:
             with self._lock:
+                self.flush()
+                if self._pending:
+                    return out
                 rows = self._db().execute(
                     """
                     SELECT decision, COUNT(*) AS n, AVG(latency_ms) AS lat
@@ -334,6 +348,9 @@ class ConscienceLedger:
         params.append(int(limit))
         try:
             with self._lock:
+                self.flush()
+                if self._pending:
+                    return []
                 rows = self._db().execute(sql, params).fetchall()
         except Exception as exc:
             log.warning("[ccc] ledger harvest failed: %s", exc)
@@ -372,6 +389,9 @@ class ConscienceLedger:
         """Hand-label a row while reviewing. Studio / CLI entry point."""
         try:
             with self._lock:
+                self.flush()
+                if self._pending:
+                    return False
                 cur = self._db().execute(
                     """
                     UPDATE conscience_ledger

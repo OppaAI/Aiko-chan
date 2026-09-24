@@ -57,24 +57,31 @@ class Embedder(Protocol):
 
 
 _EMBED_QUERY_CACHE_MAX = env_int("EMBED_QUERY_CACHE_MAX", 1024)
-# Keys are sha256(text, instruct): holding full 1500-char texts x1024 in
+# Keys hash text and instruct: holding full 1500-char texts x1024 in
 # keys alone costs ~1.5MB of strings on the Nano for zero benefit.
-_embed_query_cache: "OrderedDict[tuple[str, str], np.ndarray]" = OrderedDict()
+_embed_query_cache: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
 _embed_query_cache_lock = threading.Lock()
 
-def _cache_key(text: str, instruct: str) -> tuple[str, str]:
+def _cache_key(text: str, instruct: str, embedder=None) -> tuple:
+    from cognition.memory.vecstore import HarrierEmbedder, _flyal_mode
+
+    if isinstance(embedder, HarrierEmbedder):
+        geometry = (embedder.base_url, embedder.model, embedder.dims, _flyal_mode())
+    else:
+        geometry = (id(embedder),)
     return (
         hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest(),
         hashlib.sha256(instruct.encode("utf-8", errors="replace")).hexdigest(),
+        geometry,
     )
 
 def cached_embed_query(embedder, text: str, instruct: str = "") -> np.ndarray:
     """Embed one piece of text, reusing a prior vector for the exact same
-    (text, instruct) pair instead of re-embedding. Safe drop-in replacement
+    (text, instruct, embedder geometry) pair instead of re-embedding. Safe drop-in replacement
     for embedder.embed_query(text, instruct=instruct) at any call site that
     might see repeated text (system prompts, persona blocks, recurring
     queries) across different call sites/modules."""
-    key = _cache_key(text, instruct)
+    key = _cache_key(text, instruct, embedder)
     with _embed_query_cache_lock:
         cached = _embed_query_cache.get(key)
         if cached is not None:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 
 import numpy as np
 
@@ -54,8 +55,14 @@ def _bool_env(name: str, default: bool) -> bool:
 # Records only the last APPLIED pulse per user; skipped duplicates still flow
 # through the eligibility trail upstream (callers record eligibility when
 # applied=False).
-_LAST_PULSE: dict[str, tuple[np.ndarray, float]] = {}
+_LAST_PULSE: dict[str, tuple[np.ndarray, float, float]] = {}
 _LAST_PULSE_LOCK = threading.RLock()
+_PULSE_LOCKS: dict[str, threading.RLock] = {}
+
+
+def _pulse_lock(user_id: str | None) -> threading.RLock:
+    with _LAST_PULSE_LOCK:
+        return _PULSE_LOCKS.setdefault(user_id or "guest", threading.RLock())
 
 
 def _is_duplicate_pulse(user_id: str | None, kc, drive: float) -> bool:
@@ -74,7 +81,9 @@ def _is_duplicate_pulse(user_id: str | None, kc, drive: float) -> bool:
         last = _LAST_PULSE.get(user_id or "guest")
     if last is None:
         return False
-    last_kc, last_drive = last
+    last_kc, last_drive, last_at = last
+    if time.monotonic() - last_at > max(0.0, _float_env("FLY_DOPAMINE_DEDUP_SECONDS", 2.0)):
+        return False
     if float(np.sign(drive)) != float(np.sign(last_drive)):
         return False
     if abs(drive - last_drive) > tol:
@@ -91,7 +100,7 @@ def _record_applied_pulse(user_id: str | None, kc, drive: float) -> None:
     except Exception:
         return
     with _LAST_PULSE_LOCK:
-        _LAST_PULSE[user_id or "guest"] = (kc, drive)
+        _LAST_PULSE[user_id or "guest"] = (kc, drive, time.monotonic())
 
 
 def split_channels(reward: float) -> dict:
@@ -174,15 +183,16 @@ def pulse(
             # nothing new — skip the reinforce AND the table rewrite. The
             # eligibility trail upstream stays intact (callers record it when
             # applied=False).
-            if _is_duplicate_pulse(user_id, kc, drive):
-                out["applied"] = False
-                out["reason"] = "dedup"
-                return out
-            delta = float(mb.reinforce(kc, drive) or 0.0)
-            out["delta"] = round(delta, 4)
-            out["applied"] = abs(delta) > 0.0
-            if out["applied"]:
-                _record_applied_pulse(user_id, kc, drive)
+            with _pulse_lock(user_id):
+                if _is_duplicate_pulse(user_id, kc, drive):
+                    out["applied"] = False
+                    out["reason"] = "dedup"
+                    return out
+                delta = float(mb.reinforce(kc, drive) or 0.0)
+                out["delta"] = round(delta, 4)
+                out["applied"] = abs(delta) > 0.0
+                if out["applied"]:
+                    _record_applied_pulse(user_id, kc, drive)
             # NOTE: no flush_mb here — the teaching event persists once:
             # online_teach()/teach_interrupt_honored() delegate to
             # eligibility.assign_credit(), which flushes once at the end of

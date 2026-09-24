@@ -985,6 +985,8 @@ class AikoThink:
                 surface="chat",
             )
             if decision in ("refuse", "escalate") and reply:
+                from cognition.conscience.ledger import ledger_for
+                ledger_for(user_id).flush()
                 self._emit(reply, token_callback=token_callback)
                 with self._history_lock:
                     self._history.append({"role": "user", "content": user_input})
@@ -1035,6 +1037,8 @@ class AikoThink:
             log.info("[route] intent=%s", intent)
 
             if intent == "greeting":
+                from cognition.conscience.ledger import ledger_for
+                ledger_for(user_id).flush()
                 _brain_trace.record_step(
                     "think.route",
                     layer="route",

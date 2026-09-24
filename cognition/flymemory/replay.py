@@ -239,6 +239,18 @@ def _recent_episodes(user_id: str, now: float) -> list[dict]:
     return out
 
 
+def _sort_id(value):
+    """Tie-break key for candidate ids. Numbers keep numeric order, strings
+    keep string order, numbers sort before strings — deterministic for the
+    mixed int/str ids of a merged real+sim candidate list, and identical to
+    the old raw-id order for homogeneous lists (Phase 8 behavior kept)."""
+    if isinstance(value, bool):
+        return (0, int(value), "")
+    if isinstance(value, (int, float)):
+        return (0, value, "")
+    return (1, 0, str(value))
+
+
 def select_candidates(
     episodes: list[dict],
     *,
@@ -249,10 +261,12 @@ def select_candidates(
 
     valence_of(trace) -> float in [-1, 1] (live MB valence, same signal the
     lifecycle knobs read). Returns at most FLY_REPLAY_MAX_ITEMS dicts, each
-    with {id, trace, valence, salience, age_h, elig, recorded_valence},
-    ordered by (elig desc, id asc) — deterministic for identical inputs.
-    recorded_valence is carried through untouched (None when the source did
-    not record one); run_replay pulses it, falling back to live valence.
+    with {id, trace, valence, salience, age_h, elig, recorded_valence,
+    simulated}, ordered by (elig desc, id asc) — deterministic for
+    identical inputs. recorded_valence is carried through untouched (None
+    when the source did not record one); run_replay pulses it, falling
+    back to live valence. simulated is carried through for Phase 9
+    FlyWorld candidates.
     """
     _ = now  # reserved: age_h is precomputed by the caller.
     scored: list[dict] = []
@@ -273,8 +287,9 @@ def select_candidates(
             "age_h": round(float(ep.get("age_h", 0.0)), 3),
             "elig": round(elig, 4),
             "recorded_valence": ep.get("recorded_valence"),
+            "simulated": bool(ep.get("simulated")),
         })
-    scored.sort(key=lambda d: (-d["elig"], d["id"]))
+    scored.sort(key=lambda d: (-d["elig"], _sort_id(d["id"])))
     return scored[: _max_items()]
 
 
@@ -306,6 +321,16 @@ def run_replay(user_id: str | None = None, *, force: bool = False) -> dict:
     try:
         now = time.time()
         episodes = _recent_episodes(_uid(user_id), now)
+        # Phase 9 (opt-in): fold FlyWorld sim episodes into the same replay
+        # pass. FLY_REPLAY_INCLUDE_SIM=1 only; default 0 keeps Phase 8
+        # behavior byte-identical. Sim episodes live in flyworld's own
+        # in-memory trail (never emc_storage) and carry simulated=True.
+        if _include_sim_episodes():
+            try:
+                from cognition.flyworld.replay_bridge import collect_sim_episodes
+                episodes = list(episodes) + collect_sim_episodes(user_id)
+            except Exception as exc:
+                log.debug("replay: sim episodes skipped: %s", exc)
         out["n_candidates"] = len(episodes)
         if not episodes:
             out["reason"] = "no_episodes"
@@ -323,26 +348,6 @@ def run_replay(user_id: str | None = None, *, force: bool = False) -> dict:
         out["plastic_before"] = round(float(np.abs(mb._plastic).sum()), 4)
 
         candidates = select_candidates(episodes, valence_of=_mb_valence_of(mb), now=now)
-        # Phase 9 (opt-in): fold FlyWorld sim episodes into the same replay
-        # pass. FLY_REPLAY_INCLUDE_SIM=1 only; default 0 keeps Phase 8
-        # behavior byte-identical. Sim candidates carry simulated=True end
-        # to end and are re-capped so the total stays bounded.
-        if _include_sim_episodes():
-            try:
-                from cognition.flyworld.replay_bridge import collect_sim_episodes
-                sim_cands = select_candidates(
-                    collect_sim_episodes(user_id),
-                    valence_of=_mb_valence_of(mb), now=now,
-                )
-                for sc in sim_cands:
-                    sc["simulated"] = True
-                if sim_cands:
-                    candidates = (candidates + sim_cands)[: _max_items()]
-                    # Re-sort: selection order is (elig desc, id asc); the
-                    # merged list must honor it across both sources.
-                    candidates.sort(key=lambda d: (-d["elig"], str(d["id"])))
-            except Exception as exc:
-                log.debug("replay: sim episodes skipped: %s", exc)
         items: list[dict] = []
         replayed = 0
         skipped_dedup = 0

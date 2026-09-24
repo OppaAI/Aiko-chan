@@ -897,6 +897,16 @@ class AikoThink:
 
         self._note_user_activity()
         _route_t0 = time.monotonic()
+        # Phase 5: outcome → teach. Praise/correction on this turn teaches the
+        # MB about the *last* recorded action (route decision or tool call),
+        # closing the loop: state → bias → action → outcome → update.
+        try:
+            from cognition.fly_behavior.action_select import detect_feedback, note_feedback
+            _fb = detect_feedback(user_input)
+            if _fb:
+                note_feedback(user_id, _fb)
+        except Exception as exc:
+            log.debug("[route] feedback teach skipped: %s", exc)
         # Approval commands ("approve run-<id>", "yes") must be handled
         # BEFORE intent classification — the quaternary intent LLM labels
         # terse commands like "Approve run-…" as chat, which would skip
@@ -1395,6 +1405,14 @@ class AikoThink:
                     ctx.set(outputs={"intent": "greeting", "vector_dim": int(query_vec.shape[0])},
                             factors=["ambiguous but greeting-only regex overrides → greeting"])
                     return "greeting", query_vec
+                # Phase 5: fly → action selection. The fly scores the close-call
+                # routes; when decisive in live mode it resolves the tie without
+                # spending an LLM call. Otherwise fall through to the tiebreaks.
+                fly_label = self._fly_route_tiebreak(
+                    user_input, scores, user_id, ctx, query_vec
+                )
+                if fly_label is not None:
+                    return fly_label, query_vec
                 if _ROUTE_MODE == "semantic_only":
                     log.debug("[route] semantic_only: ambiguous gap, defaulting localchat")
                     ctx.set(outputs={"intent": "localchat", "vector_dim": int(query_vec.shape[0])},
@@ -1420,6 +1438,55 @@ class AikoThink:
             ctx.set(outputs={"intent": "localchat", "vector_dim": int(query_vec.shape[0])},
                     factors=["no threshold met, no greeting regex → default localchat"])
             return "localchat", query_vec
+
+    def _fly_route_tiebreak(self, user_input, scores, user_id, ctx, query_vec):
+        """Phase 5: let the fly resolve close route calls.
+
+        Returns the winning label when the fly is decisive in live mode,
+        else None (caller falls back to the existing LLM tiebreak).
+        """
+        try:
+            from cognition.fly_behavior.action_select import Candidate, score_candidates
+        except Exception as exc:
+            log.debug("[route] fly tiebreak unavailable: %s", exc)
+            return None
+        _ROUTE_HINTS = {
+            "greeting": ("greeting the user briefly",
+                         {"energy": "low", "speed": "fast"}),
+            "localchat": ("chatting with the user with full memory recall",
+                          {"energy": "med", "speed": "fast"}),
+            "webchat": ("searching the web to answer the user",
+                        {"energy": "med", "speed": "slow", "external": True}),
+            "agentic": ("running autonomous tools to complete a task",
+                        {"energy": "high", "speed": "slow", "external": True}),
+        }
+        candidates = []
+        for label in ("greeting", "localchat", "webchat", "agentic"):
+            if label == "agentic" and not _AGENTIC_MODE_ON:
+                continue
+            desc, hints = _ROUTE_HINTS[label]
+            candidates.append(Candidate(
+                id=label, kind="route", label=label, description=desc,
+                llm_prior=max(0.0, min(1.0, float(scores.get(label, 0.0)))),
+                hints=dict(hints),
+            ))
+        try:
+            rec = score_candidates(candidates, user_id=user_id,
+                                   context_text=user_input, source="router")
+        except Exception as exc:
+            log.debug("[route] fly tiebreak scoring failed: %s", exc)
+            return None
+        if rec.get("applied") and rec.get("winner"):
+            winner = rec["winner"]
+            ctx.set(
+                outputs={"intent": winner,
+                         "vector_dim": int(query_vec.shape[0]),
+                         "method": "fly_tiebreak"},
+                factors=[f"fly decisive in live mode (weight={rec['weight']})",
+                         f"votes={rec['candidates'][winner]['votes']}"],
+            )
+            return winner
+        return None
 
     def _semantic_example_vectors(self, examples_by_label: dict, instruct: str) -> tuple[list[str], object]:
         """Return cached route-example vectors.

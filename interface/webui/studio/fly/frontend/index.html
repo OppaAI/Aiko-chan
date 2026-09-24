@@ -64,6 +64,7 @@ legend i{width:12px;height:12px;border-radius:3px}
 <section class="panel"><h2>Observations</h2><div id="observations" class="list">No observations recorded.</div></section>
 <section class="panel"><h2>Runtime modes</h2><div id="modes" class="list">—</div></section>
 <section class="panel"><h2>Causal trail</h2><div id="causal" class="list">No influence events yet.</div></section>
+<section class="panel"><h2>Action selection (fly votes)</h2><div id="fly-actions" class="list">No action selections yet.</div></section>
 </aside>
 </main>
 <script src="/studio/fly/static/dn_body_client.js"></script>
@@ -447,7 +448,7 @@ function renderUI(c, p) {
   $('modes').innerHTML = esc(JSON.stringify(c.modes || {}, null, 2));
 }
 
-function renderSlowPanels(causal, body) {
+function renderSlowPanels(causal, body, actions) {
   const ev = (causal && causal.events) || [];
   $('causal').innerHTML = ev.length ? ev.slice().reverse().map(e => {
     const k = e.kind || e.source || 'event';
@@ -472,6 +473,28 @@ function renderSlowPanels(causal, body) {
     ).join('<br>');
   }
   try { if (window.aikoApplyDnBody) window.aikoApplyDnBody(b, intents); } catch (_) {}
+  // Phase 5: why-this-action-won — per-candidate fly votes from the trail.
+  const fa = $('fly-actions');
+  if (fa) {
+    const recs = (actions && actions.records) || [];
+    fa.innerHTML = recs.length ? recs.map(r => {
+      const cands = r.candidates || {};
+      const win = r.winner;
+      const rows = Object.entries(cands).map(([id, c]) => {
+        const v = c.votes || {};
+        const mark = id === win ? '&#9733; ' : '&nbsp;&nbsp;';
+        const veto = c.veto ? ' <b>VETO</b>' : '';
+        return `${mark}${esc(c.label)} prior ${c.llm_prior} fly ${c.fly} final ${c.final}${veto}<br>` +
+          `&nbsp;&nbsp;&nbsp;&nbsp;mb ${v.mb} cx ${v.cx} dn ${v.dn} gf ${v.gf}`;
+      }).join('<br>');
+      const tag = r.tool ? `tool ${esc(r.tool)}`
+        : r.applied ? 'APPLIED'
+        : (r.mode === 'shadow' ? 'shadow' : (r.ambiguous ? 'ambiguous' : (r.source || '')));
+      const head = r.tool ? `<b>${esc(r.source || '')}</b> · ${esc(tag)}`
+        : `<b>${esc(r.source || '')}</b> · ${esc(tag)} · winner <b>${esc(win || '—')}</b>`;
+      return `${head}<br>${rows}`;
+    }).join('<hr>') : 'No action selections yet.';
+  }
 }
 
 async function refreshTelemetry() {
@@ -484,18 +507,20 @@ async function refreshTelemetry() {
   ];
   if (doSlow) jobs.push(
     fetch("/studio/fly/api/causal?limit=16").catch(() => null),
-    fetch("/studio/fly/api/body").catch(() => null)
+    fetch("/studio/fly/api/body").catch(() => null),
+    fetch("/studio/fly/api/fly_actions?n=8").catch(() => null)
   );
   telemetryRequest = Promise.all(jobs).then(async (rs) => {
     for (const r of rs.slice(0, 2)) if (!r.ok) throw new Error("Telemetry unavailable");
     const [circuit, trace] = await Promise.all([rs[0].json(), rs[1].json()]);
     renderUI(circuit, trace);
     if (doSlow) {
-      const [causal, body] = await Promise.all([
+      const [causal, body, actions] = await Promise.all([
         rs[2]?.ok ? rs[2].json().catch(() => ({ events: [] })) : { events: [] },
-        rs[3]?.ok ? rs[3].json().catch(() => ({})) : {}
+        rs[3]?.ok ? rs[3].json().catch(() => ({})) : {},
+        rs[4]?.ok ? rs[4].json().catch(() => ({ records: [] })) : { records: [] }
       ]);
-      renderSlowPanels(causal, body);
+      renderSlowPanels(causal, body, actions);
     }
   }).catch(e => {
     console.warn("Fly telemetry refresh failed", e);

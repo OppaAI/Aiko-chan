@@ -26,12 +26,13 @@ It can announce or initiate jobs only while Aiko is running on an awake machine.
 It does not install OS-level cron jobs, wake a sleeping computer, or run after
 Aiko exits.
 
-Two hardcoded system jobs run outside schedule.json and cannot be modified
+Three hardcoded system jobs run outside schedule.json and cannot be modified
 by the user:
   - daily_reflect_and_dream    fires every day at DAILY_JOB_HOUR:DAILY_JOB_MINUTE (default 00:00)
   - monthly_consolidate        fires on the 1st of each month at MONTHLY_JOB_HOUR:MONTHLY_JOB_MINUTE (default 00:05)
+  - fly_replay                 nightly offline MB replay (Phase 8), FLY_REPLAY_HOUR:FLY_REPLAY_MINUTE (default 23:30)
 
-Both hardcoded jobs have startup catch-up logic: if the scheduler process
+All hardcoded jobs have startup catch-up logic: if the scheduler process
 was offline/asleep across a scheduled firing, the missed run(s) are
 detected and backfilled once on the next start() call, before the normal
 sleep loop begins.
@@ -1568,17 +1569,42 @@ def _next_ledger_prune() -> datetime:
     return bioclock.local_now() + timedelta(days=LEDGER_PRUNE_INTERVAL_DAYS)
 
 
+def _fly_replay_time() -> tuple[int, int]:
+    """Nightly replay wall-clock time. Default 23:30 local — ahead of the
+    00:00 dream/consolidation job so replayed plasticity is visible to it."""
+    try:
+        h = max(0, min(23, int(os.getenv("FLY_REPLAY_HOUR", "23"))))
+    except Exception:
+        h = 23
+    try:
+        m = max(0, min(59, int(os.getenv("FLY_REPLAY_MINUTE", "30"))))
+    except Exception:
+        m = 30
+    return h, m
+
+
+def _next_fly_replay() -> datetime:
+    """Next nightly offline-replay firing (Phase 8)."""
+    h, m = _fly_replay_time()
+    now = bioclock.local_now()
+    nxt = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    if nxt <= now:
+        nxt += timedelta(days=1)
+    return nxt
+
+
 # ── scheduler ─────────────────────────────────────────────────────────────────
 
 class ScheduleRunner:
     """
     Single daemon thread that sleeps until the next due event.
 
-    Three hardcoded system jobs are managed internally and never written to
+    Four hardcoded system jobs are managed internally and never written to
     schedule.json:
       - daily_reflect_and_dream   every day at DAILY_JOB_HOUR:DAILY_JOB_MINUTE
       - ledger_prune              weekly conscience-ledger retention
       - monthly_consolidate       every 1st of month at MONTHLY_JOB_HOUR:MONTHLY_JOB_MINUTE
+      - fly_replay                nightly offline MB replay (Phase 8)
 
     User reminders and scheduled jobs are read from schedule.json. Jobs with
     a "handler" field call into a registered Python function directly
@@ -1644,6 +1670,7 @@ class ScheduleRunner:
         self._next_daily   = _next_daily_reflect_and_dream()
         self._next_monthly = _next_monthly_consolidate()
         self._next_ledger_prune = bioclock.local_now()
+        self._next_fly_replay = _next_fly_replay()
 
         # catch-up state — checked on start(). NOTE: if _owner_user_id is
         # still "guest" at this point (pre-auth boot), the monthly check
@@ -1851,6 +1878,7 @@ class ScheduleRunner:
                     (self._next_daily, "daily"),
                     (self._next_monthly, "monthly"),
                     (self._next_ledger_prune, "ledger-prune"),
+                    (self._next_fly_replay, "fly-replay"),
                 ] if t <= now],
                 key=lambda x: x[0],
             ) if self._owner_promoted.is_set() else []
@@ -1877,6 +1905,9 @@ class ScheduleRunner:
                         elif name == "monthly":
                             self._run_monthly_consolidate()
                             self._next_monthly = _next_monthly_consolidate()
+                        elif name == "fly-replay":
+                            if self._run_fly_replay():
+                                self._next_fly_replay = _next_fly_replay()
                         else:
                             if self._run_ledger_prune():
                                 self._next_ledger_prune = _next_ledger_prune()
@@ -1931,6 +1962,7 @@ class ScheduleRunner:
             candidates = [self._next_daily, self._next_monthly]
             if self._owner_promoted.is_set():
                 candidates.append(self._next_ledger_prune)
+                candidates.append(self._next_fly_replay)
             for uid in all_user_ids():
                 candidates.extend(
                     datetime.fromisoformat(j["next_due"])
@@ -2139,6 +2171,33 @@ class ScheduleRunner:
             _write_last_consolidated_month(now.strftime("%Y-%m"), user_id=self._owner_user_id)
         except Exception as e:
             log.error("monthly_consolidate failed: %s", e)
+
+    def _run_fly_replay(self) -> bool:
+        """Nightly offline MB replay (Phase 8). Not in schedule.json.
+
+        Runs replay.run_replay() for every user. The replay module itself
+        is fail-soft and mode-gated (AIKO_FLY_REPLAY_MODE, default shadow),
+        so a failure here must never break the scheduler thread.
+        """
+        try:
+            from cognition.flymemory import replay as _replay
+            ok = True
+            for user_id in all_user_ids():
+                try:
+                    res = _replay.run_replay(user_id)
+                    log.info(
+                        "fly_replay: user=%s mode=%s candidates=%d replayed=%d reason=%s",
+                        (user_id or "?")[:12], res.get("mode"),
+                        res.get("n_candidates"), res.get("n_replayed"),
+                        res.get("reason"),
+                    )
+                except Exception:
+                    log.exception("fly_replay failed for user %s", (user_id or "?")[:12])
+                    ok = False
+            return ok
+        except Exception:
+            log.exception("fly_replay failed")
+            return False
 
     def _run_ledger_prune(self) -> bool:
         """Weekly conscience-ledger maintenance. Not in schedule.json.

@@ -174,22 +174,20 @@ function nodeRadius(d) {
 function edgeOpacity(e) {
   const s = nodeById.get(typeof e.source === 'object' ? e.source.id : e.source);
   const t = nodeById.get(typeof e.target === 'object' ? e.target.id : e.target);
-  const rs = s ? retainOf(s) : 0.25;
-  const rt = t ? retainOf(t) : 0.25;
-  const mid = Math.pow(Math.max(0.05, rs * rt), 0.45);
+  // Brightness follows the SIZES of both endpoint nodes (entities included
+  // via their own radius curve): big-to-big links glow, small-to-small fade.
+  const rn = n => n ? Math.max(0, Math.min(1, (nodeRadius(n) - 2.5) / 11)) : 0.2;
+  const mid = Math.pow(Math.max(0.02, rn(s) * rn(t)), 0.5);
   const w = Math.max(0, Math.min(1, Number(e.weight) || 0.4));
   const wBoost = 0.35 + 0.65 * w;
-  if (e.type === 'supersedes') return Math.min(0.85, (0.25 + mid * 0.7) * wBoost);
-  if (e.type === 'mentions' || e.type === 'grounded_in' || e.type === 'practiced_in' || e.type === 'distilled_into') {
-    return Math.min(0.8, (0.06 + mid * 0.75) * wBoost);
-  }
-  return Math.min(0.9, (0.10 + mid * 0.75) * wBoost);
+  if (e.type === 'supersedes') return Math.min(0.9, (0.3 + mid * 0.65) * wBoost);
+  return Math.min(0.85, (0.12 + mid * 0.73) * wBoost);
 }
 
 function edgeColor(e) {
   if (e.type === 'supersedes') return '#a68b4f';
   if (e.type === 'distilled_into') return '#4a6b70';
-  return '#54606f';
+  return '#385c70';
 }
 
 function lineageText(d, graph) {
@@ -598,8 +596,7 @@ function buildGraph() {
     })
     .attr('stroke-opacity', d => edgeOpacity(d) * 0.9)
     .attr('stroke-linecap', 'round')
-    .attr('stroke-dasharray', d => d.type === 'supersedes' ? null : '1.5,2.5')
-    .attr('marker-end', d => d.type === 'supersedes' ? 'url(#arrow-sup)' : null)
+        .attr('marker-end', d => d.type === 'supersedes' ? 'url(#arrow-sup)' : null)
     .attr('x1', d => nodeById.get(d.source).x)
     .attr('y1', d => nodeById.get(d.source).y)
     .attr('x2', d => nodeById.get(d.target).x)

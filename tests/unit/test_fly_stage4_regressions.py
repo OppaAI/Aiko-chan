@@ -104,26 +104,33 @@ def test_assign_credit_requires_successful_applied_pulse(monkeypatch, pulse_resu
     eligibility.clear(uid)
 
 
-def test_assign_credit_falls_back_when_pulse_raises(monkeypatch):
+def test_assign_credit_fails_soft_when_engine_raises(monkeypatch):
+    # Phase 10A: assign_credit is one rate-based engine event. If the engine
+    # itself raises, the call must not propagate — it reports instead of
+    # writing (the old per-step pulse→reinforce fallback no longer exists;
+    # per-trace failures are already contained inside the engine).
     from cognition import fly_registry
-    from cognition.flymemory import dopamine, eligibility
+    from cognition.flymemory import credit, eligibility
 
-    uid = "stage4-credit-fallback"
+    uid = "stage4-credit-engine-fail"
     mb = _MB()
     eligibility.clear(uid)
-    eligibility._TRACES[uid] = deque([("kc", 0.0)])
     monkeypatch.setattr(eligibility, "_enabled", lambda: True)
     monkeypatch.setattr(eligibility, "_mb_mode", lambda: "live")
     monkeypatch.setattr(fly_registry, "get_flymb", lambda _user_id: mb)
     monkeypatch.setattr(fly_registry, "get_fly_store", lambda _user_id: None)
-    monkeypatch.setattr(dopamine, "pulse", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("no pulse")))
+    monkeypatch.setattr(
+        credit, "credit_event",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("no credit")),
+    )
 
     result = eligibility.assign_credit(uid, 0.5)
 
-    assert result["taught"] is True
-    assert result["steps"] == 1
-    assert result["delta"] == 0.25
-    assert mb.reinforce_calls == 1
+    assert result["taught"] is False
+    assert result["steps"] == 0
+    assert result["delta"] == 0.0
+    assert "no credit" in result["reason"]
+    assert mb.reinforce_calls == 0
     eligibility.clear(uid)
 
 

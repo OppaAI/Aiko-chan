@@ -10,9 +10,11 @@ The loop:
      This isolates what the fly policy itself learns — which is exactly what
      the transfer test measures.
   4. sim.step(action) -> outcome + reward.
-  5. Credit: each outcome teaches only its own step's KC through
-     dopamine.pulse(reward, kc=kc, weight=1, source="flyworld-sim").
-     The shared real-turn eligibility trail is never touched.
+  5. Credit (Phase 10A): each step's action KC is marked as an eligibility
+     trace first; the outcome is injected as ONE dopamine event that credits
+     this step's trace plus its still-live predecessors (decayed by age).
+     Delayed credit, bounded, and confined to the flyworld-sim scope —
+     the shared real-turn eligibility trail is never touched.
   6. One flush_mb at episode end (Phase 2 convention).
 
 Mode AIKO_FLYWORLD_MODE=off|shadow|live (default shadow):
@@ -189,7 +191,6 @@ def run_episode(
         from cognition.fly_behavior.action_select import score_candidates
         from cognition.fly_registry import get_flymb, get_fly_store
         from cognition.flymemory.circuit import text_features
-        from cognition.flymemory.dopamine import pulse
 
         rng = _sim.new_rng(seed)
         state = _sim.initial_state(rng)
@@ -239,35 +240,56 @@ def run_episode(
                     log.debug("flyworld encode skipped: %s", exc)
                     kc = None
 
-            # Scenario transitions are action-independent, so only this
-            # step's KC receives its outcome. Shadow records what would apply.
+            # Scenario transitions are action-independent at the single-step
+            # level, but Phase 10A still marks per-step eligibility traces:
+            # the outcome event credits this step's trace plus its
+            # still-live predecessors (decayed by age) — bounded delayed
+            # credit that stays inside the flyworld-sim scope.
             pulsed_here: list[dict] = []
-            if kc is not None:
-                if live and mb_ok:
-                    try:
-                        res = pulse(
-                            outcome.reward, user_id=user_id, kc=kc,
-                            weight=1.0, source="flyworld-sim",
-                        )
-                        if res.get("applied"):
-                            n_pulsed += 1
-                        pulsed_here.append({
-                            "age": 0, "weight": 1.0,
-                            "applied": bool(res.get("applied")),
-                            "reason": str(res.get("reason") or ""),
-                        })
-                    except Exception as exc:
-                        pulsed_here.append({
-                            "age": 0, "weight": 1.0,
-                            "applied": False,
-                            "reason": f"error: {exc}",
-                        })
-                else:
+            if kc is not None and mb_ok:
+                try:
+                    from cognition.flymemory import credit as _credit
+
+                    tid = _credit.mark_trace(
+                        user_id, kc, value=1.0, scope="flyworld-sim")
+                    res = _credit.credit_event(
+                        user_id, outcome.reward, kc=None,
+                        source="flyworld-sim", scope="flyworld-sim",
+                        apply=live)
+                    mine = None
+                    for app in res.get("applications", []):
+                        if app.get("trace") == tid:
+                            mine = app
+                            break
+                    if mine is None:
+                        # No application for this trace (e.g. zero reward):
+                        # still report the step itself.
+                        mine = {"age": 0, "e": 1.0, "applied": False,
+                                "reason": str(res.get("reason") or "skipped")}
+                    applied = bool(mine.get("applied"))
+                    if applied:
+                        n_pulsed += 1
+                    if live:
+                        reason = "ok" if applied else str(mine.get("reason") or "skipped")
+                    else:
+                        reason = "would_pulse"
                     pulsed_here.append({
-                        "age": 0, "weight": 1.0,
-                        "applied": False,
-                        "reason": "would_pulse" if mb_ok else "mb_unavailable",
+                        "age": int(mine.get("age", 0)),
+                        "weight": 1.0,
+                        "applied": applied,
+                        "reason": reason,
                     })
+                except Exception as exc:
+                    log.debug("flyworld sim credit skipped: %s", exc)
+                    pulsed_here.append({
+                        "age": 0, "weight": 1.0, "applied": False,
+                        "reason": f"error: {exc}",
+                    })
+            elif not mb_ok:
+                pulsed_here.append({
+                    "age": 0, "weight": 1.0, "applied": False,
+                    "reason": "mb_unavailable",
+                })
 
             steps.append({
                 "step": i,

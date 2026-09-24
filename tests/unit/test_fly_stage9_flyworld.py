@@ -32,6 +32,8 @@ FLYWORLD_DIR = Path(__file__).resolve().parents[2] / "cognition" / "flyworld"
 def live_mb(monkeypatch, tmp_path):
     """Live MB layer (pulses apply) with a fresh user id per test."""
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "live")
+    # Phase 10A: the rate-based dopamine path needs its own live flag too.
+    monkeypatch.setenv("AIKO_FLY_DOPAMINE_MODE", "live")
     state_root = tmp_path / "state"
     monkeypatch.setenv("USER_SPACE_ROOT", str(state_root))
     monkeypatch.setenv("USER_STATE_ROOT", str(state_root))

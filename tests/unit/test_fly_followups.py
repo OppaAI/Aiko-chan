@@ -29,6 +29,7 @@ def test_eligibility_trace_credit_and_bounds(monkeypatch):
     from cognition.flymemory import eligibility
 
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "live")
+    monkeypatch.setenv("AIKO_FLY_DOPAMINE_MODE", "live")  # Phase 10A
     monkeypatch.setenv("FLY_ELIGIBILITY", "1")
     monkeypatch.setenv("FLY_ELIGIBILITY_STEPS", "3")
     uid = "elig-test"
@@ -55,6 +56,7 @@ def test_online_teach_credits_trace(monkeypatch):
     from cognition.flymemory.online_teach import teach_from_user_text
 
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "live")
+    monkeypatch.setenv("AIKO_FLY_DOPAMINE_MODE", "live")  # Phase 10A
     uid = "elig-online"
     eligibility.clear(uid)
     teach_from_user_text("find me a restaurant", user_id=uid)

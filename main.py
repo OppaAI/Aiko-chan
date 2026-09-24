@@ -396,9 +396,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--name", metavar="NAME", default="",        # default "" (not None) — truthiness test below works either way,
                    help="companion name for this session (requires --cli)")   # and consumers get a str, never None
     p.add_argument("--text",   action="store_true",             # quiet-mode preset: ASR + TTS both off
-                   help="keyboard input, TTS AND ASR both off (implies --no-asr); subsystems still load for /voice and /listen toggles")
+                   help="keyboard input, TTS AND ASR both off (implies --no-asr); voice subsystems are skipped at boot and /voice and /listen start them on demand")
     p.add_argument("--no-asr", action="store_true",             # narrower preset: only ASR off, TTS stays on
-                   help="keyboard input, TTS stays on, ASR off; ASR still loads for /listen")
+                   help="keyboard input, TTS stays on, ASR off; ASR is skipped at boot and /listen starts it on demand")
 
     # ---- Version -------------------------------------------------------------
     p.add_argument("--version", action=_VersionAction, nargs=0,

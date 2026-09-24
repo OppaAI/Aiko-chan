@@ -50,8 +50,9 @@ try:
     from system import brain_trace as _brain_trace
 except Exception:
     _brain_trace = None
+from cognition import reason
 from cognition.memory.vecstore import HarrierEmbedder, initialize_store_db
-from cognition.memory.vecstore import KNN_MATCH_K_MIN, KNN_MATCH_OVERSCAN
+from cognition.memory.vecstore import KNN_MATCH_K_MIN, KNN_MATCH_OVERSCAN, _QUERY_INSTRUCT
 
 # ── inlined from lifecycle.py (dream-pass tunables, previously separate) ───
 DREAM_MERGE_THRESHOLD = float(os.getenv("DREAM_MERGE_THRESHOLD", 0.88))
@@ -529,6 +530,10 @@ class EpisodicStore:
         self._embedder = embedder or HarrierEmbedder(cache_path=embed_cache)
         self._lock = threading.RLock()
         self._conn = self._connect()
+        # Phase 2: recall-count touches accumulate here; flush_writes() applies
+        # them in one UPDATE + single commit at the turn boundary.
+        self._pending_touch: set[int] = set()
+        self._touch_timer: threading.Timer | None = None
         # EMC recall result cache (see search()). Keyed by
         # (user_id, query, limit); bounded + TTL so episodic recall doesn't
         # re-run KNN+FTS (and the per-id touch loop) on every turn.
@@ -575,6 +580,7 @@ class EpisodicStore:
         source: str | None = None,
         session_id: str | None = None,
         cognitive_state: dict | None = None,
+        _defer_flush: bool = False,
     ) -> int:
         """Stage one episode. Returns staging_id. Missing fields stay NULL."""
         if not EMC_ENABLED:
@@ -604,8 +610,9 @@ class EpisodicStore:
                     ent_json, source, session_id, cognitive_json,
                 ),
             )
-            self._conn.commit()
-            staging_id = int(cur.lastrowid)
+            staging_id = int(cur.lastrowid)  # captured pre-commit: safe
+            if not _defer_flush:
+                self.flush_writes()
             log.debug("EMC bind staging_id=%s user=%s chars=%d", staging_id, uid, len(content))
             return staging_id
 
@@ -679,6 +686,7 @@ class EpisodicStore:
             source=source,
             session_id=session_id,
             cognitive_state=cognitive_state,
+            _defer_flush=True,
         )
 
         with self._lock:
@@ -687,6 +695,7 @@ class EpisodicStore:
         flushed = 0
         if auto_flush and staging_id > 0:
             flushed = self.maybe_flush()
+            self.flush_writes()
 
         if _brain_trace and _brain_trace.TRACE_ENABLED:
             _brain_trace.record_step(
@@ -995,10 +1004,8 @@ class EpisodicStore:
             if cached and now - cached[0] <= EMC_RECALL_CACHE_TTL:
                 self._recall_cache.move_to_end(cache_key)
                 hits = [dict(r) for r in cached[1]]
-                try:
-                    self._touch_episodes([r["id"] for r in hits])
-                except Exception:
-                    pass
+                # Phase 2: no touch on cache hits — a cached read must not
+                # issue a write. Counts were bumped on the uncached search.
                 # Rerank AFTER cache read: cached order is the RRF base so
                 # evolving MB plasticity re-ranks fresh on every call.
                 return _flymb_rerank(q, hits, user_id=uid)
@@ -1012,7 +1019,10 @@ class EpisodicStore:
             else:
                 emb = self._embedder
                 if hasattr(emb, "embed_query"):
-                    vector = list(emb.embed_query(q))
+                    # Phase 2: shared module cache; explicit instruct to match
+                    # embed_query's default exactly.
+                    vector = list(reason.cached_embed_query(
+                        emb, q, instruct=_QUERY_INSTRUCT))
                 else:
                     vector = list(emb.embed([q]))[0]
         except Exception as e:
@@ -1131,23 +1141,51 @@ class EpisodicStore:
             return _flymb_rerank(q, results, user_id=uid)
 
     def _touch_episodes(self, ids: list[int]) -> None:
+        # Phase 2: accumulate only — flush_writes() applies one UPDATE + the
+        # turn's single commit at the turn boundary. Never raises.
         if not ids:
             return
-        now = _utc_now_iso()
         try:
-            placeholders = ",".join("?" * len(ids))
-            self._conn.execute(
-                f"""
-                UPDATE emc_storage
-                SET recall_count = recall_count + 1,
-                    last_recalled_at = ?
-                WHERE id IN ({placeholders})
-                """,
-                [now] + ids,
-            )
-            self._conn.commit()
+            with self._lock:
+                self._pending_touch.update(int(i) for i in ids)
+                if self._touch_timer is None:
+                    self._touch_timer = threading.Timer(30.0, self.flush_writes)
+                    self._touch_timer.daemon = True
+                    self._touch_timer.start()
+                if len(self._pending_touch) >= 200:
+                    self.flush_writes()
         except Exception as e:
-            log.debug("EMC touch failed: %s", e)
+            log.debug("EMC touch accumulate failed: %s", e)
+
+    def flush_writes(self) -> int:
+        """Turn-boundary write barrier for the episodic DB.
+
+        Applies pending recall-count touches in one UPDATE and commits once,
+        covering bind()'s staged INSERT as well. Returns touched row count.
+        """
+        try:
+            with self._lock:
+                if self._touch_timer is not None:
+                    self._touch_timer.cancel()
+                    self._touch_timer = None
+                ids = sorted(self._pending_touch)
+                if ids:
+                    placeholders = ",".join("?" * len(ids))
+                    self._conn.execute(
+                        f"""
+                        UPDATE emc_storage
+                        SET recall_count = recall_count + 1,
+                            last_recalled_at = ?
+                        WHERE id IN ({placeholders})
+                        """,
+                        [_utc_now_iso()] + ids,
+                    )
+                self._conn.commit()
+                self._pending_touch.difference_update(ids)
+            return len(ids)
+        except Exception as e:
+            log.debug("EMC flush_writes failed: %s", e)
+            return 0
 
     def format_for_context(self, episodes: list[dict], *, max_chars: int | None = None, user_id: str | None = None) -> str | None:
         """Format episodic hits as a compact <episodic_context> block."""
@@ -1194,6 +1232,7 @@ class EpisodicStore:
     def close(self) -> None:
         try:
             self.flush_all()
+            self.flush_writes()
         except Exception as e:
             log.debug("EMC flush_all on close: %s", e)
         # Stop the embed worker thread if it's running
@@ -1290,8 +1329,15 @@ class EpisodicMemory:
                 return
             store.ingest_turn(
                 user_input, response_text,
-                user_id=uid, cognitive_state=cognitive_state,
+                user_id=uid, cognitive_state=cognitive_state, auto_flush=False,
             )
+            store.maybe_flush()
+            # Phase 2: single commit for the turn — covers bind()'s staged
+            # INSERT plus any pending recall-count touches.
+            try:
+                store.flush_writes()
+            except Exception:
+                pass
         except Exception as e:
             log.debug("queue_episode skipped: %s", e)
 

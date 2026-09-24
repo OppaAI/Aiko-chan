@@ -96,7 +96,9 @@ def release_ram(reason: str = "") -> dict:
 
     before = rss_mb()
     try:
-        collected = gc.collect()
+        # Gen-1 only: most churn is young garbage; a full gen-2 sweep scans
+        # every live object and costs far more for little extra reclaimed.
+        collected = gc.collect(1)
     except Exception:
         collected = -1
     trimmed = _malloc_trim()

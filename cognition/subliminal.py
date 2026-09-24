@@ -294,8 +294,8 @@ class SubliminalLayer:
             _dn_mode = "off"
         if _dn_mode in ("shadow", "live"):
             try:
-                from cognition.flysense import FlyDN as _FlyDN
-                _drv = _FlyDN().drive(energy=float(ar),
+                from cognition.flysense import get_flydn as _get_flydn
+                _drv = _get_flydn().drive(energy=float(ar),
                                       decisiveness=float(cues.get("action", 0.0)),
                                       affect=float(v))
             except Exception as exc:
@@ -534,8 +534,8 @@ class SubliminalLayer:
             _dn_mode = "off"
         if _dn_mode in ("shadow", "live"):
             try:
-                from cognition.flysense import FlyDN as _FlyDN
-                _drv = _FlyDN().drive(energy=float(self._affect.arousal),
+                from cognition.flysense import get_flydn as _get_flydn
+                _drv = _get_flydn().drive(energy=float(self._affect.arousal),
                                       decisiveness=float(self._affect.agency),
                                       affect=float(self._affect.valence))
             except Exception as exc:

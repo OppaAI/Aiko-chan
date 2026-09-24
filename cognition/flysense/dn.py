@@ -13,6 +13,7 @@ SYNTHETIC: the mapping itself (functional DN-gain abstraction).
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 DATA_PATH = Path(__file__).resolve().parent / "data" / "dn_stats.json"
@@ -61,3 +62,28 @@ class FlyDN:
 
     def summary(self) -> dict:
         return {"n_dn": self.n_dn}
+
+
+# ── shared instance ──────────────────────────────────────────────────────
+# FlyDN.__init__ re-reads dn_stats.json from disk on every construction, and
+# drive() is a pure function of (gains, energy, decisiveness, affect) — so a
+# default-configured instance can be shared process-wide. Per-turn call sites
+# (turn.py, think.py, subliminal.py) all use default gains; get_flydn()
+# avoids 2-4 JSON file reads per turn. Custom kwargs still construct fresh.
+_singleton: FlyDN | None = None
+_singleton_lock = threading.Lock()
+
+
+def get_flydn(**kwargs) -> FlyDN:
+    """Return the shared default FlyDN instance, or a fresh one for custom kwargs."""
+    global _singleton
+    if kwargs:
+        return FlyDN(**kwargs)
+    inst = _singleton
+    if inst is None:
+        with _singleton_lock:
+            inst = _singleton
+            if inst is None:
+                inst = FlyDN()
+                _singleton = inst
+    return inst

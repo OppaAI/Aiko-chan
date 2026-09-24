@@ -120,6 +120,9 @@ def teach_from_user_text(
     if mode == "shadow":
         log.debug("online_teach shadow reason=%s reward=%+.2f", reason, reward)
         return out
+    mb = None
+    direct_applied = False
+    direct_flushed = False
     try:
         from cognition.fly_registry import get_flymb, get_fly_store
         from cognition.flymemory.circuit import text_features
@@ -136,12 +139,14 @@ def teach_from_user_text(
             if _da.get("reason") != "ok" or not _da.get("applied"):
                 _record_eligibility(out, user_id, teach_text)
                 return out
+            direct_applied = True
             delta = float(_da.get("delta") or 0.0)
         except Exception:
             delta = float(mb.reinforce(kc, reward) or 0.0)
             if not delta:
                 _record_eligibility(out, user_id, teach_text)
                 return out
+            direct_applied = True
         bias = mb.valence_bias(text_features(teach_text))
         st = get_neural_state(user_id)
         st.publish_mb(bias, source=f"online:{reason}")
@@ -157,17 +162,12 @@ def teach_from_user_text(
             )
         except Exception:
             pass
-        store = get_fly_store(user_id)
-        if store is not None:
-            try:
-                store.flush_mb(mb)
-            except Exception:
-                pass
         out["taught"] = True
         out["delta"] = round(delta, 4)
         try:
             from cognition.flymemory.eligibility import assign_credit
             credit = assign_credit(user_id, reward)
+            direct_flushed = bool(credit.get("flushed"))
             _record_eligibility(out, user_id, teach_text)
             out["credit_steps"] = credit.get("steps", 0)
         except Exception:
@@ -176,6 +176,14 @@ def teach_from_user_text(
     except Exception as exc:
         log.debug("online_teach failed: %s", exc)
         out["reason"] = str(exc)
+    finally:
+        if direct_applied and not direct_flushed:
+            try:
+                store = get_fly_store(user_id)
+                if store is not None:
+                    store.flush_mb(mb)
+            except Exception:
+                log.debug("online_teach direct pulse flush failed", exc_info=True)
     return out
 
 
@@ -190,8 +198,11 @@ def teach_interrupt_honored(
     out = {"mode": mode, "taught": False, "eligibility_recorded": eligibility_recorded}
     if mode != "live":
         return out
+    mb = None
+    direct_applied = False
+    direct_flushed = False
     try:
-        from cognition.fly_registry import get_flymb
+        from cognition.fly_registry import get_flymb, get_fly_store
         from cognition.flymemory.circuit import text_features
 
         mb = get_flymb(user_id)
@@ -203,14 +214,17 @@ def teach_interrupt_honored(
             if _da.get("reason") != "ok" or not _da.get("applied"):
                 _record_eligibility(out, user_id, text)
                 return out
+            direct_applied = True
         except Exception:
             delta = float(mb.reinforce(mb.encode(text_features(text)), 0.35) or 0.0)
             if not delta:
                 _record_eligibility(out, user_id, text)
                 return out
+            direct_applied = True
         try:
             from cognition.flymemory.eligibility import assign_credit
-            assign_credit(user_id, 0.35)
+            credit = assign_credit(user_id, 0.35)
+            direct_flushed = bool(credit.get("flushed"))
             _record_eligibility(out, user_id, text)
         except Exception:
             pass
@@ -220,3 +234,11 @@ def teach_interrupt_honored(
         log.debug("teach_interrupt_honored failed: %s", exc)
         out["error"] = str(exc)
         return out
+    finally:
+        if direct_applied and not direct_flushed:
+            try:
+                store = get_fly_store(user_id)
+                if store is not None:
+                    store.flush_mb(mb)
+            except Exception:
+                log.debug("interrupt direct pulse flush failed", exc_info=True)

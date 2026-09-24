@@ -94,7 +94,7 @@ def assign_credit(user_id: str | None, reward: float) -> dict:
     Age-0 (current text) is handled by the caller's immediate reinforce, so
     it is intentionally skipped here to avoid double-crediting.
     """
-    out: dict = {"taught": False, "steps": 0, "delta": 0.0, "reward": float(reward)}
+    out: dict = {"taught": False, "steps": 0, "delta": 0.0, "reward": float(reward), "flushed": False}
     if not _enabled() or _mb_mode() != "live":
         out["reason"] = "disabled_or_off"
         return out
@@ -141,6 +141,7 @@ def assign_credit(user_id: str | None, reward: float) -> dict:
             store = get_fly_store(user_id)
             if store is not None:
                 store.flush_mb(mb)
+                out["flushed"] = True
         except Exception:
             pass
         out.update({"taught": credited > 0, "steps": credited, "delta": round(total, 4), "reason": "ok"})

@@ -67,13 +67,17 @@ def test_route_intent_can_return_greeting_from_semantic_scores(monkeypatch):
 
 
 def test_greeting_route_skips_memory_recall_and_writeback(monkeypatch):
+    from cognition.conscience import ledger
+
     think = _bare_think()
     calls = {}
+    monkeypatch.setattr(ledger, "ledger_for", lambda *_args: SimpleNamespace(flush=lambda: calls.setdefault("flushed", True)))
 
     monkeypatch.setattr(think, "_route_intent", lambda user_input: ("greeting", None))
     monkeypatch.setattr(think, "_fetch_memory_and_knowledge", lambda *a, **kw: calls.setdefault("fetch", True))
 
     def fake_chat(user_input, **kwargs):
+        assert calls["flushed"] is True
         calls["chat_kwargs"] = kwargs
         return "hi!"
 
@@ -83,6 +87,22 @@ def test_greeting_route_skips_memory_recall_and_writeback(monkeypatch):
     assert "fetch" not in calls
     assert calls["chat_kwargs"]["skip_memory"] is True
     assert calls["chat_kwargs"]["store_turn"] is False
+
+
+def test_refusal_route_flushes_before_reply(monkeypatch):
+    from cognition.conscience import hooks, ledger
+
+    think = _bare_think()
+    think._history_lock = threading.Lock()
+    think._history = []
+    events = []
+    monkeypatch.setattr(hooks, "gate_respond", lambda **_kwargs: ("refuse", "No thanks", ""))
+    monkeypatch.setattr(ledger, "ledger_for", lambda *_args: SimpleNamespace(flush=lambda: events.append("flush")))
+    monkeypatch.setattr(think, "_emit", lambda *_args, **_kwargs: events.append("emit"))
+    monkeypatch.setattr(think, "_route_intent", lambda *_args: events.append("route"))
+
+    assert think.route("Please do the wrong thing") == "No thanks"
+    assert events == ["flush", "emit"]
 
 
 def test_non_greeting_route_starts_memory_after_intent(monkeypatch):

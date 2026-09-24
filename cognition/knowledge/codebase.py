@@ -35,6 +35,7 @@ import threading
 from system.log import get_logger
 from system.config import env_float
 from system.userspace import current_user_id, user_state_path
+from cognition import reason
 from cognition.memory.vecstore import (
     HarrierEmbedder,
     initialize_store_db,
@@ -309,7 +310,10 @@ def _knn(conn, query: str, embedder, uid: str, limit: int):
     if embedder is None or not (query or "").strip():
         return []
     try:
-        vec = embedder.embed_query(query, instruct="Retrieve relevant code that answers the query")
+        # Phase 2: shared module cache — identical (text, instruct) pairs
+        # embed once per process instead of once per call site.
+        vec = reason.cached_embed_query(
+            embedder, query, instruct="Retrieve relevant code that answers the query")
     except Exception as e:
         log.debug("codebase _knn embed failed, FTS-only: %s", e)
         return []

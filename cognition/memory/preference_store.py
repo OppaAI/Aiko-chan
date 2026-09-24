@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -32,6 +33,22 @@ _EMBED_COOLDOWN_S = 300.0
 
 _vec_cache: dict[str, list[float] | None] = {}
 _embed_cooldown_until: float = 0.0
+
+# Phase 2: one shared embedder for the CX/semantic path. Constructing a fresh
+# HarrierEmbedder per call meant a new requests.Session and an empty per-
+# instance TTL cache every time — the instance cache could never hit.
+_embedder_lock = threading.Lock()
+_embedder = None
+
+
+def _shared_embedder():
+    """Process-wide HarrierEmbedder for raw (uninstructed) CX embeddings."""
+    global _embedder
+    with _embedder_lock:
+        if _embedder is None:
+            from cognition.memory.vecstore import HarrierEmbedder
+            _embedder = HarrierEmbedder(timeout=_EMBED_TIMEOUT_S)
+        return _embedder
 
 
 def _semantic_enabled() -> bool:
@@ -84,8 +101,7 @@ def _cached_vec(text: str) -> list[float] | None:
     if now < _embed_cooldown_until:
         return None
     try:
-        from cognition.memory.vecstore import HarrierEmbedder
-        vec = list(HarrierEmbedder(timeout=_EMBED_TIMEOUT_S).embed([t]))[0]
+        vec = list(_shared_embedder().embed([t]))[0]
         import numpy as _np
         arr = _np.asarray(vec, dtype=_np.float64).reshape(-1)
         if arr.size == 0:

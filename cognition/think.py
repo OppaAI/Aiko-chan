@@ -79,6 +79,7 @@ from system import brain_trace as _brain_trace
 from system import bioclock
 from cognition import reason
 from cognition.memory import learn
+from cognition.memory.vecstore import _QUERY_INSTRUCT
 
 # NOTE: weekly_social handler is registered by system.schedule
 # (register_social_handlers via register_system_handlers_only at boot) — do
@@ -984,6 +985,8 @@ class AikoThink:
                 surface="chat",
             )
             if decision in ("refuse", "escalate") and reply:
+                from cognition.conscience.ledger import ledger_for
+                ledger_for(user_id).flush()
                 self._emit(reply, token_callback=token_callback)
                 with self._history_lock:
                     self._history.append({"role": "user", "content": user_input})
@@ -1034,6 +1037,8 @@ class AikoThink:
             log.info("[route] intent=%s", intent)
 
             if intent == "greeting":
+                from cognition.conscience.ledger import ledger_for
+                ledger_for(user_id).flush()
                 _brain_trace.record_step(
                     "think.route",
                     layer="route",
@@ -1058,7 +1063,10 @@ class AikoThink:
                     mem = self._get_memorize()
                     embedder = getattr(getattr(mem, "_mem", None), "_embedder", None) if mem else None
                     if embedder is not None and hasattr(embedder, "embed_query"):
-                        query_vec = embedder.embed_query(user_input)
+                        # Phase 2: shared module cache; explicit instruct to
+                        # match embed_query's default exactly.
+                        query_vec = reason.cached_embed_query(
+                            embedder, user_input, instruct=_QUERY_INSTRUCT)
                 except Exception:
                     query_vec = None
             mem_kb_future = CONTEXT_POOL.submit(
@@ -1330,7 +1338,9 @@ class AikoThink:
                 ctx.set(outputs={"intent": label, "vector": None, "method": "llm_fallback"},
                         factors=["embedder unavailable → fell back to LLM classifier"])
                 return label, None
-            query_vec = embedder.embed_query(user_input, instruct=instruct)
+            # Phase 2: shared module cache — identical (text, instruct) pairs
+            # embed once per process instead of once per call site.
+            query_vec = reason.cached_embed_query(embedder, user_input, instruct=instruct)
             labels, example_vecs = self._semantic_example_vectors(_ROUTE_QUATERNARY_EXAMPLES, instruct)
             scores = reason.label_scores_topk(query_vec, labels, example_vecs, top_k=_SEMANTIC_LABEL_TOP_K)
 
@@ -1629,7 +1639,10 @@ class AikoThink:
             memorize = self._get_memorize()
             mem_inner = getattr(memorize, "_mem", None) if memorize is not None else None
             embedder = getattr(mem_inner, "_embedder", None)
-            cap_vec = embedder.embed_query(
+            # Phase 2: shared module cache — identical (text, instruct) pairs
+            # embed once per process instead of once per call site.
+            cap_vec = reason.cached_embed_query(
+                embedder,
                 user_input,
                 instruct="Which capability/tool domain applies to this task?",
             ) if embedder is not None else None
@@ -2837,9 +2850,9 @@ class AikoThink:
                     # clamps inside set_expression stay authoritative.
                     try:
                         from cognition.attention import flycx_decisiveness_for_text as _flydec
-                        from cognition.flysense import FlyDN as _FlyDN
+                        from cognition.flysense import get_flydn as _get_flydn
                         _dec = _flydec(response) or 0.5
-                        _drv = _FlyDN().drive(
+                        _drv = _get_flydn().drive(
                             energy=float(snap.get("energy", 0.5)),
                             decisiveness=_dec, affect=affect)
                     except Exception as exc:
@@ -2963,6 +2976,20 @@ class AikoThink:
                 pass
             try:
                 mem.wm_record_turn(user_input, response_text)
+            except Exception:
+                pass
+            try:
+                # Phase 2: conscience verdicts were buffered all turn — write
+                # them now in one executemany + single commit.
+                from cognition.conscience.ledger import ledger_for
+                ledger_for(current_user_id()).flush()
+            except Exception:
+                pass
+            try:
+                # Phase 2: knowledge access-count touches accumulated all turn
+                # — one UPDATE + single commit.
+                from cognition.knowledge.search import flush_access_counts
+                flush_access_counts(current_user_id())
             except Exception:
                 pass
             ctx.set(

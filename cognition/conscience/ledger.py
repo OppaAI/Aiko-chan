@@ -76,6 +76,9 @@ class ConscienceLedger:
         self._user_id = user_id or current_user_id()
         self._lock = threading.RLock()
         self._conn: sqlite3.Connection | None = None
+        # Phase 2: record() buffers rows here; flush() writes them in one
+        # executemany + single commit at the turn boundary (think.py).
+        self._pending: list[tuple] = []
 
     # ── connection ────────────────────────────────────────────────────────
 
@@ -88,12 +91,49 @@ class ConscienceLedger:
 
     def close(self) -> None:
         with self._lock:
+            self.flush()
+            if self._pending:
+                return
             if self._conn is not None:
                 try:
                     self._conn.close()
                 except Exception:
                     log.debug("[ccc] ledger close failed")
                 self._conn = None
+
+    def flush(self) -> int:
+        """Write buffered record() rows in one executemany + single commit.
+
+        Best-effort like record(): failures are rolled back and retried at the
+        next boundary. Returns the number of rows written.
+        """
+        with self._lock:
+            if not self._pending:
+                return 0
+            batch = self._pending
+            try:
+                self._db().executemany(
+                    """
+                    INSERT INTO conscience_ledger (
+                        id, user_id, created_at, act, surface, content_sha, content,
+                        decision, gate, vertical, horizontal, confidence,
+                        reasons, norms, rule_ids, parties, constraint_txt,
+                        canon_version, layers_run, latency_ms, fail_mode, hitl_state
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    batch,
+                )
+                self._db().commit()
+                self._pending = []
+                return len(batch)
+            except Exception as exc:
+                if self._conn is not None:
+                    try:
+                        self._conn.rollback()
+                    except Exception:
+                        log.exception("[ccc] ledger rollback failed")
+                log.warning("[ccc] ledger flush failed (%d rows retained): %s", len(batch), exc)
+                return 0
 
     # ── writing ───────────────────────────────────────────────────────────
 
@@ -104,11 +144,14 @@ class ConscienceLedger:
         content: str = "",
         surface: str = "",
     ) -> str:
-        """Persist one verdict. Returns the row id (also the escalation id).
+        """Buffer one verdict for the turn-end flush. Returns the row id (also
+        the escalation id).
 
         Best-effort: a ledger failure logs and returns a generated id rather
         than raising, because a broken audit table must not break the turn it
-        was auditing.
+        was auditing. Rows are written by flush() in one executemany + single
+        commit at the turn boundary (think.py), or when close()/resolve()/
+        pending() need them visible.
         """
         row_id = verdict.escalation_id or uuid.uuid4().hex[:12]
         if not LEDGER_ENABLED:
@@ -118,15 +161,7 @@ class ConscienceLedger:
         hitl_state = HITL_PENDING if verdict.decision == ESCALATE else ""
         try:
             with self._lock:
-                self._db().execute(
-                    """
-                    INSERT INTO conscience_ledger (
-                        id, user_id, created_at, act, surface, content_sha, content,
-                        decision, gate, vertical, horizontal, confidence,
-                        reasons, norms, rule_ids, parties, constraint_txt,
-                        canon_version, layers_run, latency_ms, fail_mode, hitl_state
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    """,
+                self._pending.append(
                     (
                         row_id, self._user_id, _utc_now(), row["act"], surface,
                         content_digest(content),
@@ -140,11 +175,10 @@ class ConscienceLedger:
                         row["constraint"], row["canon_version"],
                         json.dumps(row["layers_run"], ensure_ascii=False),
                         row["latency_ms"], row["fail_mode"], hitl_state,
-                    ),
+                    )
                 )
-                self._db().commit()
         except Exception as exc:
-            log.warning("[ccc] ledger write failed: %s", exc)
+            log.warning("[ccc] ledger buffer failed: %s", exc)
         return row_id
 
     # ── human-in-the-loop ─────────────────────────────────────────────────
@@ -155,6 +189,9 @@ class ConscienceLedger:
             raise ValueError(f"unknown hitl state: {state!r}")
         try:
             with self._lock:
+                self.flush()  # a same-turn escalation may still be buffered
+                if self._pending:
+                    return False
                 cur = self._db().execute(
                     """
                     UPDATE conscience_ledger
@@ -173,6 +210,9 @@ class ConscienceLedger:
         """Open escalations, oldest first — what the human still owes an answer to."""
         try:
             with self._lock:
+                self.flush()  # a same-turn escalation may still be buffered
+                if self._pending:
+                    return []
                 rows = self._db().execute(
                     """
                     SELECT id, created_at, act, surface, decision, reasons, norms,
@@ -234,6 +274,9 @@ class ConscienceLedger:
                "pending": 0, "avg_latency_ms": 0.0}
         try:
             with self._lock:
+                self.flush()
+                if self._pending:
+                    return out
                 rows = self._db().execute(
                     """
                     SELECT decision, COUNT(*) AS n, AVG(latency_ms) AS lat
@@ -305,6 +348,9 @@ class ConscienceLedger:
         params.append(int(limit))
         try:
             with self._lock:
+                self.flush()
+                if self._pending:
+                    return []
                 rows = self._db().execute(sql, params).fetchall()
         except Exception as exc:
             log.warning("[ccc] ledger harvest failed: %s", exc)
@@ -343,6 +389,9 @@ class ConscienceLedger:
         """Hand-label a row while reviewing. Studio / CLI entry point."""
         try:
             with self._lock:
+                self.flush()
+                if self._pending:
+                    return False
                 cur = self._db().execute(
                     """
                     UPDATE conscience_ledger

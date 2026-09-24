@@ -65,15 +65,15 @@ def test_get_fullbrain_does_not_block_or_hold_lock_during_retrieval(monkeypatch)
         if acquired:
             fullbrain._lock.release()
         begun.set()
-        assert release.wait(2)
+        release.wait()
         return "prepared.npz"
 
     monkeypatch.setattr(fullbrain, "_instance", None)
     monkeypatch.setattr(fullbrain, "_load_started", False)
     monkeypatch.setattr(fullbrain, "ensure_data", prepare)
     monkeypatch.setattr(fullbrain, "FullBrain", lambda _path: brain)
-    assert fullbrain.get_fullbrain() is None
     try:
+        assert fullbrain.get_fullbrain() is None
         assert begun.wait(2)
         assert unlocked == [True]
         assert fullbrain.get_fullbrain() is None

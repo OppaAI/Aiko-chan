@@ -39,9 +39,9 @@ def test_gate_tool_uses_registered_scope_and_preserves_fallback(monkeypatch):
             return SimpleNamespace(decision=ALLOW)
 
     monkeypatch.setattr("cognition.conscience.conscience_for", lambda *_args, **_kwargs: Core())
-    for name in ("adaptive_search", "deep_read", "deep_research", "save_note", "post_custom"):
+    for name in ("adaptive_search", "deep_read", "deep_research", "save_note", "reply_owner_email", "post_custom"):
         assert hooks.gate_tool(name=name, args={}) is None
-    assert [ctx["scope"] for ctx in contexts] == ["network", "network", "network", "local", "external"]
+    assert [ctx["scope"] for ctx in contexts] == ["network", "network", "network", "local", "external", "external"]
 
 
 def test_external_valence_caution_requires_approval_if_irreversible(monkeypatch):

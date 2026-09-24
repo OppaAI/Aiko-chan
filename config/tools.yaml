@@ -1159,6 +1159,7 @@
       "description": "Generate LLM replies for owner email prompts and send them back.",
       "props": {},
       "domain": "email",
+      "scope": "external",
       "react": true,
       "graph": true,
       "wiki": false,

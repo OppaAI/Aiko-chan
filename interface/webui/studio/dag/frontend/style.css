@@ -587,5 +587,5 @@ pre.out {
 }
 
 @media (prefers-reduced-motion: reduce) {
-    .node-group.is-running .node-card { animation: none; }
+    .node-group.is-running .node-card, .node-picker { animation: none; }
 }

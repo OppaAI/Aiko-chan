@@ -147,6 +147,14 @@ def load_items(
     return [_coerce_item(raw)]
 
 
+def _response_from_envelope(value: str, items: list[dict[str, Any]]) -> str:
+    envelope = _loads(value, None)
+    if (isinstance(envelope, dict) and isinstance(envelope.get("items"), list)
+            and items and isinstance(items[0].get("response"), str)):
+        return items[0]["response"]
+    return value
+
+
 def emit(
     items: list[dict[str, Any]],
     *,
@@ -1821,14 +1829,14 @@ def email_draft(
         "kind": "email_draft",
         "to": to or "",
         "subject": subject or "",
-        "body": body or "",
+        "body": _response_from_envelope(body or "", items),
         "sent": False,
         "created_at": datetime.now(dt_timezone.utc).isoformat(),
     }
     if items and not (subject or body):
         first = items[0] if isinstance(items[0], dict) else {}
         draft["subject"] = str(first.get("subject") or "Re: workflow item")
-        draft["body"] = _dumps(first)[:4000]
+        draft["body"] = str(first["response"])[:4000] if isinstance(first.get("response"), str) else _dumps(first)[:4000]
     if state is not None and isinstance(getattr(state, "data", None), dict):
         key = drafts_key or "email_drafts"
         drafts = list(state.data.get(key) or [])
@@ -2111,14 +2119,17 @@ def notify_user(
     title: str = "Aiko notification",
     message: str = "$prompt",
     channel: str = "app",
+    items_json: str = "",
+    from_state: str = "",
     to_state: str = "items",
     *,
     state=None,
     **_kwargs,
 ) -> str:
     """Emit a notification; best-effort email delivery, never raises."""
+    items = load_items(items_json or message, state, from_state)
     note = {"kind": "notification", "title": title or "Aiko notification",
-            "message": message or "", "channel": channel or "app",
+            "message": _response_from_envelope(message or "", items), "channel": channel or "app",
             "delivered": False,
             "at": datetime.now(dt_timezone.utc).isoformat()}
     if (channel or "app") == "email":
@@ -2393,10 +2404,13 @@ def reminder(
 ) -> str:
     """Schedule a local reminder via the system scheduler; never raises."""
     try:
+        normalized_repeat = (repeat or "once").strip().lower()
+        if normalized_repeat not in ("once", "daily"):
+            raise ValueError(f"unsupported repeat: {repeat}")
         from system.schedule import schedule_reminder_record
         record = schedule_reminder_record(
             title or "Reminder", message or "",
-            time_of_day or "09:00", repeat or "once")
+            time_of_day or "09:00", normalized_repeat)
         try:
             from system.schedule import notify_scheduler_new_job
             notify_scheduler_new_job()
@@ -2406,7 +2420,7 @@ def reminder(
                 "record": record if isinstance(record, dict) else {"result": record}}
     except Exception as exc:
         item = {"kind": "reminder", "ok": False, "error": f"reminder failed: {exc}"}
-    return emit([item], state=state, to_state=to_state, source="reminder")
+    return emit([item], state=state, to_state=to_state, ok=item["ok"], source="reminder")
 
 
 # ── file read ──────────────────────────────────────────────────────────────

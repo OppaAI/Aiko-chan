@@ -319,9 +319,11 @@ function filteredNodes() {
   const showEp = document.getElementById('layer-episodes')?.checked !== false;
 
   const layerOn = { memory: showMem, entity: showEnt, knowledge: showKb, experience: showExp, episode: showEp };
+  const memoryFilterActive = st !== 'all' || val !== 'all' || minR > 0 || !!entQ;
 
   let nodes = (graph.nodes || []).filter(d => {
     if (!layerOn[d.type]) return false;
+    if (d.type === 'entity' && memoryFilterActive) return false;
     if (d.type === 'memory') {
       if (st !== 'all' && (d.status || 'active') !== st) return false;
       if (val !== 'all' && (d.valence_tag || 'neutral') !== val) return false;
@@ -533,7 +535,7 @@ function layoutOrganic(nodes, links, w, h) {
   // 5. Scale the field to fill the canvas disc.
   const ds = nodes.map(n => Math.hypot(n.x - cx, n.y - cy)).sort((a, b) => a - b);
   const p90 = ds[Math.floor(ds.length * 0.9)] || 1;
-  const k = (R * 0.95) / Math.max(1, p90);
+  const k = Math.max(1, (R * 0.95) / Math.max(1, p90));
   for (const n of nodes) {
     n.x = cx + (n.x - cx) * k;
     n.y = cy + (n.y - cy) * k;

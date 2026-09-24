@@ -214,6 +214,7 @@ function nodePoint(node, out) {
 }
 
 function initScene() {
+  lobeMats = [];
   const canvas = $('canvas');
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
   renderer.setSize(canvas.clientWidth, canvas.clientHeight);
@@ -413,7 +414,7 @@ function tick(now) {
     renderer.render(scene, camera);
     dirty = false;
   }
-  if (pulsing || glowMoving || interacting || dirty) rafId = requestAnimationFrame(tick);
+  if (!rafId && (pulsing || glowMoving || interacting || dirty)) rafId = requestAnimationFrame(tick);
   // otherwise the loop stops; telemetry ticks, controls, or resize restart it
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) requestRender(); });
@@ -481,13 +482,19 @@ async function refreshTelemetry() {
     fetch("/studio/fly/api/circuit"),
     fetch("/studio/fly/api/trace?node_limit=500&edge_limit=1000")
   ];
-  if (doSlow) jobs.push(fetch("/studio/fly/api/causal?limit=16"), fetch("/studio/fly/api/body"));
+  if (doSlow) jobs.push(
+    fetch("/studio/fly/api/causal?limit=16").catch(() => null),
+    fetch("/studio/fly/api/body").catch(() => null)
+  );
   telemetryRequest = Promise.all(jobs).then(async (rs) => {
-    for (const r of rs) if (!r.ok) throw new Error("Telemetry unavailable");
+    for (const r of rs.slice(0, 2)) if (!r.ok) throw new Error("Telemetry unavailable");
     const [circuit, trace] = await Promise.all([rs[0].json(), rs[1].json()]);
     renderUI(circuit, trace);
     if (doSlow) {
-      const [causal, body] = await Promise.all([rs[2].json(), rs[3].json()]);
+      const [causal, body] = await Promise.all([
+        rs[2]?.ok ? rs[2].json().catch(() => ({ events: [] })) : { events: [] },
+        rs[3]?.ok ? rs[3].json().catch(() => ({})) : {}
+      ]);
       renderSlowPanels(causal, body);
     }
   }).catch(e => {
@@ -498,28 +505,38 @@ async function refreshTelemetry() {
   await telemetryRequest;
 }
 
+let atlasLoadPromise = null;
 async function loadAtlas() {
-  if (atlasReady) { await refreshTelemetry(); return; }
+  if (atlasLoadPromise) return atlasLoadPromise;
+  atlasLoadPromise = (async () => {
+    if (atlasReady) { await refreshTelemetry(); return; }
+    try {
+      const res = await fetch("/studio/fly/api/lobes");
+      if (!res.ok) throw new Error("Atlas unavailable");
+      const data = await res.json();
+      atlas = data.atlas;
+      lobeIndex = atlas.lobes.map(L => ({
+        id: L.id, name: L.name, color: L.color, groups: L.groups, samples: L.samples,
+        center: new THREE.Vector3(L.center[0], L.center[1], L.center[2]),
+        radii: new THREE.Vector3(L.radii[0], L.radii[1], L.radii[2])
+      }));
+      groupLobe = atlas.group_lobe || {};
+      lateral = atlas.lateral || {};
+      buildLegend();
+      initScene();
+      atlasReady = true;
+      requestRender();
+      $("loading").classList.add("hidden");
+      await refreshTelemetry();
+    } catch (e) {
+      $("loading").innerHTML = 'Atlas load failed: ' + esc(String(e)) + ' <button id="retry-load">Retry</button>';
+      $("retry-load").onclick = loadAtlas;
+    }
+  })();
   try {
-    const res = await fetch("/studio/fly/api/lobes");
-    if (!res.ok) throw new Error("Atlas unavailable");
-    const data = await res.json();
-    atlas = data.atlas;
-    lobeIndex = atlas.lobes.map(L => ({
-      id: L.id, name: L.name, color: L.color, groups: L.groups, samples: L.samples,
-      center: new THREE.Vector3(L.center[0], L.center[1], L.center[2]),
-      radii: new THREE.Vector3(L.radii[0], L.radii[1], L.radii[2])
-    }));
-    groupLobe = atlas.group_lobe || {};
-    lateral = atlas.lateral || {};
-    buildLegend();
-    initScene();
-    atlasReady = true;
-    $("loading").classList.add("hidden");
-    await refreshTelemetry();
-  } catch (e) {
-    $("loading").innerHTML = 'Atlas load failed: ' + esc(String(e)) + ' <button id="retry-load">Retry</button>';
-    $("retry-load").onclick = loadAtlas;
+    await atlasLoadPromise;
+  } finally {
+    atlasLoadPromise = null;
   }
 }
 

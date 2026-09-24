@@ -722,6 +722,7 @@ document.addEventListener("visibilitychange", () => {
     pollDelayMs = POLL_BASE_MS;
     pollUnchangedStreak = 0;
     lastPollSig = "";
+    schedulePoll();
   }
 });
 

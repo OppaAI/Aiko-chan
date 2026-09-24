@@ -154,6 +154,9 @@ def test_ledger_prunes_every_persistent_user_on_each_start(monkeypatch):
     monkeypatch.setattr(schedule.ScheduleRunner, "_monthly_catchup_needed", lambda self: False)
     monkeypatch.setattr(schedule, "_next_daily_reflect_and_dream", lambda: now + timedelta(days=10))
     monkeypatch.setattr(schedule, "_next_monthly_consolidate", lambda: now + timedelta(days=30))
+    # Phase 8: keep the nightly replay job out of the way so ledger-prune
+    # stays the soonest system target, as this test intends.
+    monkeypatch.setattr(schedule, "_next_fly_replay", lambda: now + timedelta(days=30))
 
     for _ in range(2):
         runner = schedule.ScheduleRunner(user_id="github_alice")

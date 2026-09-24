@@ -75,12 +75,26 @@ def test_image_decode_bounds_float_array_before_motion():
     assert decoded.dtype == np.float64
 
 
-def test_visual_frame_passes_source_to_motion_pathway():
-    import cv2
+def test_image_decode_rejects_oversized_header_before_allocating(monkeypatch):
+    header = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + (4096).to_bytes(4, "big") + (2049).to_bytes(4, "big")
+    monkeypatch.setattr(np, "frombuffer", lambda *_args, **_kwargs: pytest.fail("decoder allocated before checking dimensions"))
 
-    ok, encoded = cv2.imencode(".png", np.zeros((48, 48), dtype=np.uint8))
-    assert ok
-    data = encoded.tobytes()
+    assert _decode_image_bytes(header) is None
+
+
+def test_visual_frame_passes_source_to_motion_pathway():
+    import io
+    try:
+        from PIL import Image
+    except ImportError:
+        cv2 = pytest.importorskip("cv2")
+        ok, encoded = cv2.imencode(".png", np.zeros((48, 48), dtype=np.uint8))
+        assert ok
+        data = encoded.tobytes()
+    else:
+        output = io.BytesIO()
+        Image.new("L", (48, 48)).save(output, format="PNG")
+        data = output.getvalue()
     camera = note_visual_frame("source-isolation", data, source="camera")
     screen = note_visual_frame("source-isolation", data, source="screen")
     camera_again = note_visual_frame("source-isolation", data, source="camera")
@@ -90,7 +104,7 @@ def test_visual_frame_passes_source_to_motion_pathway():
 
 
 def test_image_decode_cv2_fallback_is_bounded(monkeypatch):
-    import cv2
+    cv2 = pytest.importorskip("cv2")
     import sys
 
     ok, encoded = cv2.imencode(".png", np.zeros((1024, 2048), dtype=np.uint8))

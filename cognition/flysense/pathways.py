@@ -98,6 +98,52 @@ def encode_voice_prosody(prosody: dict | None) -> dict | None:
 
 _pathways: dict[str, "MotionPathway"] = {}
 _pathways_lock = threading.RLock()
+MAX_VISUAL_FRAME_PIXELS = 4096 * 2048  # 4K frames fit; larger headers are rejected before decoding.
+
+
+def image_dimensions_within_limit(data: bytes) -> bool:
+    """Read JPEG/PNG/WebP dimensions without allocating decoded pixels."""
+    width = height = 0
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        if len(data) >= 24 and data[12:16] == b"IHDR":
+            width = int.from_bytes(data[16:20], "big")
+            height = int.from_bytes(data[20:24], "big")
+    elif data.startswith(b"\xff\xd8\xff"):
+        pos = 2
+        while pos + 4 <= len(data) and data[pos] == 0xFF:
+            while pos < len(data) and data[pos] == 0xFF:
+                pos += 1
+            if pos >= len(data):
+                break
+            marker = data[pos]
+            pos += 1
+            if marker in {0xD9, 0xDA}:
+                break
+            if marker == 0x01 or 0xD0 <= marker <= 0xD8:
+                continue
+            if pos + 2 > len(data):
+                break
+            segment_length = int.from_bytes(data[pos:pos + 2], "big")
+            if segment_length < 2 or pos + segment_length > len(data):
+                break
+            if 0xC0 <= marker <= 0xC3 or any(start <= marker <= start + 2 for start in (0xC5, 0xC9, 0xCD)):
+                if segment_length >= 7:
+                    height = int.from_bytes(data[pos + 3:pos + 5], "big")
+                    width = int.from_bytes(data[pos + 5:pos + 7], "big")
+                break
+            pos += segment_length
+    elif len(data) >= 30 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        chunk = data[12:16]
+        if chunk == b"VP8X":
+            width = 1 + int.from_bytes(data[24:27], "little")
+            height = 1 + int.from_bytes(data[27:30], "little")
+        elif chunk == b"VP8 " and data[23:26] == b"\x9d\x01\x2a":
+            width = int.from_bytes(data[26:28], "little") & 0x3FFF
+            height = int.from_bytes(data[28:30], "little") & 0x3FFF
+        elif chunk == b"VP8L" and data[20] == 0x2F:
+            width = 1 + data[21] + ((data[22] & 0x3F) << 8)
+            height = 1 + (data[22] >> 6) + (data[23] << 2) + ((data[24] & 0x0F) << 10)
+    return width > 0 and height > 0 and width * height <= MAX_VISUAL_FRAME_PIXELS
 
 
 def _key(user_id: str | None) -> str:
@@ -194,6 +240,8 @@ class MotionPathway:
 
 def _decode_image_bytes(data: bytes):
     """Best-effort bytes → grayscale np.ndarray. Returns None on failure."""
+    if not image_dimensions_within_limit(data):
+        return None
     try:
         import numpy as np
 

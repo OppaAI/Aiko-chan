@@ -39,6 +39,13 @@ def clear_interrupt(user_id: str | None = None) -> bool:
         st = get_neural_state(user_id)
         st.publish_gf(0.0, False, source="cleared")
         st.record_influence({"kind": "gf_clear", "interrupt": False})
+        # Phase 7: drop the decaying urgency trace too, or it would
+        # re-warm urgency after the user cleared the interrupt.
+        try:
+            from cognition.centralcomplex.temporal import reset_urgency
+            reset_urgency(user_id)
+        except Exception as exp:
+            log.debug("clear_interrupt trace reset skipped: %s", exp)
         return True
     except Exception as exp:
         log.debug("clear_interrupt skipped: %s", exp)

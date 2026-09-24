@@ -291,6 +291,40 @@ def apply_turn_priors(
 
         out["sleep_pressure"] = st.sleep_pressure
 
+        # Phase 7: persistent CX temporal dynamics — heading vector, competing
+        # drives, decaying urgency trace. Always stepped (shadow computes and
+        # records); in live mode the trace replaces the per-turn urgency
+        # spike on the bus. Never raises.
+        try:
+            from cognition.centralcomplex.temporal import cx_mode, tick_cx_temporal
+
+            cxm = cx_mode()
+            if cxm in ("shadow", "live"):
+                _s_voice = ((out.get("senses") or {}).get("voice")) or {}
+                try:
+                    _venergy = max(0.0, min(1.0, float(_s_voice.get("energy") or 0.0)))
+                except Exception:
+                    _venergy = 0.0
+                temporal = tick_cx_temporal(
+                    text or "",
+                    user_id=user_id,
+                    fresh_urgency=float(out.get("urgency") or 0.0),
+                    mb_valence=float(out.get("valence") or 0.0),
+                    sleep_pressure=float(st.sleep_pressure or 0.0),
+                    novelty=1.0 - float(out.get("familiarity") or 0.5),
+                    user_energy=_cx_user_energy(text or "", _venergy),
+                    voice_energy=_venergy,
+                )
+                out["cx_temporal"] = temporal
+                if cxm == "live" and temporal.get("ok"):
+                    trace = float(temporal.get("urgency") or 0.0)
+                    st.publish_gf(
+                        trace, bool(out.get("interrupt")), source="turn+cx"
+                    )
+                    out["urgency"] = round(trace, 4)
+        except Exception as exc:
+            log.debug("cx temporal skipped: %s", exc)
+
         bits: list[str] = []
         if st.interrupt or st.urgency >= 0.65:
             bits.append("user signaled urgency — answer briefly, acknowledge stop/wait")
@@ -307,6 +341,23 @@ def apply_turn_priors(
     except Exception as exc:
         log.debug("fly turn priors skipped: %s", str(exc))
     return out
+
+
+def _cx_user_energy(text: str, voice_energy: float) -> float:
+    """Engagement-ish input for the Phase-7 engagement drive.
+
+    Voice energy when the mic was hot, else a gentle text-length
+    heuristic. Deterministic given inputs.
+    """
+    try:
+        if voice_energy > 0.0:
+            return max(0.0, min(1.0, float(voice_energy)))
+    except Exception:
+        pass
+    try:
+        return max(0.0, min(1.0, len(text or "") / 400.0))
+    except Exception:
+        return 0.0
 
 
 def _maintenance_level_from_pressure(sleep_pressure: float) -> str:

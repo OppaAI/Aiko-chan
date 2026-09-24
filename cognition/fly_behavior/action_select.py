@@ -117,14 +117,37 @@ def _dn_vigor(user_id: str | None) -> float:
         return 1.0
 
 
-def _gf_urgency(text: str) -> float:
+def _gf_urgency(text: str, user_id: str | None = None) -> float:
     try:
         from cognition.fly_behavior.giant_fiber import assess_interrupt
         r = assess_interrupt(text or "") or {}
-        return max(0.0, min(1.0, float(r.get("urgency", 0.0))))
+        fresh = max(0.0, min(1.0, float(r.get("urgency", 0.0))))
     except Exception as exc:
         log.debug("action_select gf vote skipped: %s", exc)
-        return 0.0
+        fresh = 0.0
+    # Phase 7: in live CX mode the decaying urgency trace warms the GF
+    # vote — urgency lingers a few turns instead of spiking per turn.
+    try:
+        from cognition.centralcomplex.temporal import cx_mode, get_urgency_trace
+        if cx_mode() == "live":
+            fresh = max(fresh, get_urgency_trace(user_id))
+    except Exception as exc:
+        log.debug("action_select gf trace skipped: %s", exc)
+    return fresh
+
+
+# ── Phase 7: CX temporal drive bias (additive, live-only) ─────────────────
+
+def _cx_drive_live() -> tuple[bool, float]:
+    """(live?, weight) for the Phase-7 drive bias. Never raises."""
+    try:
+        from cognition.centralcomplex.temporal import cx_mode, drive_weight
+
+        if cx_mode() == "live":
+            return True, drive_weight()
+    except Exception as exc:
+        log.debug("action_select cx mode check skipped: %s", exc)
+    return False, 0.0
 
 
 # ── core scoring ──────────────────────────────────────────────────────────
@@ -145,7 +168,7 @@ def _votes_for(cand: Candidate, *, user_id: str | None, context_text: str) -> di
     energy = _ENERGY_MAP.get(str(cand.hints.get("energy", "med")).lower(), 0.0)
     dn = max(-1.0, min(1.0, energy * (vigor - 1.0) * 2.0))
 
-    urgency = _gf_urgency(context_text)
+    urgency = _gf_urgency(context_text, user_id)
     speed = str(cand.hints.get("speed", "med")).lower()
     if speed == "fast":
         gf = 0.6 * urgency
@@ -154,7 +177,26 @@ def _votes_for(cand: Candidate, *, user_id: str | None, context_text: str) -> di
     else:
         gf = 0.0
 
-    return {"mb": mb, "cx": cx, "dn": dn, "gf": gf}
+    # Phase 7: competing-drive bias — always computed (shadow logs it),
+    # applied to the final score only in live CX mode.
+    try:
+        from cognition.centralcomplex.temporal import drive_bias_for_candidate
+
+        try:
+            novelty = float(cand.hints.get("novelty", 0.5))
+        except Exception:
+            novelty = 0.5
+        cx_drive = drive_bias_for_candidate(
+            user_id,
+            kind=cand.kind,
+            energy=energy,
+            novelty=novelty,
+        )
+    except Exception as exc:
+        log.debug("action_select cx drive vote skipped: %s", exc)
+        cx_drive = 0.0
+
+    return {"mb": mb, "cx": cx, "dn": dn, "gf": gf, "cx_drive": cx_drive}
 
 
 def score_candidates(
@@ -171,6 +213,7 @@ def score_candidates(
     and logged regardless so the trail is useful for validation.
     """
     mode = _MODE if _MODE in ("off", "shadow", "live") else "shadow"
+    cx_live, cx_w = _cx_drive_live()
     ts = time.time()
     scored: dict[str, dict] = {}
     for cand in candidates:
@@ -181,6 +224,10 @@ def score_candidates(
             + _VOTE_W[2] * votes["dn"]
             + _VOTE_W[3] * votes["gf"]
         )
+        if cx_live:
+            # Phase 7: drive bias enters additively — bounded by cx_w,
+            # never overriding the LLM prior + fly votes.
+            fly += cx_w * votes["cx_drive"]
         fly01 = (max(-1.0, min(1.0, fly)) + 1.0) / 2.0
         prior = max(0.0, min(1.0, float(cand.llm_prior)))
         final = (1.0 - _WEIGHT) * prior + _WEIGHT * fly01
@@ -219,6 +266,8 @@ def score_candidates(
         "source": source,
         "mode": mode,
         "weight": _WEIGHT,
+        "cx_drive_live": cx_live,
+        "cx_drive_weight": round(cx_w, 4),
         "winner": winner,
         "applied": applied,
         "ambiguous": ambiguous,
@@ -279,13 +328,27 @@ def note_feedback(user_id: str | None, feedback: str) -> dict:
     if last.get("taught_fb") == feedback:
         out["reason"] = "already_taught"
         return out
+    # Phase 7: CX → MB teaching gate — drive levels modulate teaching
+    # strength (bounded factor). Computed always for the trail; applied
+    # only in live CX mode.
+    strength = 0.30
+    cx_gain = 1.0
+    try:
+        from cognition.centralcomplex.temporal import cx_mode, teach_gain_for
+
+        cx_gain = teach_gain_for(user_id)
+        if cx_mode() == "live":
+            strength = 0.30 * cx_gain
+    except Exception as exc:
+        log.debug("action_select cx teach gain skipped: %s", exc)
+    out["cx_teach_gain"] = round(cx_gain, 3)
     try:
         from cognition.flymemory.teach_api import teach_preference
         r = teach_preference(
             last["description"],
             direction="prefer" if feedback == "praise" else "avoid",
             user_id=user_id,
-            strength=0.30,
+            strength=strength,
             write_memory_fact=False,
         )
         out["taught"] = bool(r.get("taught"))

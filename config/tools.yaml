@@ -16,6 +16,7 @@
         "query"
       ],
       "domain": "research",
+      "scope": "network",
       "react": true,
       "graph": true,
       "wiki": true,
@@ -413,6 +414,7 @@
         "url"
       ],
       "domain": "research",
+      "scope": "network",
       "react": true,
       "graph": true,
       "wiki": true,
@@ -432,6 +434,7 @@
         "query"
       ],
       "domain": "research",
+      "scope": "network",
       "react": true,
       "graph": true,
       "wiki": true,

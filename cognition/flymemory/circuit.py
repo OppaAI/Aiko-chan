@@ -91,26 +91,13 @@ def _csr(pre: np.ndarray, post: np.ndarray, w: np.ndarray,
     return indptr, post_s.astype(np.int64), w_s.astype(np.float64)
 
 
-_vec_pre_cache: dict[int, np.ndarray] = {}
-
-
-def _csrmatvec_vec(indptr, indices, data, x: np.ndarray, n_post: int) -> np.ndarray:
+def _csrmatvec_vec(indptr, indices, data, pre_rep, x: np.ndarray, n_post: int) -> np.ndarray:
     """Vectorised sparse matvec (Phase 4 rule 2).
 
     Replaces the old Python row loop with a single scatter-reduce:
         out[post] += x[pre] * w
-    Per-edge ``pre`` is reconstructed once per matrix via ``np.repeat`` and
-    cached on ``id(indptr)``. Verified numerically identical to the loop on
-    all three MB pathways (max abs diff 0.0) before the loop was removed.
+    Per-edge ``pre`` is owned by each pathway and built at initialization.
     """
-    key = id(indptr)
-    pre_rep = _vec_pre_cache.get(key)
-    if pre_rep is None:
-        pre_rep = np.repeat(
-            np.arange(len(indptr) - 1, dtype=np.int64),
-            np.diff(indptr).astype(np.int64),
-        )
-        _vec_pre_cache[key] = pre_rep
     return np.bincount(
         indices, weights=x[pre_rep] * data, minlength=n_post
     ).astype(np.float64)
@@ -171,6 +158,12 @@ class FlyMB:
         (self._kcm, _) = pathway("KC", "MBON", "post")
         (self._dkm, _) = pathway("DAN", "MBON", "max")
         (self._mm, _) = pathway("MBON", "MBON", "max")
+        for name in ("_ikc", "_akc", "_mm"):
+            indptr, indices, data = getattr(self, name)
+            pre_rep = np.repeat(
+                np.arange(len(indptr) - 1, dtype=np.int64), np.diff(indptr)
+            )
+            setattr(self, name, (indptr, indices, data, pre_rep))
         # Plastic overlay on KC->MBON (the learned association layer).
         _, kc_mbon_idx, kc_mbon_dat = self._kcm
         self._plastic = np.zeros_like(kc_mbon_dat)

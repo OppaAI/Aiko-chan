@@ -42,6 +42,7 @@ class ToolSpec:
     output_model: Type[BaseModel] | None = None
     needs_approval: bool = False
     domain: Optional[str] = None  # capability routing (research, scheduling, etc.)
+    scope: Optional[str] = None  # network/external/local effect for conscience gating
     always_on: bool = False  # always included in tool list regardless of capability match
     # Execution modes - which backends can execute this tool
     react: bool = True   # ReAct loop
@@ -176,6 +177,7 @@ class ToolRegistry:
         props: Optional[Dict[str, Any]] = None,
         required: Optional[List[str]] = None,
         domain: Optional[str] = None,
+        scope: Optional[str] = None,
         always_on: bool = False,
         react: bool = True,
         graph: bool = False,
@@ -192,6 +194,7 @@ class ToolRegistry:
             props=props or {},
             required=required or [],
             domain=domain,
+            scope=scope,
             always_on=always_on,
             react=react,
             graph=graph,
@@ -283,6 +286,8 @@ class ToolRegistry:
                 entry["required"] = list(spec.required)
             if spec.domain is not None:
                 entry["domain"] = spec.domain
+            if spec.scope is not None:
+                entry["scope"] = spec.scope
             if spec.always_on:
                 entry["always_on"] = spec.always_on
             entry["react"] = spec.react
@@ -312,6 +317,7 @@ def tool(
     props: Optional[Dict[str, Any]] = None,
     required: Optional[List[str]] = None,
     domain: Optional[str] = None,
+    scope: Optional[str] = None,
     always_on: bool = False,
     react: bool = True,    # ReAct is the default execution mode
     graph: bool = False,   # Must opt-in for graph engine
@@ -342,6 +348,7 @@ def tool(
             props=props or {},
             required=required or [],
             domain=domain,
+            scope=scope,
             always_on=always_on,
             react=react,
             graph=graph,
@@ -360,6 +367,7 @@ def tool(
             props=spec.props,
             required=spec.required,
             domain=spec.domain,
+            scope=spec.scope,
             always_on=spec.always_on,
             react=spec.react,
             graph=spec.graph,
@@ -380,6 +388,7 @@ def register_tool_schema(
     props: Optional[Dict[str, Any]] = None,
     required: Optional[List[str]] = None,
     domain: Optional[str] = None,
+    scope: Optional[str] = None,
     always_on: bool = False,
     react: bool = True,
     graph: bool = True,
@@ -402,6 +411,7 @@ def register_tool_schema(
         props=props,
         required=required,
         domain=domain,
+        scope=scope,
         always_on=always_on,
         react=react,
         graph=graph,

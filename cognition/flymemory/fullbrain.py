@@ -17,6 +17,7 @@ matching the rest of the fly brain.
 from __future__ import annotations
 
 import os
+import tempfile
 import threading
 from pathlib import Path
 
@@ -43,10 +44,11 @@ RELEASE_URL = os.environ.get("AIKO_FULLBRAIN_URL", DEFAULT_RELEASE_URL).strip()
 _lock = threading.RLock()
 _instance: "FullBrain | None" = None
 _missing_logged = False
+_load_started = False
 
 
 def ensure_data() -> Path | None:
-    """Locate the full-connectome npz, downloading it once if needed."""
+    """Locate or prepare validated data; call only off the turn path."""
     candidates = []
     env = os.environ.get("AIKO_FULLBRAIN_PATH", "").strip()
     if env:
@@ -54,25 +56,52 @@ def ensure_data() -> Path | None:
     candidates.append(Path.home() / ".aiko" / "data" / DATA_NAME)
     candidates.append(Path(__file__).resolve().parent / "data" / DATA_NAME)
     for c in candidates:
-        if c.is_file() and c.stat().st_size > 10_000_000:
-            return c
+        if c.is_file():
+            try:
+                load_fullbrain(c)
+                return c
+            except Exception as exc:
+                log.warning("fullbrain: invalid artifact %s: %s", c, exc)
     if RELEASE_URL:
         dest = Path.home() / ".aiko" / "data" / DATA_NAME
+        temporary = None
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             import urllib.request
             log.info("fullbrain: downloading %s", RELEASE_URL)
-            urllib.request.urlretrieve(RELEASE_URL, dest)
-            if dest.stat().st_size > 10_000_000:
-                return dest
+            with tempfile.NamedTemporaryFile(dir=dest.parent, prefix=f".{DATA_NAME}.", suffix=".npz", delete=False) as tmp:
+                temporary = Path(tmp.name)
+            urllib.request.urlretrieve(RELEASE_URL, temporary)
+            load_fullbrain(temporary)
+            os.replace(temporary, dest)
+            return dest
         except Exception as exc:
             log.warning("fullbrain: download failed: %s", exc)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
     return None
 
 
 def load_fullbrain(path: str | Path) -> dict:
     with np.load(path, allow_pickle=False) as d:
         out = {k: d[k] for k in d.files}
+    required = {"indptr", "indices", "data", "pre_sorted", "node_ids", "node_types", "node_sign"}
+    if missing := required - out.keys():
+        raise ValueError(f"fullbrain artifact missing arrays: {sorted(missing)}")
+    n = len(out["node_ids"])
+    edges = len(out["indices"])
+    if (
+        any(out[key].ndim != 1 for key in required)
+        or len(out["indptr"]) != n + 1
+        or len(out["node_types"]) != n
+        or len(out["node_sign"]) != n
+        or len(out["data"]) != edges
+        or len(out["pre_sorted"]) != edges
+        or out["indptr"][0] != 0
+        or out["indptr"][-1] != edges
+    ):
+        raise ValueError("fullbrain artifact has inconsistent array dimensions")
     # meta_json is a 0-d object array; normalise to str
     m = out.get("meta_json")
     if m is not None:
@@ -176,22 +205,34 @@ class FullBrain:
         }
 
 
-def get_fullbrain() -> FullBrain | None:
-    """Process-wide singleton (Phase 4 rule 3). Returns None if data absent."""
+def _load_fullbrain_background() -> None:
     global _instance, _missing_logged
+    path = ensure_data()
+    brain = None
+    if path is not None:
+        try:
+            brain = FullBrain(path)
+        except Exception as exc:
+            log.warning("fullbrain: load failed: %s", exc)
     with _lock:
-        if _instance is None and not _missing_logged:
-            path = ensure_data()
-            if path is None:
-                log.warning(
-                    "fullbrain: malecns_full.npz not found; whole-brain step "
-                    "disabled (run cognition/flymemory/tools/extract_full.py)"
-                )
-                _missing_logged = True
-            else:
-                try:
-                    _instance = FullBrain(path)
-                except Exception as exc:
-                    log.warning("fullbrain: load failed: %s", exc)
-                    _missing_logged = True
-        return _instance
+        _instance = brain
+        if brain is None and not _missing_logged:
+            log.warning(
+                "fullbrain: malecns_full.npz unavailable; whole-brain step "
+                "disabled (run cognition/flymemory/tools/extract_full.py)"
+            )
+            _missing_logged = True
+
+
+def get_fullbrain() -> FullBrain | None:
+    """Return the process-wide brain, preparing it off the turn path once."""
+    global _load_started
+    start = False
+    with _lock:
+        if _instance is None and not _load_started:
+            _load_started = True
+            start = True
+        brain = _instance
+    if start:
+        threading.Thread(target=_load_fullbrain_background, name="fullbrain-loader", daemon=True).start()
+    return brain

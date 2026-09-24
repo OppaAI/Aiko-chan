@@ -62,19 +62,19 @@ def _nt_sign(nt: str) -> float:
 def _dl(url: str, dest: str) -> None:
     import urllib.request
     if os.path.exists(dest) and os.path.getsize(dest) > 0:
-        # verify completeness for the big weights file via HEAD size
+        # Verify completeness with a ranged GET; HEAD is not reliable here.
         try:
-            req = urllib.request.Request(url, method="HEAD")
+            req = urllib.request.Request(url, headers={"Range": "bytes=0-0"})
             with urllib.request.urlopen(req, timeout=30) as r:
-                want = int(r.headers.get("Content-Length") or 0)
+                content_range = r.headers.get("Content-Range", "")
+                want = int(content_range.rsplit("/", 1)[-1]) if r.status == 206 and "/" in content_range else 0
             if want and os.path.getsize(dest) == want:
                 print(f"  have {dest}")
                 return
             print(f"  incomplete {dest} "
                   f"({os.path.getsize(dest)}/{want}), re-downloading")
         except Exception:
-            print(f"  have {dest}")
-            return
+            print(f"  could not verify {dest}, re-downloading")
     print(f"  downloading {url} ...")
     for attempt in range(3):
         try:

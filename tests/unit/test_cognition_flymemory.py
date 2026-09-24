@@ -41,6 +41,15 @@ def test_sparse_deterministic_encoding():
         m.encode([0.0, 1.0])
 
 
+def test_vectorized_pathways_own_pre_indices():
+    first, second = FlyMB(), FlyMB()
+    for pathway in ("_ikc", "_akc", "_mm"):
+        indptr, indices, _, pre_rep = getattr(first, pathway)
+        assert len(pre_rep) == len(indices)
+        assert np.array_equal(pre_rep, np.repeat(np.arange(len(indptr) - 1), np.diff(indptr)))
+        assert pre_rep is not getattr(second, pathway)[3]
+
+
 def test_reward_shifts_readout_toward_approach():
     m = FlyMB()
     kc = m.encode(FEATS)

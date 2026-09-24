@@ -140,8 +140,12 @@ def gate_tool(*, name: str, args: dict, llm_client=None, embedder=None, social_p
     """Evaluate act=tool. Returns a dict payload to block, or None to proceed."""
     try:
         from cognition.conscience import conscience_for, REFUSE, ESCALATE
+        from agentic.registry import TOOLS, registry
         social = social_post_tools or set()
-        scope = "external" if name in social or name.startswith("post_") else "local"
+        spec = registry.get(name) or TOOLS.get(name)
+        scope = spec.scope if spec and spec.scope is not None else (
+            "external" if name in social or name.startswith("post_") else "local"
+        )
         serialized_args = json.dumps(args, ensure_ascii=False, default=str)
         content = f"tool={name} args={serialized_args}"
         # MB valence (Phase 4): the fly brain's learned approach/avoid signal

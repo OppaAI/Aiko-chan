@@ -388,14 +388,6 @@ class ConscienceCircuitCore:
             verdict.gate = GATE_HITL
             verdict.reasons.insert(0, f"irreversible external action ({tool or 'tool'}) — excessive-agency control")
             return verdict
-        if (
-            IRREVERSIBLE_REQUIRES_APPROVAL
-            and verdict.decision == CAUTION
-            and gr.is_irreversible(tool, ctx)
-        ):
-            verdict.decision = ESCALATE
-            verdict.gate = GATE_HITL
-            verdict.reasons.insert(0, f"caution on an irreversible tool ({tool})")
         # MB valence (Phase 4): the fly brain's learned approach/avoid signal.
         # Strongly negative valence means this context was paired with bad
         # outcomes — downgrade a clean ALLOW to CAUTION on external tools so
@@ -418,6 +410,14 @@ class ConscienceCircuitCore:
                 )
         except Exception:
             pass
+        if (
+            IRREVERSIBLE_REQUIRES_APPROVAL
+            and verdict.decision == CAUTION
+            and gr.is_irreversible(tool, ctx)
+        ):
+            verdict.decision = ESCALATE
+            verdict.gate = GATE_HITL
+            verdict.reasons.insert(0, f"caution on an irreversible tool ({tool})")
         return verdict
 
     # ── HITL ──────────────────────────────────────────────────────────────

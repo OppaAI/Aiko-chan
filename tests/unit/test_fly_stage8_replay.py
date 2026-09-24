@@ -157,10 +157,11 @@ def test_shadow_computes_but_writes_nothing(monkeypatch):
     assert replay.last_run(uid)["n_candidates"] == 2
 
 
-def test_live_replay_strengthens_taught_pattern(monkeypatch):
+def test_live_replay_strengthens_taught_pattern(monkeypatch, tmp_path):
     uid = _uid("live")
     monkeypatch.setenv("AIKO_FLY_REPLAY_MODE", "live")
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "live")
+    monkeypatch.setenv("FLY_PLASTICITY_DB", str(tmp_path))
     from cognition.fly_registry import get_flymb
     from cognition.flymemory.circuit import text_features
     mb = get_flymb(uid)
@@ -228,6 +229,7 @@ def test_integration_db_to_mb(monkeypatch, tmp_path):
     monkeypatch.setenv("AIKO_FLY_REPLAY_MODE", "live")
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "live")
     monkeypatch.setenv("FLY_REPLAY_LOOKBACK_H", "24")
+    monkeypatch.setenv("FLY_PLASTICITY_DB", str(tmp_path))
     from cognition.fly_registry import get_flymb
     mb = get_flymb(uid)
     _teach(mb, "db replay probe delta fantastic", +1.0)
@@ -279,3 +281,40 @@ def test_run_fly_replay_never_raises(monkeypatch):
                         lambda uid: (_ for _ in ()).throw(RuntimeError("x")))
     runner = sched.ScheduleRunner(user_id="github_alice")
     assert runner._run_fly_replay() is False  # reports failure, no raise
+
+
+def test_failed_fly_replay_advances_schedule(monkeypatch, caplog):
+    import system.schedule as sched
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 9, 24, 23, 30, tzinfo=timezone.utc)
+    next_replay = now + timedelta(days=1)
+    monkeypatch.setattr(sched.bioclock, "local_now", lambda: now)
+    monkeypatch.setattr(sched, "_next_fly_replay", lambda: next_replay)
+    monkeypatch.setattr(sched, "all_user_ids", lambda: [])
+    monkeypatch.setattr(sched, "acquire_busy", lambda **kwargs: True)
+    monkeypatch.setattr(sched, "release_busy", lambda: None)
+    monkeypatch.setattr(sched.ScheduleRunner, "_missing_reflection_dates", lambda self: [])
+    monkeypatch.setattr(sched.ScheduleRunner, "_monthly_catchup_needed", lambda self: False)
+
+    runner = sched.ScheduleRunner(user_id="github_alice")
+    runner._next_daily = now + timedelta(days=2)
+    runner._next_monthly = now + timedelta(days=2)
+    runner._next_ledger_prune = now + timedelta(days=2)
+    runner._next_fly_replay = now
+    attempts = []
+    monkeypatch.setattr(runner, "_run_fly_replay", lambda: attempts.append(True) and False)
+    sleeps = []
+
+    def wait_seconds(_wakeup, seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            runner.stop()
+
+    monkeypatch.setattr(sched.bioclock, "wait_seconds", wait_seconds)
+    runner._run()
+
+    assert len(attempts) == 1
+    assert runner._next_fly_replay == next_replay
+    assert sleeps == [86400, 86400]
+    assert "fly_replay failed" in caplog.text

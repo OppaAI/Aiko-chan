@@ -26,16 +26,16 @@ It can announce or initiate jobs only while Aiko is running on an awake machine.
 It does not install OS-level cron jobs, wake a sleeping computer, or run after
 Aiko exits.
 
-Three hardcoded system jobs run outside schedule.json and cannot be modified
+Four hardcoded system jobs run outside schedule.json and cannot be modified
 by the user:
   - daily_reflect_and_dream    fires every day at DAILY_JOB_HOUR:DAILY_JOB_MINUTE (default 00:00)
   - monthly_consolidate        fires on the 1st of each month at MONTHLY_JOB_HOUR:MONTHLY_JOB_MINUTE (default 00:05)
+  - ledger_prune               runs at startup, then every 7 days to remove expired conscience-ledger rows
   - fly_replay                 nightly offline MB replay (Phase 8), FLY_REPLAY_HOUR:FLY_REPLAY_MINUTE (default 23:30)
 
-All hardcoded jobs have startup catch-up logic: if the scheduler process
-was offline/asleep across a scheduled firing, the missed run(s) are
-detected and backfilled once on the next start() call, before the normal
-sleep loop begins.
+Only daily_reflect_and_dream and monthly_consolidate implement startup catch-up
+for missed runs. fly_replay skips missed runs because ScheduleRunner initializes
+_next_fly_replay to the next future replay time (default 23:30).
 
   - daily_reflect_and_dream: catch-up is detected per-date via
     _reflection_post_exists() (a live GitHub API check against the Hugo
@@ -1906,7 +1906,10 @@ class ScheduleRunner:
                             self._run_monthly_consolidate()
                             self._next_monthly = _next_monthly_consolidate()
                         elif name == "fly-replay":
-                            if self._run_fly_replay():
+                            try:
+                                if not self._run_fly_replay():
+                                    log.error("Scheduler: fly_replay failed; next run remains scheduled.")
+                            finally:
                                 self._next_fly_replay = _next_fly_replay()
                         else:
                             if self._run_ledger_prune():
@@ -1914,7 +1917,7 @@ class ScheduleRunner:
                     except Exception:
                         # Transient store failure (e.g. sqlite hiccup on a
                         # network home dir) must not kill the scheduler
-                        # thread — log and retry on the next tick.
+                        # thread — log and retry jobs still due on the next tick.
                         log.exception("Scheduler: system job %s skipped", name)
                     finally:
                         reset_current_user_id(uid_token)

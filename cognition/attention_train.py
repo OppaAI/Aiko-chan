@@ -178,6 +178,13 @@ def _retrain_job() -> None:
                         continue
         if len(rows) < _MIN_ROWS_FOR_RETRAIN:
             return
+          
+        # Per-detector self-distillation models (best-effort).
+        try:
+            _train_detector_models(rows)
+        except Exception as e:
+            log.debug("attention_train detector pass failed: %s", e)
+
         # Only train when we have some signal variance
         labels = [float(r["label"]) for r in rows]
         if max(labels) - min(labels) < 0.1:
@@ -219,11 +226,7 @@ def _retrain_job() -> None:
         booster.save_model(str(tmp))
         tmp.replace(_MODEL_PATH)
         log.info("attention_train retrained on %d rows → %s", len(rows), _MODEL_PATH)
-        # Per-detector self-distillation models (best-effort).
-        try:
-            _train_detector_models(rows)
-        except Exception as e:
-            log.debug("attention_train detector pass failed: %s", e)
+       
         # Optionally truncate buffer after successful retrain (keep last 500)
         try:
             with _BUFFER_PATH.open("r", encoding="utf-8") as f:

@@ -983,6 +983,9 @@ async function playNextTts() {
   window.AIKO_TTS_STARTED_AT = performance.now();  // S3 echo guard
   try {
     const ctx = getTtsContext();
+    if (ctx.state === 'suspended') {
+      try { await ctx.resume(); } catch (e) {}
+    }
     const audioBuffer = await ctx.decodeAudioData(buf.slice(0));
     const analyser = getTtsAnalyser();
     const src = ctx.createBufferSource();

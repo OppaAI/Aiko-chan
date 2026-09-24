@@ -1882,6 +1882,25 @@ class AikoThink:
                 "Keep it natural, warm, and easy to ignore. One or two short sentences max."
             )
             system += "\n\n" + bioclock.current_datetime_block()
+            # MB valence (Phase 4): the fly brain's learned approach/avoid
+            # signal nudges the check-in topic. Negative valence -> gentler,
+            # supportive tone; positive -> warmer/playful. A nudge only —
+            # never overrides the prompt hint.
+            try:
+                from cognition.neural_state import get_neural_state
+                try:
+                    _uid = current_user_id()
+                except Exception:
+                    _uid = None
+                _v = float(get_neural_state(_uid).valence or 0.0)
+                if _v <= -0.4:
+                    system += ("\n\nContext: recent interactions carry a heavy tone. "
+                               "Be extra gentle and supportive, not playful.")
+                elif _v >= 0.4:
+                    system += ("\n\nContext: recent interactions carry a warm tone. "
+                               "A little playfulness is welcome.")
+            except Exception:
+                pass
             messages = [{
                 "role": "user",
                 "content": (

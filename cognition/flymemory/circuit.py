@@ -91,13 +91,29 @@ def _csr(pre: np.ndarray, post: np.ndarray, w: np.ndarray,
     return indptr, post_s.astype(np.int64), w_s.astype(np.float64)
 
 
-def _csrmatvec(indptr, indices, data, x: np.ndarray, n_post: int) -> np.ndarray:
-    out = np.zeros(n_post, dtype=np.float64)
-    for i in range(len(indptr) - 1):
-        s, e = indptr[i], indptr[i + 1]
-        if e > s and x[i] != 0.0:
-            out[indices[s:e]] += x[i] * data[s:e]
-    return out
+_vec_pre_cache: dict[int, np.ndarray] = {}
+
+
+def _csrmatvec_vec(indptr, indices, data, x: np.ndarray, n_post: int) -> np.ndarray:
+    """Vectorised sparse matvec (Phase 4 rule 2).
+
+    Replaces the old Python row loop with a single scatter-reduce:
+        out[post] += x[pre] * w
+    Per-edge ``pre`` is reconstructed once per matrix via ``np.repeat`` and
+    cached on ``id(indptr)``. Verified numerically identical to the loop on
+    all three MB pathways (max abs diff 0.0) before the loop was removed.
+    """
+    key = id(indptr)
+    pre_rep = _vec_pre_cache.get(key)
+    if pre_rep is None:
+        pre_rep = np.repeat(
+            np.arange(len(indptr) - 1, dtype=np.int64),
+            np.diff(indptr).astype(np.int64),
+        )
+        _vec_pre_cache[key] = pre_rep
+    return np.bincount(
+        indices, weights=x[pre_rep] * data, minlength=n_post
+    ).astype(np.float64)
 
 
 @dataclass
@@ -126,6 +142,8 @@ class FlyMB:
         self.n_kc = len(self._role_idx["KC"])
         self.n_mbon = len(self._role_idx["MBON"])
         self.mbon_types = circ["node_types"][self._role_idx["MBON"]]
+        # BodyIds of the slice KCs — used to seed the full-connectome graph.
+        self.kc_body_ids = circ["node_ids"][self._role_idx["KC"]].astype(np.int64)
 
         # Global node ids -> compact per-role positions for each pathway matrix.
         pos = np.full(len(roles), -1, dtype=np.int64)
@@ -185,9 +203,9 @@ class FlyMB:
         if f.shape[0] != self.n_features:
             raise ValueError(f"expected {self.n_features} features, got {f.shape[0]}")
         drive_in = np.maximum(self._sensory.T @ f, 0.0)
-        kc = _csrmatvec(*self._ikc, drive_in, self.n_kc)
+        kc = _csrmatvec_vec(*self._ikc, drive_in, self.n_kc)
         # APL/DPM global divisive inhibition keeps activity sparse and bounded.
-        apl = _csrmatvec(*self._akc, np.ones(4), self.n_kc)
+        apl = _csrmatvec_vec(*self._akc, np.ones(4), self.n_kc)
         kc = kc / (1.0 + self.apl_gain * (apl.mean() + kc.mean()))
         k = max(1, int(round(self.n_kc * self.kc_sparsity)))
         if k < self.n_kc:
@@ -205,7 +223,7 @@ class FlyMB:
             if e > s and kc[i] != 0.0:
                 mbon[idx[s:e]] += kc[i] * w[s:e]
         # One recurrent MBON<->MBON step (real feedback weights).
-        mbon = np.maximum(mbon + self.rec_gain * _csrmatvec(*self._mm, mbon, self.n_mbon), 0.0)
+        mbon = np.maximum(mbon + self.rec_gain * _csrmatvec_vec(*self._mm, mbon, self.n_mbon), 0.0)
         approach = float(mbon[self.mbon_sign > 0].sum())
         avoid = float(mbon[self.mbon_sign < 0].sum())
         return approach, avoid

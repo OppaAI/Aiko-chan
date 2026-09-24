@@ -43,6 +43,7 @@ GATE_JUDGE = "judge"          # L2
 GATE_DELIBERATE = "deliberate"  # L3
 GATE_HITL = "hitl"            # L4
 GATE_ERROR = "error"          # circuit failed; see fail_mode
+GATE_MB_VALENCE = "mb_valence"  # Phase 4: fly-brain learned aversion soft-prior
 
 # Acts the circuit knows how to judge.
 ACT_RESPOND = "respond"   # pre-act, about to answer a user turn
@@ -393,7 +394,7 @@ __all__ = [
     "DELIBERATE_MAX_TOKENS", "DELIBERATE_MODEL", "DELIBERATE_THRESHOLD",
     "DELIBERATE_TIMEOUT", "ESCALATE", "GATE_CANON", "GATE_DELIBERATE",
     "GATE_DISABLED", "GATE_ERROR", "GATE_FLOOR", "GATE_GUARDRAIL", "GATE_HITL",
-    "GATE_JUDGE", "GUARDRAILS_ENABLED", "GUARDRAIL_DISABLED_RULES",
+    "GATE_JUDGE", "GUARDRAILS_ENABLED", "GUARDRAIL_DISABLED_RULES", "GATE_MB_VALENCE",
     "ESCALATE_IRREVERSIBLE_EXTERNAL", "GUARDRAIL_EGRESS_STRICT", "GuardrailHit", "HITL_DEFAULT", "HITL_THRESHOLD",
     "HITL_TIMEOUT_SECONDS", "IRREVERSIBLE_REQUIRES_APPROVAL", "LEDGER_DDL",
     "LEDGER_DB_PATH", "LEDGER_ENABLED", "LEDGER_RETAIN_DAYS",

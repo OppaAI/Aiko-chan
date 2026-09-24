@@ -52,6 +52,7 @@ from .schema import (
     GATE_GUARDRAIL,
     GATE_HITL,
     GATE_JUDGE,
+    GATE_MB_VALENCE,
     HITL_DEFAULT,
     IRREVERSIBLE_REQUIRES_APPROVAL,
     MAX_LAYER,
@@ -395,6 +396,28 @@ class ConscienceCircuitCore:
             verdict.decision = ESCALATE
             verdict.gate = GATE_HITL
             verdict.reasons.insert(0, f"caution on an irreversible tool ({tool})")
+        # MB valence (Phase 4): the fly brain's learned approach/avoid signal.
+        # Strongly negative valence means this context was paired with bad
+        # outcomes — downgrade a clean ALLOW to CAUTION on external tools so
+        # the learned aversion genuinely weighs on gating. Never escalates or
+        # refuses by itself; it is a prior, not a rule.
+        try:
+            mb_v = ctx.get("mb_valence")
+            if (
+                mb_v is not None
+                and float(mb_v) <= -0.5
+                and verdict.decision == ALLOW
+                and external
+            ):
+                verdict.decision = CAUTION
+                verdict.gate = GATE_MB_VALENCE
+                verdict.reasons.insert(
+                    0,
+                    f"mushroom-body valence {float(mb_v):.2f} — learned "
+                    f"aversion to this context",
+                )
+        except Exception:
+            pass
         return verdict
 
     # ── HITL ──────────────────────────────────────────────────────────────

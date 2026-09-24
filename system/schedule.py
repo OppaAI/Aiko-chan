@@ -2195,7 +2195,7 @@ class ScheduleRunner:
                         res.get("reason"),
                     )
                     if str(res.get("reason") or "").startswith("error:"):
-                    ok = False
+                        ok = False
                 except Exception:
                     log.exception("fly_replay failed for user %s", (user_id or "?")[:12])
                     ok = False

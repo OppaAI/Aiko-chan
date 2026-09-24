@@ -118,6 +118,16 @@ def _min_elig() -> float:
     return _float_env("FLY_REPLAY_MIN_ELIG", 0.05, 0.0, 1.0)
 
 
+def _include_sim_episodes() -> bool:
+    """Phase 9 opt-in: fold FlyWorld sim episodes into the replay pass."""
+    try:
+        return (os.getenv("FLY_REPLAY_INCLUDE_SIM", "0") or "0").strip().lower() not in (
+            "0", "false", "no", "off",
+        )
+    except Exception:
+        return False
+
+
 def score_candidate(age_h: float, valence: float, salience: float | None) -> float:
     """Eligibility score in [0, 1]. Pure function — deterministic, testable.
 
@@ -135,6 +145,16 @@ def score_candidate(age_h: float, valence: float, salience: float | None) -> flo
     recency = 0.5 ** (age / _halflife_h())
     sal = max(0.0, min(1.0, abs(v) + 0.5 * s))
     return max(0.0, min(1.0, recency * sal))
+
+
+def _parse_valence(value) -> float | None:
+    """valence_tag column -> float in [-1, 1]. None when absent/unparseable."""
+    if value is None:
+        return None
+    try:
+        return max(-1.0, min(1.0, float(value)))
+    except Exception:
+        return None
 
 
 def _parse_ts(value) -> float | None:
@@ -209,10 +229,26 @@ def _recent_episodes(user_id: str, now: float) -> list[dict]:
                 "trace": trace,
                 "salience": sal,
                 "age_h": max(0.0, (now - ts_epoch) / 3600.0),
+                # The valence recorded when the experience happened. The live
+                # pulse re-teaches THIS (not today's valence) — it is what
+                # the experience actually felt like at the time.
+                "recorded_valence": _parse_valence(row[4]) if len(row) > 4 else None,
             })
         except Exception:
             continue
     return out
+
+
+def _sort_id(value):
+    """Tie-break key for candidate ids. Numbers keep numeric order, strings
+    keep string order, numbers sort before strings — deterministic for the
+    mixed int/str ids of a merged real+sim candidate list, and identical to
+    the old raw-id order for homogeneous lists (Phase 8 behavior kept)."""
+    if isinstance(value, bool):
+        return (0, int(value), "")
+    if isinstance(value, (int, float)):
+        return (0, value, "")
+    return (1, 0, str(value))
 
 
 def select_candidates(
@@ -225,8 +261,12 @@ def select_candidates(
 
     valence_of(trace) -> float in [-1, 1] (live MB valence, same signal the
     lifecycle knobs read). Returns at most FLY_REPLAY_MAX_ITEMS dicts, each
-    with {id, trace, valence, salience, age_h, elig}, ordered by
-    (elig desc, id asc) — deterministic for identical inputs.
+    with {id, trace, valence, salience, age_h, elig, recorded_valence,
+    simulated}, ordered by (elig desc, id asc) — deterministic for
+    identical inputs. recorded_valence is carried through untouched (None
+    when the source did not record one); run_replay pulses it, falling
+    back to live valence. simulated is carried through for Phase 9
+    FlyWorld candidates.
     """
     _ = now  # reserved: age_h is precomputed by the caller.
     scored: list[dict] = []
@@ -246,8 +286,10 @@ def select_candidates(
             "salience": ep.get("salience"),
             "age_h": round(float(ep.get("age_h", 0.0)), 3),
             "elig": round(elig, 4),
+            "recorded_valence": ep.get("recorded_valence"),
+            "simulated": bool(ep.get("simulated")),
         })
-    scored.sort(key=lambda d: (-d["elig"], d["id"]))
+    scored.sort(key=lambda d: (-d["elig"], _sort_id(d["id"])))
     return scored[: _max_items()]
 
 
@@ -279,6 +321,16 @@ def run_replay(user_id: str | None = None, *, force: bool = False) -> dict:
     try:
         now = time.time()
         episodes = _recent_episodes(_uid(user_id), now)
+        # Phase 9 (opt-in): fold FlyWorld sim episodes into the same replay
+        # pass. FLY_REPLAY_INCLUDE_SIM=1 only; default 0 keeps Phase 8
+        # behavior byte-identical. Sim episodes live in flyworld's own
+        # in-memory trail (never emc_storage) and carry simulated=True.
+        if _include_sim_episodes():
+            try:
+                from cognition.flyworld.replay_bridge import collect_sim_episodes
+                episodes = list(episodes) + collect_sim_episodes(user_id)
+            except Exception as exc:
+                log.debug("replay: sim episodes skipped: %s", exc)
         out["n_candidates"] = len(episodes)
         if not episodes:
             out["reason"] = "no_episodes"
@@ -303,6 +355,7 @@ def run_replay(user_id: str | None = None, *, force: bool = False) -> dict:
             item = {
                 "id": cand["id"], "valence": cand["valence"], "elig": cand["elig"],
                 "age_h": cand["age_h"], "applied": False, "delta": 0.0,
+                "simulated": bool(cand.get("simulated")),
                 "valence_before": cand["valence"], "valence_after": cand["valence"],
             }
             if live:
@@ -311,9 +364,19 @@ def run_replay(user_id: str | None = None, *, force: bool = False) -> dict:
                     from cognition.flymemory.dopamine import pulse
                     kc = mb.encode(text_features(cand["trace"]))
                     before = float(mb.valence_bias(text_features(cand["trace"])))
+                    # Re-teach the valence recorded at experience time; fall
+                    # back to live valence when none was recorded (e.g. sim
+                    # candidates, older rows).
+                    reward = cand.get("recorded_valence")
+                    reward_source = "recorded"
+                    if reward is None:
+                        reward = cand["valence"]
+                        reward_source = "live"
+                    item["reward_source"] = reward_source
                     res = pulse(
-                        cand["recorded_valence"], user_id=user_id, kc=kc,
-                        weight=cand["elig"], source="replay",
+                        reward, user_id=user_id, kc=kc,
+                        weight=cand["elig"],
+                        source="flyworld-replay" if cand["simulated"] else "replay",
                     )
                     if res.get("reason") == "dedup":
                         skipped_dedup += 1
@@ -386,6 +449,7 @@ def _record_trail(user_id: str | None, out: dict) -> None:
                 {k: it[k] for k in (
                     "id", "valence", "elig", "applied", "delta",
                     "valence_before", "valence_after",
+                    "reward_source", "simulated",
                 ) if k in it}
                 for it in (out.get("items") or [])
             ],

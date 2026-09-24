@@ -668,7 +668,7 @@ class AikoWeb:
         # motion energy only. Bytes are decoded transiently, never retained.
         try:
             from cognition.flysense.pathways import note_visual_frame
-            note_visual_frame(uid, image)
+            await asyncio.to_thread(note_visual_frame, uid, image, source)
         except Exception:
             log.debug("fly visual pathway skipped", exc_info=True)
         self._broadcast({"type": "vision", "status": "working", "source": source}, user_id=uid)

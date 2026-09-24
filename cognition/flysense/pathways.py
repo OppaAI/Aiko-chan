@@ -119,20 +119,20 @@ class MotionPathway:
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._fly = None
+        self._flies: dict[str, object] = {}
         self._salience = 0.0
         self._sudden = False
         self._frames = 0
         self._visual_events = 0
         self._last_ts = 0.0
 
-    def _ensure(self):
-        if self._fly is None:
+    def _ensure(self, source: str = "camera"):
+        if source not in self._flies:
             from cognition.flysense.motion import FlyMotion
-            self._fly = FlyMotion()
-        return self._fly
+            self._flies[source] = FlyMotion()
+        return self._flies[source]
 
-    def feed_frame(self, frame) -> dict:
+    def feed_frame(self, frame, source: str = "camera") -> dict:
         """Score one frame (np.ndarray, or raw image bytes). Best-effort."""
         try:
             import numpy as np
@@ -145,8 +145,8 @@ class MotionPathway:
             arr = np.asarray(arr)
             if arr.size == 0:
                 return {"ok": False, "reason": "empty"}
-            fly = self._ensure()
-            e = fly.score(arr)
+            with self._lock:
+                e = self._ensure(source).score(arr)
             total = float(e.get("total", 0.0) or 0.0)
             change = float(e.get("change", 0.0) or 0.0)
             # T4/T5 opponent energy is O(0.01–0.1); wide-field change is a
@@ -203,16 +203,20 @@ def _decode_image_bytes(data: bytes):
             from PIL import Image
             import io
 
-            img = Image.open(io.BytesIO(data)).convert("L")
-            return np.asarray(img, dtype=np.float64)
+            with Image.open(io.BytesIO(data)) as img:
+                img.draft("L", (64, 64))
+                gray = img.convert("L")
+                gray.thumbnail((64, 64))
+                # FlyMotion expects at least 48 samples on each axis.
+                return np.asarray(gray.resize((48, 48)), dtype=np.float64)
         except Exception:
             pass
         try:
             import cv2
 
-            img = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+            img = cv2.imdecode(arr, cv2.IMREAD_REDUCED_GRAYSCALE_8)
             if img is not None:
-                return np.asarray(img, dtype=np.float64)
+                return np.asarray(cv2.resize(img, (48, 48), interpolation=cv2.INTER_AREA), dtype=np.float64)
         except Exception:
             pass
         return None
@@ -230,7 +234,7 @@ def get_motion_pathway(user_id: str | None = None) -> MotionPathway:
         return mp
 
 
-def note_visual_frame(user_id: str | None, image_data_url: str | None) -> dict:
+def note_visual_frame(user_id: str | None, image_data_url: str | None, source: str = "camera") -> dict:
     """Feed a consented camera/screen frame into the motion pathway.
 
     Accepts a data-URL (as the WebUI sends) or raw bytes. Decodes to a
@@ -261,7 +265,7 @@ def note_visual_frame(user_id: str | None, image_data_url: str | None) -> dict:
         if len(raw) > 4_000_000:
             return {**out, "reason": "too_large"}
         mp = get_motion_pathway(user_id)
-        fed = mp.feed_frame(raw)
+        fed = mp.feed_frame(raw, source=source)
         mp.note_visual_event()
         out = {"ok": bool(fed.get("ok")), **{k: v for k, v in fed.items() if k != "ok"}}
         return out

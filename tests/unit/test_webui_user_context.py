@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import queue
@@ -11,6 +12,29 @@ from interface.webui.webui import AikoWeb, _validate_image_data_uri, _vision_bas
 from interface.webui.studio.session_binding import _relative_path
 from system.prepare import run_post_auth
 from system.userspace import current_display_name, current_user_id, reset_current_display_name, reset_current_user_id
+
+
+def test_image_motion_runs_in_thread_with_source(monkeypatch):
+    from cognition.flysense import pathways
+    from interface.webui import webui
+
+    web = AikoWeb.__new__(AikoWeb)
+    web._broadcast = lambda *_args, **_kwargs: None
+    web._infer_image = lambda *_args: "description"
+    monkeypatch.setattr(webui, "observe_fly_runtime", lambda *_args, **_kwargs: None)
+    seen = []
+    caller_thread = threading.get_ident()
+
+    def note_frame(uid, image, source):
+        seen.append((uid, image, source, threading.get_ident()))
+
+    monkeypatch.setattr(pathways, "note_visual_frame", note_frame)
+
+    asyncio.run(web._handle_image_input("image", "question", "alice", source="screen"))
+
+    assert len(seen) == 1
+    assert seen[0][:3] == ("alice", "image", "screen")
+    assert seen[0][3] != caller_thread
 
 
 class DummyMemorize:

@@ -150,6 +150,7 @@ def apply_turn_priors(
             log.debug("circadian tick skipped: %s", str(exc))
 
         motion = 0.0
+        motion_sudden = False
         voice_urgency = 0.0
         try:
             # Phase 6: encode voice / motion / visual channels into neural
@@ -161,7 +162,11 @@ def apply_turn_priors(
             )
             out["senses"] = senses
             motion = float(st.motion_salience or 0.0)
-            voice = (senses or {}).get("voice") or {}
+            motion_sudden = bool(
+                (senses or {}).get("mode") == "live"
+                and ((senses or {}).get("motion") or {}).get("sudden")
+            )
+            voice = ((senses or {}).get("voice") or {}) if (senses or {}).get("mode") == "live" else {}
             voice_urgency = float(voice.get("urgency") or 0.0)
         except Exception as exc:
             log.debug("sensory pathways skipped: %s", str(exc))
@@ -171,6 +176,7 @@ def apply_turn_priors(
             priority=priority,
             subliminal_urgency=float(subliminal_urgency or 0.0),
             motion_salience=motion,
+            motion_sudden=motion_sudden,
             voice_urgency=voice_urgency,
         )
         st.publish_gf(float(gf.get("urgency") or 0.0), bool(gf.get("interrupt")), source="turn")
@@ -237,7 +243,8 @@ def apply_turn_priors(
                 energy = max(0.0, min(1.0, 1.0 - float(st.sleep_pressure or 0.0)))
                 # Phase 6: voice speech-rate energy blends with rest energy —
                 # a tired body can still hear an urgent voice.
-                _voice = ((out.get("senses") or {}).get("voice")) or {}
+                _senses = out.get("senses") or {}
+                _voice = (_senses.get("voice") or {}) if _senses.get("mode") == "live" else {}
                 if _voice.get("energy") is not None:
                     try:
                         energy = max(

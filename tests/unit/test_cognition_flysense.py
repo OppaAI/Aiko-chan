@@ -1,7 +1,9 @@
 """Unit tests for fly sensory grafts (numpy-only, offline)."""
 import numpy as np
+import pytest
 
 from cognition.flysense import FlyAL, FlyDN, FlyMotion, emd_energy
+from cognition.flysense.pathways import MotionPathway, _decode_image_bytes, note_visual_frame
 
 
 def test_al_loads_and_normalizes():
@@ -44,6 +46,62 @@ def test_motion_gate_stateful():
     fm.reset()
     moved, e = fm.moved(f0)
     assert moved and e["novel"]
+
+
+def test_motion_pathway_keeps_a_baseline_per_source():
+    rng = np.random.default_rng(3)
+    frame = rng.normal(size=(48, 48))
+    pathway = MotionPathway()
+
+    assert pathway.feed_frame(frame, source="camera")["novel"] is True
+    assert pathway.feed_frame(np.roll(frame, 2, axis=1), source="screen")["novel"] is True
+    assert pathway.feed_frame(frame, source="camera")["novel"] is False
+    assert pathway.feed_frame(frame, source="screen")["novel"] is False
+    assert len(pathway._flies) == 2
+
+
+def test_image_decode_bounds_float_array_before_motion():
+    import io
+    Image = pytest.importorskip("PIL.Image")
+
+    image = Image.new("RGB", (2048, 1024), color=(120, 40, 10))
+    data = io.BytesIO()
+    image.save(data, format="JPEG")
+
+    decoded = _decode_image_bytes(data.getvalue())
+
+    assert decoded is not None
+    assert decoded.shape == (48, 48)
+    assert decoded.dtype == np.float64
+
+
+def test_visual_frame_passes_source_to_motion_pathway():
+    import cv2
+
+    ok, encoded = cv2.imencode(".png", np.zeros((48, 48), dtype=np.uint8))
+    assert ok
+    data = encoded.tobytes()
+    camera = note_visual_frame("source-isolation", data, source="camera")
+    screen = note_visual_frame("source-isolation", data, source="screen")
+    camera_again = note_visual_frame("source-isolation", data, source="camera")
+    assert camera["ok"] and camera["novel"]
+    assert screen["ok"] and screen["novel"]
+    assert camera_again["ok"] and not camera_again["novel"]
+
+
+def test_image_decode_cv2_fallback_is_bounded(monkeypatch):
+    import cv2
+    import sys
+
+    ok, encoded = cv2.imencode(".png", np.zeros((1024, 2048), dtype=np.uint8))
+    assert ok
+    monkeypatch.setitem(sys.modules, "PIL", None)
+
+    decoded = _decode_image_bytes(encoded.tobytes())
+
+    assert decoded is not None
+    assert decoded.shape == (48, 48)
+    assert decoded.dtype == np.float64
 
 
 def test_dn_drive_bounded():

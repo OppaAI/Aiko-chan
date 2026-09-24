@@ -23,6 +23,7 @@
             <button id="add-node-btn" class="btn" title="Add the selected palette node (N)">Add Node</button>
             <button id="delete-selected-btn" class="btn btn-danger" title="Delete selected node or edge (Del)">Remove</button>
             <button id="tidy-btn" class="btn" title="Auto-layout the canvas">Tidy</button>
+            <button id="flow-btn" class="btn btn-active" title="Toggle animated data flow on executed paths">≋ Flow</button>
             <span class="divider"></span>
             <button id="validate-btn" class="btn" title="Check cycles, deps, unknown tools">Validate</button>
             <button id="run-btn" class="btn" title="Bounded dry-run">▶ Run</button>
@@ -65,6 +66,8 @@
                 <button class="zoom-btn" id="zoom-out" title="Zoom out">−</button>
                 <button class="zoom-btn" id="zoom-fit" title="Fit to view">⊡</button>
             </div>
+
+            <button class="canvas-add-btn" id="canvas-add" title="Add node">+</button>
 
             <div class="details-panel" id="details-panel" hidden>
                 <div class="details-panel-header">

@@ -43,14 +43,14 @@ legend i{width:12px;height:12px;border-radius:3px}
 @keyframes spin{to{transform:rotate(360deg)}}
 #loading.hidden{display:none}
 </style></head><body>
-<header><a class="back" href="/">← Chat</a><div><div class="brand">Aiko Neural Observatory</div><div class="sub">Fly-brain-inspired bilateral atlas · bounded active-subgraph overlay</div></div><button id="refresh">Refresh</button></header>
+<header><a class="back" href="/">← Chat</a><div><div class="brand">Aiko Neural Observatory</div><div class="sub">Fly-brain-inspired bilateral atlas · lobe-sampled overlay</div></div><button id="refresh">Refresh</button></header>
 <main class="shell">
 <section class="panel main">
 <div class="topline"><div><div class="kicker">Connectome execution</div><div class="title">MaleCNS v1.0 — full brain projection</div></div><div class="badges" id="badges"></div></div>
 <div class="stats" id="stats"></div>
 <canvas id="canvas"></canvas>
 <div id="loading"><div class="spinner"></div>Loading connectome…</div>
-<p class="note">Stylized bilateral fly-brain projection: paired optic lobes, central brain, mushroom body, central complex, and descending/VNC axis. Positions are anatomical-inspired, not registered XYZ coordinates.</p>
+<p class="note">Stylized 3D fly-brain lobe atlas: 2,700 seeded sample neurons across 9 anatomical lobe volumes stand in for the full connectome (no 200k-node download). Live trace activity is projected into lobe space; lobe glow tracks aggregate firing.</p>
 <legend id="legend"></legend>
 </section>
 <aside class="side">
@@ -76,24 +76,98 @@ legend i{width:12px;height:12px;border-radius:3px}
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
+/* Fly Studio — lobe-atlas brain view.
+ *
+ * Replaces the old 211k-neuron catalog point cloud with a lightweight,
+ * brain-like 3D atlas: 9 anatomical lobe volumes, ~2.7k seeded sample
+ * neurons, static inter-lobe tracts. Live trace activity is projected
+ * into lobe space (deterministic per-node placement) and lobes glow
+ * with aggregate firing rate.
+ *
+ * RAM/CPU discipline:
+ *  - No full-catalog fetch (was: 211k JSON nodes + duplicate Map + GPU buffers).
+ *  - No permanent RAF loop: renders on demand (telemetry tick, interaction,
+ *    lobe-glow easing, or a gentle pulse while activity is fresh). The loop
+ *    stops entirely when the tab is hidden.
+ *  - No per-frame buffer rewrites: active-point pulse is a single material
+ *    uniform; lobe glow eases only toward telemetry-tick targets.
+ *  - No per-frame allocations: scratch objects are module-level.
+ *  - Slow panels (causal trail, DN body) poll at ~6s instead of 2s.
+ */
+
 const $ = id => document.getElementById(id);
 const clamp = v => Math.max(0, Math.min(1, Number(v) || 0));
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const METERS = [['valence','Valence'],['sensory_gain','Sensory gain'],['motion_salience','Motion'],['focus_sharpness','Focus'],['urgency','Urgency'],['action_drive','Action drive'],['motor_vigor','Motor vigor']];
 const BODY_KEYS = [['expression_intensity','Expression'],['gesture_intensity','Gesture'],['gaze_speed','Gaze speed'],['action_vigor','Action vigor'],['rate_mult','Speech rate'],['vol_mult','Speech vol']];
 
-let renderer, scene, camera, controls;
-let pointsMesh, activeMesh, edgesLine;
-let catalogNodes = [], activeNodes = [], activeEdges = [];
-let catalogById = new Map();
-let animationId = null;
-let currentTrace = null;
-let neuralState = {};
-let modes = {};
-let catalogReady = false;
-let telemetryRequest = null;
+// Static anatomical tracts between lobes (lobe indices from /api/lobes).
+const TRACTS = [[0,5],[1,5],[0,2],[1,2],[2,3],[2,4],[2,6],[3,7],[4,7],[5,6],[5,7],[6,7],[7,8]];
+const MAX_ACTIVE = 500;
+const MAX_EDGES = 1000;
+const PULSE_TTL_MS = 25000; // keep pulsing only while telemetry is fresh
 
-const WIDTH = 1000, HEIGHT = 600;
+// ── deterministic hashing / PRNG (stable placement across loads) ──
+function hashStr(s) {
+  let h = 2166136261;
+  const str = String(s);
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// Compact port of cognition/fly_runtime/layout.py::classify_group (mapping only).
+function classifyGroup(raw) {
+  const t = String(raw || 'unknown').toLowerCase();
+  const pre = p => t.startsWith(p);
+  if (pre('dn') || pre('dng') || pre('dnp')) return 'DN';
+  if (pre('vnc')) return 'VNC';
+  if (pre('gf') || t === 'giant_fiber' || t === 'gf1' || t === 'gf2') return 'GF';
+  if (pre('lh') || pre('lhn')) return 'LH';
+  if (pre('epg') || pre('pen') || pre('pfn') || pre('pgn') || pre('peg')) return 'CX';
+  if (pre('mbon') || pre('mbout')) return 'MBON';
+  if (pre('kc') || pre('kenyon') || pre('cla')) return 'KC';
+  if (pre('dan') || pre('pam') || pre('pp1') || pre('pp2')) return 'DAN';
+  if (pre('apl')) return 'APL';
+  if (pre('mb') || t === 'mushroom_body') return 'MB';
+  if (pre('t4') || pre('t5')) return 'T4';
+  if (pre('tm') || pre('tmy')) return 'Tm';
+  if (pre('mi') || pre('mir')) return 'Mi';
+  if ((pre('c') || pre('ct')) && t.length <= 3) return 'C';
+  if (pre('l') && t.length <= 3) return 'L';
+  if (pre('al') || t === 'antennal_lobe') return 'AL';
+  if (['sens','phot','ol','oc','ocg','amc','aotu','vs','hs','ch','dno'].some(pre)) return 'sensory';
+  if (pre('out') || t === 'motor' || t === 'output') return 'output';
+  return 'unknown';
+}
+
+// ── module state ──
+let renderer, scene, camera, controls;
+let atlas = null;
+let lobeIndex = [];   // {id,name,color,groups,samples,center:V3,radii:V3}
+let lobeMats = [];
+let groupLobe = {}, lateral = {};
+let activeMesh, edgesLine;
+let atlasReady = false;
+let telemetryRequest = null;
+let slowTick = 0;
+let activeCount = 0;
+let lastTelemetry = 0;
+// render scheduling
+let rafId = 0, dirty = false, interacting = false;
+// module-level scratch (no per-frame allocation)
+const scratchColor = new THREE.Color();
+const scratchVec = new THREE.Vector3();
+const scratchV0 = new THREE.Vector3(), scratchV1 = new THREE.Vector3(), scratchVC = new THREE.Vector3();
+const EDGE_EXC = new THREE.Color('#48d8ff');
+const EDGE_INH = new THREE.Color('#ffbe62');
 
 function meters(s) {
   $('meters').innerHTML = METERS.map(([k, n]) => {
@@ -109,14 +183,34 @@ function textList(rows, empty) {
 }
 
 function buildLegend() {
-  const groups = [...new Set(catalogNodes.map(n => n.group))].sort();
-  $('legend').innerHTML = groups.map(g => {
-    const color = catalogNodes.find(n => n.group === g)?.color || '#91a1ba';
-    return `<span><i style="background:${color}"></i>${g} (${catalogNodes.filter(n => n.group === g).length})</span>`;
-  }).join('');
+  $('legend').innerHTML = lobeIndex.map(L =>
+    `<span><i style="background:${L.color}"></i>${esc(L.name)} (${L.samples})</span>`
+  ).join('');
 }
 
-function initThree() {
+// Map a live trace node onto a lobe (paired groups split by id hash, like the old layout).
+function lobeIdxOf(node) {
+  const g = classifyGroup(node.type);
+  const lat = lateral[g];
+  if (lat) return lat[hashStr(node.id) % 2];
+  const li = groupLobe[g];
+  return li == null ? lobeIndex.length - 1 : li;
+}
+
+// Deterministic point inside the node's lobe ellipsoid.
+function nodePoint(node, out) {
+  const L = lobeIndex[lobeIdxOf(node)];
+  const r = mulberry32(hashStr('p:' + node.id));
+  const th = r() * Math.PI * 2, ph = Math.acos(2 * r() - 1), rr = Math.cbrt(r());
+  out.set(
+    L.center.x + rr * Math.sin(ph) * Math.cos(th) * L.radii.x,
+    L.center.y + rr * Math.sin(ph) * Math.sin(th) * L.radii.y,
+    L.center.z + rr * Math.cos(ph) * L.radii.z
+  );
+  return L;
+}
+
+function initScene() {
   const canvas = $('canvas');
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
   renderer.setSize(canvas.clientWidth, canvas.clientHeight);
@@ -124,7 +218,7 @@ function initThree() {
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x07101c);
   camera = new THREE.PerspectiveCamera(45, canvas.clientWidth / canvas.clientHeight, 1, 10000);
-  camera.position.set(WIDTH/2, HEIGHT/2, 1200);
+  camera.position.set(500, 300, 1150);
   controls = new OrbitControls(camera, canvas);
   controls.enableDamping = true;
   controls.dampingFactor = 0.05;
@@ -132,120 +226,212 @@ function initThree() {
   controls.enableRotate = false;
   controls.minDistance = 120;
   controls.maxDistance = 3000;
-  controls.target.set(WIDTH / 2, HEIGHT / 2, 0);
+  controls.target.set(500, 270, 0);
   controls.update();
+  controls.addEventListener('start', () => { interacting = true; ensureLoop(); });
+  controls.addEventListener('end', () => { interacting = false; requestRender(); });
+  controls.addEventListener('change', () => { requestRender(); });
   scene.add(new THREE.AmbientLight(0x404060, 0.6));
   const dir = new THREE.DirectionalLight(0xffffff, 0.4);
   dir.position.set(0, 0, 500);
   scene.add(dir);
-  const geom = new THREE.BufferGeometry();
-  const count = catalogNodes.length;
-  const positions = new Float32Array(count * 3);
-  const colors = new Float32Array(count * 3);
-  const sizes = new Float32Array(count);
-  for (let i = 0; i < count; i++) {
-    const n = catalogNodes[i];
-    positions[i*3] = n.x; positions[i*3+1] = n.y; positions[i*3+2] = 0;
-    const c = new THREE.Color(n.color);
-    colors[i*3] = c.r; colors[i*3+1] = c.g; colors[i*3+2] = c.b;
-    sizes[i] = 2.5;
+
+  // Lobe volumes: organic deformed-icosahedron blobs + faint rim shells.
+  for (const L of lobeIndex) {
+    const geo = new THREE.IcosahedronGeometry(1, 3);
+    const pos = geo.attributes.position;
+    const jr = mulberry32(hashStr(L.id));
+    for (let i = 0; i < pos.count; i++) {
+      const s = 1 + (jr() - 0.5) * 0.28;
+      pos.setXYZ(i, pos.getX(i) * s * L.radii.x, pos.getY(i) * s * L.radii.y, pos.getZ(i) * s * L.radii.z);
+    }
+    geo.computeVertexNormals();
+    const mat = new THREE.MeshStandardMaterial({
+      color: L.color, transparent: true, opacity: 0.13,
+      roughness: 0.55, metalness: 0.15, flatShading: true,
+      depthWrite: false, emissive: L.color, emissiveIntensity: 0
+    });
+    mat.userData.target = 0;
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.copy(L.center);
+    scene.add(mesh);
+    const rim = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+      color: L.color, transparent: true, opacity: 0.10, side: THREE.BackSide, depthWrite: false
+    }));
+    rim.position.copy(L.center);
+    rim.scale.setScalar(1.04);
+    scene.add(rim);
+    lobeMats.push(mat);
   }
-  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  geom.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
-  pointsMesh = new THREE.Points(geom, new THREE.PointsMaterial({ size: 3, vertexColors: true, transparent: true, opacity: 0.6, sizeAttenuation: true, depthWrite: false, depthTest: false }));
-  pointsMesh.frustumCulled = false;
-  scene.add(pointsMesh);
-  const activeGeom = new THREE.BufferGeometry();
-  const maxActive = 500;
-  activeGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(maxActive * 3), 3));
-  activeGeom.setAttribute('color', new THREE.BufferAttribute(new Float32Array(maxActive * 3), 3));
-  activeGeom.setAttribute('size', new THREE.BufferAttribute(new Float32Array(maxActive), 1));
-  activeGeom.setAttribute('rate', new THREE.BufferAttribute(new Float32Array(maxActive), 1));
-  activeGeom.setDrawRange(0, 0);
-  activeMesh = new THREE.Points(activeGeom, new THREE.PointsMaterial({ size: 8, vertexColors: true, transparent: true, opacity: 1.0, sizeAttenuation: true, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending }));
-  activeMesh.frustumCulled = false;
-  scene.add(activeMesh);
-  const edgeGeom = new THREE.BufferGeometry();
-  edgeGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(1000 * 2 * 3), 3));
-  edgeGeom.setAttribute('color', new THREE.BufferAttribute(new Float32Array(1000 * 2 * 3), 3));
-  edgeGeom.setDrawRange(0, 0);
-  edgesLine = new THREE.LineSegments(edgeGeom, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.5, depthWrite: false, depthTest: false }));
-  edgesLine.renderOrder = 10;
-  scene.add(edgesLine);
+
+  // Sampled neurons: one Points cloud for the whole atlas.
+  {
+    const n = atlas.neurons.length;
+    const positions = new Float32Array(n * 3);
+    const colors = new Float32Array(n * 3);
+    for (let k = 0; k < n; k++) {
+      const nr = atlas.neurons[k];
+      const L = lobeIndex[nr[0]];
+      positions[k*3] = nr[1]; positions[k*3+1] = nr[2]; positions[k*3+2] = nr[3];
+      scratchColor.set(L.color).multiplyScalar(0.7 + 0.5 * mulberry32(hashStr('n' + k))());
+      colors[k*3] = scratchColor.r; colors[k*3+1] = scratchColor.g; colors[k*3+2] = scratchColor.b;
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    const pts = new THREE.Points(geom, new THREE.PointsMaterial({
+      size: 3, vertexColors: true, transparent: true, opacity: 0.9,
+      sizeAttenuation: true, depthWrite: false, depthTest: false
+    }));
+    pts.frustumCulled = false;
+    scene.add(pts);
+  }
+
+  // Static inter-lobe tracts (gentle arcs between lobe centers).
+  {
+    const tPts = [];
+    for (const [a, b] of TRACTS) {
+      if (a >= lobeIndex.length || b >= lobeIndex.length) continue;
+      scratchV0.copy(lobeIndex[a].center);
+      scratchV1.copy(lobeIndex[b].center);
+      scratchVC.addVectors(scratchV0, scratchV1).multiplyScalar(0.5);
+      scratchVC.z += 110;
+      let px = 0, py = 0, pz = 0;
+      for (let s = 0; s <= 20; s++) {
+        const t = s / 20, it = 1 - t;
+        const x = it*it*scratchV0.x + 2*it*t*scratchVC.x + t*t*scratchV1.x;
+        const y = it*it*scratchV0.y + 2*it*t*scratchVC.y + t*t*scratchV1.y;
+        const z = it*it*scratchV0.z + 2*it*t*scratchVC.z + t*t*scratchV1.z;
+        if (s > 0) tPts.push(px, py, pz, x, y, z);
+        px = x; py = y; pz = z;
+      }
+    }
+    const tg = new THREE.BufferGeometry();
+    tg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(tPts), 3));
+    scene.add(new THREE.LineSegments(tg, new THREE.LineBasicMaterial({
+      color: 0x5f7396, transparent: true, opacity: 0.35, depthWrite: false
+    })));
+  }
+
+  // Active overlay: fixed-size typed arrays (unchanged budgets).
+  {
+    const activeGeom = new THREE.BufferGeometry();
+    activeGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAX_ACTIVE * 3), 3));
+    activeGeom.setAttribute('color', new THREE.BufferAttribute(new Float32Array(MAX_ACTIVE * 3), 3));
+    activeGeom.setDrawRange(0, 0);
+    activeMesh = new THREE.Points(activeGeom, new THREE.PointsMaterial({
+      size: 8, vertexColors: true, transparent: true, opacity: 1.0,
+      sizeAttenuation: true, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending
+    }));
+    activeMesh.frustumCulled = false;
+    scene.add(activeMesh);
+    const edgeGeom = new THREE.BufferGeometry();
+    edgeGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAX_EDGES * 2 * 3), 3));
+    edgeGeom.setAttribute('color', new THREE.BufferAttribute(new Float32Array(MAX_EDGES * 2 * 3), 3));
+    edgeGeom.setDrawRange(0, 0);
+    edgesLine = new THREE.LineSegments(edgeGeom, new THREE.LineBasicMaterial({
+      vertexColors: true, transparent: true, opacity: 0.5, depthWrite: false, depthTest: false
+    }));
+    edgesLine.renderOrder = 10;
+    scene.add(edgesLine);
+  }
   $('loading').classList.add('hidden');
-  animate();
+  requestRender();
 }
 
 function updateActive(trace) {
-  if (!trace || !trace.nodes || !trace.nodes.length) {
-    activeMesh.geometry.setDrawRange(0, 0);
-    edgesLine.geometry.setDrawRange(0, 0);
-    return;
-  }
-  const nodes = trace.nodes;
-  const edges = trace.edges || [];
+  const nodes = (trace && trace.nodes) || [];
+  const edges = (trace && trace.edges) || [];
   const aPos = activeMesh.geometry.attributes.position.array;
   const aColor = activeMesh.geometry.attributes.color.array;
-  const aSize = activeMesh.geometry.attributes.size.array;
-  const aRate = activeMesh.geometry.attributes.rate.array;
-  let activeCount = 0;
-  for (const n of nodes) {
-    if (activeCount >= 500) break;
-    const cat = catalogById.get(n.id);
-    if (!cat) continue;
-    const rate = clamp(n.rate || 0);
-    aPos[activeCount*3] = cat.x; aPos[activeCount*3+1] = cat.y; aPos[activeCount*3+2] = 5;
-    const c = new THREE.Color(cat.color);
-    aColor[activeCount*3] = c.r; aColor[activeCount*3+1] = c.g; aColor[activeCount*3+2] = c.b;
-    aSize[activeCount] = 6 + rate * 10;
-    aRate[activeCount] = rate;
+  const idToIdx = new Map();
+  const lobeAgg = new Float32Array(lobeIndex.length);
+  activeCount = 0;
+  for (const nd of nodes) {
+    if (activeCount >= MAX_ACTIVE) break;
+    const L = nodePoint(nd, scratchVec);
+    const rate = clamp(nd.rate || 0);
+    aPos[activeCount*3] = scratchVec.x;
+    aPos[activeCount*3+1] = scratchVec.y;
+    aPos[activeCount*3+2] = scratchVec.z + 6;
+    scratchColor.set(L.color);
+    aColor[activeCount*3] = scratchColor.r;
+    aColor[activeCount*3+1] = scratchColor.g;
+    aColor[activeCount*3+2] = scratchColor.b;
+    idToIdx.set(String(nd.id), activeCount);
+    lobeAgg[lobeIdxOf(nd)] += rate;
     activeCount++;
   }
   activeMesh.geometry.attributes.position.needsUpdate = true;
   activeMesh.geometry.attributes.color.needsUpdate = true;
-  activeMesh.geometry.attributes.size.needsUpdate = true;
-  activeMesh.geometry.attributes.rate.needsUpdate = true;
   activeMesh.geometry.setDrawRange(0, activeCount);
+  // Lobe glow targets ease toward these on the render loop (telemetry-tick granularity).
+  for (let i = 0; i < lobeMats.length; i++) {
+    lobeMats[i].userData.target = Math.min(0.6, lobeAgg[i] * 0.12);
+  }
   const ePos = edgesLine.geometry.attributes.position.array;
   const eColor = edgesLine.geometry.attributes.color.array;
   let edgeCount = 0;
   for (const e of edges) {
-    if (edgeCount >= 1000) break;
-    const src = catalogById.get(e.source);
-    const tgt = catalogById.get(e.target);
-    if (!src || !tgt) continue;
-    const c = new THREE.Color(e.sign === 'inhibitory' ? '#ffbe62' : '#48d8ff');
-    ePos[edgeCount*6] = src.x; ePos[edgeCount*6+1] = src.y; ePos[edgeCount*6+2] = 5;
-    ePos[edgeCount*6+3] = tgt.x; ePos[edgeCount*6+4] = tgt.y; ePos[edgeCount*6+5] = 5;
-    eColor[edgeCount*6] = c.r; eColor[edgeCount*6+1] = c.g; eColor[edgeCount*6+2] = c.b;
+    if (edgeCount >= MAX_EDGES) break;
+    const si = idToIdx.get(String(e.source));
+    const ti = idToIdx.get(String(e.target));
+    if (si == null || ti == null) continue;
+    const c = e.sign === 'inhibitory' ? EDGE_INH : EDGE_EXC;
+    ePos[edgeCount*6] = aPos[si*3];     ePos[edgeCount*6+1] = aPos[si*3+1]; ePos[edgeCount*6+2] = aPos[si*3+2];
+    ePos[edgeCount*6+3] = aPos[ti*3];   ePos[edgeCount*6+4] = aPos[ti*3+1]; ePos[edgeCount*6+5] = aPos[ti*3+2];
+    eColor[edgeCount*6] = c.r;   eColor[edgeCount*6+1] = c.g; eColor[edgeCount*6+2] = c.b;
     eColor[edgeCount*6+3] = c.r; eColor[edgeCount*6+4] = c.g; eColor[edgeCount*6+5] = c.b;
     edgeCount++;
   }
   edgesLine.geometry.attributes.position.needsUpdate = true;
   edgesLine.geometry.attributes.color.needsUpdate = true;
   edgesLine.geometry.setDrawRange(0, edgeCount * 2);
+  lastTelemetry = performance.now();
+  requestRender();
 }
 
+// ── idle-aware render loop: runs only while there is work to do ──
+function requestRender() { dirty = true; ensureLoop(); }
+function ensureLoop() { if (!rafId && atlasReady) rafId = requestAnimationFrame(tick); }
+function tick(now) {
+  rafId = 0;
+  if (document.hidden) return; // stop entirely when the tab is hidden
+  const pulsing = activeCount > 0 && (now - lastTelemetry) < PULSE_TTL_MS;
+  let glowMoving = false;
+  for (const m of lobeMats) {
+    const t = m.userData.target || 0;
+    const d = t - m.emissiveIntensity;
+    if (Math.abs(d) > 0.004) { m.emissiveIntensity += d * 0.25; glowMoving = true; }
+  }
+  if (pulsing) activeMesh.material.size = 8 + 2.2 * Math.sin(now * 0.005); // one uniform, no buffer upload
+  if (dirty || pulsing || glowMoving || interacting) {
+    controls.update();
+    renderer.render(scene, camera);
+    dirty = false;
+  }
+  if (pulsing || glowMoving || interacting || dirty) rafId = requestAnimationFrame(tick);
+  // otherwise the loop stops; telemetry ticks, controls, or resize restart it
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) requestRender(); });
+
 function renderUI(c, p) {
-  let raw = p.trace || {};
-  let active = Array.isArray(raw.nodes) && raw.nodes.length > 0;
-  let t = active ? raw : {...raw, mode: 'idle'};
+  const raw = p.trace || {};
+  const active = Array.isArray(raw.nodes) && raw.nodes.length > 0;
+  const t = active ? raw : { ...raw, mode: 'idle' };
   $('badges').innerHTML = [
     t.mode || 'idle',
     active ? (t.truncated ? 'budget truncated' : 'complete') : 'motif preview',
-    t.checksum && t.checksum !== 'unknown' ? 'verified catalog' : 'awaiting catalog'
-  ].map((x, i) => `<span class="badge ${i===0 && x==='live' ? 'live' : ''}">${esc(x)}</span>`).join('');
+    'lobe atlas'
+  ].map((x, i) => `<span class="badge ${i === 0 && x === 'live' ? 'live' : ''}">${esc(x)}</span>`).join('');
   $('stats').innerHTML = [
     ["Evaluated cells", active ? t.active_nodes : "—"],
     ["Evaluated edges", active ? t.active_edges : "—"],
-    ["Drawn cells", active ? t.display_nodes : catalogNodes.length],
-    ["Drawn edges", active ? t.display_edges : "—"]
+    ["Sampled neurons", atlas ? atlas.neuron_count.toLocaleString() : "—"],
+    ["Active traces", active ? t.display_edges : "—"]
   ].map(([n, v]) => `<div class="stat"><b>${v ?? '—'}</b><span>${n}</span></div>`).join('');
   meters(c.neural_state || {});
   updateActive(active ? raw : null);
-  neuralState = c.neural_state || {};
-  modes = c.modes || {};
   $('outputs').innerHTML = textList(
     Object.entries(raw.outputs || {}).map(([k, v]) => `${k.padEnd(18)} ${Number(v).toFixed(4)}`),
     active ? 'No output readouts.' : 'Waiting for a live evaluation.'
@@ -254,46 +440,53 @@ function renderUI(c, p) {
     (raw.observations || []).map(o => `${o.modality} · ${o.consented ? 'consented' : 'blocked'} · ${(Number(o.salience) || 0).toFixed(2)}`),
     'No observations recorded.'
   );
-  $('modes').innerHTML = esc(JSON.stringify(modes, null, 2));
-  fetch('/studio/fly/api/causal?limit=16').then(r => r.ok ? r.json() : {events:[]}).then(d => {
-    const ev = d.events || [];
-    $('causal').innerHTML = ev.length ? ev.slice().reverse().map(e => {
-      const k = e.kind || e.source || 'event';
-      const extra = e.topic || e.text_preview || e.direction || '';
-      const dlt = (e.delta != null) ? ` Δ${e.delta}` : '';
-      return esc(`${k}${extra ? ' · '+extra : ''}${dlt}`);
-    }).join('<br>') : 'No influence events yet.';
-  }).catch(() => {});
-  fetch('/studio/fly/api/body').then(r => r.ok ? r.json() : {}).then(d => {
-    const b = d.body || {};
-    const intents = d.avatar_intents || [];
-    const lines = BODY_KEYS.map(([k, label]) => {
-      const v = b[k];
-      const n = (v == null) ? '—' : Number(v).toFixed(3);
-      return `${label.padEnd(14)} ${n}`;
-    });
-    if (b.cancelled) lines.unshift('CANCELLED (GF interrupt)');
-    lines.push(`mode ${b.mode || '—'}`);
-    const el = $('body-drive');
-    if (el) el.innerHTML = lines.map(esc).join('<br>');
-    if (intents.length && $('intents')) {
-      $('intents').innerHTML = intents.map(i =>
-        esc(`${i.kind}:${i.name} · ${Number(i.intensity).toFixed(2)} — ${i.reason}`)
-      ).join('<br>');
-    }
-    try { if (window.aikoApplyDnBody) window.aikoApplyDnBody(b, intents); } catch (_) {}
-  }).catch(() => {});
+  $('modes').innerHTML = esc(JSON.stringify(c.modes || {}, null, 2));
+}
+
+function renderSlowPanels(causal, body) {
+  const ev = (causal && causal.events) || [];
+  $('causal').innerHTML = ev.length ? ev.slice().reverse().map(e => {
+    const k = e.kind || e.source || 'event';
+    const extra = e.topic || e.text_preview || e.direction || '';
+    const dlt = (e.delta != null) ? ` Δ${e.delta}` : '';
+    return esc(`${k}${extra ? ' · ' + extra : ''}${dlt}`);
+  }).join('<br>') : 'No influence events yet.';
+  const b = (body && body.body) || {};
+  const intents = (body && body.avatar_intents) || [];
+  const lines = BODY_KEYS.map(([k, label]) => {
+    const v = b[k];
+    const n = (v == null) ? '—' : Number(v).toFixed(3);
+    return `${label.padEnd(14)} ${n}`;
+  });
+  if (b.cancelled) lines.unshift('CANCELLED (GF interrupt)');
+  lines.push(`mode ${b.mode || '—'}`);
+  const el = $('body-drive');
+  if (el) el.innerHTML = lines.map(esc).join('<br>');
+  if (intents.length && $('intents')) {
+    $('intents').innerHTML = intents.map(i =>
+      esc(`${i.kind}:${i.name} · ${Number(i.intensity).toFixed(2)} — ${i.reason}`)
+    ).join('<br>');
+  }
+  try { if (window.aikoApplyDnBody) window.aikoApplyDnBody(b, intents); } catch (_) {}
 }
 
 async function refreshTelemetry() {
-  if (!catalogReady || telemetryRequest) return;
-  telemetryRequest = Promise.all([
+  if (!atlasReady || telemetryRequest) return;
+  slowTick++;
+  const doSlow = slowTick % 3 === 1; // causal + body at ~6s cadence
+  const jobs = [
     fetch("/studio/fly/api/circuit"),
     fetch("/studio/fly/api/trace?node_limit=500&edge_limit=1000")
-  ]).then(async ([circuitRes, traceRes]) => {
-    if (!circuitRes.ok || !traceRes.ok) throw new Error("Telemetry unavailable");
-    const [circuit, trace] = await Promise.all([circuitRes.json(), traceRes.json()]);
+  ];
+  if (doSlow) jobs.push(fetch("/studio/fly/api/causal?limit=16"), fetch("/studio/fly/api/body"));
+  telemetryRequest = Promise.all(jobs).then(async (rs) => {
+    for (const r of rs) if (!r.ok) throw new Error("Telemetry unavailable");
+    const [circuit, trace] = await Promise.all([rs[0].json(), rs[1].json()]);
     renderUI(circuit, trace);
+    if (doSlow) {
+      const [causal, body] = await Promise.all([rs[2].json(), rs[3].json()]);
+      renderSlowPanels(causal, body);
+    }
   }).catch(e => {
     console.warn("Fly telemetry refresh failed", e);
   }).finally(() => {
@@ -302,39 +495,29 @@ async function refreshTelemetry() {
   await telemetryRequest;
 }
 
-async function loadCatalog() {
-  if (catalogReady) { await refreshTelemetry(); return; }
+async function loadAtlas() {
+  if (atlasReady) { await refreshTelemetry(); return; }
   try {
-    const catalogRes = await fetch("/studio/fly/api/catalog?limit=211577");
-    const catalog = await catalogRes.json();
-    const allCatalogNodes = catalog.nodes || [];
-    catalogById = new Map(allCatalogNodes.map(n => [n.id, n]));
-    catalogNodes = allCatalogNodes;
+    const res = await fetch("/studio/fly/api/lobes");
+    if (!res.ok) throw new Error("Atlas unavailable");
+    const data = await res.json();
+    atlas = data.atlas;
+    lobeIndex = atlas.lobes.map(L => ({
+      id: L.id, name: L.name, color: L.color, groups: L.groups, samples: L.samples,
+      center: new THREE.Vector3(L.center[0], L.center[1], L.center[2]),
+      radii: new THREE.Vector3(L.radii[0], L.radii[1], L.radii[2])
+    }));
+    groupLobe = atlas.group_lobe || {};
+    lateral = atlas.lateral || {};
     buildLegend();
-    initThree();
-    catalogReady = true;
+    initScene();
+    atlasReady = true;
     $("loading").classList.add("hidden");
     await refreshTelemetry();
   } catch (e) {
-    $("loading").innerHTML = 'Catalog load failed: ' + esc(String(e)) + ' <button id="retry-load">Retry</button>';
-    $("retry-load").onclick = loadCatalog;
+    $("loading").innerHTML = 'Atlas load failed: ' + esc(String(e)) + ' <button id="retry-load">Retry</button>';
+    $("retry-load").onclick = loadAtlas;
   }
-}
-
-function animate(time = performance.now()) {
-  animationId = requestAnimationFrame(animate);
-  controls.update();
-  if (activeMesh && activeMesh.geometry.attributes.rate) {
-    const rates = activeMesh.geometry.attributes.rate.array;
-    const sizes = activeMesh.geometry.attributes.size.array;
-    const drawRange = Math.min(activeMesh.geometry.drawRange.count, 500);
-    for (let i = 0; i < drawRange; i++) {
-      const pulse = 1 + 0.3 * Math.sin(time * 0.004 + i);
-      sizes[i] = (6 + rates[i] * 10) * pulse;
-    }
-    activeMesh.geometry.attributes.size.needsUpdate = true;
-  }
-  renderer.render(scene, camera);
 }
 
 window.addEventListener('resize', () => {
@@ -343,9 +526,11 @@ window.addEventListener('resize', () => {
   renderer.setSize(canvas.clientWidth, canvas.clientHeight);
   camera.aspect = canvas.clientWidth / canvas.clientHeight;
   camera.updateProjectionMatrix();
+  requestRender();
 });
 
-$('refresh').onclick = loadCatalog;
-loadCatalog();
+$('refresh').onclick = loadAtlas;
+loadAtlas();
 setInterval(refreshTelemetry, 2000);
+
 </script></body></html>

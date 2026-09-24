@@ -95,14 +95,18 @@ header h1 {
   opacity: 0.95;
 }
 
-/* Neural pulse animation for active nodes */
-@keyframes neuralPulse {
-  0%, 100% { opacity: 0.12; transform: scale(1); }
-  50% { opacity: 0.28; transform: scale(1.06); }
+/* Layered neural-network column labels */
+.layer-label {
+  fill: var(--dim);
+  font-size: 11px;
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  pointer-events: none;
+  opacity: 0.85;
 }
-.pulse-glow {
-  animation: neuralPulse 3s ease-in-out infinite;
-}
+
+/* Straight connector lines between neurons */
+.edge { pointer-events: none; }
 
 /* Shared STM / LTM / KB studio tabs, styled like Approval Studio filters. */
 .memory-studio-tabs {

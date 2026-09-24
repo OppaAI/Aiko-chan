@@ -1,9 +1,31 @@
-/* Knowledge Graph Studio — knowledge + entity nodes only */
+/* Knowledge Graph Studio — knowledge + entity nodes only.
+ *
+ * Neural-net layered view: knowledge chunks form the left column, entity
+ * hubs the right column, joined by thin straight connectors. Layout is
+ * fully deterministic (no force simulation): fixed x per column, y spread
+ * evenly by importance, so re-filtering is instant and costs no per-tick
+ * DOM churn. One flat circle per node, one shared subtle glow, no
+ * per-node gradient defs.
+ */
 const API_BASE = (window.KNOWLEDGE_API_BASE || GraphBoot.apiBase()).replace(/\/+$/, '');
 const API_ROOT = API_BASE.endsWith('/api') ? API_BASE : API_BASE + '/api';
+
 let graph = { nodes: [], edges: [], meta: {} };
-let simulation = null;
 let zoomBeh = null;
+let viewport = null;   // zoom target group
+let edgesG = null;     // lines layer
+let nodesG = null;     // node layer
+let labelsG = null;    // layer labels
+let linkSel = null;    // current line selection (for drag updates)
+let currentNodes = [];
+let currentLinks = [];
+
+const COL_CHUNK = '#4ade80';
+const COL_ENTITY = '#a78bfa';
+const EDGE_ABOUT = '#6ee7a8';
+const EDGE_SAMEDOC = '#5b4a6e';
+const LAYER_TOP = 70;
+const LAYER_BOTTOM_PAD = 48;
 
 function importanceOf(d) {
   const sc = d.scores || {};
@@ -27,13 +49,12 @@ function nodeOpacity(d) {
   return 0.22 + importanceOf(d) * 0.78;
 }
 
-function glowStrength(d) {
-  return 0.4 + importanceOf(d) * 2.8;
+function nodeColor(d) {
+  return d.type === 'entity' ? COL_ENTITY : COL_CHUNK;
 }
 
-function nodeColor(d) {
-  if (d.type === 'entity') return '#a78bfa';
-  return '#4ade80';
+function nodeLabel(d) {
+  return String(d.label || d.doc_title || d.text || d.id || '').slice(0, 80);
 }
 
 function escapeHtml(s) {
@@ -65,7 +86,7 @@ async function loadGraph() {
   if (graph && graph.meta && graph.meta.error) {
     throw new Error(`graph export failed: ${graph.meta.error}`);
   }
-  render();
+  update();
   const count = (graph.nodes || []).length;
   const details = document.getElementById('details');
   if (!count) {
@@ -76,42 +97,82 @@ async function loadGraph() {
   }
 }
 
+/* Single-pass filter over the raw payload — no object cloning. Returns the
+ * node objects themselves plus links resolved to node references. */
 function filteredNodesEdges() {
   const minI = parseFloat(document.getElementById('min-imp').value || '0') || 0;
   const entQ = (document.getElementById('filter-entity').value || '').trim().toLowerCase();
+  const all = graph.nodes || [];
+  const rawEdges = graph.edges || [];
 
-  let nodes = (graph.nodes || []).map(n => ({ ...n })).filter(d => {
-    if (d.type === 'entity') {
-      if (entQ && !(String(d.label || d.text || '').toLowerCase().includes(entQ))) return false;
-      return true;
-    }
-    if (importanceOf(d) < minI) return false;
+  // Pass 1: knowledge chunks that survive the importance / entity filters.
+  const keepChunk = new Set();
+  for (const n of all) {
+    if (n.type === 'entity') continue;
+    if (importanceOf(n) < minI) continue;
     if (entQ) {
-      const ents = (d.entities || []).map(e => String(e).toLowerCase());
-      if (!ents.some(e => e.includes(entQ))) return false;
+      let hit = false;
+      const ents = n.entities || [];
+      for (const e of ents) {
+        if (String(e).toLowerCase().includes(entQ)) { hit = true; break; }
+      }
+      if (!hit) continue;
     }
-    return true;
-  });
-
-  const keep = new Set(nodes.filter(n => n.type === 'knowledge').map(n => n.id));
-  for (const e of (graph.edges || [])) {
-    if (e.type === 'about' && keep.has(e.source)) keep.add(e.target);
+    keepChunk.add(n.id);
   }
-  nodes = (graph.nodes || []).map(n => ({ ...n })).filter(n => {
-    if (n.type === 'knowledge') return keep.has(n.id) && importanceOf(n) >= minI;
-    if (n.type === 'entity') {
-      if (!keep.has(n.id)) return false;
-      if (entQ && !(String(n.label || '').toLowerCase().includes(entQ))) return false;
-      return true;
-    }
-    return false;
-  });
 
-  const idSet = new Set(nodes.map(n => n.id));
-  const links = (graph.edges || [])
-    .map(e => ({ ...e }))
-    .filter(e => idSet.has(e.source) && idSet.has(e.target));
+  // Pass 2: entities referenced by surviving chunks via 'about' edges.
+  const keepEnt = new Set();
+  for (const e of rawEdges) {
+    if (e.type === 'about' && keepChunk.has(e.source)) keepEnt.add(e.target);
+  }
+
+  // Pass 3: final node list + id lookup.
+  const nodes = [];
+  const byId = new Map();
+  for (const n of all) {
+    if (n.type === 'entity') {
+      if (!keepEnt.has(n.id)) continue;
+      if (entQ && !String(n.label || n.text || '').toLowerCase().includes(entQ)) continue;
+    } else if (!keepChunk.has(n.id)) {
+      continue;
+    }
+    nodes.push(n);
+    byId.set(n.id, n);
+  }
+
+  // Pass 4: links resolved to node objects.
+  const links = [];
+  for (const e of rawEdges) {
+    const s = byId.get(e.source);
+    const t = byId.get(e.target);
+    if (s && t) links.push({ source: s, target: t, type: e.type });
+  }
   return { nodes, links };
+}
+
+/* Deterministic layered layout: fixed x per column, y spread evenly by
+ * importance (most important near the top). O(n), runs once per update. */
+function layoutLayered(nodes, w, h) {
+  const chunks = [];
+  const ents = [];
+  for (const n of nodes) (n.type === 'entity' ? ents : chunks).push(n);
+  chunks.sort((a, b) => importanceOf(b) - importanceOf(a));
+  ents.sort((a, b) => importanceOf(b) - importanceOf(a));
+  const top = LAYER_TOP;
+  const bottom = Math.max(top + 60, h - LAYER_BOTTOM_PAD);
+  placeColumn(chunks, w * 0.32, top, bottom);
+  placeColumn(ents, w * 0.68, top, bottom);
+  return { chunks: chunks.length, ents: ents.length };
+}
+
+function placeColumn(list, x, top, bottom) {
+  const n = list.length;
+  for (let i = 0; i < n; i++) {
+    const d = list[i];
+    d.x = x;
+    d.y = n === 1 ? (top + bottom) / 2 : top + ((bottom - top) * i) / (n - 1);
+  }
 }
 
 function showDetails(d) {
@@ -142,85 +203,147 @@ function showDetails(d) {
     '<h3 style="margin:12px 0 6px;font-size:13px">Scores</h3>' + bars;
 }
 
-function render() {
-  if (simulation) {
-    simulation.stop();
-    simulation = null;
-  }
+function ensureScene() {
+  if (viewport) return;
   const svg = d3.select('#svg');
-  svg.selectAll('*').remove();
+  const defs = svg.append('defs');
+  // One shared subtle glow for the whole node layer — a single offscreen
+  // pass instead of per-node filters.
+  GraphBoot.addGlowFilter(defs, 'netglow', 2.2);
+
+  viewport = svg.append('g').attr('id', 'viewport');
+  zoomBeh = GraphBoot.makeZoom({ scaleExtent: [0.15, 4], target: viewport });
+  svg.call(zoomBeh);
+
+  labelsG = viewport.append('g').attr('id', 'layer-labels');
+  edgesG = viewport.append('g').attr('id', 'edges');
+  nodesG = viewport.append('g').attr('id', 'nodes').attr('filter', 'url(#netglow)');
+
+  nodesG.append('title').text('Drag nodes to rearrange · scroll to zoom');
+}
+
+function edgeKey(l) {
+  return l.source.id + '|' + l.target.id + '|' + (l.type || '');
+}
+
+function positionEdges(sel) {
+  sel
+    .attr('x1', l => l.source.x).attr('y1', l => l.source.y)
+    .attr('x2', l => l.target.x).attr('y2', l => l.target.y);
+}
+
+function makeNodeDrag() {
+  return d3.drag()
+    .on('drag', (ev, d) => {
+      d.x = ev.x;
+      d.y = ev.y;
+      d3.select(ev.sourceEvent.target.closest('g.node'))
+        .attr('transform', `translate(${d.x},${d.y})`);
+      if (linkSel) positionEdges(linkSel);
+    });
+}
+
+/* Update in place: keyed joins, deterministic layout, no teardown, no
+ * simulation. Cheap enough to run on every filter change. */
+function update() {
+  ensureScene();
+  const svg = d3.select('#svg');
   const canvas = document.getElementById('canvas');
   const w = canvas.clientWidth || 800;
   const h = canvas.clientHeight || 600;
   svg.attr('viewBox', [0, 0, w, h]);
 
   const { nodes, links } = filteredNodesEdges();
-  nodes.forEach(d => {
-    d._col = nodeColor(d);
-    d._glassId = 'g' + String(d.id).replace(/[^a-zA-Z0-9]/g, '_');
-  });
+  currentNodes = nodes;
+  currentLinks = links;
+  const counts = layoutLayered(nodes, w, h);
 
-  const gRoot = svg.append('g');
-  zoomBeh = GraphBoot.makeZoom({ scaleExtent: [0.15, 4], target: gRoot });
-  svg.call(zoomBeh);
+  // Layer labels + faint column guides.
+  const labelData = [
+    { x: w * 0.32, text: `KNOWLEDGE · ${counts.chunks}` },
+    { x: w * 0.68, text: `ENTITIES · ${counts.ents}` },
+  ];
+  const labels = labelsG.selectAll('text.layer-label').data(labelData, d => d.text.split(' ·')[0]);
+  labels.join(
+    enter => enter.append('text')
+      .attr('class', 'layer-label')
+      .attr('text-anchor', 'middle')
+      .attr('y', 34)
+      .attr('fill', '#8b7a9e')
+      .attr('font-size', '11px')
+      .attr('letter-spacing', '0.18em')
+      .attr('font-weight', '600'),
+    updateLbl => updateLbl,
+    exit => exit.remove()
+  )
+    .attr('x', d => d.x)
+    .text(d => d.text);
 
-  const defs = svg.append('defs');
-  nodes.forEach(d => {
-    const grad = defs.append('radialGradient').attr('id', d._glassId)
-      .attr('cx', '35%').attr('cy', '30%').attr('r', '65%');
-    grad.append('stop').attr('offset', '0%').attr('stop-color', '#fff').attr('stop-opacity', 0.35);
-    grad.append('stop').attr('offset', '45%').attr('stop-color', d._col).attr('stop-opacity', 0.9);
-    grad.append('stop').attr('offset', '100%').attr('stop-color', d._col).attr('stop-opacity', 0.5);
-  });
-  const glow = defs.append('filter').attr('id', 'glow')
-    .attr('x', '-50%').attr('y', '-50%').attr('width', '200%').attr('height', '200%');
-  glow.append('feGaussianBlur').attr('in', 'SourceGraphic').attr('stdDeviation', '1.5').attr('result', 'blur');
-  glow.append('feMerge').selectAll('feMergeNode').data(['blur', 'SourceGraphic']).join('feMergeNode').attr('in', d => d);
+  const guides = labelsG.selectAll('line.col-guide').data(labelData, d => d.text.split(' ·')[0]);
+  guides.join(
+    enter => enter.append('line')
+      .attr('class', 'col-guide')
+      .attr('stroke', '#3d2f4f')
+      .attr('stroke-width', 1)
+      .attr('stroke-dasharray', '3 6')
+      .attr('stroke-opacity', 0.5),
+    updateG => updateG,
+    exit => exit.remove()
+  )
+    .attr('x1', d => d.x).attr('x2', d => d.x)
+    .attr('y1', LAYER_TOP - 18)
+    .attr('y2', Math.max(LAYER_TOP + 42, h - LAYER_BOTTOM_PAD));
 
-  const link = gRoot.append('g').selectAll('line').data(links).join('line')
-    .attr('stroke', d => d.type === 'same_doc' ? '#5b4a6e' : '#6ee7a8')
-    .attr('stroke-width', d => d.type === 'about' ? 1.2 : 0.7)
-    .attr('stroke-opacity', 0.35);
+  // Edges: one thin straight line each.
+  linkSel = edgesG.selectAll('line').data(links, edgeKey);
+  linkSel = linkSel.join(
+    enter => enter.append('line')
+      .attr('stroke', l => (l.type === 'about' ? EDGE_ABOUT : EDGE_SAMEDOC))
+      .attr('stroke-width', l => (l.type === 'about' ? 1.1 : 0.7))
+      .attr('stroke-opacity', 0.30),
+    updateE => updateE,
+    exit => exit.remove()
+  );
+  positionEdges(linkSel);
 
-  const node = gRoot.append('g').selectAll('g').data(nodes).join('g')
-    .style('cursor', 'pointer')
-    .call(GraphBoot.makeDrag(() => simulation))
-    .on('click', (ev, d) => { ev.stopPropagation(); showDetails(d); });
-
-  node.append('circle')
-    .attr('r', d => nodeRadius(d) + glowStrength(d) * 0.4)
-    .attr('fill', d => d._col)
-    .attr('opacity', d => 0.12 + importanceOf(d) * 0.2)
-    .attr('filter', 'url(#glow)');
-
-  node.append('circle')
+  // Nodes: one flat circle each.
+  const nodeSel = nodesG.selectAll('g.node').data(nodes, d => d.id);
+  const entered = nodeSel.join(
+    enter => {
+      const g = enter.append('g')
+        .attr('class', 'node')
+        .style('cursor', 'grab')
+        .call(makeNodeDrag())
+        .on('click', (ev, d) => { ev.stopPropagation(); showDetails(d); });
+      g.append('circle');
+      g.append('title');
+      return g;
+    },
+    updateN => updateN,
+    exit => exit.remove()
+  );
+  entered
+    .attr('transform', d => `translate(${d.x},${d.y})`);
+  entered.select('circle')
     .attr('r', nodeRadius)
-    .attr('fill', d => `url(#${d._glassId})`)
-    .attr('stroke', d => d._col)
-    .attr('stroke-width', 0.9)
-    .attr('stroke-opacity', d => 0.35 + importanceOf(d) * 0.4)
-    .attr('opacity', nodeOpacity);
-
-  simulation = GraphBoot.makeSimulation(nodes, links, {
-    w,
-    h,
-    charge: -180,
-    nodeRadius,
-    linkDistance: 70,
-    linkStrength: 0.35,
-  })
-    .on('tick', () => {
-      link
-        .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
-        .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
-      node.attr('transform', d => `translate(${d.x},${d.y})`);
-    });
+    .attr('fill', nodeColor)
+    .attr('fill-opacity', nodeOpacity)
+    .attr('stroke', nodeColor)
+    .attr('stroke-width', 1)
+    .attr('stroke-opacity', 0.85);
+  entered.select('title')
+    .text(d => `${nodeLabel(d)} — importance ${importanceOf(d).toFixed(2)}`);
 }
 
 function svgZoom(k) {
   if (!zoomBeh) return;
-  const svg = d3.select('#svg');
-  svg.transition().call(zoomBeh.scaleBy, k);
+  d3.select('#svg').transition().call(zoomBeh.scaleBy, k);
+}
+
+let resizeTimer = null;
+function onResize() {
+  if (resizeTimer) clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => { resizeTimer = null; update(); }, 150);
 }
 
 function init() {
@@ -231,13 +354,14 @@ function init() {
       el.textContent = 'Load failed: ' + err;
     });
   };
-  document.getElementById('refilter').onclick = () => render();
+  document.getElementById('refilter').onclick = () => update();
   document.getElementById('z-in').onclick = () => svgZoom(1.25);
   document.getElementById('z-out').onclick = () => svgZoom(0.8);
   document.getElementById('z-fit').onclick = () => {
     if (!zoomBeh) return;
     d3.select('#svg').transition().call(zoomBeh.transform, d3.zoomIdentity);
   };
+  window.addEventListener('resize', onResize);
 
   loadGraph().catch(err => {
     const el = document.getElementById('details');

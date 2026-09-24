@@ -25,6 +25,9 @@
   const ROW_GAP = 130;
   const STICKY_W = 210;
   const STICKY_H = 96;
+  const SUB_W = 148;
+  const SUB_H = 46;
+  const SUB_GAP = 10;
 
   // GraphBoot ships with the studio shell; fall back gracefully if absent.
   const Boot = window.GraphBoot || {
@@ -56,6 +59,69 @@
   let svgRoot = null;
   let viewport = null;
   let dragging = null;
+  let edgeFlowOn = true;
+  let graphNodeById = {};
+  let resizeTimer = null;
+
+  // Every node gets a real icon: catalog glyph, or the label's initial when the
+  // catalog only has the generic ◆ fallback.
+  function nodeIcon(meta) {
+    const icon = meta && meta.icon;
+    if (icon && icon !== "◆") return icon;
+    const label = (meta && (meta.label || meta.name)) || "?";
+    return label.trim().charAt(0).toUpperCase() || "◆";
+  }
+
+  // ── attached sub-nodes (n8n: Chat Model / Memory / Tool under an AI Agent) ─
+  // A node with `attached_to` renders docked under its parent instead of as a
+  // free card; the depends_on edge is drawn as a dashed connector.
+  function isAttached(node) { return !!(node && node.attached_to); }
+
+  function parentOf(node) {
+    if (!isAttached(node) || !current) return null;
+    return current.nodes.find((n) => n.id === node.attached_to) || null;
+  }
+
+  function subKindOf(node) {
+    const meta = nodeMeta(node.tool);
+    return node.sub_kind || meta.sub_kind || "tool";
+  }
+
+  function attachedChildren(parentId) {
+    if (!current) return [];
+    const order = { chat_model: 0, memory: 1, tool: 2 };
+    return current.nodes
+      .filter((n) => n.attached_to === parentId)
+      .sort((a, b) => (order[subKindOf(a)] ?? 3) - (order[subKindOf(b)] ?? 3));
+  }
+
+  function subLabel(node) {
+    const meta = nodeMeta(node.tool);
+    const kind = subKindOf(node);
+    if (kind === "chat_model") return "Chat Model*";
+    if (kind === "memory") return "Memory";
+    const sub = meta.subtitle && meta.subtitle !== "Not connected" ? meta.subtitle : "";
+    return sub || meta.label || node.tool;
+  }
+
+  function attachedPos(parent, index) {
+    const kids = attachedChildren(parent.id);
+    const totalW = kids.length * SUB_W + Math.max(0, kids.length - 1) * SUB_GAP;
+    const startX = parent.position.x + (NODE_W - totalW) / 2;
+    return {
+      x: Math.round(startX + index * (SUB_W + SUB_GAP)),
+      y: Math.round(parent.position.y + NODE_H + 30),
+    };
+  }
+
+  function layoutAttached(parent, nodeById) {
+    attachedChildren(parent.id).forEach((child, index) => {
+      child.position = attachedPos(parent, index);
+      const sel = d3.select(`[data-node="${child.id}"]`);
+      if (!sel.empty()) sel.attr("transform", `translate(${child.position.x}, ${child.position.y})`);
+      refreshEdgesFor(child.id, nodeById);
+    });
+  }
 
   // ── tiny helpers ─────────────────────────────────────────────────────────
   const $ = (id) => document.getElementById(id);
@@ -165,6 +231,7 @@
     ensurePositions();
     renderPlaybookList();
     renderGraph();
+    fitToView();
     hideDetails();
   }
 
@@ -264,9 +331,84 @@
     return `M ${x1} ${y1} C ${x1 + curve} ${y1}, ${x2 - curve} ${y2}, ${x2} ${y2}`;
   }
 
+  // Dashed vertical connector from a composite parent to a docked sub-node.
+  function attachedConnectorPath(parent, child) {
+    const x1 = parent.position.x + NODE_W / 2;
+    const y1 = parent.position.y + NODE_H;
+    const x2 = child.position.x + SUB_W / 2;
+    const y2 = child.position.y - 4;
+    const midY = (y1 + y2) / 2;
+    return `M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}`;
+  }
+
+  // Edges whose source node ran ok in the last run: green + animated flow.
+  function executedEdgeKeys() {
+    const keys = new Set();
+    if (!lastRun || !lastRun.byId || !current) return keys;
+    (current.edges || []).forEach((edge) => {
+      if ((edge.type || "depends_on") !== "depends_on") return;
+      const result = lastRun.byId[edge.source];
+      if (result && result.ok) keys.add(edgeKey(edge));
+    });
+    return keys;
+  }
+
+  function itemCountFor(nodeId) {
+    const result = lastRun && lastRun.byId && lastRun.byId[nodeId];
+    if (!result || !result.content) return null;
+    try {
+      const parsed = JSON.parse(result.content);
+      const items = Array.isArray(parsed) ? parsed : parsed.items;
+      return Array.isArray(items) ? items.length : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Hover "+" on an edge: opens the node picker to insert between the nodes.
+  let edgeInsertTimer = null;
+  function edgeMidpoint(edge) {
+    const line = d3.select(`[data-edge-line="${CSS.escape(edgeKey(edge))}"]`).node();
+    if (!line || !line.getTotalLength) return null;
+    return line.getPointAtLength(line.getTotalLength() / 2);
+  }
+  function viewportToArea(point) {
+    const t = d3.zoomTransform(svgRoot.node());
+    return { x: t.x + point.x * t.k, y: t.y + point.y * t.k };
+  }
+  function showEdgeInsert(edge) {
+    hideEdgeInsert();
+    if (!viewport) return;
+    const mid = edgeMidpoint(edge);
+    if (!mid) return;
+    const area = viewportToArea(mid);
+    const g = viewport.append("g")
+      .attr("id", "edge-insert-btn")
+      .attr("class", "edge-insert")
+      .attr("transform", `translate(${mid.x}, ${mid.y})`)
+      .on("click", (event) => {
+        event.stopPropagation();
+        hideEdgeInsert();
+        openNodePicker(area.x, area.y, { insertEdge: edge });
+      })
+      .on("mouseenter", () => { if (edgeInsertTimer) { clearTimeout(edgeInsertTimer); edgeInsertTimer = null; } })
+      .on("mouseleave", () => scheduleHideEdgeInsert());
+    g.append("circle").attr("r", 11);
+    g.append("text").attr("y", 0.5).text("+");
+  }
+  function scheduleHideEdgeInsert() {
+    if (edgeInsertTimer) clearTimeout(edgeInsertTimer);
+    edgeInsertTimer = setTimeout(() => hideEdgeInsert(), 140);
+  }
+  function hideEdgeInsert() {
+    if (edgeInsertTimer) { clearTimeout(edgeInsertTimer); edgeInsertTimer = null; }
+    if (viewport) viewport.select("#edge-insert-btn").remove();
+  }
+
   // ── canvas render ────────────────────────────────────────────────────────
   function renderGraph() {
     const svg = d3.select("#canvas");
+    const prevTransform = svgRoot ? d3.zoomTransform(svgRoot.node()) : null;
     svg.selectAll("*").remove();
     if (!current) { clearCanvas(); return; }
 
@@ -290,8 +432,10 @@
     }
 
     const defs = svg.append("defs");
-    ["depends", "loop", "fallback"].forEach((kind) => {
-      const color = kind === "loop" ? "var(--pink)" : kind === "fallback" ? "var(--amber)" : "var(--dim)";
+    ["depends", "loop", "fallback", "exec"].forEach((kind) => {
+      const color = kind === "loop" ? "var(--pink)"
+        : kind === "fallback" ? "var(--amber)"
+        : kind === "exec" ? "var(--n8n-green)" : "var(--dim)";
       defs.append("marker")
         .attr("id", `arrow-${kind}`).attr("viewBox", "0 0 10 10")
         .attr("refX", 9).attr("refY", 5)
@@ -299,39 +443,72 @@
         .append("path").attr("d", "M 0 1 L 10 5 L 0 9 Z").attr("fill", color);
     });
     const grid = defs.append("pattern")
-      .attr("id", "grid").attr("width", 40).attr("height", 40)
+      .attr("id", "grid").attr("width", 28).attr("height", 28)
       .attr("patternUnits", "userSpaceOnUse");
-    grid.append("path").attr("d", "M 40 0 L 0 0 0 40")
-      .attr("fill", "none").attr("stroke", "var(--dimmer)")
-      .attr("stroke-width", 0.5).attr("opacity", 0.5);
+    grid.append("circle").attr("cx", 1.5).attr("cy", 1.5).attr("r", 1.4)
+      .attr("fill", "var(--n8n-dot)");
 
     const g = svg.append("g");
     viewport = g;
     g.append("rect")
       .attr("x", -4000).attr("y", -4000).attr("width", 12000).attr("height", 12000)
       .attr("fill", "url(#grid)")
-      .on("click", () => { hideDetails(); renderGraph(); });
+      .on("click", () => { closeNodePicker(); hideDetails(); updateSelection(); });
 
     zoom = Boot.makeZoom({ scaleExtent: [0.25, 2.5], target: g, onZoom: () => {} });
     svg.call(zoom);
+    if (prevTransform) svg.call(zoom.transform, prevTransform);
 
     const edgeLayer = g.append("g").attr("class", "edges");
     const nodeLayer = g.append("g").attr("class", "nodes");
     const nodeById = {};
     current.nodes.forEach((n) => { nodeById[n.id] = n; });
+    graphNodeById = nodeById;
     const tooltip = $("tooltip");
 
+    // Docked sub-nodes are positioned from their parents. Recalculate them
+    // BEFORE drawing edges so attached connectors use fresh positions on
+    // first render (saved/template positions may be stale).
+    current.nodes.forEach((n) => {
+      if (isAttached(n)) {
+        const parent = parentOf(n);
+        if (parent) {
+          const index = attachedChildren(parent.id).findIndex((c) => c.id === n.id);
+          if (index >= 0) n.position = attachedPos(parent, index);
+        }
+      }
+    });
+
     // edges
+    const executed = executedEdgeKeys();
     (current.edges || []).forEach((edge) => {
       const source = nodeById[edge.source];
       const target = nodeById[edge.target];
       if (!source || !target) return;
       const type = edge.type || "depends_on";
-      const cls = type === "loop_to" ? "edge-loop" : type === "fallback_to" ? "edge-fallback" : "edge-depends";
-      const marker = type === "loop_to" ? "url(#arrow-loop)"
-        : type === "fallback_to" ? "url(#arrow-fallback)" : "url(#arrow-depends)";
-      const path = edgePath(source, target);
       const key = edgeKey(edge);
+
+      // Attached sub-nodes (Chat Model / Memory / Tool) dock under their
+      // parent: a dashed connector instead of a regular edge.
+      const attachedPair = (target.attached_to && target.attached_to === source.id) ||
+        (source.attached_to && source.attached_to === target.id);
+      if (attachedPair) {
+        const parent = target.attached_to === source.id ? source : target;
+        const child = parent === source ? target : source;
+        edgeLayer.append("path")
+          .attr("class", "edge-line edge-attached")
+          .attr("d", attachedConnectorPath(parent, child))
+          .attr("data-edge-line", key)
+          .style("pointer-events", "none");
+        return;
+      }
+
+      const cls = type === "loop_to" ? "edge-loop" : type === "fallback_to" ? "edge-fallback" : "edge-depends";
+      const isExec = executed.has(key);
+      const marker = type === "loop_to" ? "url(#arrow-loop)"
+        : type === "fallback_to" ? "url(#arrow-fallback)"
+        : isExec ? "url(#arrow-exec)" : "url(#arrow-depends)";
+      const path = edgePath(source, target);
 
       edgeLayer.append("path")
         .attr("class", "edge-hit").attr("d", path)
@@ -340,6 +517,7 @@
           event.stopPropagation();
           selectedEdgeKey = key;
           selectedNodeId = null;
+          updateSelection();
           showEdgeDetails(edge);
         })
         .on("mouseenter", (event) => {
@@ -347,18 +525,50 @@
           tooltip.style.left = `${event.offsetX + 12}px`;
           tooltip.style.top = `${event.offsetY - 22}px`;
           tooltip.classList.add("visible");
+          showEdgeInsert(edge);
         })
-        .on("mouseleave", () => tooltip.classList.remove("visible"));
+        .on("mouseleave", () => { tooltip.classList.remove("visible"); scheduleHideEdgeInsert(); });
 
-      edgeLayer.append("path")
-        .attr("class", cls + (selectedEdgeKey === key ? " edge-highlight" : ""))
+      const line = edgeLayer.append("path")
+        .attr("class", "edge-line " + cls
+          + (selectedEdgeKey === key ? " edge-highlight" : "")
+          + (isExec ? " edge-executed" : "")
+          + (edgeFlowOn && isExec ? " edge-flow" : ""))
         .attr("d", path).attr("marker-end", marker)
         .attr("data-edge-line", key)
         .style("pointer-events", "none");
+
+      // n8n-style item-count pill on executed edges.
+      const count = isExec ? itemCountFor(edge.source) : null;
+      if (count !== null && count !== undefined) {
+        const lineNode = line.node();
+        const mid = lineNode.getPointAtLength(lineNode.getTotalLength() / 2);
+        const pill = edgeLayer.append("g").attr("class", "edge-count")
+          .attr("transform", `translate(${mid.x}, ${mid.y})`)
+          .style("pointer-events", "none");
+        const label = String(count);
+        const w = Math.max(18, label.length * 7 + 10);
+        pill.append("rect").attr("x", -w / 2).attr("y", -8).attr("width", w).attr("height", 16).attr("rx", 8);
+        pill.append("text").attr("y", 0.5).text(label);
+      }
     });
 
     // nodes
     current.nodes.forEach((node) => {
+      // Docked sub-nodes (Chat Model / Memory / Tool) are positioned from
+      // their parent and move with it; they are not draggable on their own.
+      let dockedParent = null;
+      if (isAttached(node)) {
+        const parent = parentOf(node);
+        if (parent) {
+          const index = attachedChildren(parent.id).findIndex((c) => c.id === node.id);
+          if (index >= 0) {
+            node.position = attachedPos(parent, index);
+            dockedParent = parent;
+          }
+        }
+      }
+
       const group = nodeLayer.append("g")
         .attr("class", "node-group")
         .attr("data-node", node.id)
@@ -366,9 +576,13 @@
 
       if (isDecorative(node)) {
         renderSticky(group, node);
+      } else if (dockedParent) {
+        renderSubNode(group, node, tooltip);
       } else {
         renderNode(group, node, tooltip);
       }
+
+      if (dockedParent) return;
 
       group.call(d3.drag()
         .filter((event) => !event.target.classList.contains("port-hit"))
@@ -379,6 +593,7 @@
           dragging.moved = true;
           group.attr("transform", `translate(${node.position.x}, ${node.position.y})`);
           refreshEdgesFor(node.id, nodeById);
+          layoutAttached(node, nodeById);
         })
         .on("end", () => {
           if (dragging && dragging.moved) {
@@ -393,13 +608,17 @@
     const runnable = current.nodes.filter((n) => !isDecorative(n)).length;
     $("graph-info").textContent =
       `${runnable} nodes · ${(current.edges || []).length} connections`;
-    fitToView();
+    paintRunDots();
   }
 
+  // n8n-style node card: dark rounded card, white glyph in a rounded icon
+  // square, bold white title, smaller grey subtitle, thin category accent on
+  // top, orange lightning badge for triggers.
   function renderNode(group, node, tooltip) {
     const meta = nodeMeta(node.tool);
     const color = categoryColor(meta.category);
     const disabled = !!node.disabled;
+    const isTrigger = meta.category === "trigger";
 
     group.append("rect")
       .attr("x", 2).attr("y", 3).attr("width", NODE_W).attr("height", NODE_H)
@@ -412,7 +631,7 @@
         event.stopPropagation();
         selectedNodeId = node.id;
         selectedEdgeKey = null;
-        renderGraph();
+        updateSelection();
         showNodeDetails(node);
       })
       .on("mouseenter", (event) => {
@@ -423,54 +642,62 @@
       })
       .on("mouseleave", () => tooltip.classList.remove("visible"));
 
+    // thin category accent along the top edge
     group.append("rect")
-      .attr("class", "node-accent")
-      .attr("x", 0).attr("y", 10).attr("width", 4).attr("height", NODE_H - 20)
-      .attr("rx", 2).attr("fill", color).attr("opacity", disabled ? 0.4 : 1);
+      .attr("class", "node-top-accent")
+      .attr("x", 8).attr("y", 0).attr("width", NODE_W - 16).attr("height", 3)
+      .attr("rx", 1.5).attr("fill", color).attr("opacity", disabled ? 0.4 : 0.9);
 
+    // icon square with white glyph
+    group.append("rect")
+      .attr("class", "node-icon-square")
+      .attr("x", 12).attr("y", NODE_H / 2 - 15)
+      .attr("width", 30).attr("height", 30).attr("rx", 8)
+      .attr("fill", color).attr("fill-opacity", disabled ? 0.35 : 0.92);
     group.append("text")
-      .attr("x", 18).attr("y", NODE_H / 2 - 7)
-      .attr("font-size", "13px").attr("fill", color)
-      .style("pointer-events", "none")
-      .text(meta.icon || "◆");
+      .attr("class", "node-icon-glyph")
+      .attr("x", 27).attr("y", NODE_H / 2 + 0.5)
+      .attr("opacity", disabled ? 0.5 : 1)
+      .text(nodeIcon(meta));
 
-    const label = node.label || meta.label || node.tool;
+    // bold title + grey subtitle
+    const title = node.label || meta.label || node.tool;
     group.append("text")
-      .attr("class", "node-tool-label")
-      .attr("x", 40).attr("y", NODE_H / 2 - 6)
-      .text(label.length > 20 ? `${label.slice(0, 19)}…` : label);
-
+      .attr("class", "node-title")
+      .attr("x", 50).attr("y", NODE_H / 2 - 7)
+      .text(title.length > 19 ? `${title.slice(0, 18)}…` : title);
+    const subtitle = meta.subtitle || categoryLabel(meta.category) || node.id;
     group.append("text")
-      .attr("class", "node-id-label")
-      .attr("x", 40).attr("y", NODE_H / 2 + 13)
-      .text(node.id.length > 24 ? `${node.id.slice(0, 23)}…` : node.id);
+      .attr("class", "node-subtitle")
+      .attr("x", 50).attr("y", NODE_H / 2 + 12)
+      .text(subtitle.length > 24 ? `${subtitle.slice(0, 23)}…` : subtitle);
 
-    // badges (right edge, top row)
+    // trigger badge: orange lightning, top-left overlapping the card
+    if (isTrigger) {
+      const badge = group.append("g").attr("class", "trigger-badge")
+        .attr("transform", "translate(2, 2)");
+      badge.append("circle").attr("r", 11).attr("fill", "var(--n8n-orange)");
+      badge.append("text")
+        .attr("y", 0.5).attr("text-anchor", "middle").attr("dominant-baseline", "central")
+        .attr("font-size", "11px").attr("fill", "#fff").text("⚡");
+    }
+
+    // small status badges, bottom-right
     const badges = [];
-    if (!(node.depends_on || []).length) badges.push({ text: "ENTRY", color: "var(--cyan)" });
     if (node.loop_to) badges.push({ text: `LOOP ×${node.max_visits || 1}`, color: "var(--pink)" });
     if (node.pinned_data) badges.push({ text: "PINNED", color: "var(--amber)" });
     if (node.needs_approval) badges.push({ text: "🔒", color: "var(--amber)" });
     if (disabled) badges.push({ text: "OFF", color: "var(--dim)" });
-    let badgeX = NODE_W - 8;
+    let badgeX = NODE_W - 10;
     badges.slice(0, 3).forEach((badge) => {
-      const node_text = group.append("text")
+      group.append("text")
         .attr("class", "node-badge-text")
-        .attr("x", badgeX).attr("y", 15)
+        .attr("x", badgeX).attr("y", NODE_H - 9)
         .attr("text-anchor", "end")
         .attr("fill", badge.color)
         .text(badge.text);
       badgeX -= badge.text.length * 5 + 10;
-      return node_text;
     });
-
-    // run status dot
-    const result = lastRun && lastRun.byId && lastRun.byId[node.id];
-    if (result) {
-      group.append("circle")
-        .attr("class", result.ok ? "status-ok" : "status-fail")
-        .attr("cx", NODE_W - 11).attr("cy", NODE_H - 12).attr("r", 4);
-    }
 
     // ports
     group.append("circle").attr("class", "port-circle port-input")
@@ -479,7 +706,8 @@
       .attr("class", "port-hit")
       .attr("cx", 0).attr("cy", NODE_H / 2).attr("r", PORT_HIT_R)
       .attr("fill", "transparent").attr("data-target-id", node.id)
-      .style("cursor", "crosshair");
+      .style("cursor", "crosshair")
+      .call(inputPortDrag(node));
 
     group.append("circle").attr("class", "port-circle port-output")
       .attr("cx", NODE_W).attr("cy", NODE_H / 2).attr("r", PORT_R);
@@ -488,36 +716,250 @@
       .attr("cx", NODE_W).attr("cy", NODE_H / 2).attr("r", PORT_HIT_R)
       .attr("fill", "transparent").attr("data-source-id", node.id)
       .style("cursor", "crosshair")
-      .call(d3.drag()
-        .on("start", () => {
-          dragging = { connectFrom: node.id };
-        })
-        .on("drag", (event) => {
-          if (!dragging || !dragging.connectFrom) return;
-          let temp = svgRoot.select("#temp-edge");
-          if (temp.empty()) {
-            temp = viewport.append("path").attr("id", "temp-edge")
-              .attr("class", "edge-depends").style("pointer-events", "none");
-          }
-          const point = d3.pointer(event, viewport.node());
-          const x1 = node.position.x + NODE_W;
-          const y1 = node.position.y + NODE_H / 2;
-          const curve = Math.min(Math.max(Math.hypot(point[0] - x1, point[1] - y1) * 0.35, 30), 110);
-          temp.attr("d", `M ${x1} ${y1} C ${x1 + curve} ${y1}, ${point[0] - curve} ${point[1]}, ${point[0]} ${point[1]}`);
-        })
-        .on("end", (event) => {
-          svgRoot.select("#temp-edge").remove();
-          if (!dragging || !dragging.connectFrom) return;
-          const point = d3.pointer(event, viewport.node());
-          const target = current.nodes.find((candidate) => {
-            if (candidate.id === node.id || isDecorative(candidate)) return false;
-            const cx = candidate.position.x;
-            const cy = candidate.position.y + NODE_H / 2;
-            return Math.hypot(point[0] - cx, point[1] - cy) < 34;
-          });
-          if (target) connectNodes(node.id, target.id);
-          dragging = null;
-        }));
+      .call(outputPortDrag(node));
+  }
+
+  // Docked sub-node card (Chat Model* / Memory / Tool): smaller, with a
+  // diamond port on top. Click selects it and opens its parameters.
+  function renderSubNode(group, node, tooltip) {
+    const meta = nodeMeta(node.tool);
+    const disabled = !!node.disabled;
+    const label = subLabel(node);
+
+    group.append("rect")
+      .attr("x", 1).attr("y", 2).attr("width", SUB_W).attr("height", SUB_H)
+      .attr("rx", 8).attr("fill", "rgba(0,0,0,0.3)");
+
+    group.append("rect")
+      .attr("class", "node-card sub-card" + (selectedNodeId === node.id ? " selected" : "") + (disabled ? " disabled" : ""))
+      .attr("width", SUB_W).attr("height", SUB_H).attr("rx", 8)
+      .on("click", (event) => {
+        event.stopPropagation();
+        selectedNodeId = node.id;
+        selectedEdgeKey = null;
+        updateSelection();
+        showNodeDetails(node);
+      })
+      .on("mouseenter", (event) => {
+        tooltip.innerHTML = `<b>${esc(label)}</b><br>${esc(meta.label || "")}<br>${esc(meta.summary || node.tool)}`;
+        tooltip.style.left = `${event.offsetX + 14}px`;
+        tooltip.style.top = `${event.offsetY - 10}px`;
+        tooltip.classList.add("visible");
+      })
+      .on("mouseleave", () => tooltip.classList.remove("visible"));
+
+    // diamond port, top center
+    const cx = SUB_W / 2;
+    group.append("path")
+      .attr("class", "sub-diamond")
+      .attr("d", `M ${cx} -5 L ${cx + 5} 0 L ${cx} 5 L ${cx - 5} 0 Z`);
+
+    group.append("text")
+      .attr("class", "sub-label")
+      .attr("x", 12).attr("y", SUB_H / 2 + 0.5)
+      .attr("dominant-baseline", "central")
+      .text(label.length > 20 ? `${label.slice(0, 19)}…` : label);
+  }
+
+  function categoryLabel(categoryId) {
+    const found = (catalog.categories || []).find((c) => c.id === categoryId);
+    return found ? found.label : "";
+  }
+
+  // ── port dragging ────────────────────────────────────────────────────────
+  // Output port → another node's input connects; dropping on empty canvas
+  // opens the node picker to create-and-connect in one gesture (n8n style).
+  function areaPointFromEvent(event) {
+    const rect = $("canvas-area").getBoundingClientRect();
+    const srcEvent = event.sourceEvent || event;
+    return {
+      x: (srcEvent.clientX || 0) - rect.left,
+      y: (srcEvent.clientY || 0) - rect.top,
+    };
+  }
+
+  function areaToCanvas(point) {
+    const t = d3.zoomTransform(svgRoot.node());
+    return { x: (point.x - t.x) / t.k, y: (point.y - t.y) / t.k };
+  }
+
+  function drawTempEdge(fromX, fromY, toX, toY) {
+    let temp = viewport.select("#temp-edge");
+    if (temp.empty()) {
+      temp = viewport.append("path").attr("id", "temp-edge")
+        .attr("class", "edge-depends").style("pointer-events", "none");
+    }
+    const curve = Math.min(Math.max(Math.hypot(toX - fromX, toY - fromY) * 0.35, 30), 110);
+    temp.attr("d", `M ${fromX} ${fromY} C ${fromX + curve} ${fromY}, ${toX - curve} ${toY}, ${toX} ${toY}`);
+  }
+
+  function outputPortDrag(node) {
+    return d3.drag()
+      .on("start", () => { dragging = { connectFrom: node.id }; })
+      .on("drag", (event) => {
+        if (!dragging || !dragging.connectFrom) return;
+        const point = d3.pointer(event, viewport.node());
+        drawTempEdge(node.position.x + NODE_W, node.position.y + NODE_H / 2, point[0], point[1]);
+      })
+      .on("end", (event) => {
+        viewport.select("#temp-edge").remove();
+        if (!dragging || !dragging.connectFrom) return;
+        const point = d3.pointer(event, viewport.node());
+        const target = current.nodes.find((candidate) => {
+          if (candidate.id === node.id || isDecorative(candidate) || isAttached(candidate)) return false;
+          const cx = candidate.position.x;
+          const cy = candidate.position.y + NODE_H / 2;
+          return Math.hypot(point[0] - cx, point[1] - cy) < 34;
+        });
+        const areaPt = areaPointFromEvent(event);
+        if (target) connectNodes(node.id, target.id);
+        else openNodePicker(areaPt.x, areaPt.y, { connectFrom: node.id });
+        dragging = null;
+      });
+  }
+
+  function inputPortDrag(node) {
+    return d3.drag()
+      .on("start", () => { dragging = { connectTo: node.id }; })
+      .on("drag", (event) => {
+        if (!dragging || !dragging.connectTo) return;
+        const point = d3.pointer(event, viewport.node());
+        drawTempEdge(point[0], point[1], node.position.x, node.position.y + NODE_H / 2);
+      })
+      .on("end", (event) => {
+        viewport.select("#temp-edge").remove();
+        if (!dragging || !dragging.connectTo) return;
+        const point = d3.pointer(event, viewport.node());
+        const source = current.nodes.find((candidate) => {
+          if (candidate.id === node.id || isDecorative(candidate) || isAttached(candidate)) return false;
+          const cx = candidate.position.x + NODE_W;
+          const cy = candidate.position.y + NODE_H / 2;
+          return Math.hypot(point[0] - cx, point[1] - cy) < 34;
+        });
+        const areaPt = areaPointFromEvent(event);
+        if (source) connectNodes(source.id, node.id);
+        else openNodePicker(areaPt.x, areaPt.y, { connectTo: node.id });
+        dragging = null;
+      });
+  }
+
+  // ── searchable canvas node picker ────────────────────────────────────────
+  // Opened by the canvas "+" button, by dropping a port on empty canvas, or
+  // by the "+" on a hovered edge (insert mode).
+  let pickerState = null;
+
+  function openNodePicker(areaX, areaY, opts) {
+    closeNodePicker();
+    if (!current) return;
+    pickerState = Object.assign({ canvasPos: null }, opts || {});
+    if (!pickerState.canvasPos) {
+      pickerState.canvasPos = areaToCanvas({ x: areaX, y: areaY });
+    }
+    const area = $("canvas-area");
+    const picker = document.createElement("div");
+    picker.className = "node-picker";
+    picker.id = "node-picker";
+    picker.style.left = `${Math.max(8, Math.min(areaX, area.clientWidth - 300))}px`;
+    picker.style.top = `${Math.max(8, Math.min(areaY, area.clientHeight - 390))}px`;
+    const hint = pickerState.insertEdge ? "Insert node on connection"
+      : pickerState.connectFrom ? "New node (connects from " + pickerState.connectFrom + ")"
+      : pickerState.connectTo ? "New node (connects into " + pickerState.connectTo + ")"
+      : "Add node";
+    picker.innerHTML =
+      `<div style="padding:10px 10px 0;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--n8n-sub)">${esc(hint)}</div>` +
+      `<input id="node-picker-search" placeholder="Search nodes…" autocomplete="off">` +
+      `<div class="node-picker-list" id="node-picker-list"></div>`;
+    area.appendChild(picker);
+
+    const renderList = (query) => {
+      const list = $("node-picker-list");
+      list.innerHTML = "";
+      const q = (query || "").toLowerCase();
+      (catalog.categories || []).forEach((category) => {
+        const entries = (catalog.groups[category.id] || []).filter((entry) =>
+          !q || entry.name.toLowerCase().includes(q) ||
+          (entry.label || "").toLowerCase().includes(q) ||
+          (entry.summary || "").toLowerCase().includes(q));
+        if (!entries.length) return;
+        const head = document.createElement("div");
+        head.className = "cat-head";
+        head.style.color = category.color;
+        head.innerHTML = `<span class="cat-dot" style="background:${category.color}"></span>${esc(category.label)}`;
+        list.appendChild(head);
+        entries.slice(0, q ? 30 : 20).forEach((entry) => {
+          const button = document.createElement("button");
+          button.className = "picker-item";
+          button.innerHTML =
+            `<span class="chip-icon" style="background:${categoryColor(entry.category)}">${esc(nodeIcon(entry))}</span>` +
+            `<span class="chip-text"><span class="chip-name">${esc(entry.label)}</span><br>` +
+            `<span class="chip-desc">${esc(entry.summary || entry.name)}</span></span>`;
+          button.onclick = () => createNodeFromPicker(entry);
+          list.appendChild(button);
+        });
+      });
+    };
+    renderList("");
+    const search = $("node-picker-search");
+    search.addEventListener("input", (event) => renderList(event.target.value));
+    setTimeout(() => search.focus(), 30);
+    picker.addEventListener("mousedown", (event) => event.stopPropagation());
+  }
+
+  function closeNodePicker() {
+    const picker = $("node-picker");
+    if (picker) picker.remove();
+    pickerState = null;
+  }
+
+  function uniqueNodeId(toolName) {
+    const base = toolName.replace(/[^A-Za-z0-9]+/g, "_").toLowerCase().slice(0, 24) || "node";
+    const taken = new Set(current.nodes.map((n) => n.id));
+    let id = base;
+    let suffix = 1;
+    while (taken.has(id)) { suffix += 1; id = `${base}_${suffix}`; }
+    return id;
+  }
+
+  function createNodeFromPicker(entry) {
+    const opts = pickerState || {};
+    const id = uniqueNodeId(entry.name);
+    const meta = nodeMeta(entry.name);
+    const node = {
+      id,
+      tool: entry.name,
+      args: JSON.parse(JSON.stringify(meta.defaults || {})),
+      depends_on: [],
+      position: {
+        x: Math.round((opts.canvasPos && opts.canvasPos.x) || 120) - NODE_W / 2,
+        y: Math.round((opts.canvasPos && opts.canvasPos.y) || 160) - NODE_H / 2,
+      },
+    };
+    if (opts.connectFrom) {
+      node.depends_on = [opts.connectFrom];
+    } else if (opts.insertEdge && (opts.insertEdge.type || "depends_on") === "depends_on") {
+      const edge = opts.insertEdge;
+      node.depends_on = [edge.source];
+      const target = current.nodes.find((n) => n.id === edge.target);
+      if (target) {
+        target.depends_on = (target.depends_on || []).map((dep) => (dep === edge.source ? id : dep));
+        if (!target.depends_on.includes(id)) target.depends_on.push(id);
+      }
+    }
+    current.nodes.push(node);
+    if (opts.connectTo) {
+      const target = current.nodes.find((n) => n.id === opts.connectTo);
+      if (target) {
+        target.depends_on = target.depends_on || [];
+        if (!target.depends_on.includes(id)) target.depends_on.push(id);
+      }
+    }
+    closeNodePicker();
+    selectedNodeId = id;
+    selectedEdgeKey = null;
+    activeTab = "params";
+    markDirty();
+    renderGraph();
+    showNodeDetails(node);
   }
 
   function renderSticky(group, node) {
@@ -528,7 +970,7 @@
         event.stopPropagation();
         selectedNodeId = node.id;
         selectedEdgeKey = null;
-        renderGraph();
+        updateSelection();
         showNodeDetails(node);
       });
     const text = String((node.args && node.args.content) || "Note");
@@ -551,11 +993,83 @@
       const source = nodeById[edge.source];
       const target = nodeById[edge.target];
       if (!source || !target) return;
-      const path = edgePath(source, target);
       const key = edgeKey(edge);
+      // Attached sub-node pairs use the dashed vertical connector, not the
+      // regular horizontal edge path (otherwise dragging a composite parent
+      // redraws its docked links as normal curves).
+      const attachedPair = (target.attached_to && target.attached_to === source.id) ||
+        (source.attached_to && source.attached_to === target.id);
+      let path;
+      if (attachedPair) {
+        const parent = target.attached_to === source.id ? source : target;
+        const child = parent === source ? target : source;
+        path = attachedConnectorPath(parent, child);
+      } else {
+        path = edgePath(source, target);
+      }
       d3.selectAll(`[data-edge="${key}"]`).attr("d", path);
       d3.selectAll(`[data-edge-line="${key}"]`).attr("d", path);
     });
+  }
+
+  // ── incremental updates (no full rebuild) ──────────────────────────────
+
+  // Selection changes only toggle classes on the existing SVG.
+  function updateSelection() {
+    d3.selectAll(".node-group").each(function () {
+      const g = d3.select(this);
+      const selected = g.attr("data-node") === selectedNodeId;
+      g.select(".node-card").classed("selected", selected);
+      g.select(".sticky-card").classed("selected", selected);
+    });
+    d3.selectAll(".edge-line").each(function () {
+      d3.select(this).classed("edge-highlight",
+        d3.select(this).attr("data-edge-line") === selectedEdgeKey);
+    });
+  }
+
+  // n8n-style run badges: green check / red failure overlay at the top-right.
+  function paintRunDots() {
+    d3.selectAll(".node-group").each(function () {
+      const g = d3.select(this);
+      const id = g.attr("data-node");
+      const node = graphNodeById[id];
+      g.selectAll(".run-badge-ok, .run-badge-fail").remove();
+      const result = lastRun && lastRun.byId && lastRun.byId[id];
+      if (!result) return;
+      const bx = node && isAttached(node) ? SUB_W - 2 : NODE_W - 2;
+      const badge = g.append("g")
+        .attr("class", result.ok ? "run-badge-ok" : "run-badge-fail")
+        .attr("transform", `translate(${bx}, -8)`);
+      badge.append("circle").attr("r", 10);
+      badge.append("text").attr("y", 0.5).text(result.ok ? "✓" : "✕");
+    });
+  }
+
+  // While a run is in flight, runnable node cards pulse (see .is-running CSS).
+  function setRunning(on) {
+    d3.selectAll(".node-group").each(function () {
+      const g = d3.select(this);
+      const node = graphNodeById[g.attr("data-node")];
+      if (!node || isDecorative(node)) return;
+      g.classed("is-running", on);
+    });
+  }
+
+  function updateViewBox() {
+    if (!svgRoot) return;
+    const area = $("canvas-area");
+    const width = area.clientWidth || 1200;
+    const height = area.clientHeight || 800;
+    svgRoot.attr("viewBox", `0 0 ${width} ${height}`);
+  }
+
+  function setEdgeFlow(on) {
+    edgeFlowOn = on;
+    const btn = $("flow-btn");
+    if (btn) btn.classList.toggle("btn-active", on);
+    // Flow animates only executed edges; re-render to apply/remove it.
+    if (current) renderGraph();
   }
 
   function connectNodes(sourceId, targetId) {
@@ -596,7 +1110,12 @@
     const panel = $("details-panel");
     const meta = nodeMeta(node.tool);
     panel.hidden = false;
-    $("details-title").textContent = `${meta.icon || "◆"} ${meta.label || node.tool}`;
+    const color = categoryColor(meta.category);
+    $("details-title").innerHTML =
+      `<span class="node-head"><span class="nh-icon" style="background:${color}">${esc(nodeIcon(meta))}</span>` +
+      `<span><span class="nh-title">${esc(node.label || meta.label || node.tool)}</span><br>` +
+      `<span class="nh-sub">${esc(meta.subtitle || categoryLabel(meta.category) || "")}</span> ` +
+      `<span class="nh-tool">${esc(node.id)}</span></span></span>`;
     document.querySelectorAll("#details-tabs .tab").forEach((tab) => {
       tab.classList.toggle("active", tab.dataset.tab === activeTab);
     });
@@ -861,6 +1380,7 @@
         other.depends_on = (other.depends_on || []).map((dep) => (dep === oldId ? newId : dep));
         if (other.loop_to === oldId) other.loop_to = newId;
         if (other.fallback_to === oldId) other.fallback_to = newId;
+        if (other.attached_to === oldId) other.attached_to = newId;
         Object.entries(other.args || {}).forEach(([key, value]) => {
           if (typeof value === "string" && value === `$result:${oldId}`) other.args[key] = `$result:${newId}`;
         });
@@ -951,7 +1471,7 @@
       button.title = entry.summary || entry.name;
       button.innerHTML =
         `<div class="node-chip">` +
-        `<span class="chip-icon" style="color:${categoryColor(entry.category)}">${esc(entry.icon || "◆")}</span>` +
+        `<span class="chip-icon" style="color:${categoryColor(entry.category)}">${esc(nodeIcon(entry))}</span>` +
         `<span class="chip-text"><span class="chip-name">${esc(entry.label)}` +
         `${entry.needs_approval ? " 🔒" : ""}</span>` +
         `<span class="chip-desc">${esc(entry.summary || entry.name)}</span></span></div>`;
@@ -1022,11 +1542,14 @@
     if (!current) return;
     if (selectedNodeId) {
       if (!window.confirm(`Delete node ${selectedNodeId}?`)) return;
-      current.nodes = current.nodes.filter((n) => n.id !== selectedNodeId);
+      // Deleting a composite parent takes its docked sub-nodes with it.
+      const doomed = new Set([selectedNodeId]);
+      current.nodes.forEach((n) => { if (n.attached_to === selectedNodeId) doomed.add(n.id); });
+      current.nodes = current.nodes.filter((n) => !doomed.has(n.id));
       current.nodes.forEach((node) => {
-        node.depends_on = (node.depends_on || []).filter((dep) => dep !== selectedNodeId);
-        if (node.loop_to === selectedNodeId) delete node.loop_to;
-        if (node.fallback_to === selectedNodeId) delete node.fallback_to;
+        node.depends_on = (node.depends_on || []).filter((dep) => !doomed.has(dep));
+        if (doomed.has(node.loop_to)) delete node.loop_to;
+        if (doomed.has(node.fallback_to)) delete node.fallback_to;
       });
       selectedNodeId = null;
       markDirty();
@@ -1107,6 +1630,7 @@
 
     showRunPanel("Run", '<div class="run-dim">Running… (bounded, 1 worker)</div>');
     status("Running…");
+    setRunning(true);
     try {
       const data = await api(`/playbooks/${encodeURIComponent(current.id)}/run`, {
         method: "POST",
@@ -1139,7 +1663,7 @@
           if (!node) return;
           selectedNodeId = node.id;
           activeTab = "output";
-          renderGraph();
+          updateSelection();
           showNodeDetails(node);
         };
       });
@@ -1148,6 +1672,8 @@
     } catch (err) {
       showRunPanel("Run failed", `<div class="run-fail">${esc(err.message)}</div>`);
       status("Run failed", "bad");
+    } finally {
+      setRunning(false);
     }
   }
 
@@ -1210,6 +1736,7 @@
     $("add-node-btn").onclick = addNode;
     $("delete-selected-btn").onclick = deleteSelected;
     $("tidy-btn").onclick = tidyLayout;
+    $("flow-btn").onclick = () => setEdgeFlow(!edgeFlowOn);
     $("template-btn").onclick = openTemplates;
     $("template-close").onclick = () => { $("template-modal").hidden = true; };
     $("details-close").onclick = hideDetails;
@@ -1318,10 +1845,27 @@
     $("zoom-out").onclick = () => svgRoot && svgRoot.transition().duration(250).call(zoom.scaleBy, 0.75);
     $("zoom-fit").onclick = fitToView;
 
+    $("canvas-add").onclick = (event) => {
+      if (!current) { window.alert("Select or create a workflow first"); return; }
+      const rect = $("canvas-area").getBoundingClientRect();
+      const areaX = event.clientX - rect.left;
+      const areaY = event.clientY - rect.top;
+      const center = areaToCanvas({ x: rect.width / 2, y: rect.height / 2 });
+      openNodePicker(areaX + 14, areaY + 14, { canvasPos: center });
+    };
+
+    document.addEventListener("click", (event) => {
+      const picker = $("node-picker");
+      if (picker && !picker.contains(event.target) && event.target.id !== "canvas-add") {
+        closeNodePicker();
+      }
+    });
+
     document.addEventListener("keydown", (event) => {
       const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName);
       if (event.key === "Escape") {
         $("template-modal").hidden = true;
+        closeNodePicker();
         hideDetails();
         return;
       }
@@ -1339,7 +1883,11 @@
       event.returnValue = "";
     });
 
-    window.addEventListener("resize", () => { if (current) renderGraph(); });
+    window.addEventListener("resize", () => {
+      if (!current) return;
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(updateViewBox, 150);
+    });
   }
 
   // ── boot ─────────────────────────────────────────────────────────────────

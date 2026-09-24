@@ -136,14 +136,14 @@ function valenceHue(d) {
 }
 
 function hueColor(hue) {
-  if (hue === 'entity') return '#b794f6';
-  if (hue === 'knowledge') return '#4ade80';
-  if (hue === 'experience') return '#fb923c';
-  if (hue === 'episode') return '#51d4c8';
-  if (hue === 'imprint') return '#c651a8';
-  if (hue === 'neg') return '#3de0ff';
-  if (hue === 'pos') return '#f0c14a';
-  return '#8a9bb8';
+  if (hue === 'entity') return '#c9b8f7';
+  if (hue === 'knowledge') return '#a9e8b8';
+  if (hue === 'experience') return '#f9c795';
+  if (hue === 'episode') return '#a5e8e0';
+  if (hue === 'imprint') return '#e0a3cc';
+  if (hue === 'neg') return '#a5ecff';
+  if (hue === 'pos') return '#f6d789';
+  return '#a8b6cf';
 }
 
 /** Translucent glass fill — dim nodes ghost into the background. */
@@ -187,9 +187,9 @@ function edgeOpacity(e) {
 }
 
 function edgeColor(e) {
-  if (e.type === 'supersedes') return '#f59e0b';
-  if (e.type === 'distilled_into') return '#51d4c8';
-  return '#3de0ff';
+  if (e.type === 'supersedes') return '#f2c063';
+  if (e.type === 'distilled_into') return '#a5e8e0';
+  return '#a5ecff';
 }
 
 function lineageText(d, graph) {
@@ -585,7 +585,7 @@ function buildGraph() {
   // (dim when both ends are small); supersede edges stay solid + directed.
   linkSel = g.append('g').selectAll('line').data(links).join('line')
     .attr('class', 'edge')
-    .attr('stroke', d => d.type === 'supersedes' ? '#f59e0b' : shade(edgeColor(d), -0.30))
+    .attr('stroke', d => d.type === 'supersedes' ? '#f2c063' : shade(edgeColor(d), -0.30))
     .attr('stroke-width', d => {
       if (d.type === 'supersedes') return 1.2;
       const wgt = Math.max(0, Math.min(1, Number(d.weight) || 0.4));
@@ -659,7 +659,7 @@ function defs_(svg) {
   const defs = svg.append('defs');
   defs.append('marker').attr('id','arrow-sup').attr('viewBox','0 0 10 10')
     .attr('refX', 9).attr('refY', 5).attr('markerWidth', 5).attr('markerHeight', 5).attr('orient','auto')
-    .append('path').attr('d','M 0 1 L 10 5 L 0 9 Z').attr('fill', '#f59e0b').attr('opacity', 0.8);
+    .append('path').attr('d','M 0 1 L 10 5 L 0 9 Z').attr('fill', '#f2c063').attr('opacity', 0.8);
   // Translucent glass marbles: soft sheen, feathered edge that melts into
   // the dark background (outer stop fades to transparent).
   for (const h of HUES) {

@@ -18,8 +18,8 @@ let linkSel = null;    // current line selection (for drag updates)
 let currentNodes = [];
 let currentLinks = [];
 
-const COL_CHUNK = '#4ade80';
-const COL_ENTITY = '#a78bfa';
+const COL_CHUNK = '#a9e8b8';
+const COL_ENTITY = '#c4b0f7';
 const EDGE_ABOUT = '#6ee7a8';
 const EDGE_SAMEDOC = '#5b4a6e';
 

@@ -312,15 +312,15 @@ function ensureScene() {
   if (viewport) return;
   const svg = d3.select('#svg');
   const defs = svg.append('defs');
-  // One shared glossy-sphere gradient per node type + one shared glare.
+  // One shared glassmorphic-sphere gradient per node type + one shared glare.
   for (const [key, base] of [['chunk', COL_CHUNK], ['entity', COL_ENTITY]]) {
     const g = defs.append('radialGradient')
       .attr('id', 'gloss-' + key)
       .attr('cx', '34%').attr('cy', '28%').attr('r', '78%');
-    g.append('stop').attr('offset', '0%').attr('stop-color', shade(base, 0.85));
-    g.append('stop').attr('offset', '22%').attr('stop-color', shade(base, 0.38));
-    g.append('stop').attr('offset', '52%').attr('stop-color', base);
-    g.append('stop').attr('offset', '100%').attr('stop-color', shade(base, -0.62));
+    g.append('stop').attr('offset', '0%').attr('stop-color', shade(base, 0.45));
+    g.append('stop').attr('offset', '35%').attr('stop-color', shade(base, 0.12));
+    g.append('stop').attr('offset', '70%').attr('stop-color', base);
+    g.append('stop').attr('offset', '100%').attr('stop-color', shade(base, -0.38));
   }
   const glare = defs.append('radialGradient').attr('id', 'kb-glare').attr('cx', '50%').attr('cy', '50%').attr('r', '50%');
   glare.append('stop').attr('offset', '0%').attr('stop-color', '#ffffff').attr('stop-opacity', 0.85);
@@ -423,11 +423,11 @@ function update() {
     .attr('stroke-width', 1)
     .attr('stroke-opacity', 0.6);
   entered.select('ellipse.glare')
-    .attr('cx', d => -nodeRadius(d) * 0.30)
-    .attr('cy', d => -nodeRadius(d) * 0.36)
-    .attr('rx', d => nodeRadius(d) * 0.42)
-    .attr('ry', d => nodeRadius(d) * 0.28)
-    .attr('opacity', d => 0.12 + 0.55 * importanceOf(d));
+    .attr('cx', d => -nodeRadius(d) * 0.28)
+    .attr('cy', d => -nodeRadius(d) * 0.32)
+    .attr('rx', d => nodeRadius(d) * 0.48)
+    .attr('ry', d => nodeRadius(d) * 0.30)
+    .attr('opacity', d => 0.10 + 0.28 * importanceOf(d));
   entered.select('text.node-label')
     .attr('dy', d => -(nodeRadius(d) + 6))
     .style('opacity', d => hotIds.has(d.id) ? 0.85 : 0)

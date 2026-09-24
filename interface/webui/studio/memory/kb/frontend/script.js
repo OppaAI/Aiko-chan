@@ -3,7 +3,7 @@
  * Organic neural-field view (reference: graph-explorer hairball):
  * deterministic one-shot force layout (seeded, bounded ticks, no live
  * simulation loop), glossy 3D spheres via one shared radial gradient per
- * type, straight connectors whose brightness follows both endpoint sizes.
+ * type, thin faint connectors whose brightness follows both endpoint sizes.
  * Size + brightness track importance.
  */
 const API_BASE = (window.KNOWLEDGE_API_BASE || GraphBoot.apiBase()).replace(/\/+$/, '');
@@ -191,27 +191,28 @@ function shade(hex, amt) {
 function layoutOrganic(nodes, links, w, h) {
   const cx = w / 2, cy = h / 2;
   const R = Math.min(w, h) * 0.30;
-  const types = [...new Set(nodes.map(n => n.type))];
-  const slot = (Math.PI * 2) / Math.max(1, types.length);
-  const center = {};
-  types.forEach((t, i) => {
-    center[t] = { x: cx + Math.cos(i * slot) * R * 0.55, y: cy + Math.sin(i * slot) * R * 0.55 };
-  });
+  // Seed: random scatter inside a disc (not type clusters) so hues mix
+  // through the blob instead of separating into bands or chains.
+  const rnd = mulberry32(2024);
   for (const n of nodes) {
-    const c = center[n.type] || { x: cx, y: cy };
-    n.x = c.x + (hashStr(n.id + ':jx') - 0.5) * R * 1.1;
-    n.y = c.y + (hashStr(n.id + ':jy') - 0.5) * R * 1.1;
+    const a = rnd() * Math.PI * 2;
+    const r = Math.sqrt(rnd()) * R * 0.7;
+    n.x = cx + Math.cos(a) * r;
+    n.y = cy + Math.sin(a) * r;
     n.vx = 0; n.vy = 0;
   }
   const fl = links.map(l => ({ source: l.source.id, target: l.target.id }));
+  // Tight link pull + gentle repulsion + radial gravity: connected nodes
+  // collapse into clusters inside a round blob; nothing stretches into
+  // vertical/horizontal chains. One-shot, bounded ticks, no live loop.
   const sim = d3.forceSimulation(nodes)
-    .force('link', d3.forceLink(fl).id(d => d.id).distance(58).strength(0.35))
-    .force('charge', d3.forceManyBody().strength(-150))
-    .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 6).iterations(2))
-    .force('center', d3.forceCenter(cx, cy))
-    .randomSource(mulberry32(2024))
+    .force('link', d3.forceLink(fl).id(d => d.id).distance(26).strength(1.0))
+    .force('charge', d3.forceManyBody().strength(-50))
+    .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 6).iterations(3))
+    .force('radial', d3.forceRadial(R * 0.35, cx, cy).strength(0.3))
+    .randomSource(mulberry32(5150))
     .stop();
-  const ticks = nodes.length > 400 ? 60 : 120;
+  const ticks = nodes.length > 400 ? 100 : 220;
   for (let i = 0; i < ticks; i++) sim.tick();
   sim.stop();
 }

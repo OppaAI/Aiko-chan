@@ -2,7 +2,7 @@
  *
  * Deterministic one-shot force layout (seeded, bounded ticks, no live
  * simulation loop), glossy 3D sphere nodes via one shared radial gradient
- * per hue, straight connector lines whose brightness follows both endpoint
+ * per hue, dotted synapse connectors whose brightness follows both endpoint
  * sizes. Size + brightness track score / tendency to retain.
  */
 const API_BASE = GraphBoot.apiBase();
@@ -400,17 +400,14 @@ function shade(hex, amt) {
 function layoutOrganic(nodes, links, w, h) {
   const cx = w / 2, cy = h / 2;
   const R = Math.min(w, h) * 0.30;
-  // Seed: type clusters arranged on a ring + deterministic hash jitter.
-  const types = [...new Set(nodes.map(n => n.type))];
-  const slot = (Math.PI * 2) / Math.max(1, types.length);
-  const center = {};
-  types.forEach((t, i) => {
-    center[t] = { x: cx + Math.cos(i * slot) * R * 0.55, y: cy + Math.sin(i * slot) * R * 0.55 };
-  });
+  // Seed: random scatter inside a disc (not type clusters) so hues mix
+  // through the blob instead of separating into bands or chains.
+  const rnd = mulberry32(1337);
   for (const n of nodes) {
-    const c = center[n.type] || { x: cx, y: cy };
-    n.x = c.x + (hashStr(n.id + ':jx') - 0.5) * R * 1.1;
-    n.y = c.y + (hashStr(n.id + ':jy') - 0.5) * R * 1.1;
+    const a = rnd() * Math.PI * 2;
+    const r = Math.sqrt(rnd()) * R * 0.7;
+    n.x = cx + Math.cos(a) * r;
+    n.y = cy + Math.sin(a) * r;
     n.vx = 0; n.vy = 0;
   }
   const byId = new Set(nodes.map(n => n.id));
@@ -420,14 +417,17 @@ function layoutOrganic(nodes, links, w, h) {
     const t = typeof l.target === 'object' ? l.target.id : l.target;
     if (byId.has(s) && byId.has(t)) fl.push({ source: s, target: t });
   }
+  // Tight link pull + gentle repulsion + radial gravity: connected nodes
+  // collapse into clusters inside a round blob; nothing stretches into
+  // vertical/horizontal chains. One-shot, bounded ticks, no live loop.
   const sim = d3.forceSimulation(nodes)
-    .force('link', d3.forceLink(fl).id(d => d.id).distance(58).strength(0.35))
-    .force('charge', d3.forceManyBody().strength(-150))
-    .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 6).iterations(2))
-    .force('center', d3.forceCenter(cx, cy))
-    .randomSource(mulberry32(1337))
+    .force('link', d3.forceLink(fl).id(d => d.id).distance(26).strength(1.0))
+    .force('charge', d3.forceManyBody().strength(-50))
+    .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 6).iterations(3))
+    .force('radial', d3.forceRadial(R * 0.35, cx, cy).strength(0.3))
+    .randomSource(mulberry32(4242))
     .stop();
-  const ticks = nodes.length > 900 ? 50 : nodes.length > 400 ? 90 : 150;
+  const ticks = nodes.length > 900 ? 60 : nodes.length > 400 ? 120 : 250;
   for (let i = 0; i < ticks; i++) sim.tick();
   sim.stop();
 }
@@ -471,19 +471,19 @@ function buildGraph() {
     [...nodes].sort((a, b) => retainOf(b) - retainOf(a)).slice(0, 40).map(n => n.id)
   );
 
-  // faint connector lines — brightness follows both endpoint sizes
-  // (dim when both ends are small); supersede edges stay directed + orange.
+  // dotted synapse connectors — brightness follows both endpoint sizes
+  // (dim when both ends are small); supersede edges stay solid + directed.
   linkSel = g.append('g').selectAll('line').data(links).join('line')
     .attr('class', 'edge')
-    .attr('stroke', edgeColor)
+    .attr('stroke', d => d.type === 'supersedes' ? '#f59e0b' : shade(edgeColor(d), -0.30))
     .attr('stroke-width', d => {
-      if (d.type === 'supersedes') return 1.4;
+      if (d.type === 'supersedes') return 1.2;
       const wgt = Math.max(0, Math.min(1, Number(d.weight) || 0.4));
-      return 0.6 + wgt * 1.4;
+      return 0.5 + wgt * 0.6;
     })
-    .attr('stroke-opacity', edgeOpacity)
+    .attr('stroke-opacity', d => edgeOpacity(d) * 0.6)
     .attr('stroke-linecap', 'round')
-    .attr('stroke-dasharray', d => d.type === 'supersedes' ? '5,3' : null)
+    .attr('stroke-dasharray', d => d.type === 'supersedes' ? null : '1.5,2.5')
     .attr('marker-end', d => d.type === 'supersedes' ? 'url(#arrow-sup)' : null)
     .attr('x1', d => nodeById.get(d.source).x)
     .attr('y1', d => nodeById.get(d.source).y)

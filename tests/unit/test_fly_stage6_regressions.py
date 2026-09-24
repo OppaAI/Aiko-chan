@@ -236,6 +236,7 @@ def test_sudden_motion_bumps_gf_without_changing_regular_salience(monkeypatch):
 
 @pytest.mark.parametrize("mode", ["off", "shadow", "live"])
 def test_turn_only_uses_live_voice_and_sudden_motion(monkeypatch, mode):
+    from cognition.centralcomplex import temporal
     from cognition.fly_behavior import giant_fiber
     from cognition.fly_behavior.turn import apply_turn_priors
     from cognition.flysense import dn, pathways
@@ -246,12 +247,14 @@ def test_turn_only_uses_live_voice_and_sudden_motion(monkeypatch, mode):
     monkeypatch.setenv("MEMORY_FLYDN_MODE", "live")
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "off")
     monkeypatch.setenv("MEMORY_FLYGF_MODE", "live")
+    monkeypatch.setattr(temporal, "_MODE", "shadow")
     monkeypatch.setattr(pathways, "encode_turn_senses", lambda *_args, **_kwargs: {
         "mode": mode,
-        "voice": {"urgency": 0.4, "energy": 0.0},
+        "voice": {"urgency": 0.4, "energy": 0.5},
         "motion": {"sudden": True},
     })
     gf_inputs = []
+    temporal_inputs = []
     real_assess = giant_fiber.assess_interrupt
 
     def capture_assess(*args, **kwargs):
@@ -261,11 +264,18 @@ def test_turn_only_uses_live_voice_and_sudden_motion(monkeypatch, mode):
     monkeypatch.setattr(giant_fiber, "assess_interrupt", capture_assess)
     energies = []
     monkeypatch.setattr(dn.FlyDN, "drive", lambda self, **kwargs: energies.append(kwargs["energy"]) or {"rate_mult": 1.0})
+    monkeypatch.setattr(
+        temporal,
+        "tick_cx_temporal",
+        lambda *_args, **kwargs: temporal_inputs.append(kwargs) or {"ok": True},
+    )
 
     apply_turn_priors("hello", user_id=user_id)
 
-    assert len(gf_inputs) == 1 and len(energies) == 1
+    assert len(gf_inputs) == len(energies) == len(temporal_inputs) == 1
     assert gf_inputs[0]["voice_urgency"] == (0.4 if mode == "live" else 0.0)
     assert gf_inputs[0]["motion_sudden"] is (mode == "live")
-    assert energies[0] == (0.6 if mode == "live" else 1.0)
+    assert energies[0] == (0.8 if mode == "live" else 1.0)
+    assert temporal_inputs[0]["voice_energy"] == (0.5 if mode == "live" else 0.0)
+    assert temporal_inputs[0]["user_energy"] == (0.5 if mode == "live" else 0.0125)
     clear_neural_state(user_id)

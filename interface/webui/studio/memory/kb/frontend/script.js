@@ -42,7 +42,7 @@ function nodeRadius(d) {
 }
 
 function nodeOpacity(d) {
-  return 0.22 + importanceOf(d) * 0.78;
+  return 0.15 + importanceOf(d) * 0.55;
 }
 
 /* Edge brightness follows both endpoint sizes — dim when both ends are small. */
@@ -312,15 +312,16 @@ function ensureScene() {
   if (viewport) return;
   const svg = d3.select('#svg');
   const defs = svg.append('defs');
-  // One shared glassmorphic-sphere gradient per node type + one shared glare.
+  // Translucent glass marbles: soft sheen, feathered edge melting into the
+  // dark background (outer stop fades to transparent).
   for (const [key, base] of [['chunk', COL_CHUNK], ['entity', COL_ENTITY]]) {
     const g = defs.append('radialGradient')
       .attr('id', 'gloss-' + key)
       .attr('cx', '34%').attr('cy', '28%').attr('r', '78%');
-    g.append('stop').attr('offset', '0%').attr('stop-color', shade(base, 0.45));
-    g.append('stop').attr('offset', '35%').attr('stop-color', shade(base, 0.12));
-    g.append('stop').attr('offset', '70%').attr('stop-color', base);
-    g.append('stop').attr('offset', '100%').attr('stop-color', shade(base, -0.38));
+    g.append('stop').attr('offset', '0%').attr('stop-color', shade(base, 0.38));
+    g.append('stop').attr('offset', '40%').attr('stop-color', shade(base, 0.10));
+    g.append('stop').attr('offset', '72%').attr('stop-color', base);
+    g.append('stop').attr('offset', '100%').attr('stop-color', base).attr('stop-opacity', 0.30);
   }
   const glare = defs.append('radialGradient').attr('id', 'kb-glare').attr('cx', '50%').attr('cy', '50%').attr('r', '50%');
   glare.append('stop').attr('offset', '0%').attr('stop-color', '#ffffff').attr('stop-opacity', 0.85);
@@ -419,9 +420,9 @@ function update() {
     .attr('r', nodeRadius)
     .attr('fill', d => `url(#gloss-${d.type === 'entity' ? 'entity' : 'chunk'})`)
     .attr('fill-opacity', nodeOpacity)
-    .attr('stroke', d => shade(nodeColor(d), -0.45))
+    .attr('stroke', d => shade(nodeColor(d), -0.25))
     .attr('stroke-width', 1)
-    .attr('stroke-opacity', 0.6);
+    .attr('stroke-opacity', 0.35);
   entered.select('ellipse.glare')
     .attr('cx', d => -nodeRadius(d) * 0.28)
     .attr('cy', d => -nodeRadius(d) * 0.32)

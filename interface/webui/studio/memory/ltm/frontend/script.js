@@ -146,10 +146,10 @@ function hueColor(hue) {
   return '#8a9bb8';
 }
 
-/** Flat-fill opacity — score-proportional brightness, no gradients needed. */
+/** Translucent glass fill — dim nodes ghost into the background. */
 function nodeOpacity(d) {
   let r = retainOf(d);
-  let o = 0.25 + Math.pow(r, 0.9) * 0.75;
+  let o = 0.18 + Math.pow(r, 0.9) * 0.55;
   const hue = valenceHue(d);
   if (hue === 'pos' || hue === 'neg') o = Math.min(1, o + 0.08);
   if (d.pinned) o = Math.max(o, 0.92);
@@ -559,9 +559,9 @@ function buildGraph() {
     .attr('r', nodeRadius)
     .attr('fill', d => `url(#gloss-${valenceHue(d)})`)
     .attr('fill-opacity', nodeOpacity)
-    .attr('stroke', d => d.pinned ? '#ffffff' : shade(hueColor(valenceHue(d)), -0.45))
+    .attr('stroke', d => d.pinned ? '#ffffff' : shade(hueColor(valenceHue(d)), -0.25))
     .attr('stroke-width', d => d.pinned ? 2 : 1)
-    .attr('stroke-opacity', d => d.pinned ? 0.9 : 0.6)
+    .attr('stroke-opacity', d => d.pinned ? 0.9 : 0.35)
     .attr('stroke-dasharray', d =>
       (d.type === 'memory' && (d.status === 'superseded' || d.is_tip === false)) ? '3,2' : null);
 
@@ -607,16 +607,17 @@ function defs_(svg) {
   defs.append('marker').attr('id','arrow-sup').attr('viewBox','0 0 10 10')
     .attr('refX', 9).attr('refY', 5).attr('markerWidth', 5).attr('markerHeight', 5).attr('orient','auto')
     .append('path').attr('d','M 0 1 L 10 5 L 0 9 Z').attr('fill', '#f59e0b').attr('opacity', 0.8);
-  // Glassmorphic sphere per hue: soft sheen → translucent base → gentle rim.
+  // Translucent glass marbles: soft sheen, feathered edge that melts into
+  // the dark background (outer stop fades to transparent).
   for (const h of HUES) {
     const base = hueColor(h);
     const g = defs.append('radialGradient')
       .attr('id', 'gloss-' + h)
       .attr('cx', '34%').attr('cy', '28%').attr('r', '78%');
-    g.append('stop').attr('offset', '0%').attr('stop-color', shade(base, 0.45));
-    g.append('stop').attr('offset', '35%').attr('stop-color', shade(base, 0.12));
-    g.append('stop').attr('offset', '70%').attr('stop-color', base);
-    g.append('stop').attr('offset', '100%').attr('stop-color', shade(base, -0.38));
+    g.append('stop').attr('offset', '0%').attr('stop-color', shade(base, 0.38));
+    g.append('stop').attr('offset', '40%').attr('stop-color', shade(base, 0.10));
+    g.append('stop').attr('offset', '72%').attr('stop-color', base);
+    g.append('stop').attr('offset', '100%').attr('stop-color', base).attr('stop-opacity', 0.30);
   }
   // Shared specular glare dabbed on hot nodes.
   const glare = defs.append('radialGradient').attr('id', 'glare').attr('cx', '50%').attr('cy', '50%').attr('r', '50%');

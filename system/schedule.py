@@ -1871,16 +1871,16 @@ class ScheduleRunner:
             return
         try:
             while self._catchup_dates:
-                try:
-                    date = self._catchup_dates.pop(0)
-                except IndexError:
-                    break
                 if not acquire_busy(owner="scheduler:daily-catchup"):
                     log.error(
                         "Scheduler: skipping daily catch-up — %s",
                         holder_desc())
                     return
                 try:
+                    try:
+                        date = self._catchup_dates.pop(0)
+                    except IndexError:
+                        break
                     uid = self._resolve_owner()
                     if not uid or uid == "guest":
                         return

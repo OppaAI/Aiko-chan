@@ -73,3 +73,39 @@ def test_restore_schedule_record_replaces_cancelled_record(monkeypatch):
     assert schedule.restore_schedule_record(restored)
     assert jobs == [restored]
     assert written == [[restored]]
+
+
+def test_catchup_retains_date_after_busy_timeout(monkeypatch):
+    import system.schedule as schedule
+
+    monkeypatch.setattr(schedule.ScheduleRunner, "_missing_reflection_dates", lambda _self: [])
+    monkeypatch.setattr(schedule.ScheduleRunner, "_monthly_catchup_needed", lambda _self: False)
+    runner = schedule.ScheduleRunner(user_id="github_alice")
+    date = datetime(2026, 8, 25, tzinfo=timezone.utc)
+    runner._catchup_dates = [date]
+    monkeypatch.setattr(schedule, "acquire_busy", lambda **_kwargs: False)
+
+    runner._run_catchup_backfill()
+
+    assert runner._catchup_dates == [date]
+
+
+def test_catchup_releases_gate_if_dates_change_while_waiting(monkeypatch):
+    import system.schedule as schedule
+
+    monkeypatch.setattr(schedule.ScheduleRunner, "_missing_reflection_dates", lambda _self: [])
+    monkeypatch.setattr(schedule.ScheduleRunner, "_monthly_catchup_needed", lambda _self: False)
+    runner = schedule.ScheduleRunner(user_id="github_alice")
+    runner._catchup_dates = [datetime(2026, 8, 25, tzinfo=timezone.utc)]
+    released = []
+
+    def acquire(**_kwargs):
+        runner._catchup_dates.clear()
+        return True
+
+    monkeypatch.setattr(schedule, "acquire_busy", acquire)
+    monkeypatch.setattr(schedule, "release_busy", lambda: released.append(True))
+
+    runner._run_catchup_backfill()
+
+    assert released == [True]

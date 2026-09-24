@@ -1535,6 +1535,8 @@ def run_session(ui, args) -> None:
         # longer block turns forever — the turn is skipped loudly instead.
         if not acquire_busy(owner="interactive-turn"):
             log.error("turn skipped: busy gate timeout — %s", holder_desc())
+            ui.add_message('sys', 'Turn skipped because Aiko is busy. Please retry your message.')
+            ui._draw()
             continue
 
         from system.userspace import current_user_id

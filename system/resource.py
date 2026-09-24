@@ -145,7 +145,7 @@ def companion_rss_mb(
     Best-effort: never raises, returns {} when nothing matches or the
     process table is unreadable. Prefers psutil, falls back to /proc.
     """
-    pats = tuple(patterns) if patterns else COMPANION_PATTERNS
+    pats = tuple(pat.lower() for pat in patterns) if patterns else COMPANION_PATTERNS
     if not pats:
         return {}
     self_pid = os.getpid()
@@ -166,13 +166,17 @@ def companion_rss_mb(
                     continue
                 for pat in pats:
                     if pat in cmdline:
-                        rss = float(
-                            proc.info["memory_info"].rss) / (1024 * 1024)
+                        memory_info = proc.info["memory_info"]
+                        if memory_info is None:
+                            raise ValueError("companion memory_info is unavailable")
+                        rss = float(memory_info.rss) / (1024 * 1024)
                         label = f"{pat}:{pid}"
                         found[label] = round(rss, 1)
                         break
-            except Exception:
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
                 continue
+            except Exception:
+                log.warning("ram: failed to inspect companion process %s", getattr(proc, "pid", "?"), exc_info=True)
         return found
     except Exception:
         pass

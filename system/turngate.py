@@ -49,6 +49,7 @@ Usage:
 from __future__ import annotations
 
 import contextlib
+import math
 import threading
 import time
 
@@ -64,6 +65,9 @@ AIKO_BUSY_LOCK = threading.RLock()
 #: unprotected. Override with AIKO_BUSY_TIMEOUT_S (0 = wait forever,
 #: preserving the old blocking behaviour).
 BUSY_TIMEOUT_S: float = env_float("AIKO_BUSY_TIMEOUT_S", 600.0)
+if not math.isfinite(BUSY_TIMEOUT_S) or BUSY_TIMEOUT_S < 0:
+    log.warning("Invalid AIKO_BUSY_TIMEOUT_S; using 600s default")
+    BUSY_TIMEOUT_S = 600.0
 
 _meta_lock = threading.Lock()
 _holder_ident: int | None = None
@@ -95,6 +99,8 @@ def acquire_busy(owner: str = "", timeout: float | None = None) -> bool:
     current holder's identity so a wedged holder is visible.
     """
     wait = BUSY_TIMEOUT_S if timeout is None else timeout
+    if not math.isfinite(wait) or wait < 0:
+        raise ValueError("busy-gate timeout must be finite and non-negative")
     if wait and wait > 0:
         ok = AIKO_BUSY_LOCK.acquire(timeout=wait)
     else:

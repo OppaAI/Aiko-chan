@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import sys
+from types import ModuleType, SimpleNamespace
 
 import system.resource as ram
 
@@ -39,3 +41,41 @@ def test_release_ram_survives_broken_gc(monkeypatch):
 
 def test_malloc_trim_returns_bool():
     assert isinstance(ram._malloc_trim(), bool)
+
+
+def test_companion_rss_matches_case_insensitive_override(monkeypatch):
+    psutil = ModuleType("psutil")
+    psutil.NoSuchProcess = type("NoSuchProcess", (Exception,), {})
+    psutil.ZombieProcess = type("ZombieProcess", (Exception,), {})
+    psutil.process_iter = lambda _attrs: [SimpleNamespace(
+        pid=123, info={"pid": 123, "cmdline": ["/opt/miotts/server"],
+                       "memory_info": SimpleNamespace(rss=1024 * 1024)},
+    )]
+    monkeypatch.setitem(sys.modules, "psutil", psutil)
+
+    assert ram.companion_rss_mb(patterns=("MioTTS",)) == {"miotts:123": 1.0}
+
+
+def test_companion_rss_logs_missing_memory_but_ignores_exit_race(monkeypatch, caplog):
+    psutil = ModuleType("psutil")
+    psutil.NoSuchProcess = type("NoSuchProcess", (Exception,), {})
+    psutil.ZombieProcess = type("ZombieProcess", (Exception,), {})
+
+    class Exited:
+        pid = 123
+
+        @property
+        def info(self):
+            raise psutil.NoSuchProcess()
+
+    exited = Exited()
+    missing = SimpleNamespace(
+        pid=124, info={"pid": 124, "cmdline": ["miotts"], "memory_info": None},
+    )
+    psutil.process_iter = lambda _attrs: [exited, missing]
+    monkeypatch.setitem(sys.modules, "psutil", psutil)
+
+    assert ram.companion_rss_mb(patterns=("miotts",)) == {}
+    assert "companion process 124" in caplog.text
+    assert "memory_info is unavailable" in caplog.text
+    assert "companion process 123" not in caplog.text

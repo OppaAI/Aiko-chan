@@ -76,6 +76,7 @@ code, not here — see the code below.
 from __future__ import annotations   # annotations become lazy strings — forward refs & newer syntax OK
 
 import argparse                      # CLI argument parsing
+import contextlib                    # suppress(Exception) for best-effort logging blocks
 import logging                       # logger for all [main] output
 import os                            # env gate + hard-exit trap
 import traceback                     # logging exit origins
@@ -150,10 +151,8 @@ def _install_two_stage_sigint(log: logging.Logger) -> None:
         state["count"] += 1
         if state["count"] == 1:
             raise KeyboardInterrupt
-        try:
+        with contextlib.suppress(Exception):
             log.warning("[main] second interrupt — forcing immediate exit")
-        except Exception:
-            pass
         os._exit(130)
 
     try:
@@ -273,7 +272,7 @@ def _handle_backup(log: logging.Logger, args) -> int:
     """
     from system.backup import BackupError, run_backup
 
-    dests = [d for d in str(getattr(args, "backup_dest", "usb") or "usb").split(",")]
+    dests = str(getattr(args, "backup_dest", "usb") or "usb").split(",")
     try:
         manifest = run_backup(
             getattr(args, "backup_type", "settings") or "settings",
@@ -477,7 +476,6 @@ def _apply_debug_trace_env(args: argparse.Namespace) -> None:
                                                          # flag is the only write source; beats any shell export.
 
 
-
 def _flush_fly_plasticity(log) -> None:
     """Best-effort write of pending fly MB/CX state on process exit."""
     try:
@@ -486,10 +484,8 @@ def _flush_fly_plasticity(log) -> None:
         if result:
             log.debug("[main] fly plasticity flushed: %s", result)
     except Exception as exc:
-        try:
+        with contextlib.suppress(Exception):
             log.debug("[main] fly plasticity flush skipped: %s", exc)
-        except Exception:
-            pass
 
 
 def main() -> int:

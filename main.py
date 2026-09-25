@@ -271,7 +271,8 @@ def _handle_backup(log: logging.Logger, args) -> int:
 
     Non-destructive, so no confirmation gates — but fail-closed: any
     snapshot/verify/transport error returns 1 with the cause in aiko.log.
-    Exit codes: 0 = verified backup written; 1 = failed.
+    Exit codes: 0 = wiped or aborted at a gate; 1 = guard failed or wipe failed;
+    2 = user id not resolvable (pass --user or set AIKO_USER_ID).
     """
     from system.backup import BackupError, run_backup
 
@@ -321,7 +322,7 @@ def _handle_factory_reset(log: logging.Logger, args) -> int:
         log.error("[main] factory reset refused: %s", e)
         if not _console_enabled():
             print(f"ERROR: {e}")
-        return 1
+        return 2
     phrase = _FACTORY_RESET_PHRASE_TMPL.format(uid=uid)
     try:
         confirm = input(f"WARNING: This will PERMANENTLY erase ALL state for '{uid}'. Continue? [Yes/No]: ").strip().lower()

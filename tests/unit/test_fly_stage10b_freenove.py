@@ -4,8 +4,8 @@ Covers:
   - exact wire-protocol encoding (F/O/A/B/E/C/D/M/R + trailing '#' + '\\n')
   - primitive → wire mapping (locomotion/gesture/pose/expression/gaze/buzzer)
   - no-spam: unchanged channels are not re-transmitted
-  - auto-stop: F#0#0#0# when a locomotion intent disappears
-  - GF interrupt → hardware e-stop F#0#0#0# (sent once, before apply)
+  - auto-stop: F#0#0#0#5# when a locomotion intent disappears
+  - GF interrupt → hardware e-stop F#0#0#0#5# (sent once, before apply)
   - shadow mode computes wire strings but never opens a socket
   - unreachable dog → soft fallback, no raise, bounded time
   - AIKO_FLY_BODY_BACKEND selection (default null; invalid → null)
@@ -121,7 +121,7 @@ def test_encode_exact_wire_strings():
     assert fd.encode("F", 0, 0, 0) == "F#0#0#0#\n"
     assert fd.encode("F", 10, -20, 0, 50) == "F#10#-20#0#50#\n"
     assert fd.move(10, -20, 0, 50) == "F#10#-20#0#50#\n"
-    assert fd.STOP == "F#0#0#0#\n"
+    assert fd.STOP == "F#0#0#0#5#\n"
     assert fd.trick(6) == "O#6#\n"
     assert fd.trick(99) == "O#6#\n"   # clamped to 1..6
     assert fd.trick(0) == "O#1#\n"
@@ -184,7 +184,7 @@ def test_auto_stop_when_intent_disappears(uid, live_mode, freenove_backend,
     assert b"F#10#0#0#50#\n" in _bytes(dog_server)
     # Next turn: no locomotion intent → the dog must be stopped explicitly.
     body.drive(_record(), user_id=uid, tick=2)
-    assert b"F#0#0#0#\n" in _bytes(dog_server)
+    assert b"F#0#0#0#5#\n" in _bytes(dog_server)
 
 
 # ── e-stop ──────────────────────────────────────────────────────────
@@ -203,7 +203,67 @@ def test_gf_interrupt_sends_estop_once(uid, live_mode, freenove_backend,
     fr = res["backends"]["freenove"]
     assert fr["estop"]["estop_sent"] is True
     data = _bytes(dog_server)
-    assert data.count(b"F#0#0#0#\n") == 1, data
+    assert data.count(b"F#0#0#0#5#\n") == 1, data
+
+
+def test_failed_estop_preserves_move_for_apply_retry(uid, monkeypatch):
+    be = body._BACKENDS["freenove"]
+    moving = fd.move(10, 0, 0, 50)
+    be._last_wire[body._key(uid)] = {"F": moving}
+
+    class Link:
+        available = True
+        def estop(self):
+            return False
+        def send(self, wire):
+            assert wire == fd.STOP
+            return True
+
+    monkeypatch.setattr(fd, "get_link", lambda: Link())
+    assert be.estop(user_id=uid, live=True)["estop_sent"] is False
+    assert be._last_wire[body._key(uid)]["F"] == moving
+    assert be.apply({}, user_id=uid, live=True)["sent"] == [fd.STOP]
+
+
+def test_dog_link_reconnect_backoff_and_availability(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(fd.time, "monotonic", lambda: now[0])
+    calls = []
+
+    class Socket:
+        def __init__(self, broken=False):
+            self.broken = broken
+        def settimeout(self, timeout):
+            pass
+        def sendall(self, data):
+            if self.broken:
+                raise OSError("send failed")
+        def close(self):
+            pass
+
+    def connect(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("connect failed")
+        return Socket(broken=len(calls) == 2)
+
+    monkeypatch.setattr(fd.socket, "create_connection", connect)
+    link = fd.DogLink("127.0.0.1", 5000)
+    monkeypatch.setattr(link, "_warn_once", lambda msg: None)
+    assert link.available is False
+    assert link.send(fd.STOP) is False
+    assert link.send(fd.STOP) is False
+    assert len(calls) == 1
+    now[0] += fd._RECONNECT_BACKOFF_S
+    assert link.send(fd.STOP) is False
+    assert link.available is False
+    assert link.send(fd.STOP) is False
+    assert len(calls) == 2
+    now[0] += fd._RECONNECT_BACKOFF_S
+    assert link.send(fd.STOP) is True
+    assert link.available is True
+    assert link.send(fd.STOP) is True
+    assert len(calls) == 3  # the open socket remains the fast path
 
 
 # ── mapping spot checks (unit-level, exact wires) ───────────────────

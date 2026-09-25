@@ -40,6 +40,7 @@ import logging
 import os
 import threading
 from collections import deque
+from copy import deepcopy
 
 log = logging.getLogger("aiko.fly.body")
 
@@ -166,6 +167,15 @@ def latest_record(user_id: str | None = None) -> dict | None:
         return None
 
 
+def last_drive(user_id: str | None = None) -> dict:
+    """Read the latest completed drive result without advancing the pipeline."""
+    try:
+        with _lock:
+            return deepcopy(_last_drive.get(_key(user_id), {}))
+    except Exception:
+        return {}
+
+
 def translate(active: list[dict], *, user_id: str | None = None) -> dict:
     """Turn coordinated in-flight primitives into per-actuator commands.
 
@@ -228,10 +238,14 @@ def _translate(active: list[dict], *, user_id: str | None) -> dict:
     # Rate limits: cap the per-turn change of each actuator's scalar.
     with _lock:
         prev = _last_cmd.setdefault(_key(user_id), {})
+        if "dog.locomotion" not in cmds:
+            prev.pop("dog.locomotion", None)
         for actuator, cmd in cmds.items():
             key = _RATE_KEYS.get(actuator)
             limit = _RATE_LIMITS.get(actuator)
             old = prev.get(actuator)
+            if actuator == "dog.locomotion" and old is None:
+                old = {"speed": 0}
             if key and limit and isinstance(old, dict) and key in old:
                 try:
                     delta = float(cmd[key]) - float(old[key])
@@ -348,7 +362,7 @@ class FreenoveBackend(_Backend):
     Primitive → wire mapping (interpretive — the dog is not a VRM avatar):
       dog.locomotion {x,y,rot,speed} → F#x#y#rot#speed#
           Auto-stop: F is continuous, so when the locomotion intent
-          disappears the backend sends F#0#0#0# on its own — otherwise
+          disappears the backend sends STOP on its own — otherwise
           the dog would keep walking forever.
       vrm.gesture {name}  → O#n# trick: greet→1 say_hello,
           emphasize→6 dancing, work→2 push_up; none/unknown → nothing.
@@ -503,7 +517,7 @@ class FreenoveBackend(_Backend):
 
     def estop(self, *, user_id: str | None = None,
             live: bool = False) -> dict:
-        """Hardware e-stop: F#0#0#0# sent immediately.
+        """Hardware e-stop: F#0#0#0#5# sent immediately.
 
         Bypasses change detection (safety > no-spam) and clears the
         locomotion channel state so the next move intent re-sends fresh.
@@ -516,8 +530,8 @@ class FreenoveBackend(_Backend):
             uk = _key(user_id)
             from cognition.fly_behavior import freenove_dog as fd
             with self._lock:
-                self._last_wire.get(uk, {}).pop("F", None)
                 if fd.get_link().estop():
+                    self._last_wire.get(uk, {}).pop("F", None)
                     out["estop_sent"] = True
         except Exception as exc:
             log.debug("freenove estop skipped: %s", exc)
@@ -666,7 +680,7 @@ def _drive(record: dict | None, *, user_id: str | None, tick: int | None) -> dic
         if live and out["cancelled"]:
             # Hardware e-stop path: F is continuous — without an
             # explicit stop the dog keeps walking on its last vector,
-            # so a GF cancel must send F#0#0#0# immediately.
+            # so a GF cancel must send the STOP command immediately.
             # Safety outranks the no-spam rule. Sent BEFORE apply()
             # computes, so apply() won't duplicate the stop.
             estop_res = fr.estop(user_id=user_id, live=True)
@@ -681,16 +695,18 @@ def _drive(record: dict | None, *, user_id: str | None, tick: int | None) -> dic
 
     # Observability: what the body layer did this turn.
     try:
-        from cognition.neural_state import get_neural_state
-        get_neural_state(user_id).record_influence({
-            "kind": "body_drive",
-            "mode": mode,
-            "n_primitives": len(prims),
-            "n_active": len(coord.get("active", [])),
-            "cancelled": out["cancelled"],
-            "actuators": sorted(actuators.keys()),
-            "applied": live,
-        })
+        from cognition.neural_state import peek_neural_state
+        st = peek_neural_state(user_id)
+        if st is not None:
+            st.record_influence({
+                "kind": "body_drive",
+                "mode": mode,
+                "n_primitives": len(prims),
+                "n_active": len(coord.get("active", [])),
+                "cancelled": out["cancelled"],
+                "actuators": sorted(actuators.keys()),
+                "applied": live,
+            })
     except Exception:
         pass
     with _lock:

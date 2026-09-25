@@ -14,6 +14,7 @@ Covers the QA contract:
 """
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
@@ -22,6 +23,7 @@ from cognition.fly_behavior import motor_primitives as mp
 from cognition.fly_behavior import vnc_coordinator as vnc
 from cognition.fly_behavior import body
 from cognition.fly_behavior import dn_body
+from cognition.fly_behavior import action_select
 
 
 @pytest.fixture
@@ -175,6 +177,17 @@ def test_duration_expiry(uid):
     assert vnc.in_flight(uid) == []
 
 
+def test_elapsed_ticks_and_clock_rewind(uid):
+    p = _prim("gaze", "vrm.gaze", duration=5, cooldown=10)
+    vnc.coordinate([p], user_id=uid, tick=10)
+    assert vnc.coordinate([], user_id=uid, tick=14)["active"][0]["remaining"] == 1
+    assert vnc.coordinate([], user_id=uid, tick=15)["active"] == []
+    # A reset clock must not preserve cooldowns from the old clock.
+    rewind = vnc.coordinate([p], user_id=uid, tick=5)
+    assert rewind["started"]
+    assert vnc.coordinate([], user_id=uid, tick=4)["active"][0]["remaining"] == 4
+
+
 def test_interrupt_cancels_in_flight(uid):
     vnc.coordinate([_prim("expression", "vrm.expression", priority=20,
                            duration=5)],
@@ -227,6 +240,15 @@ def test_rate_limits(uid):
         [{"name": "expression", "actuator": "vrm.expression",
           "params": {"name": "happy", "intensity": 1.0}}], user_id=uid)
     assert second["vrm.expression"]["intensity"] == pytest.approx(0.75)
+
+
+def test_locomotion_ramps_from_rest_after_idle(uid):
+    move = [{"name": "locomotion", "params":
+             {"x": 10, "y": 0, "rot": 0, "speed": 100}}]
+    assert body.translate(move, user_id=uid)["dog.locomotion"]["speed"] == 50
+    assert body.translate(move, user_id=uid)["dog.locomotion"]["speed"] == 100
+    body.translate([], user_id=uid)
+    assert body.translate(move, user_id=uid)["dog.locomotion"]["speed"] == 50
 
 
 def test_drive_shadow_applies_nothing(uid, shadow_mode, monkeypatch):
@@ -286,6 +308,41 @@ def test_on_scored_hook_feeds_drive(uid, shadow_mode):
     assert "gesture" in names  # tool-kind primitives
 
 
+def test_last_drive_is_read_only_and_does_not_run_pipeline(uid, monkeypatch):
+    assert body.last_drive(uid) == {}
+    body._last_drive[body._key(uid)] = {"backends": {"agent": {"vigor": 1.2}}}
+    monkeypatch.setattr(body, "drive", lambda **kwargs: pytest.fail("drive called"))
+    snapshot = body.last_drive(uid)
+    snapshot["backends"]["agent"]["vigor"] = 0.4
+    assert body.last_drive(uid)["backends"]["agent"]["vigor"] == 1.2
+    assert action_select._dn_vigor(uid) == 1.2
+
+
+def test_scoring_records_and_drives_only_for_stateful_user(uid, shadow_mode,
+                                                           monkeypatch):
+    votes = {"mb": 0.0, "cx": 0.0, "dn": 0.0, "gf": 0.0, "cx_drive": 0.0}
+    monkeypatch.setattr(action_select, "_votes_for", lambda *args, **kwargs: votes)
+    seen = []
+    monkeypatch.setattr(body, "on_scored", lambda rec, **kw: seen.append(("record", kw)))
+    monkeypatch.setattr(body, "drive", lambda **kw: seen.append(("drive", kw)))
+    cand = action_select.Candidate(
+        "walk", "tool", "walk", "walk", 0.8,
+        {"locomotion": {"x": 10, "y": 0, "rot": 0, "speed": 30}},
+    )
+    action_select.score_candidates([cand], user_id=uid, record_state=False)
+    action_select.score_candidates([cand], record_state=True)
+    assert seen == []
+    rec = action_select.score_candidates([cand], user_id=uid)
+    assert rec["candidates"]["walk"]["locomotion"]["speed"] == 30
+    _neural(uid)
+    assert any(p.name == "locomotion" for p in
+               mp.emit_primitives(rec, user_id=uid))
+    assert seen == [("record", {"user_id": uid}), ("drive", {"user_id": uid})]
+    cand.hints["locomotion"]["speed"] = 200
+    invalid = action_select.score_candidates([cand], user_id=uid, record_state=False)
+    assert "locomotion" not in invalid["candidates"]["walk"]
+
+
 def test_tts_and_agent_accessors(uid, live_mode):
     _neural(uid)
     body.drive(_record("reply"), user_id=uid, tick=1)
@@ -320,6 +377,20 @@ def test_body_drive_shadow_packet(uid, shadow_mode, monkeypatch):
     assert pkt["body_applied"] is False
 
 
+def test_body_drive_cancellation_still_runs_backend(uid, live_mode, monkeypatch):
+    monkeypatch.setenv("MEMORY_FLYDN_MODE", "live")
+    monkeypatch.setattr("cognition.fly_behavior.gf_global.should_cancel_output",
+                        lambda user_id: True)
+    seen = []
+    monkeypatch.setattr(body, "drive", lambda **kw: seen.append(kw) or
+                        {"mode": "live", "applied": True, "primitives": [],
+                         "backends": {}})
+    pkt = dn_body.body_drive(user_id=uid)
+    assert seen == [{"user_id": uid}]
+    assert pkt["cancelled"] is True and pkt["body_mode"] == "live"
+    assert pkt["rate_mult"] == 0.0
+
+
 def test_agent_step_budget_body_live(uid, live_mode, monkeypatch):
     monkeypatch.setenv("MEMORY_FLYDN_MODE", "live")
     _neural(uid, vigor=1.5, drive=1.0)
@@ -346,6 +417,8 @@ def test_gf_interrupt_end_to_end(uid, live_mode, monkeypatch):
 
 # ── performance ─────────────────────────────────────────────────────
 
+@pytest.mark.skipif(os.getenv("AIKO_RUN_PERF_TESTS") != "1",
+                    reason="set AIKO_RUN_PERF_TESTS=1 to run timing checks")
 def test_drive_cost_sub_ms(uid, shadow_mode):
     _neural(uid)
     rec = _record("reply")

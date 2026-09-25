@@ -3,7 +3,7 @@
 Transport: TCP socket to the dog on port 5000 (port 8000 is the camera
 video stream — out of scope here). Message format is a single-char
 command, '#' separators, integer params, a trailing '#', and a newline,
-e.g. "F#0#0#0#\\n".
+e.g. "F#0#0#0#5#\\n".
 
 Protocol extracted from Freenove's open firmware
 (Freenove_ESP32_Dog_Firmware, ESP-IDF): BluetoothOrders.h,
@@ -11,7 +11,7 @@ TaskCommandService.cpp, TaskMotionService.cpp.
 
 Command set:
   F  move_any     F#x#y#rot#speed#   continuous locomotion; keeps going
-                                    until stopped — F#0#0#0# stops.
+                                    until stopped — F#0#0#0#5# stops.
   O  tricks       O#1..6#  1=say_hello 2=push_up 3=stretch_self
                            4=turn_around 5=sit_down 6=dancing
   A  posture      A#0/1/2#
@@ -57,6 +57,7 @@ log = logging.getLogger("aiko.fly.freenove")
 _DEFAULT_HOST = "192.168.4.1"
 _DEFAULT_PORT = 5000
 _DEFAULT_TIMEOUT = 1.0
+_RECONNECT_BACKOFF_S = 1.0
 
 # Log-once cooldown per host so an unreachable dog doesn't spam logs.
 _WARN_COOLDOWN_S = 60.0
@@ -111,11 +112,11 @@ def encode(cmd: str, *params: int) -> str:
 # ── command builders ────────────────────────────────────────────────
 
 def move(x: int = 0, y: int = 0, rot: int = 0, speed: int = 0) -> str:
-    """Continuous locomotion vector. move(0,0,0,0) == stop."""
+    """Continuous locomotion vector."""
     return encode("F", x, y, rot, speed)
 
 
-STOP = encode("F", 0, 0, 0)  # the firmware's stop form: "F#0#0#0#"
+STOP = encode("F", 0, 0, 0, 5)
 
 
 def trick(n: int) -> str:
@@ -175,7 +176,7 @@ class DogLink:
 
     Connects on first send with a short timeout. The socket is kept open
     between sends; any failure closes it and marks the link unavailable
-    until the next send attempt.
+    until a later send succeeds. Failed connections back off briefly.
     """
 
     def __init__(self, host_: str | None = None, port_: int | None = None,
@@ -185,7 +186,8 @@ class DogLink:
         self._timeout = timeout if timeout is not None else timeout_s()
         self._lock = threading.Lock()
         self._sock: socket.socket | None = None
-        self._unavailable = False
+        self._unavailable = True
+        self._next_attempt_at = 0.0
 
     @property
     def available(self) -> bool:
@@ -204,18 +206,20 @@ class DogLink:
     def _ensure(self) -> bool:
         if self._sock is not None:
             return True
+        if time.monotonic() < self._next_attempt_at:
+            return False
         try:
             s = socket.create_connection(
                 (self._host, self._port), timeout=self._timeout)
             s.settimeout(self._timeout)
             self._sock = s
-            self._unavailable = False
             log.info("freenove dog connected at %s:%d",
                      self._host, self._port)
             return True
         except Exception as exc:
             self._close_locked()
             self._unavailable = True
+            self._next_attempt_at = time.monotonic() + _RECONNECT_BACKOFF_S
             self._warn_once(
                 f"unreachable at {self._host}:{self._port} ({exc}); "
                 "backend falls back to null (no commands sent)")
@@ -238,16 +242,19 @@ class DogLink:
                     return False
                 assert self._sock is not None
                 self._sock.sendall(data.encode("ascii", "replace"))
+                self._unavailable = False
+                self._next_attempt_at = 0.0
             return True
         except Exception as exc:
             with self._lock:
                 self._close_locked()
                 self._unavailable = True
+                self._next_attempt_at = time.monotonic() + _RECONNECT_BACKOFF_S
             self._warn_once(f"send failed ({exc}); link dropped")
             return False
 
     def estop(self) -> bool:
-        """Hardware e-stop: F#0#0#0#. Bypasses change detection upstream."""
+        """Hardware e-stop: F#0#0#0#5#. Bypasses change detection upstream."""
         return self.send(STOP)
 
     def close(self) -> None:

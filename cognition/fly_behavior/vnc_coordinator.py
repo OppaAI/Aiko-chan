@@ -129,8 +129,12 @@ def coordinate(
 def _coordinate(primitives, *, user_id, tick, interrupt) -> dict:
     with _lock:
         st = _state(user_id)
-        st.tick = tick if tick is not None else st.tick + 1
-        now = st.tick
+        now = tick if tick is not None else st.tick + 1
+        elapsed = now - st.tick
+        if elapsed < 0:
+            st.cooldown_until.clear()
+            elapsed = 1
+        st.tick = now
 
         # GF interrupt is authoritative: everything stops this turn.
         if interrupt:
@@ -141,7 +145,7 @@ def _coordinate(primitives, *, user_id, tick, interrupt) -> dict:
         # Age in-flight primitives; expire finished ones.
         live: list[_InFlight] = []
         for p in st.in_flight:
-            p.remaining -= 1
+            p.remaining -= elapsed
             if p.remaining > 0:
                 live.append(p)
         st.in_flight = live

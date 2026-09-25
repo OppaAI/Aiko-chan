@@ -37,6 +37,25 @@ def body_drive(*, user_id: str | None = None) -> dict:
     }
     if mode not in ("shadow", "live"):
         return out
+    # Run the body layer before the cancellation return so its backend can
+    # send a stop for any motion already in flight.
+    try:
+        from cognition.fly_behavior import body as _body_layer
+        bl = _body_layer.drive(user_id=user_id) or {}
+        vrm = (bl.get("backends") or {}).get("vrm") or {}
+        out.update({
+            "body_mode": bl.get("mode", "off"),
+            "body_applied": bool(bl.get("applied", False)),
+            "primitives": bl.get("primitives", []),
+            "expression_name": vrm.get("expression_name", "neutral"),
+            "gaze_target": vrm.get("gaze_target", "user"),
+            "gesture_name": vrm.get("gesture_name", "none"),
+            "pose_name": vrm.get("pose_name", "idle"),
+            "emphasis": ((bl.get("backends") or {}).get("tts") or {}).get(
+                "emphasis", 0.0),
+        })
+    except Exception as exc:
+        log.debug("body_drive 10B layer skipped: %s", exc)
     try:
         from cognition.fly_behavior.gf_global import should_cancel_output
         if should_cancel_output(user_id):
@@ -87,25 +106,6 @@ def body_drive(*, user_id: str | None = None) -> dict:
             pass
     except Exception as exc:
         log.debug("body_drive skipped: %s", exc)
-    # Phase 10B: fold the body layer's primitive-derived fields into the
-    # packet (additive only — all existing keys keep their meaning).
-    try:
-        from cognition.fly_behavior import body as _body_layer
-        bl = _body_layer.drive(user_id=user_id) or {}
-        vrm = (bl.get("backends") or {}).get("vrm") or {}
-        out.update({
-            "body_mode": bl.get("mode", "off"),
-            "body_applied": bool(bl.get("applied", False)),
-            "primitives": bl.get("primitives", []),
-            "expression_name": vrm.get("expression_name", "neutral"),
-            "gaze_target": vrm.get("gaze_target", "user"),
-            "gesture_name": vrm.get("gesture_name", "none"),
-            "pose_name": vrm.get("pose_name", "idle"),
-            "emphasis": ((bl.get("backends") or {}).get("tts") or {}).get(
-                "emphasis", 0.0),
-        })
-    except Exception as exc:
-        log.debug("body_drive 10B layer skipped: %s", exc)
     return out
 
 

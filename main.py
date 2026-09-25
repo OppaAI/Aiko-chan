@@ -131,7 +131,7 @@ def _install_os_exit_trap(log: logging.Logger, enabled: bool) -> None:
         except Exception:                    # noqa: SIM105 — the finally below is load-bearing:
             pass                             # a BaseException (Ctrl+C) during logging must still
         finally:                             # reach _original_os_exit; suppress() would skip it.
-            _original_os_exit(code)          # 
+            _original_os_exit(code)          # exit with the saved reference of the real hard exit.
 
     os._exit = _logged_os_exit     # patch applied; anything that bound os._exit before this bypasses logging
     # NOTE: Not idempotent — calling this twice double-wraps os._exit (harmless

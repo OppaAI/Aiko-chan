@@ -128,10 +128,13 @@ def _install_os_exit_trap(log: logging.Logger, enabled: bool) -> None:
     # os._exit() cannot be caught by try/except, so the only way to observe it
     # is to wrap it: log WHO called it, then perform the real exit.
     def _logged_os_exit(code: int | str | None) -> None:
-        except Exception:                    # noqa: SIM105 — the finally below is load-bearing:
-            pass                             # a BaseException (Ctrl+C) during logging must still
-        finally:                             # reach _original_os_exit; suppress() would skip it.
-            _original_os_exit(code)          # exit with the saved reference of the real hard exit.
+        try:                                                     # Attempt to log the caller's stack
+            log.error("[main] os._exit(%s) called from:\n%s",    # .format_stack() returns list of str, join() makes it one str
+                code, "".join(traceback.format_stack()))
+        except Exception:                                        # noqa: SIM105 — the finally below is load-bearing:
+            pass                                                 # a BaseException (Ctrl+C) during logging must still
+        finally:                                                 # reach _original_os_exit; suppress() would skip it.
+            _original_os_exit(code)                              # exit with the saved reference of the real hard exit.
 
     os._exit = _logged_os_exit     # patch applied; anything that bound os._exit before this bypasses logging
     # NOTE: Not idempotent — calling this twice double-wraps os._exit (harmless

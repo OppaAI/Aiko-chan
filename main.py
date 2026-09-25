@@ -113,8 +113,11 @@ def _resolve_version() -> str:
 
 class _VersionAction(argparse.Action):
     """Print the version and exit — resolves metadata lazily (see _resolve_version)."""
+    # exists so the version lookup (importlib.metadata) only runs when --version is passed,
+    # not on every boot — argparse's built-in action="version" would force it upfront,
+    # becase argparse was designed so action= only accepts a string keyword or Action subclass.
     def __call__(self, parser, namespace, values, option_string=None):
-        parser.exit(message=f"{parser.prog} {_resolve_version()}\n")
+        parser.exit(message=f"Aiko-chan {_resolve_version()}\n")        # print the version number and exit immediately
 
 
 def _install_os_exit_trap(log: logging.Logger, enabled: bool) -> None:
@@ -125,13 +128,10 @@ def _install_os_exit_trap(log: logging.Logger, enabled: bool) -> None:
     # os._exit() cannot be caught by try/except, so the only way to observe it
     # is to wrap it: log WHO called it, then perform the real exit.
     def _logged_os_exit(code: int | str | None) -> None:
-        try:                                                     # Attempt to log the caller's stack
-            log.error("[main] os._exit(%s) called from:\n%s",    # .format_stack() returns list of str, join() makes it one str
-                      code, "".join(traceback.format_stack()))
-        except Exception:                                        # Exception, not BaseException — a Ctrl+C
-            pass                                                 # during logging still exits via finally
-        finally:                                                 # finally runs on EVERY path — this is
-            _original_os_exit(code)                              # what guarantees the real exit
+        except Exception:                    # noqa: SIM105 — the finally below is load-bearing:
+            pass                             # a BaseException (Ctrl+C) during logging must still
+        finally:                             # reach _original_os_exit; suppress() would skip it.
+            _original_os_exit(code)          # 
 
     os._exit = _logged_os_exit     # patch applied; anything that bound os._exit before this bypasses logging
     # NOTE: Not idempotent — calling this twice double-wraps os._exit (harmless

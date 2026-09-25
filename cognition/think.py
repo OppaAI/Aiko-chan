@@ -451,6 +451,7 @@ def _conditional_persona_blocks(user_input: str) -> str:
 
 
 _user_context_cache: dict[str, tuple[float, str]] = {}  # user_id -> (mtime, block)
+_USER_CONTEXT_CACHE_MAX = 16
 
 
 def _load_user_context() -> tuple[str, str]:
@@ -488,6 +489,8 @@ def _load_user_context() -> tuple[str, str]:
     user_block = "\n\n" + "\n\n".join(context_blocks) if context_blocks else ""
     try:
         _user_context_cache[uid] = (user_path.stat().st_mtime, user_block)
+        while len(_user_context_cache) > _USER_CONTEXT_CACHE_MAX:
+            _user_context_cache.pop(next(iter(_user_context_cache)))
     except OSError:
         log.debug("think: user context cache write failed")
     return display_name, user_block
@@ -1513,13 +1516,18 @@ class AikoThink:
                         data = np.load(f, allow_pickle=False)
                         cached = (list(data["labels"].astype(str)), data["vectors"])
                     self._semantic_example_cache[cache_key] = cached
+                    while len(self._semantic_example_cache) > 8:
+                        self._semantic_example_cache.pop(next(iter(self._semantic_example_cache)))
                     return cached
                 except Exception as exc:
                     log.debug("[route] ignoring stale vector cache %s: %s", disk_path, exc)
 
             labels, vectors = reason.embed_example_matrix(embedder, examples_by_label, instruct=instruct)
             cached = (labels, vectors)
-            self._semantic_example_cache[cache_key] = cached
+            with self._semantic_example_cache_lock:
+                self._semantic_example_cache[cache_key] = cached
+                while len(self._semantic_example_cache) > 8:
+                    self._semantic_example_cache.pop(next(iter(self._semantic_example_cache)))
             if disk_path is not None:
                 try:
                     disk_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1712,7 +1720,7 @@ class AikoThink:
                 embedder,
                 user_input,
                 instruct="Which capability/tool domain applies to this task?",
-            ) if embedder is not None else None
+            ) if embedder is not None and hasattr(embedder, "embed_query") else None
             if system_note and system_note.strip():
                 # Agentic prompt plumbing lives in run_agentic_chat; carry the
                 # notices as marked situational context so drained notes are

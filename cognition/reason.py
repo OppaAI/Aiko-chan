@@ -81,6 +81,10 @@ def cached_embed_query(embedder, text: str, instruct: str = "") -> np.ndarray:
     for embedder.embed_query(text, instruct=instruct) at any call site that
     might see repeated text (system prompts, persona blocks, recurring
     queries) across different call sites/modules."""
+    if not hasattr(embedder, "embed_query"):
+        raise TypeError(
+            f"embedder must expose embed_query(), got {type(embedder).__name__}"
+        )
     key = _cache_key(text, instruct, embedder)
     with _embed_query_cache_lock:
         cached = _embed_query_cache.get(key)

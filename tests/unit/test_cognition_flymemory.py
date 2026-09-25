@@ -237,7 +237,7 @@ def test_grasp_fill_records_lateral_horn_fingerprint_once(monkeypatch):
 
     identity = "grasp-lh-once"
     bucket = CountingSet()
-    monkeypatch.setitem(lateral_horn._seen, identity, bucket)
+    monkeypatch.setitem(lateral_horn._seen_fp, identity, bucket)
     monkeypatch.setattr(lateral_horn, "_mode", lambda: "live")
 
     grasp.GraspBuffer(journal_enabled=False, identity=identity).fill("new context", "new response")

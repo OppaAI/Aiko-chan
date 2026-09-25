@@ -8,8 +8,10 @@ def test_preference_semantic_tiers(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         userspace, "user_state_dir",
-        lambda user_id=None: str(tmp_path / (str(user_id or "default"))),
+        lambda user_id=None: tmp_path / (str(user_id or "default")),
     )
+    # NOTE: mock returns pathlib.Path (not str) — system.userspace does
+    # Path arithmetic (base / name) on this value.
     monkeypatch.setenv("PREF_SEMANTIC", "0")  # deterministic: no embedder
     monkeypatch.setattr(preference_store, "_embed_cooldown_until", 0.0, raising=False)
 

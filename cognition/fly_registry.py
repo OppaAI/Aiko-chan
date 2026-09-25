@@ -37,6 +37,35 @@ _identity_inputs: dict[str, str | None] = {}
 _mb_ok: dict[str, bool] = {}
 _cx_ok: dict[str, bool] = {}
 
+# Bound per-identity growth like the other registries (episode/grasp cap 8
+# users). Must hold _lock when calling.
+_FLY_REGISTRY_MAX_IDENTITIES = 8
+
+
+def _evict_oldest_identity() -> None:
+    """Drop the oldest identity's cached state (flushing MB/CX first)."""
+    for key in list(_stores):
+        if key not in _stores:
+            continue
+        try:
+            store, mb, cx = _stores.get(key), _mbs.get(key), _cxs.get(key)
+            if store not in (None, False) and mb is not None:
+                try:
+                    store.flush_mb(mb)
+                except Exception:
+                    pass
+            if store not in (None, False) and cx is not None:
+                try:
+                    store.flush_cx(float(getattr(cx, "sleep_pressure", 0.0)))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        for reg in (_stores, _mbs, _cxs, _cx_locks, _identity_inputs, _mb_ok, _cx_ok):
+            reg.pop(key, None)
+        log.debug("fly registry evicted identity %s", key)
+        return
+
 
 def _norm_id(user_id: str | None) -> str:
     uid = (user_id or "").strip()
@@ -122,6 +151,8 @@ def get_fly_store(user_id: str | None = None):
             except Exception as exc:
                 log.debug("fly store unavailable for %s: %s", key, exc)
                 _stores[key] = False
+            while len(_stores) > _FLY_REGISTRY_MAX_IDENTITIES:
+                _evict_oldest_identity()
         store = _stores[key]
         return store or None
 

@@ -634,10 +634,16 @@ class AikoWeb:
                 targets = list(self._clients)
         if not targets:
             return
-        await asyncio.gather(
+        results = await asyncio.gather(
             *(self._safe_send(ws, raw) for ws in targets),
             return_exceptions=True,
         )
+        dead = [ws for ws, res in zip(targets, results) if res is False]
+        if dead:
+            with self._clients_lock:
+                for ws in dead:
+                    self._clients.discard(ws)
+                    self._client_users.pop(ws, None)
 
     @staticmethod
     def _infer_image(image: str, question: str, source: str = "camera") -> str:
@@ -724,10 +730,17 @@ class AikoWeb:
                 targets = list(self._clients)
         if not targets:
             return
-        await asyncio.gather(
+        results = await asyncio.gather(
             *(self._safe_send(ws, raw) for ws in targets),
             return_exceptions=True,
         )
+        dead = [ws for ws, res in zip(targets, results) if res is False]
+        if dead:
+            with self._clients_lock:
+                for ws in dead:
+                    self._clients.discard(ws)
+                    self._client_users.pop(ws, None)
+            log.debug("webui: evicted %d dead browser client(s)", len(dead))
 
     def has_remote_listener(self) -> bool:
         """Check if any browser clients are currently connected."""
@@ -735,14 +748,17 @@ class AikoWeb:
             return bool(self._clients)
 
     @staticmethod
-    async def _safe_send(ws, raw) -> None:
+    async def _safe_send(ws, raw) -> bool:
+        """Send one message; returns False when the client is dead (evict it)."""
         try:
             if isinstance(raw, bytes):
                 await ws.send_bytes(raw)
             else:
                 await ws.send_text(raw)
+            return True
         except Exception:
             log.warning("webui: failed to send ws message")
+            return False
 
     def _draw(self, buf=None) -> None:
         # No-op: preserves AikoTUI's draw interface so orchestrate.run_session()

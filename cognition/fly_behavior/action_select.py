@@ -284,6 +284,14 @@ def score_candidates(
             ),
             "ts": ts,
         }
+    # Phase 10B: hand the scored record to the body layer so the DN →
+    # primitives → coordination path can drive this turn's body language.
+    # Fail-soft; the body layer also degrades to "no primitives".
+    try:
+        from cognition.fly_behavior import body as _body_layer
+        _body_layer.on_scored(record, user_id=user_id)
+    except Exception as exc:
+        log.debug("action_select body hook skipped: %s", exc)
     return record
 
 

@@ -87,6 +87,25 @@ def body_drive(*, user_id: str | None = None) -> dict:
             pass
     except Exception as exc:
         log.debug("body_drive skipped: %s", exc)
+    # Phase 10B: fold the body layer's primitive-derived fields into the
+    # packet (additive only — all existing keys keep their meaning).
+    try:
+        from cognition.fly_behavior import body as _body_layer
+        bl = _body_layer.drive(user_id=user_id) or {}
+        vrm = (bl.get("backends") or {}).get("vrm") or {}
+        out.update({
+            "body_mode": bl.get("mode", "off"),
+            "body_applied": bool(bl.get("applied", False)),
+            "primitives": bl.get("primitives", []),
+            "expression_name": vrm.get("expression_name", "neutral"),
+            "gaze_target": vrm.get("gaze_target", "user"),
+            "gesture_name": vrm.get("gesture_name", "none"),
+            "pose_name": vrm.get("pose_name", "idle"),
+            "emphasis": ((bl.get("backends") or {}).get("tts") or {}).get(
+                "emphasis", 0.0),
+        })
+    except Exception as exc:
+        log.debug("body_drive 10B layer skipped: %s", exc)
     return out
 
 
@@ -96,6 +115,17 @@ def agent_step_budget(*, user_id: str | None = None, base: int = 8) -> int:
         bd = body_drive(user_id=user_id)
         if bd.get("cancelled"):
             return 0
+        # Phase 10B: when the body layer is live, its agent backend is the
+        # authoritative vigor source (primitive-driven pacing).
+        if bd.get("body_applied"):
+            try:
+                from cognition.fly_behavior import body as _body_layer
+                cmd = _body_layer.agent_command(user_id=user_id) or {}
+                if cmd.get("applied"):
+                    vig = float(cmd.get("vigor") or 1.0)
+                    return max(1, int(round(base * max(0.4, min(1.3, vig)))))
+            except Exception:
+                pass
         vig = float(bd.get("action_vigor") or 1.0)
         return max(1, int(round(base * max(0.4, min(1.3, vig)))))
     except Exception:

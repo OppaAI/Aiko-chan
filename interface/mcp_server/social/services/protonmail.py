@@ -217,6 +217,23 @@ def _run_client_call(method, *args, **kwargs):
         return method(*args, **kwargs)
 
 
+def _fetch_all_pages_no_count(client, page_size: int = 150, max_pages: int = 20) -> list:
+    """Fetch every message page without touching the /count endpoint.
+
+    Stops at the first short/empty page. Bounded by max_pages so a lying
+    server can't page forever.
+    """
+    seen: list = []
+    for page in range(max_pages):
+        batch = _run_client_call(client.get_messages_by_page, page, page_size)
+        if not batch:
+            break
+        seen.extend(batch)
+        if len(batch) < page_size:
+            break
+    return seen
+
+
 def _get_client():
     """Return an authenticated client using the documented session flow."""
     global _client_cache, _cache_username
@@ -428,8 +445,15 @@ async def _read_messages_inner(client, folder: str, unread: bool, max_results: i
         folder_lower = folder.lower()
         protonmail_label = _FOLDER_LABEL_MAP.get(folder_lower, folder_lower)
 
-        # Get all messages
-        all_messages = await asyncio.to_thread(_run_client_call, client.get_messages)
+        # Get all messages. NOTE: client.get_messages() calls the
+        # mail/v4/messages/count endpoint first, which currently raises
+        # KeyError('Counts') (Proton response drift, Sep 2026). Fall back to
+        # count-free paging via get_messages_by_page() instead of failing
+        # the whole inbox read.
+        try:
+            all_messages = await asyncio.to_thread(_run_client_call, client.get_messages)
+        except KeyError:
+            all_messages = await asyncio.to_thread(_fetch_all_pages_no_count, client)
 
         # Filter by folder (0=inbox, 3=trash, 4=spam).
         messages = []

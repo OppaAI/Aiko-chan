@@ -147,17 +147,17 @@ def _install_two_stage_sigint(log: logging.Logger) -> None:
     # Second Ctrl-C within the same run hard-exits immediately instead of queuing behind
     # blocking shutdown waits (adapter stops, memory flush, TTS drain — each of
     # which eats the next Ctrl-C on a loaded box).
-    import signal as _signal
+    import signal as _signal                                    # lazy import for SIGINT handling; aliased to avoid shadowing
 
-    state = {"count": 0}
+    state = [0]                                                 # init counter to 0 (list, not int — mutable for the closure below)
 
     def _handler(signum, frame) -> None:
-        state["count"] += 1
-        if state["count"] == 1:
-            raise KeyboardInterrupt
-        with contextlib.suppress(Exception):
+        state[0] += 1                                           # count this Ctrl-C
+        if state[0] == 1:                                       # 1st time this run
+            raise KeyboardInterrupt                             # graceful path — same as Python's default SIGINT behaviour
+        with contextlib.suppress(Exception):                    # 2nd+ time — no more patience
             log.warning("[main] second interrupt — forcing immediate exit")
-        os._exit(130)
+        os._exit(130)                                           # hard exit (128+2 = SIGINT signal 2), skip all further cleanup
 
     try:
         _signal.signal(_signal.SIGINT, _handler)

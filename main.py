@@ -272,7 +272,6 @@ def _handle_backup(log: logging.Logger, args) -> int:
     Non-destructive, so no confirmation gates — but fail-closed: any
     snapshot/verify/transport error returns 1 with the cause in aiko.log.
     Exit codes: 0 = wiped or aborted at a gate; 1 = guard failed or wipe failed;
-    2 = user id not resolvable (pass --user or set AIKO_USER_ID).
     """
     from system.backup import BackupError, run_backup
 
@@ -312,7 +311,8 @@ def _handle_factory_reset(log: logging.Logger, args) -> int:
     closed without a verified backup <24h old). The human gates mirror
     --clear-mem: explicit Yes plus a typed phrase naming the user, so shell
     history can never re-run a reset unattended.
-    Exit codes: 0 = wiped or aborted at a gate; 1 = guard failed or wipe failed.
+    Exit codes: 0 = wiped or aborted at a gate; 1 = guard failed or wipe failed;
+    2 = user id not resolvable (pass --user or set AIKO_USER_ID).
     """
     from system.backup import BackupError, perform_factory_reset, resolve_user_id
 

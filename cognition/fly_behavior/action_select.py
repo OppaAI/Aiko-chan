@@ -110,10 +110,10 @@ def _neural_state(user_id: str | None):
 
 def _dn_vigor(user_id: str | None) -> float:
     try:
-        from cognition.fly_behavior.body import last_drive
-        d = last_drive(user_id) or {}
-        agent = (d.get("backends") or {}).get("agent") or {}
-        return float(agent.get("vigor", 1.0))
+        from cognition.neural_state import peek_neural_state
+        st = peek_neural_state(user_id)
+        vigor = float(getattr(st, "motor_vigor", 1.0))
+        return max(0.5, min(1.5, vigor)) if math.isfinite(vigor) else 1.0
     except Exception as exc:
         log.debug("action_select dn vote skipped: %s", exc)
         return 1.0
@@ -312,7 +312,8 @@ def score_candidates(
         try:
             from cognition.fly_behavior import body as _body_layer
             _body_layer.on_scored(record, user_id=user_id)
-            _body_layer.drive(user_id=user_id)
+            drive = _body_layer.drive(user_id=user_id)
+            _body_layer.share_scored_drive(record, drive, user_id=user_id)
         except Exception as exc:
             log.debug("action_select body hook skipped: %s", exc)
     return record

@@ -310,12 +310,29 @@ def test_on_scored_hook_feeds_drive(uid, shadow_mode):
 
 def test_last_drive_is_read_only_and_does_not_run_pipeline(uid, monkeypatch):
     assert body.last_drive(uid) == {}
-    body._last_drive[body._key(uid)] = {"backends": {"agent": {"vigor": 1.2}}}
+    body._last_drive[body._key(uid)] = {"backends": {"agent": {"vigor": 0.4}}}
     monkeypatch.setattr(body, "drive", lambda **kwargs: pytest.fail("drive called"))
     snapshot = body.last_drive(uid)
-    snapshot["backends"]["agent"]["vigor"] = 0.4
-    assert body.last_drive(uid)["backends"]["agent"]["vigor"] == 1.2
+    snapshot["backends"]["agent"]["vigor"] = 1.2
+    assert body.last_drive(uid)["backends"]["agent"]["vigor"] == 0.4
+    assert action_select._dn_vigor(uid) == 1.0
+    _neural(uid, vigor=1.2)
     assert action_select._dn_vigor(uid) == 1.2
+
+
+def test_dn_vigor_clamps_raw_state_and_falls_back_on_read_error(uid, monkeypatch):
+    from cognition.neural_state import get_neural_state
+    st = get_neural_state(uid)
+    st.motor_vigor = 2.0
+    assert action_select._dn_vigor(uid) == 1.5
+    st.motor_vigor = 0.1
+    assert action_select._dn_vigor(uid) == 0.5
+    st.motor_vigor = float("nan")
+    assert action_select._dn_vigor(uid) == 1.0
+    def fail_read(_uid):
+        raise RuntimeError("read failed")
+    monkeypatch.setattr("cognition.neural_state.peek_neural_state", fail_read)
+    assert action_select._dn_vigor(uid) == 1.0
 
 
 def test_scoring_records_and_drives_only_for_stateful_user(uid, shadow_mode,
@@ -367,6 +384,79 @@ def test_body_drive_packet_extended(uid, live_mode, monkeypatch):
     assert pkt["expression_name"] in ("happy", "sad", "neutral")
     # Legacy keys unchanged in shape.
     assert 0.85 <= pkt["rate_mult"] <= 1.15
+
+
+def test_body_drive_reuses_only_the_current_scored_record(uid, live_mode, monkeypatch):
+    monkeypatch.setenv("MEMORY_FLYDN_MODE", "live")
+    monkeypatch.setattr(action_select, "_votes_for", lambda *args, **kwargs:
+                        {"mb": 0.0, "cx": 0.0, "dn": 0.0, "gf": 0.0,
+                         "cx_drive": 0.0})
+    calls = []
+
+    def drive(**kwargs):
+        calls.append(kwargs)
+        return {"mode": "live", "applied": True,
+                "primitives": [{"turn": len(calls)}], "backends": {}}
+
+    monkeypatch.setattr(body, "drive", drive)
+    cand = action_select.Candidate("reply", "reply", "reply", "reply", 0.8)
+    action_select.score_candidates([cand], user_id=uid)
+    action_select.score_candidates([cand], user_id=uid)
+    pkt = dn_body.body_drive(user_id=uid)
+    assert pkt["primitives"] == [{"turn": 2}]
+    assert len(calls) == 2
+    dn_body.body_drive(user_id=uid)
+    assert len(calls) == 2
+    action_select.score_candidates([cand], user_id=uid)
+    from cognition.fly_behavior.turn import apply_turn_priors
+    apply_turn_priors("next turn", user_id=uid)
+    dn_body.body_drive(user_id=uid)
+    assert len(calls) == 4
+
+
+def test_scored_packet_does_not_advance_body_pipeline(uid, live_mode, monkeypatch):
+    monkeypatch.setenv("MEMORY_FLYDN_MODE", "live")
+    monkeypatch.setattr(action_select, "_votes_for", lambda *args, **kwargs:
+                        {"mb": 0.0, "cx": 0.0, "dn": 0.0, "gf": 0.0,
+                         "cx_drive": 0.0})
+    _neural(uid)
+    original_drive = body.drive
+    calls = []
+
+    def counted_drive(**kwargs):
+        calls.append(kwargs)
+        return original_drive(**kwargs)
+
+    monkeypatch.setattr(body, "drive", counted_drive)
+    cand = action_select.Candidate("reply", "reply", "reply", "reply", 0.8)
+    action_select.score_candidates([cand], user_id=uid)
+    scored = body.last_drive(uid)
+    pkt = dn_body.body_drive(user_id=uid)
+    assert len(calls) == 1
+    assert pkt["primitives"] == scored["primitives"]
+    assert body.last_drive(uid)["coordinator"]["tick"] == scored["coordinator"]["tick"]
+
+
+def test_late_cancel_refreshes_shared_drive(uid, live_mode, monkeypatch):
+    monkeypatch.setenv("MEMORY_FLYDN_MODE", "live")
+    rec = _record()
+    body.on_scored(rec, user_id=uid)
+    body.share_scored_drive(rec, {"mode": "live", "cancelled": False,
+                                  "primitives": [{"name": "pose"}]}, user_id=uid)
+    monkeypatch.setattr("cognition.fly_behavior.gf_global.should_cancel_output",
+                        lambda _uid: True)
+    calls = []
+
+    def cancel_drive(**kwargs):
+        calls.append(kwargs)
+        return {"mode": "live", "applied": True, "cancelled": True,
+                "primitives": [], "backends": {}}
+
+    monkeypatch.setattr(body, "drive", cancel_drive)
+    pkt = dn_body.body_drive(user_id=uid)
+    assert calls == [{"user_id": uid}]
+    assert pkt["cancelled"] is True
+    assert pkt["primitives"] == []
 
 
 def test_body_drive_shadow_packet(uid, shadow_mode, monkeypatch):

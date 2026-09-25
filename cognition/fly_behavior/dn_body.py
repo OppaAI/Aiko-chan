@@ -41,7 +41,16 @@ def body_drive(*, user_id: str | None = None) -> dict:
     # send a stop for any motion already in flight.
     try:
         from cognition.fly_behavior import body as _body_layer
-        bl = _body_layer.drive(user_id=user_id) or {}
+        bl = _body_layer.scored_drive(user_id)
+        if bl is not None and bl.get("mode") == "live" and not bl.get("cancelled"):
+            try:
+                from cognition.fly_behavior.gf_global import should_cancel_output
+                if should_cancel_output(user_id):
+                    bl = None
+            except Exception:
+                pass
+        if bl is None:
+            bl = _body_layer.drive(user_id=user_id) or {}
         vrm = (bl.get("backends") or {}).get("vrm") or {}
         out.update({
             "body_mode": bl.get("mode", "off"),

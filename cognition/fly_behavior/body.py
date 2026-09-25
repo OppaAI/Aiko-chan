@@ -118,6 +118,7 @@ _lock = threading.RLock()
 _last_cmd: dict[str, dict[str, dict]] = {}   # user -> actuator -> command
 _latest_record: dict[str, deque] = {}        # user -> deque[record]
 _last_drive: dict[str, dict] = {}            # user -> last drive() result
+_shared_drive: dict[str, tuple[dict, dict]] = {}  # user -> (scored record, packet result)
 
 
 def _key(user_id: str | None) -> str:
@@ -135,6 +136,7 @@ def clear(user_id: str | None = None) -> None:
             _last_cmd.pop(_key(user_id), None)
             _latest_record.pop(_key(user_id), None)
             _last_drive.pop(_key(user_id), None)
+            _shared_drive.pop(_key(user_id), None)
     except Exception:
         pass
 
@@ -149,6 +151,7 @@ def on_scored(record: dict | None, *, user_id: str | None = None) -> None:
         if not isinstance(record, dict):
             return
         with _lock:
+            _shared_drive.pop(_key(user_id), None)
             dq = _latest_record.get(_key(user_id))
             if dq is None:
                 dq = deque(maxlen=4)
@@ -174,6 +177,30 @@ def last_drive(user_id: str | None = None) -> dict:
             return deepcopy(_last_drive.get(_key(user_id), {}))
     except Exception:
         return {}
+
+
+def share_scored_drive(record: dict, result: dict, *, user_id: str | None = None) -> None:
+    """Make this scoring record's drive available to packet reads this turn."""
+    with _lock:
+        dq = _latest_record.get(_key(user_id))
+        if dq and dq[-1] is record and isinstance(result, dict):
+            _shared_drive[_key(user_id)] = (record, result)
+
+
+def scored_drive(user_id: str | None = None) -> dict | None:
+    """Read only the drive belonging to the latest scored record this turn."""
+    with _lock:
+        shared = _shared_drive.get(_key(user_id))
+        dq = _latest_record.get(_key(user_id))
+        if shared and dq and dq[-1] is shared[0]:
+            return shared[1]
+    return None
+
+
+def discard_scored_drive(user_id: str | None = None) -> None:
+    """Start a new turn without carrying forward an unused packet result."""
+    with _lock:
+        _shared_drive.pop(_key(user_id), None)
 
 
 def translate(active: list[dict], *, user_id: str | None = None) -> dict:
@@ -617,6 +644,7 @@ def drive(
     (AIKO_FLY_BODY_BACKEND). Never raises.
     """
     try:
+        discard_scored_drive(user_id)
         return _drive(record, user_id=user_id, tick=tick)
     except Exception as exc:
         log.debug("body drive skipped: %s", exc)

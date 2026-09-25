@@ -431,8 +431,12 @@ def tick_cx_temporal(
 
         tcx = get_temporal_cx(user_id)
         # Phase 11: persona gains (identity unless AIKO_FLY_PERSONA_MODE=live).
-        # fresh_urgency is scaled by the GF-urgency gain before it enters
-        # the dynamics — a calm identity is harder to startle.
+        # Calmness shapes the urgency dynamics exactly once, inside
+        # TemporalCX.step via cx.urgency.gain. The top-level gf_urgency gain
+        # is intentionally NOT pre-applied to fresh_urgency here — it serves
+        # the per-turn GF vote in action_select._gf_urgency; applying both
+        # would square the gain (effective range [0.25, 2.25], breaking the
+        # documented [0.5, 1.5] clamp).
         pg: dict = {}
         try:
             from cognition.fly_persona.modulators import applied_gains as _pg
@@ -440,16 +444,12 @@ def tick_cx_temporal(
             pg = _pg(user_id) or {}
         except Exception as exc:
             log.debug("tick_cx_temporal persona gains skipped: %s", exc)
-        try:
-            gf_mult = max(0.1, min(3.0, float(pg.get("gf_urgency", 1.0))))
-        except Exception:
-            gf_mult = 1.0
         with tcx._lock:
             readout = tcx.step(
                 {
                     "cue_x": cue_x,
                     "cue_y": cue_y,
-                    "fresh_urgency": _clip01(fresh_urgency) * gf_mult,
+                    "fresh_urgency": _clip01(fresh_urgency),
                     "novelty": novelty,
                     "engagement_in": user_energy,
                     "rest_in": sleep_pressure,

@@ -57,6 +57,11 @@ def apply_turn_priors(
         "senses": None,
     }
     try:
+        from cognition.fly_behavior.body import discard_scored_drive
+        discard_scored_drive(user_id)
+    except Exception as exc:
+        log.debug("body drive reset skipped: %s", exc)
+    try:
         from cognition.neural_state import get_neural_state
         from cognition.fly_behavior.giant_fiber import assess_interrupt
         from cognition.fly_behavior.lateral_horn import context_prior

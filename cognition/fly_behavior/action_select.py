@@ -23,6 +23,7 @@ Every external readout is best-effort: any failure degrades that vote to
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import threading
@@ -109,9 +110,10 @@ def _neural_state(user_id: str | None):
 
 def _dn_vigor(user_id: str | None) -> float:
     try:
-        from cognition.fly_behavior.dn_body import body_drive
-        d = body_drive(user_id=user_id) or {}
-        return float(d.get("action_vigor", 1.0))
+        from cognition.neural_state import peek_neural_state
+        st = peek_neural_state(user_id)
+        vigor = float(getattr(st, "motor_vigor", 1.0))
+        return max(0.5, min(1.5, vigor)) if math.isfinite(vigor) else 1.0
     except Exception as exc:
         log.debug("action_select dn vote skipped: %s", exc)
         return 1.0
@@ -153,6 +155,25 @@ def _cx_drive_live() -> tuple[bool, float]:
 # ── core scoring ──────────────────────────────────────────────────────────
 
 _ENERGY_MAP = {"low": -1.0, "med": 0.0, "high": 1.0}
+
+
+def _locomotion_hint(hints: dict) -> dict | None:
+    """Copy a bounded move vector only when every field is valid."""
+    loco = hints.get("locomotion")
+    if not isinstance(loco, dict):
+        return None
+    try:
+        bounds = {"x": (-100, 100), "y": (-100, 100),
+                  "rot": (-100, 100), "speed": (0, 100)}
+        if any(not isinstance(loco.get(k), (int, float))
+               or isinstance(loco[k], bool)
+               or not math.isfinite(loco[k])
+               or not lo <= loco[k] <= hi
+               for k, (lo, hi) in bounds.items()):
+            return None
+        return {k: int(loco[k]) for k in bounds}
+    except Exception:
+        return None
 
 
 def _votes_for(cand: Candidate, *, user_id: str | None, context_text: str) -> dict[str, float]:
@@ -245,6 +266,9 @@ def score_candidates(
             "veto": veto,
             "votes": {k: round(v, 4) for k, v in votes.items()},
         }
+        loco = _locomotion_hint(cand.hints)
+        if loco is not None:
+            scored[cand.id]["locomotion"] = loco
 
     ranked = sorted(scored.items(), key=lambda kv: kv[1]["final"], reverse=True)
     prior_ranked = sorted(scored.items(), key=lambda kv: kv[1]["llm_prior"], reverse=True)
@@ -284,6 +308,14 @@ def score_candidates(
             ),
             "ts": ts,
         }
+        # Fail-soft: the body pipeline runs once for a per-user stateful turn.
+        try:
+            from cognition.fly_behavior import body as _body_layer
+            _body_layer.on_scored(record, user_id=user_id)
+            drive = _body_layer.drive(user_id=user_id)
+            _body_layer.share_scored_drive(record, drive, user_id=user_id)
+        except Exception as exc:
+            log.debug("action_select body hook skipped: %s", exc)
     return record
 
 

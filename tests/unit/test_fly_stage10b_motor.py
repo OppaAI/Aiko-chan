@@ -229,7 +229,8 @@ def test_rate_limits(uid):
     assert second["vrm.expression"]["intensity"] == pytest.approx(0.75)
 
 
-def test_drive_shadow_applies_nothing(uid, shadow_mode):
+def test_drive_shadow_applies_nothing(uid, shadow_mode, monkeypatch):
+    monkeypatch.setenv("AIKO_FLY_BODY_BACKEND", "vrm")
     _neural(uid)
     res = body.drive(_record("reply"), user_id=uid, tick=1)
     assert res["mode"] == "shadow"
@@ -241,7 +242,8 @@ def test_drive_shadow_applies_nothing(uid, shadow_mode):
     assert res["backends"]["null"]["logged"] is True
 
 
-def test_drive_live_applies(uid, live_mode):
+def test_drive_live_applies(uid, live_mode, monkeypatch):
+    monkeypatch.setenv("AIKO_FLY_BODY_BACKEND", "vrm")
     _neural(uid)
     res = body.drive(_record("reply"), user_id=uid, tick=1)
     assert res["mode"] == "live"

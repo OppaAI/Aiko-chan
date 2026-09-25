@@ -6,7 +6,7 @@ stack is modeled: as a *functional abstraction*, not a neuron simulation.
 Takes the fly action-selection output (score_candidates record) plus the
 current NeuralState readouts (vigor, drive, urgency, valence) and emits
 discrete, named, bounded **motor primitives** — e.g. prosody, expression,
-gaze, gesture, pose, vigor — rather than raw VRM numbers or TTS floats.
+gaze, gesture, pose, vigor, locomotion — rather than raw VRM numbers or TTS floats.
 
 Design rules (shared with the rest of the fly brain):
   - deterministic given the same record + state (no wall clock, no RNG)
@@ -56,6 +56,7 @@ ACTUATORS = (
     "vrm.gesture",    # avatar hand/arm motion
     "vrm.pose",       # avatar whole-body pose
     "agent",          # agent loop pacing (step budget, retry energy)
+    "dog.locomotion", # Freenove dog continuous move vector (backend-gated)
 )
 
 # name -> (actuator, priority, duration_turns, cooldown_turns)
@@ -67,6 +68,11 @@ _PRIMITIVE_SPEC: dict[str, tuple[str, int, int, int]] = {
     "gesture":    ("vrm.gesture",    15, 1, 2),
     "pose":       ("vrm.pose",       5,  3, 1),
     "vigor":      ("agent",          10, 2, 0),
+    # Locomotion is safety-relevant (it moves a physical robot), so it gets
+    # the highest priority and no cooldown. It is emitted ONLY when the
+    # scored record's winner candidate carries explicit move intent —
+    # the fly layer never invents movement on its own.
+    "locomotion": ("dog.locomotion", 40, 1, 0),
 }
 
 # Candidate kinds coming out of action_select.Candidate.
@@ -247,6 +253,31 @@ def _emit(record: dict | None, *, user_id: str | None, state) -> list[MotorPrimi
             "name": "idle",
             "intensity": _clamp(0.4 * drive + 0.2, 0.0, 1.0),
         }))
+
+    # Locomotion: ONLY from explicit move intent on the winner candidate
+    # (populated by the agent layer, e.g. "walk toward the user").
+    # Absent intent → no primitive → the dog holds position.
+    # NOTE: built directly, not via _mk — _mk clamps numerics to ±2.0,
+    # which would destroy a ±100 move vector.
+    loco = cand.get("locomotion")
+    if isinstance(loco, dict):
+        try:
+            actuator, prio, dur, cd = _PRIMITIVE_SPEC["locomotion"]
+            out.append(MotorPrimitive(
+                name="locomotion",
+                params={
+                    "x": int(_clamp(loco.get("x", 0), -100, 100)),
+                    "y": int(_clamp(loco.get("y", 0), -100, 100)),
+                    "rot": int(_clamp(loco.get("rot", 0), -100, 100)),
+                    "speed": int(_clamp(loco.get("speed", 0), 0, 100)),
+                },
+                priority=prio,
+                duration_turns=dur,
+                cooldown_turns=cd,
+                actuator=actuator,
+            ))
+        except Exception:
+            pass
 
     return out
 

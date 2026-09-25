@@ -5,14 +5,19 @@ outputs. MaleVNC-derived signals do NOT map 1:1 to VRM movement — so nothing
 here maps them 1:1 either. Primitives are translated into per-actuator
 commands with clamping and per-actuator rate limits, then handed to backends.
 
-Concrete backends (Aiko has no physical body):
-  - vrm    → extends the dn_body.py packet (avatar expression/gaze/gesture/pose)
-  - tts    → TTS prosody hints (rate/volume/emphasis)
-  - agent  → agent action-vigor (step pacing)
-  - null   → log-only, for headless operation
-  - physical → STUB ONLY. Aiko has no physical body. This is a documented
-    interface showing where a future hardware backend would plug in; it is
-    never selected and applies nothing.
+Concrete backends (Aiko has no physical body besides the dog):
+  - vrm      → extends the dn_body.py packet (avatar expression/gaze/gesture/pose)
+  - tts      → TTS prosody hints (rate/volume/emphasis)
+  - agent    → agent action-vigor (step pacing)
+  - freenove → Freenove Robot Dog FNK0062 over TCP (see freenove_dog.py)
+  - null     → log-only, for headless operation
+  - physical → STUB ONLY. Kept as documentation; the freenove backend is
+    the real hardware-backend example. Never selected, applies nothing.
+
+Which embodied backend drives the vrm.*/dog.* actuators is chosen by
+AIKO_FLY_BODY_BACKEND=null|vrm|freenove (default null — the dog isn't
+connected yet). The tts/agent channels are backend-independent and always
+computed; they apply in live mode regardless of the embodied choice.
 
 Mode (AIKO_FLY_BODY_MODE=off|shadow|live, default shadow):
   - off:    the whole layer is a no-op
@@ -62,6 +67,10 @@ _RATE_LIMITS = {
     "vrm.pose": 0.20,
     "tts": 0.10,
     "agent": 0.20,
+    # Locomotion speed changes are capped per turn: a physical robot must
+    # never jump from 0 to full speed in one turn, and the dog's firmware
+    # warns against command spam.
+    "dog.locomotion": 50.0,
 }
 
 # Which scalar of each command the rate limit applies to.
@@ -72,6 +81,7 @@ _RATE_KEYS = {
     "vrm.pose": "intensity",
     "tts": "rate",
     "agent": "vigor",
+    "dog.locomotion": "speed",
 }
 
 _VALID_GAZE_TARGETS = ("user", "task", "away")
@@ -93,6 +103,14 @@ def _clamp01(x) -> float:
 def _pick(value, valid: tuple, default: str) -> str:
     v = str(value or "")
     return v if v in valid else default
+
+
+def _safe_int(value, lo: int, hi: int) -> int:
+    try:
+        v = int(value)
+    except Exception:
+        v = 0
+    return max(lo, min(hi, v))
 
 
 _lock = threading.RLock()
@@ -196,6 +214,15 @@ def _translate(active: list[dict], *, user_id: str | None) -> dict:
         elif name == "vigor":
             cmds["agent"] = {
                 "vigor": max(0.4, min(1.5, float(params.get("mult", 1.0)))),
+            }
+        elif name == "locomotion":
+            # Freenove dog move vector. Defensive int coercion: a raise
+            # here would drop every actuator for the turn.
+            cmds["dog.locomotion"] = {
+                "x": _safe_int(params.get("x", 0), -100, 100),
+                "y": _safe_int(params.get("y", 0), -100, 100),
+                "rot": _safe_int(params.get("rot", 0), -100, 100),
+                "speed": _safe_int(params.get("speed", 0), 0, 100),
             }
 
     # Rate limits: cap the per-turn change of each actuator's scalar.
@@ -312,6 +339,191 @@ class AgentBackend(_Backend):
                 "vigor": round(vigor, 4)}
 
 
+class FreenoveBackend(_Backend):
+    """Freenove Robot Dog FNK0062 backend (ESP32-WROVER, TCP :5000).
+
+    Translates actuator commands into the dog's wire protocol
+    (see freenove_dog.py). Selected via AIKO_FLY_BODY_BACKEND=freenove.
+
+    Primitive → wire mapping (interpretive — the dog is not a VRM avatar):
+      dog.locomotion {x,y,rot,speed} → F#x#y#rot#speed#
+          Auto-stop: F is continuous, so when the locomotion intent
+          disappears the backend sends F#0#0#0# on its own — otherwise
+          the dog would keep walking forever.
+      vrm.gesture {name}  → O#n# trick: greet→1 say_hello,
+          emphasize→6 dancing, work→2 push_up; none/unknown → nothing.
+      vrm.pose {name}     → A#n# posture: engaged→0 (up),
+          thinking/idle→1 (down).
+      vrm.expression {name, intensity} → C#1#r#g#b# LED static color:
+          happy→green, sad→blue, neutral→white, scaled by intensity.
+      vrm.gaze {target}   → E#x#y#z# small body-lean surrogate. The kit
+          has NO head servo, so gaze becomes a lean — honestly a
+          surrogate, documented as such.
+      tts {emphasis}      → D#880# alert beep, edge-triggered (fires on
+          the rising edge past 0.7, re-arms below 0.4).
+
+    No-spam: the firmware warns the MCU has limited processing, so a
+    wire string is transmitted only when it differs from the last one
+    sent on that channel; body.py's per-actuator rate limits bound how
+    fast intents can change in the first place. The e-stop bypasses
+    change detection — safety outranks spam.
+
+    Shadow mode: wire strings are computed and returned for
+    observability, but no socket is ever opened. Live + unreachable dog:
+    soft fallback — wire computed, nothing sent, applied=False, and the
+    link logs once per host (see freenove_dog.DogLink).
+    """
+
+    name = "freenove"
+
+    # Avatar gesture name → dog trick number (interpretive translation).
+    _GESTURE_TRICK = {"greet": 1, "emphasize": 6, "work": 2}
+    # Avatar pose name → dog posture value.
+    _POSE_POSTURE = {"engaged": 0, "thinking": 1, "idle": 1}
+    # Expression name → base LED color (scaled by intensity).
+    _EXPR_COLOR = {
+        "happy": (0, 255, 0),
+        "sad": (0, 0, 255),
+        "neutral": (255, 255, 255),
+    }
+    # Gaze target → body-lean surrogate (degrees-ish, kept small).
+    _GAZE_LEAN = {
+        "user": (10, 0, 0),
+        "task": (0, 10, 0),
+        "away": (-10, 0, 0),
+    }
+    _BEEP_FREQ = 880
+    _BEEP_ON = 0.7
+    _BEEP_OFF = 0.4
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._last_wire: dict[str, dict[str, str]] = {}  # user -> ch -> wire
+        self._beep_armed: dict[str, bool] = {}            # user -> armed
+
+    def reset(self, user_id: str | None = None) -> None:
+        """Drop change-detection state (tests). Never raises."""
+        try:
+            with self._lock:
+                if user_id is None:
+                    self._last_wire.clear()
+                    self._beep_armed.clear()
+                else:
+                    self._last_wire.pop(_key(user_id), None)
+                    self._beep_armed.pop(_key(user_id), None)
+        except Exception:
+            pass
+
+    def _compute(self, commands: dict, uk: str) -> list[tuple[str, str]]:
+        """Actuator commands → [(channel, wire)] in a stable order."""
+        from cognition.fly_behavior import freenove_dog as fd
+
+        wires: list[tuple[str, str]] = []
+        last = self._last_wire.get(uk, {})
+
+        loco = commands.get("dog.locomotion") or {}
+        if loco:
+            wires.append(("F", fd.move(
+                _safe_int(loco.get("x", 0), -100, 100),
+                _safe_int(loco.get("y", 0), -100, 100),
+                _safe_int(loco.get("rot", 0), -100, 100),
+                _safe_int(loco.get("speed", 0), 0, 100),
+            )))
+        elif last.get("F") not in (None, fd.STOP):
+            # F is continuous: the intent is gone but the dog is still
+            # moving — stop it explicitly.
+            wires.append(("F", fd.STOP))
+
+        trick = self._GESTURE_TRICK.get(
+            (commands.get("vrm.gesture") or {}).get("name"))
+        if trick:
+            wires.append(("O", fd.trick(trick)))
+
+        posture = self._POSE_POSTURE.get(
+            (commands.get("vrm.pose") or {}).get("name"))
+        if posture is not None:
+            wires.append(("A", fd.posture(posture)))
+
+        expr = commands.get("vrm.expression") or {}
+        if expr:
+            r, g, b = self._EXPR_COLOR.get(
+                expr.get("name"), (255, 255, 255))
+            k = _clamp01(expr.get("intensity", 0.5))
+            wires.append(("C", fd.led(1, round(r * k), round(g * k),
+                                      round(b * k))))
+
+        lean = self._GAZE_LEAN.get(
+            (commands.get("vrm.gaze") or {}).get("target"))
+        if lean:
+            wires.append(("E", fd.twist(*lean)))
+
+        emph = _clamp01((commands.get("tts") or {}).get("emphasis", 0.0))
+        armed = self._beep_armed.get(uk, True)
+        if emph >= self._BEEP_ON and armed:
+            wires.append(("D", fd.buzzer(self._BEEP_FREQ)))
+            self._beep_armed[uk] = False
+        elif emph < self._BEEP_OFF:
+            self._beep_armed[uk] = True
+
+        return wires
+
+    def apply(self, commands: dict, *, user_id: str | None = None,
+              live: bool = False) -> dict:
+        out: dict = {
+            "backend": "freenove",
+            "applied": False,
+            "wire": [],
+            "sent": [],
+            "reachable": False,
+        }
+        try:
+            uk = _key(user_id)
+            with self._lock:
+                wires = self._compute(commands, uk)
+            out["wire"] = [w for _, w in wires]
+            if not live:
+                return out  # shadow: computed, never transmitted
+            from cognition.fly_behavior import freenove_dog as fd
+            link = fd.get_link()
+            sent: list[str] = []
+            with self._lock:
+                last = self._last_wire.setdefault(uk, {})
+                for ch, wire in wires:
+                    if last.get(ch) == wire:
+                        continue  # no-spam: unchanged channel, skip
+                    if link.send(wire):
+                        last[ch] = wire
+                        sent.append(wire)
+            out["sent"] = sent
+            out["reachable"] = link.available
+            out["applied"] = bool(sent)
+        except Exception as exc:
+            log.debug("freenove backend skipped: %s", exc)
+        return out
+
+    def estop(self, *, user_id: str | None = None,
+            live: bool = False) -> dict:
+        """Hardware e-stop: F#0#0#0# sent immediately.
+
+        Bypasses change detection (safety > no-spam) and clears the
+        locomotion channel state so the next move intent re-sends fresh.
+        Only transmits in live mode — shadow never opens a socket.
+        """
+        out: dict = {"estop_sent": False}
+        try:
+            if not live:
+                return out
+            uk = _key(user_id)
+            from cognition.fly_behavior import freenove_dog as fd
+            with self._lock:
+                self._last_wire.get(uk, {}).pop("F", None)
+                if fd.get_link().estop():
+                    out["estop_sent"] = True
+        except Exception as exc:
+            log.debug("freenove estop skipped: %s", exc)
+        return out
+
+
 class NullBackend(_Backend):
     """Log-only backend for headless operation: computes, applies nothing."""
 
@@ -325,13 +537,13 @@ class NullBackend(_Backend):
 
 
 class PhysicalBodyBackend(_Backend):
-    """STUB — Aiko has no physical body.
+    """STUB — kept as documentation.
 
-    This class exists only to document where a future hardware backend
-    would plug in. It is never selected by `drive()` and applies nothing.
-    A real implementation would subclass _Backend, talk to the hardware
-    driver, and register itself in _BACKENDS — plus go through its own
-    safety review before ever being enabled.
+    The freenove backend above is the real hardware-backend example: it
+    subclasses _Backend, talks to a hardware driver (freenove_dog.py),
+    and registers itself in _BACKENDS. Any future body would follow the
+    same pattern — plus go through its own safety review before ever
+    being enabled.
     """
 
     name = "physical"
@@ -345,12 +557,29 @@ _BACKENDS: dict[str, _Backend] = {
     "vrm": VRMBackend(),
     "tts": TTSBackend(),
     "agent": AgentBackend(),
+    "freenove": FreenoveBackend(),
     "null": NullBackend(),
     "physical": PhysicalBodyBackend(),  # stub; never selected
 }
 
-# Backends the live path actually drives. "physical" is deliberately absent.
-_LIVE_BACKENDS = ("vrm", "tts", "agent")
+
+def _embodied_backend() -> str:
+    """Which embodied backend drives the vrm.*/dog.* actuators.
+
+    AIKO_FLY_BODY_BACKEND=null|vrm|freenove, default null (the dog isn't
+    connected yet). Invalid values fall back to null. Never raises.
+    """
+    try:
+        from system.config import env_str
+        m = env_str("AIKO_FLY_BODY_BACKEND", "null").strip().lower()
+    except Exception:
+        m = (os.getenv("AIKO_FLY_BODY_BACKEND") or "null").strip().lower()
+    return m if m in ("null", "vrm", "freenove") else "null"
+
+
+def embodied_backend() -> str:
+    """Current embodied-backend selection (stable API for Studio/tests)."""
+    return _embodied_backend()
 
 
 def backends() -> list[str]:
@@ -370,7 +599,8 @@ def drive(
 
     `record`: score_candidates record; when omitted the latest record from
     on_scored() is used. Shadow computes everything and logs; live applies
-    the vrm/tts/agent backends. Never raises.
+    the tts/agent backends plus the selected embodied backend
+    (AIKO_FLY_BODY_BACKEND). Never raises.
     """
     try:
         return _drive(record, user_id=user_id, tick=tick)
@@ -418,11 +648,33 @@ def _drive(record: dict | None, *, user_id: str | None, tick: int | None) -> dic
     out["actuators"] = actuators
 
     live = mode == "live"
-    for name in _LIVE_BACKENDS:
+    embodied = _embodied_backend()
+    # tts + agent channels are backend-independent: always computed,
+    # applied only in live mode.
+    for name in ("tts", "agent"):
         res = _BACKENDS[name].apply(actuators, user_id=user_id)
         res["applied"] = live
         out["backends"][name] = res
-    # The null backend always runs in shadow as the headless record.
+    # Embodied backend: exactly one of vrm / freenove / null is selected.
+    if embodied == "vrm":
+        res = _BACKENDS["vrm"].apply(actuators, user_id=user_id)
+        res["applied"] = live
+        out["backends"]["vrm"] = res
+    elif embodied == "freenove":
+        fr = _BACKENDS["freenove"]
+        estop_res = None
+        if live and out["cancelled"]:
+            # Hardware e-stop path: F is continuous — without an
+            # explicit stop the dog keeps walking on its last vector,
+            # so a GF cancel must send F#0#0#0# immediately.
+            # Safety outranks the no-spam rule. Sent BEFORE apply()
+            # computes, so apply() won't duplicate the stop.
+            estop_res = fr.estop(user_id=user_id, live=True)
+        res = fr.apply(actuators, user_id=user_id, live=live)
+        if estop_res is not None:
+            res["estop"] = estop_res
+        out["backends"]["freenove"] = res
+    # The null backend always runs as the headless/log record.
     null_res = _BACKENDS["null"].apply(actuators, user_id=user_id)
     out["backends"]["null"] = null_res
     out["applied"] = live

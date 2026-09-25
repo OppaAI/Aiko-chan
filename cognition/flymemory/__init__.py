@@ -16,6 +16,13 @@ from .online_teach import teach_from_user_text, teach_interrupt_honored
 from .teach_api import teach_preference, extract_topic
 from .eligibility import assign_credit, record_step, stats as eligibility_stats
 from .dopamine import pulse as dopamine_pulse, split_channels as dopamine_channels
+from .credit import (
+    credit_event,
+    mark_trace,
+    dopamine_mode,
+    stats as credit_stats,
+    clear as credit_clear,
+)
 from .consolidate_mb import consolidate as consolidate_mb
 
 __all__ = [
@@ -36,5 +43,10 @@ __all__ = [
     "eligibility_stats",
     "dopamine_pulse",
     "dopamine_channels",
+    "credit_event",
+    "mark_trace",
+    "dopamine_mode",
+    "credit_stats",
+    "credit_clear",
     "consolidate_mb",
 ]

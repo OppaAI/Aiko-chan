@@ -161,6 +161,7 @@ def test_live_replay_strengthens_taught_pattern(monkeypatch, tmp_path):
     uid = _uid("live")
     monkeypatch.setenv("AIKO_FLY_REPLAY_MODE", "live")
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "live")
+    monkeypatch.setenv("AIKO_FLY_DOPAMINE_MODE", "live")  # Phase 10A
     monkeypatch.setenv("FLY_PLASTICITY_DB", str(tmp_path))
     from cognition.fly_registry import get_flymb
     from cognition.flymemory.circuit import text_features
@@ -228,6 +229,7 @@ def test_integration_db_to_mb(monkeypatch, tmp_path):
     monkeypatch.setattr(replay, "_db_path_for_user", lambda u: str(db))
     monkeypatch.setenv("AIKO_FLY_REPLAY_MODE", "live")
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "live")
+    monkeypatch.setenv("AIKO_FLY_DOPAMINE_MODE", "live")  # Phase 10A
     monkeypatch.setenv("FLY_REPLAY_LOOKBACK_H", "24")
     monkeypatch.setenv("FLY_PLASTICITY_DB", str(tmp_path))
     from cognition.fly_registry import get_flymb

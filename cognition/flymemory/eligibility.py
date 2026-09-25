@@ -81,6 +81,14 @@ def record_step(user_id: str | None, text: str) -> bool:
             buf.append((kc.copy(), time.time()))
             while len(buf) > _steps():
                 buf.popleft()
+        # Phase 10A: mark the pattern's eligibility trace in the rate-based
+        # credit engine (bounded per-user in-memory store, event-stepped).
+        try:
+            from cognition.flymemory import credit as _credit
+
+            _credit.mark_trace(user_id, kc, value=1.0, scope="real")
+        except Exception:
+            pass
         return True
     except Exception as exc:
         log.debug("eligibility record skipped: %s", exc)
@@ -88,11 +96,14 @@ def record_step(user_id: str | None, text: str) -> bool:
 
 
 def assign_credit(user_id: str | None, reward: float) -> dict:
-    """Spread `reward` over prior trail steps with exponential decay.
+    """Credit `reward` backward through the marked eligibility traces.
 
-    Age-1 (previous turn) gets `reward*decay`, age-2 `reward*decay^2`, etc.
-    Age-0 (current text) is handled by the caller's immediate reinforce, so
-    it is intentionally skipped here to avoid double-crediting.
+    Phase 10A: one dopamine event over the already-marked traces —
+    ``credit_event(user_id, reward, kc=None)``. The reward (consequence)
+    multiplies each trace by its current eligibility (decayed since the
+    action was marked); unrelated patterns have decayed to ~0 and learn
+    nothing. The current text's own trace is the caller's business (the
+    unified path marks it in its own event), so kc=None here on purpose.
     """
     out: dict = {"taught": False, "steps": 0, "delta": 0.0, "reward": float(reward), "flushed": False}
     if not _enabled() or _mb_mode() != "live":
@@ -107,47 +118,29 @@ def assign_credit(user_id: str | None, reward: float) -> dict:
         out["reason"] = "zero_reward"
         return out
     try:
-        from cognition.fly_registry import get_flymb, get_fly_store
+        from cognition.fly_registry import get_fly_store
+        from cognition.flymemory import credit as _credit
 
-        mb = get_flymb(user_id)
-        if mb is None:
-            out["reason"] = "mb_unavailable"
-            return out
-        decay = _decay()
-        with _lock:
-            trail = list(_TRACES.get(_uid(user_id), ()))
-        total = 0.0
-        credited = 0
-        for age, (kc, _ts) in enumerate(reversed(trail), start=1):
-            w = decay ** age
-            if w < 0.05:
-                break
-            try:
-                try:
-                    from cognition.flymemory.dopamine import pulse
-                    res = pulse(r, user_id=user_id, kc=kc, weight=w, source="eligibility")
-                    if res.get("reason") != "ok" or not res.get("applied"):
-                        continue
-                    delta = float(res.get("delta") or 0.0)
-                except Exception:
-                    delta = float(mb.reinforce(kc, r * w) or 0.0)
-                    if not delta:
-                        continue
-                total += delta
-                credited += 1
-            except Exception:
-                continue
+        res = _credit.credit_event(
+            user_id, r, kc=None, text=None, source="eligibility", scope="real"
+        )
+        credited = int(res.get("n_applied_traces") or 0)
+        total = float(res.get("delta") or 0.0)
         try:
+            from cognition.fly_registry import get_flymb
+
+            mb = get_flymb(user_id)
             store = get_fly_store(user_id)
-            if store is not None:
+            if res.get("applied") and store is not None and mb is not None:
                 store.flush_mb(mb)
                 out["flushed"] = True
         except Exception:
             pass
-        out.update({"taught": credited > 0, "steps": credited, "delta": round(total, 4), "reason": "ok"})
+        out.update({"taught": bool(res.get("applied")), "steps": credited,
+                    "delta": round(total, 4), "reason": str(res.get("reason") or "")})
         with _lock:
             _LAST[_uid(user_id)] = {"reward": r, "steps": credited, "delta": out["delta"]}
-        log.debug("eligibility credit user=%s reward=%+.2f steps=%d delta=%.4f",
+        log.debug("eligibility credit user=%s reward=%+.2f traces=%d delta=%.4f",
                   _uid(user_id)[:12], r, credited, total)
     except Exception as exc:
         log.debug("eligibility credit failed: %s", exc)
@@ -161,6 +154,12 @@ def stats(user_id: str | None = None) -> dict:
         trail = _TRACES.get(_uid(user_id), ())
         last = dict(_LAST.get(_uid(user_id), {}))
     last["trail_depth"] = len(trail)
+    try:
+        from cognition.flymemory import credit as _credit
+
+        last["credit"] = _credit.stats(user_id, scope="real")
+    except Exception:
+        pass
     return last
 
 
@@ -169,3 +168,9 @@ def clear(user_id: str | None = None) -> None:
     with _lock:
         _TRACES.pop(_uid(user_id), None)
         _LAST.pop(_uid(user_id), None)
+    try:
+        from cognition.flymemory import credit as _credit
+
+        _credit.clear(user_id, scope=None)
+    except Exception:
+        pass

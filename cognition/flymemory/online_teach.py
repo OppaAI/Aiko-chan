@@ -134,13 +134,19 @@ def teach_from_user_text(
             return out
         kc = mb.encode(text_features(teach_text))
         try:
+            # Phase 10A: one rate-based credit event via the dopamine shim —
+            # mark this turn's trace, bump dopamine by the prediction error,
+            # credit all live traces backward. Replaces the legacy
+            # pulse-then-assign_credit pair (which double-bumped dopamine).
             from cognition.flymemory.dopamine import pulse as _da_pulse
-            _da = _da_pulse(reward, user_id=user_id, kc=kc, text=teach_text, source="online_teach")
-            if _da.get("reason") != "ok" or not _da.get("applied"):
+            _cr = _da_pulse(
+                reward, user_id=user_id, kc=kc, text=teach_text,
+                source="online_teach")
+            if _cr.get("reason") != "ok" or not _cr.get("applied"):
                 _record_eligibility(out, user_id, teach_text)
                 return out
             direct_applied = True
-            delta = float(_da.get("delta") or 0.0)
+            delta = float(_cr.get("delta") or 0.0)
         except Exception:
             delta = float(mb.reinforce(kc, reward) or 0.0)
             if not delta:
@@ -165,11 +171,8 @@ def teach_from_user_text(
         out["taught"] = True
         out["delta"] = round(delta, 4)
         try:
-            from cognition.flymemory.eligibility import assign_credit
-            credit = assign_credit(user_id, reward)
-            direct_flushed = bool(credit.get("flushed"))
             _record_eligibility(out, user_id, teach_text)
-            out["credit_steps"] = credit.get("steps", 0)
+            out["credit_steps"] = int(_cr.get("n_applied_traces", 0))
         except Exception:
             pass
         log.debug("online_teach live reason=%s reward=%+.2f delta=%.4f", reason, reward, delta)
@@ -209,9 +212,13 @@ def teach_interrupt_honored(
         if mb is None:
             return out
         try:
+            # Phase 10A: single rate-based credit event via the dopamine
+            # shim (mark + dopamine + backward credit), replacing
+            # pulse-then-assign_credit.
             from cognition.flymemory.dopamine import pulse as _da_pulse
-            _da = _da_pulse(0.35, user_id=user_id, text=text, source="interrupt_honored")
-            if _da.get("reason") != "ok" or not _da.get("applied"):
+            _cr = _da_pulse(
+                0.35, user_id=user_id, text=text, source="interrupt_honored")
+            if _cr.get("reason") != "ok" or not _cr.get("applied"):
                 _record_eligibility(out, user_id, text)
                 return out
             direct_applied = True
@@ -222,9 +229,6 @@ def teach_interrupt_honored(
                 return out
             direct_applied = True
         try:
-            from cognition.flymemory.eligibility import assign_credit
-            credit = assign_credit(user_id, 0.35)
-            direct_flushed = bool(credit.get("flushed"))
             _record_eligibility(out, user_id, text)
         except Exception:
             pass

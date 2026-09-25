@@ -93,31 +93,38 @@ def test_ledger_reads_and_updates_wait_for_batch_commit(tmp_path, action):
 
 
 def test_dopamine_debounce_expires_and_serializes_same_user(monkeypatch):
+    # Phase 10A: the duplicate-event debounce lives in the rate-based
+    # credit engine (credit._LAST_EVENT), not the old pulse module state.
     from cognition import fly_registry
-    from cognition.flymemory import dopamine
+    from cognition.flymemory import credit
 
     now = [0.0]
     calls = []
     mb = SimpleNamespace(reinforce=lambda *_args: calls.append(True) or 0.2)
-    monkeypatch.setattr(dopamine, "_mb_mode", lambda: "live")
-    monkeypatch.setattr(dopamine.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(credit, "_mb_mode", lambda: "live")
+    monkeypatch.setattr(credit, "dopamine_mode", lambda: "live")
+    monkeypatch.setattr(credit.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(fly_registry, "get_flymb", lambda _uid: mb)
-    monkeypatch.setattr(dopamine, "_LAST_PULSE", {})
+    monkeypatch.setattr(credit, "_LAST_EVENT", {})
+    monkeypatch.setattr(credit, "_STATE", {})
     kc = np.array([1.0, 0.0])
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(lambda _: dopamine.pulse(0.4, user_id="dedup-user", kc=kc), range(2)))
+        results = list(pool.map(lambda _: credit.credit_event("dedup-user", 0.4, kc=kc), range(2)))
     assert sorted(result["reason"] for result in results) == ["dedup", "ok"]
     assert len(calls) == 1
     now[0] = 3.0
-    assert dopamine.pulse(0.4, user_id="dedup-user", kc=kc)["applied"] is True
+    assert credit.credit_event("dedup-user", 0.4, kc=kc)["applied"] is True
     assert len(calls) == 2
 
 
-@pytest.mark.parametrize("credit_result", [None, {}, {"flushed": True}])
-def test_direct_teaching_flushes_when_credit_does_not(monkeypatch, credit_result):
+def test_direct_teaching_flushes_once_per_applied_event(monkeypatch):
+    # Phase 10A: the online-teach path is one rate-based credit event;
+    # assign_credit is no longer part of it. Each applied teaching event
+    # flushes exactly once (Phase 2 convention); unapplied teaching never
+    # flushes.
     from cognition import fly_registry, neural_state
-    from cognition.flymemory import dopamine, eligibility, online_teach, teach_api
+    from cognition.flymemory import dopamine, online_teach, teach_api
 
     flushed = []
     mb = SimpleNamespace(encode=lambda _: np.array([1.0]), valence_bias=lambda _: 0.2)
@@ -128,16 +135,29 @@ def test_direct_teaching_flushes_when_credit_does_not(monkeypatch, credit_result
     monkeypatch.setattr(fly_registry, "get_fly_store", lambda _: store)
     monkeypatch.setattr(dopamine, "pulse", lambda *_args, **_kwargs: {"reason": "ok", "applied": True, "delta": 0.2})
     monkeypatch.setattr(neural_state, "get_neural_state", lambda _: SimpleNamespace(publish_mb=lambda *_args, **_kwargs: None, record_influence=lambda _: None))
-    if credit_result is None:
-        def fail_credit(*_args):
-            raise RuntimeError("credit unavailable")
-        monkeypatch.setattr(eligibility, "assign_credit", fail_credit)
-    else:
-        monkeypatch.setattr(eligibility, "assign_credit", lambda *_args: credit_result)
 
     online_teach.teach_from_user_text("thanks!", user_id="direct-user")
     online_teach.teach_interrupt_honored(user_id="direct-user")
-    assert len(flushed) == (0 if credit_result and credit_result.get("flushed") else 2)
+    assert len(flushed) == 2
+
+
+def test_direct_teaching_never_flushes_when_not_applied(monkeypatch):
+    from cognition import fly_registry, neural_state
+    from cognition.flymemory import dopamine, online_teach, teach_api
+
+    flushed = []
+    mb = SimpleNamespace(encode=lambda _: np.array([1.0]), valence_bias=lambda _: 0.2)
+    store = SimpleNamespace(flush_mb=lambda _mb: flushed.append(True))
+    monkeypatch.setattr(online_teach, "_mode", lambda: "live")
+    monkeypatch.setattr(teach_api, "extract_topic", lambda _: None)
+    monkeypatch.setattr(fly_registry, "get_flymb", lambda _: mb)
+    monkeypatch.setattr(fly_registry, "get_fly_store", lambda _: store)
+    monkeypatch.setattr(dopamine, "pulse", lambda *_args, **_kwargs: {"reason": "shadow", "applied": False, "delta": 0.0})
+    monkeypatch.setattr(neural_state, "get_neural_state", lambda _: SimpleNamespace(publish_mb=lambda *_args, **_kwargs: None, record_influence=lambda _: None))
+
+    online_teach.teach_from_user_text("thanks!", user_id="direct-user")
+    online_teach.teach_interrupt_honored(user_id="direct-user")
+    assert len(flushed) == 0
 
 
 def test_episode_direct_writes_and_read_only_touches_commit(tmp_path):

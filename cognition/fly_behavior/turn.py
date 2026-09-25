@@ -300,6 +300,7 @@ def apply_turn_priors(
         # drives, decaying urgency trace. Always stepped (shadow computes and
         # records); in live mode the trace replaces the per-turn urgency
         # spike on the bus. Never raises.
+        cx_applied = False
         try:
             from cognition.centralcomplex.temporal import cx_mode, tick_cx_temporal
 
@@ -322,6 +323,7 @@ def apply_turn_priors(
                     voice_energy=_venergy,
                 )
                 out["cx_temporal"] = temporal
+                cx_applied = bool(temporal.get("ok"))
                 if cxm == "live" and temporal.get("ok"):
                     trace = float(temporal.get("urgency") or 0.0)
                     st.publish_gf(
@@ -330,6 +332,19 @@ def apply_turn_priors(
                     out["urgency"] = round(trace, 4)
         except Exception as exc:
             log.debug("cx temporal skipped: %s", exc)
+
+        # Phase 11: persona explainability trace — trait → circuit gains →
+        # effects, recorded into the NeuralState influence ring for the
+        # future Studio panel. Computed only; shadow never modulates.
+        try:
+            from cognition.fly_persona import persona_mode, record_persona_trace
+
+            if persona_mode() != "off":
+                out["persona"] = record_persona_trace(
+                    user_id, cx_applied=cx_applied
+                )
+        except Exception as exc:
+            log.debug("persona trace skipped: %s", exc)
 
         bits: list[str] = []
         if st.interrupt or st.urgency >= 0.65:

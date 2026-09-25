@@ -129,13 +129,27 @@ def _gf_urgency(text: str, user_id: str | None = None) -> float:
         fresh = 0.0
     # Phase 7: in live CX mode the decaying urgency trace warms the GF
     # vote — urgency lingers a few turns instead of spiking per turn.
+    # Phase 11: persona urgency sensitivity scales the fresh signal; the
+    # trace already carries persona shaping from tick_cx_temporal, so it
+    # is merged unscaled (no double application). Identity unless
+    # AIKO_FLY_PERSONA_MODE=live.
     try:
         from cognition.centralcomplex.temporal import cx_mode, get_urgency_trace
+        from cognition.fly_persona.modulators import applied_gains as _pg
+        mult = max(0.1, min(3.0, float((_pg(user_id) or {}).get("gf_urgency", 1.0))))
         if cx_mode() == "live":
-            fresh = max(fresh, get_urgency_trace(user_id))
+            fresh = max(fresh * mult, get_urgency_trace(user_id))
+        else:
+            fresh = fresh * mult
     except Exception as exc:
-        log.debug("action_select gf trace skipped: %s", exc)
-    return fresh
+        log.debug("action_select gf urgency skipped: %s", exc)
+        try:
+            from cognition.centralcomplex.temporal import cx_mode, get_urgency_trace
+            if cx_mode() == "live":
+                fresh = max(fresh, get_urgency_trace(user_id))
+        except Exception:
+            pass
+    return max(0.0, min(1.0, fresh))
 
 
 # ── Phase 7: CX temporal drive bias (additive, live-only) ─────────────────

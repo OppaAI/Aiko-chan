@@ -133,8 +133,21 @@ class TemporalCX:
         self.drives: dict[str, float] = {name: 0.0 for name in _DRIVES}
         self.urgency: float = 0.0
         self.valence: float = 0.0
+        # Phase 11: per-step persona gain overrides (multiplicative factors
+        # on the module constants; identity when no persona is applied).
+        self._persona_cx: dict = {}
 
-    def step(self, inputs: dict | None) -> dict:
+    def _pg(self, *path, default: float = 1.0) -> float:
+        """Read a multiplicative persona factor from the last step's gains."""
+        try:
+            node = self._persona_cx
+            for p in path:
+                node = node[p]
+            return max(0.1, min(3.0, float(node)))
+        except Exception:
+            return default
+
+    def step(self, inputs: dict | None, *, gains: dict | None = None) -> dict:
         """Advance one turn. inputs keys (all optional floats):
 
         cue_x, cue_y   2-D direction cue (compass heading × salience)
@@ -143,17 +156,34 @@ class TemporalCX:
         engagement_in  user engagement [0,1]       → engagement
         rest_in        sleep pressure [0,1]        → rest
         mb_valence     mushroom-body valence [-1,1]
+
+        Per-drive base (decay, gain, threshold) constants live in _DRIVES
+        (env-overridable); the update is
+
+            drive   ← drive·decay + input·gain
+            urgency ← urgency·_D_U + fresh·_G_U
+            heading ← heading·_D_H + cue·_G_H
+
+        gains (Phase 11): optional persona gain structure from
+        cognition.fly_persona.modulators.applied_gains() — multiplicative
+        factors on the module-level decay/gain/threshold constants,
+        applied to this step only. Never mutates the shared constants.
         """
         try:
+            self._persona_cx = (gains or {}).get("cx", {}) if isinstance(gains, dict) else {}
             inp = inputs or {}
             hx, hy = self.heading
             cx = _clip11(inp.get("cue_x", 0.0))
             cy = _clip11(inp.get("cue_y", 0.0))
-            self.heading = _clip_vec2(hx * _D_H + cx * _G_H,
-                                      hy * _D_H + cy * _G_H)
+            h_gain = self._pg("heading", "gain")
+            h_decay = self._pg("heading", "decay")
+            self.heading = _clip_vec2(hx * _D_H * h_decay + cx * _G_H * h_gain,
+                                      hy * _D_H * h_decay + cy * _G_H * h_gain)
 
             fresh = _clip01(inp.get("fresh_urgency", 0.0))
-            self.urgency = _clip01(self.urgency * _D_U + fresh * _G_U)
+            u_gain = self._pg("urgency", "gain")
+            u_decay = self._pg("urgency", "decay")
+            self.urgency = _clip01(self.urgency * _D_U * u_decay + fresh * _G_U * u_gain)
 
             novelty = _clip01(inp.get("novelty", 0.0))
             eng_in = _clip01(inp.get("engagement_in", 0.0))
@@ -165,7 +195,9 @@ class TemporalCX:
             }
             for name, (decay, gain, _thr) in _DRIVES.items():
                 d = self.drives.get(name, 0.0)
-                self.drives[name] = _clip01(d * decay + drive_inputs[name] * gain)
+                d_gain = self._pg(name, "gain")
+                d_decay = self._pg(name, "decay")
+                self.drives[name] = _clip01(d * decay * d_decay + drive_inputs[name] * gain * d_gain)
 
             self.valence = _clip11(inp.get("mb_valence", 0.0))
             return self.readout()
@@ -176,9 +208,15 @@ class TemporalCX:
     # ── derived readouts ────────────────────────────────────────────────
 
     def threshold(self, name: str) -> float:
-        """Valence-modulated drive threshold (MB → CX)."""
+        """Valence-modulated drive threshold (MB → CX).
+
+        Phase 11: multiplied by the persona threshold factor for this
+        drive (<1 = more sensitive, e.g. a curious identity notices
+        novelty sooner).
+        """
         _decay, _gain, base = _DRIVES[name]
-        return max(0.05, min(0.95, base - self.valence * _K_V))
+        t = base - self.valence * _K_V
+        return max(0.05, min(0.95, t * self._pg(name, "thresh")))
 
     def activation(self, name: str) -> float:
         """Normalized suprathreshold drive activation in [0,1]."""
@@ -310,9 +348,20 @@ def reset_urgency(user_id: str | None = None) -> None:
 
 
 def teach_gain_for(user_id: str | None = None) -> float:
-    """CX → MB teaching gate for this identity. Never raises."""
+    """CX → MB teaching gate for this identity. Never raises.
+
+    Phase 11: multiplied by the persona MB-plasticity gain — a playful /
+    attached identity consolidates rewarding interactions more strongly.
+    """
     try:
-        return get_temporal_cx(user_id).teach_gain()
+        g = get_temporal_cx(user_id).teach_gain()
+        try:
+            from cognition.fly_persona.modulators import applied_gains as _pg
+
+            m = float((_pg(user_id) or {}).get("mb_plasticity", 1.0))
+        except Exception:
+            m = 1.0
+        return max(0.25, min(1.5, g * max(0.1, min(3.0, m))))
     except Exception:
         return 1.0
 
@@ -381,17 +430,32 @@ def tick_cx_temporal(
                 cue_y = math.sin(rad) * cue_scale
 
         tcx = get_temporal_cx(user_id)
+        # Phase 11: persona gains (identity unless AIKO_FLY_PERSONA_MODE=live).
+        # Calmness shapes the urgency dynamics exactly once, inside
+        # TemporalCX.step via cx.urgency.gain. The top-level gf_urgency gain
+        # is intentionally NOT pre-applied to fresh_urgency here — it serves
+        # the per-turn GF vote in action_select._gf_urgency; applying both
+        # would square the gain (effective range [0.25, 2.25], breaking the
+        # documented [0.5, 1.5] clamp).
+        pg: dict = {}
+        try:
+            from cognition.fly_persona.modulators import applied_gains as _pg
+
+            pg = _pg(user_id) or {}
+        except Exception as exc:
+            log.debug("tick_cx_temporal persona gains skipped: %s", exc)
         with tcx._lock:
             readout = tcx.step(
                 {
                     "cue_x": cue_x,
                     "cue_y": cue_y,
-                    "fresh_urgency": fresh_urgency,
+                    "fresh_urgency": _clip01(fresh_urgency),
                     "novelty": novelty,
                     "engagement_in": user_energy,
                     "rest_in": sleep_pressure,
                     "mb_valence": mb_valence,
-                }
+                },
+                gains=pg,
             )
         out.update({"ok": True, **readout})
 

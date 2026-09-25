@@ -362,6 +362,8 @@ def test_turn_trace_marks_cx_gains_unapplied_when_cx_off(pdir, live_persona, mon
     monkeypatch.setattr(temporal, "_MODE", "off")
     out = apply_turn_priors("hello", user_id=_uid("turn-trace-cx-off"))
     assert out["persona"]["applied"] is False
+    assert "error" not in out["persona"]
+    assert any("cx unavailable" in e for e in out["persona"]["effects"])
 
 
 # ── 9. gain application paths: CX / MB / GF / DN ──────────────────────────

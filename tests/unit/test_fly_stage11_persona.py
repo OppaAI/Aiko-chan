@@ -349,6 +349,21 @@ def test_explain_turn_live_marks_applied(pdir, live_persona):
     assert not any("shadow" in e for e in rec["effects"])
 
 
+def test_explain_turn_cx_off_marks_gains_unapplied(pdir, live_persona, monkeypatch):
+    monkeypatch.setattr(temporal, "_MODE", "off")
+    rec = persona.explain_turn(_uid("trace-cx-off"))
+    assert rec["applied"] is False
+    assert any("cx unavailable" in e for e in rec["effects"])
+
+
+def test_turn_trace_marks_cx_gains_unapplied_when_cx_off(pdir, live_persona, monkeypatch):
+    from cognition.fly_behavior.turn import apply_turn_priors
+
+    monkeypatch.setattr(temporal, "_MODE", "off")
+    out = apply_turn_priors("hello", user_id=_uid("turn-trace-cx-off"))
+    assert out["persona"]["applied"] is False
+
+
 # ── 9. gain application paths: CX / MB / GF / DN ──────────────────────────
 
 def test_mb_plasticity_gain_path(pdir, live_persona):

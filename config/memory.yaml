@@ -239,6 +239,15 @@ MEMORY_FLYSLEEP_MODE: "live"  # off | shadow | live
 FLY_SOUL_TEACH_ON_BOOT: "live"  # off | shadow | live (enabled for Stage 2)
 FLY_SOUL_TEACH_FORCE: "0"  # 1 = re-run bootstrap even if SOUL.md hash unchanged
 
+# -- Phases 8-11: new fly circuits (env-only gates, default shadow in code) --
+# off | shadow | live. Set live per owner instruction (Sep 2026).
+AIKO_FLY_REPLAY_MODE: "live"  # Phase 8: offline replay <-> Memory Bank consolidation.
+AIKO_FLYWORLD_MODE: "live"  # Phase 9: closed-loop FlyWorld simulator.
+AIKO_FLY_SENSE_MODE: "live"  # Phase 6/11: real sensory -> fly pathways.
+AIKO_FLY_ACTION_MODE: "live"  # Phase 10+: action selection.
+AIKO_FLY_BODY_MODE: "live"  # Phase 10B: DN -> motor/VNC/body incl. Freenove backend.
+AIKO_FLY_PERSONA_MODE: "live"  # Phase 11: persona-conditioned modulators.
+
 
 
 MEMORY_SEARCH_CACHE_SIZE: "128"  # Max number of memory search results cached in-process.

@@ -142,10 +142,11 @@ def _install_os_exit_trap(log: logging.Logger, enabled: bool) -> None:
 
 
 def _install_two_stage_sigint(log: logging.Logger) -> None:
-    """First Ctrl-C behaves as before (graceful KeyboardInterrupt); a second
-    one within the same run hard-exits immediately instead of queuing behind
-    blocking shutdown waits (adapter stops, memory flush, TTS drain — each of
-    which eats the next Ctrl-C on a loaded box)."""
+    """Setup two stage Ctrl-C break exit system"""
+    # First Ctrl-C behaves as before (graceful KeyboardInterrupt);
+    # Second Ctrl-C within the same run hard-exits immediately instead of queuing behind
+    # blocking shutdown waits (adapter stops, memory flush, TTS drain — each of
+    # which eats the next Ctrl-C on a loaded box).
     import signal as _signal
 
     state = {"count": 0}

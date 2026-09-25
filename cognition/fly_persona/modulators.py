@@ -84,8 +84,11 @@ def persona_gains(user_id: str | None = None) -> dict:
                     "decay": round(_mult(e, 0.3), 4),
                 },
                 "urgency": {
+                    # calmness lowers the gain (harder to startle) AND the
+                    # retention factor (faster urgency recovery): both use a
+                    # negative k so higher calmness shrinks the multiplier.
                     "gain": round(_mult(m, -0.6), 4),
-                    "decay": round(_mult(m, 0.3), 4),
+                    "decay": round(_mult(m, -0.3), 4),
                 },
             },
             "mb_plasticity": round(

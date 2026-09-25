@@ -131,17 +131,20 @@ def on_credit_outcome(
             return out
 
         st = get_personality(user_id)
-        st._event_clock += 1
-        if st._event_clock - st._last_update_event < _COOLDOWN_EVENTS:
-            out["reason"] = "cooldown"
-            return out
 
         sig = _signals(user_id)
         lr = _lr()
         deltas: dict[str, float] = {}
         # state._lock is the module-level RLock guarding all personality
-        # states; plasticity is the single sanctioned writer.
+        # states; plasticity is the single sanctioned writer. The event-clock
+        # increment and cooldown check live under the lock so concurrent
+        # credit events cannot both pass the check before either records
+        # _last_update_event.
         with _state_mod._lock:
+            st._event_clock += 1
+            if st._event_clock - st._last_update_event < _COOLDOWN_EVENTS:
+                out["reason"] = "cooldown"
+                return out
             cur = dict(st._traits)
             for trait, s in sig.items():
                 try:

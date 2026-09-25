@@ -130,6 +130,12 @@ class NeuralPersonalityState:
                 self._event_clock = int(raw.get("event_clock", 0))
             except Exception:
                 pass
+            try:
+                self._last_update_event = int(
+                    raw.get("last_update_event", self._last_update_event)
+                )
+            except Exception:
+                pass
         except Exception as exc:
             log.debug("persona load skipped: %s", exc)
 
@@ -144,6 +150,7 @@ class NeuralPersonalityState:
                         "traits": {k: round(v, 4) for k, v in self._traits.items()},
                         "defaults": {k: round(v, 4) for k, v in self.defaults.items()},
                         "event_clock": self._event_clock,
+                        "last_update_event": self._last_update_event,
                     },
                     indent=2,
                 ),

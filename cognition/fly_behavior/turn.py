@@ -331,6 +331,17 @@ def apply_turn_priors(
         except Exception as exc:
             log.debug("cx temporal skipped: %s", exc)
 
+        # Phase 11: persona explainability trace — trait → circuit gains →
+        # effects, recorded into the NeuralState influence ring for the
+        # future Studio panel. Computed only; shadow never modulates.
+        try:
+            from cognition.fly_persona import persona_mode, record_persona_trace
+
+            if persona_mode() != "off":
+                out["persona"] = record_persona_trace(user_id)
+        except Exception as exc:
+            log.debug("persona trace skipped: %s", exc)
+
         bits: list[str] = []
         if st.interrupt or st.urgency >= 0.65:
             bits.append("user signaled urgency — answer briefly, acknowledge stop/wait")

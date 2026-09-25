@@ -493,6 +493,21 @@ def credit_event(
             })
         except Exception:
             pass
+        # Phase 11: trait plasticity — the ONLY path that mutates the
+        # neural personality state. Guarded inside on_credit_outcome:
+        # live persona mode AND scope="real" only.
+        if out.get("ran"):
+            try:
+                from cognition.fly_persona.plasticity import on_credit_outcome
+                out["persona"] = on_credit_outcome(
+                    user_id,
+                    reward=r,
+                    pe=out.get("pe", 0.0),
+                    da=out.get("da", 0.0),
+                    scope=scope_name,
+                )
+            except Exception as exc:
+                log.debug("credit persona plasticity skipped: %s", exc)
     except Exception as exc:
         log.debug("credit event skipped: %s", exc)
         out["reason"] = f"error: {exc}"

@@ -84,6 +84,14 @@ def body_drive(*, user_id: str | None = None) -> dict:
             return out
         vigor = float(getattr(st, "motor_vigor", 1.0) or 1.0)
         drive = float(getattr(st, "action_drive", 0.5) or 0.5)
+        # Phase 11: persona vigor gain — a playful / attached identity
+        # moves with more energy. Identity unless AIKO_FLY_PERSONA_MODE=live.
+        try:
+            from cognition.fly_persona.modulators import applied_gains as _pg
+            vm = float((_pg(user_id) or {}).get("dn_vigor", 1.0))
+            vigor = vigor * max(0.1, min(3.0, vm))
+        except Exception as exc:
+            log.debug("dn_body persona vigor skipped: %s", exc)
         v = (drive - 0.5) * 2.0
         out.update(
             {

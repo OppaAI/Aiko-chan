@@ -159,20 +159,21 @@ def _install_two_stage_sigint(log: logging.Logger) -> None:
             log.warning("[main] second interrupt — forcing immediate exit")
         os._exit(130)                                           # hard exit (128+2 = SIGINT signal 2), skip all further cleanup
 
-    try:
-        _signal.signal(_signal.SIGINT, _handler)
-    except Exception as exc:
-        log.debug("[main] two-stage SIGINT unavailable: %s", exc)
+    try:                                                        # attempt to register SIGINT (Ctrl-C) handling
+        _signal.signal(_signal.SIGINT, _handler)                # register the handler for SIGINT (Ctrl-C)
+    except Exception as exc:                                    # signal unavailable (eg. not on main thread)
+        log.debug("[main] two-stage SIGINT unavailable: %s", exc)   # log the signal setup failure but keep going
 
 
 def _console_enabled() -> bool:
     """True when log records already reach the terminal (else print()s fill in)."""
-    return os.environ.get("LOG_CONSOLE") == "1"
-
+    # exists because LOG_CONSOLE isn't set until _apply_debug_trace_env() runs later in main(), after argparse
+    return os.environ.get("LOG_CONSOLE") == "1"                 # console logging is on if the env var LOG_CONSOLE == "1"
+                                                                # NOTE: this is the value set by _apply_debug_trace_env(), not the env var itself
 
 def _clear_dream_scratch(log: logging.Logger) -> None:
     """Delete deep-study scratch DBs for the active user (transient work files)."""
-    from system.userspace import user_state_path
+    from system.userspace import user_state_path                # deferred import — import the user-state path for the active user
     dream_dir = user_state_path("dream")
     if not dream_dir.is_dir():
         return

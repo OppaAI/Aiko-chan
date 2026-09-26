@@ -174,15 +174,15 @@ def _console_enabled() -> bool:
 def _clear_dream_scratch(log: logging.Logger) -> None:
     """Delete deep-study scratch DBs for the active user (transient work files)."""
     from system.userspace import user_state_path                # deferred import — import the user-state path for the active user
-    dream_dir = user_state_path("dream")
-    if not dream_dir.is_dir():
-        return
-    for child in dream_dir.iterdir():
-        try:
-            if child.is_file() or child.is_symlink():
-                child.unlink()
-        except OSError as e:                            # keep wiping the rest; report at the end via log
-            log.warning("[main] could not remove dream scratch %s: %s", child, e)
+    dream_dir = user_state_path("dream")                        # set the dream dir path for the active user
+    if not dream_dir.is_dir():                                  # if the dream dir doesn't exist,
+        return                                                  # nothing to wipe
+    for child in dream_dir.iterdir():                           # for each entry in the dream dir (files, symlinks, or dirs),
+        try:                                                    # attempt to unlink the file/symlink
+            if child.is_file() or child.is_symlink():           # if the child is a file or a symlink,
+                child.unlink()                                  # unlink the file/symlink
+        except OSError as e:                                    # keep wiping the rest; report at the end via log
+            log.warning("[main] could not remove dream scratch %s: %s", child, e)  # log the failure to remove the dream scratch file
 
 
 def _handle_clear_mem(log: logging.Logger) -> int:

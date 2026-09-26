@@ -74,7 +74,7 @@ EDGE_COGNITION_MAX_GOALS: "5"  # Active intentions carried forward in the fast s
 EDGE_COGNITION_MAX_IDENTITIES: "16"  # Hard RAM bound across concurrent users.
 
 SQLITE_MEMORY_PATH: ""  # Optional override; blank uses per-user ~/.aiko/<user_id>/memory/memory.db.
-EMBED_BASE_URL: "http://127.0.0.1:8080"  # Embedding server base URL used by cognition/memory/vecstore.py.
+EMBED_BASE_URL: "http://127.0.0.1:8081"  # Embedding server base URL used by cognition/memory/vecstore.py.
 EMBED_MODEL: "harrier"  # Embedding model id/alias; must match server/custom embedder.
 EMBED_DIMS: "640"  # Vector dimensions; must match embedding model and sqlite-vec schema.
 EMBED_QUERY_INSTRUCT: "Retrieve relevant memories that answer the query"  # Instruction prefix used for query embeddings; memories/documents stay unprefixed.

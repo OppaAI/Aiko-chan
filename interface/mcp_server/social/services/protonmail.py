@@ -217,6 +217,25 @@ def _run_client_call(method, *args, **kwargs):
         return method(*args, **kwargs)
 
 
+# protonmail-api-client pins its x-pm-appversion headers at release time
+# (currently web-mail@5.0.66.5 in 2.4.3). Proton rejects stale versions on
+# the mail API with HTTP 422 Code 5003 ("out of date, please refresh"),
+# whose payload carries no Messages/Counts key — surfacing here as
+# KeyError 'Messages'/'Counts'. Override with the live web-client version
+# (scraped from mail.proton.me's bundle, Sep 2026) after auth, for both
+# fresh logins and loaded sessions (the pickle stores the stale header).
+# Env override so the next Proton bump is a config change, not a release.
+def _mail_app_version() -> str:
+    return env("PROTONMAIL_MAIL_APP_VERSION", "web-mail@5.0.133.5") or "web-mail@5.0.133.5"
+
+
+def _apply_mail_app_version(client) -> None:
+    try:
+        client.session.headers["x-pm-appversion"] = _mail_app_version()
+    except Exception as e:
+        print(f"[PROTONMAIL] Could not set app version header: {e}", file=sys.stderr, flush=True)
+
+
 def _fetch_all_pages_no_count(client, page_size: int = 150, max_pages: int = 20) -> list:
     """Fetch every message page without touching the /count endpoint.
 
@@ -247,6 +266,7 @@ def _get_client():
         return None, {"ok": False, "error": "PROTONMAIL_USERNAME not set", "provider": "protonmail"}
     if _client_cache is not None and _cache_username == username:
         print("[PROTONMAIL] Using cached client", file=sys.stderr, flush=True)
+        _apply_mail_app_version(_client_cache)
         return _client_cache, None
     session_file = _session_file()
     if not os.path.exists(session_file) and not password:
@@ -295,6 +315,7 @@ def _get_client():
             _run_client_call(client.save_session, session_file)
             print(f"[PROTONMAIL] Session saved: {session_file}", file=sys.stderr, flush=True)
         _clear_auth_backoff()
+        _apply_mail_app_version(client)
         _client_cache = client
         _cache_username = username
         return client, None

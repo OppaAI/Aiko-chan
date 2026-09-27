@@ -75,7 +75,7 @@ AIKO_DEV_GITHUB_REPO: "OppaAI/aiko-dev"
 AIKO_DEV_GITHUB_BRANCH: "main"
 AIKO_DEV_HUGO_CONTENT_PATH: "content/posts"
 A1_FULL_PROVIDERS: ""
-A1_TEASER_PROVIDERS: "bluesky,mastodon,discord,threads"
+A1_TEASER_PROVIDERS: "bluesky,discord,threads"  # mastodon paused (suspended) — re-add mastodon when mastodon.bot approved
 
 # -- Social MCP Server --
 SOCIAL_MCP_DB_PATH: ""

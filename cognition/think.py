@@ -167,7 +167,10 @@ def _llm_extra_body() -> dict:
         "repeat_last_n":  int(os.getenv("REPEAT_LAST_N", 64)),
         "top_k":          int(os.getenv("TOP_K", 40)),
     }
-    if _LLM_NO_THINK:
+    if _deep_think_ctx.get():
+        # /think turn: explicitly re-enable thinking (server default may be off).
+        body["chat_template_kwargs"] = {"enable_thinking": True}
+    elif _LLM_NO_THINK:
         body["chat_template_kwargs"] = {"enable_thinking": False}
     return body
 
@@ -176,9 +179,10 @@ def _apply_no_think(messages: list[dict]) -> list[dict]:
     """Return a copy with `/no_think` appended to the last user turn.
 
     Idempotent (skips when already suffixed). History/store keep the raw
-    text — this only touches the request payload.
+    text — this only touches the request payload. Deep-think (/think) turns
+    are exempt so thinking can be re-enabled on demand.
     """
-    if not _LLM_NO_THINK or not messages:
+    if not _LLM_NO_THINK or not messages or _deep_think_ctx.get():
         return messages
     out = [dict(m) for m in messages]
     for m in reversed(out):

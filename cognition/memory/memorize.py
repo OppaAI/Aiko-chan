@@ -483,6 +483,10 @@ class _MemoryBackend:
             max_tokens=_EXTRACT_MAX_TOKENS + _thinker_headroom(),
             temperature=0.0,  # deterministic — reduces hallucinated facts
             timeout=_EXTRACT_TIMEOUT,
+            # Fact extraction is structured work: hybrid-reasoning models
+            # (Agent A1) need thinking ON to emit valid JSON. Always enable
+            # here regardless of the chat no-think default; background path.
+            extra_body={"chat_template_kwargs": {"enable_thinking": True}},
         )
         schema_kwargs = {
             "response_format": {

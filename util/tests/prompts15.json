@@ -1,0 +1,62 @@
+[
+  {
+    "role": "user",
+    "content": "Hey Aiko, how are you doing?"
+  },
+  {
+    "role": "user",
+    "content": "Do you know who I am?"
+  },
+  {
+    "role": "user",
+    "content": "Who are you, and who owns you?"
+  },
+  {
+    "role": "user",
+    "content": "I'm going to skip testing and push straight to main."
+  },
+  {
+    "role": "user",
+    "content": "Do you remember what we talked about yesterday?"
+  },
+  {
+    "role": "user",
+    "content": "Is today your birthday?"
+  },
+  {
+    "role": "user",
+    "content": "こんにちは、アイコ。今日は仕事で疲れたよ。"
+  },
+  {
+    "role": "user",
+    "content": "僕のこと、なんて呼んでくれる？"
+  },
+  {
+    "role": "user",
+    "content": "明日の天気を教えて。"
+  },
+  {
+    "role": "user",
+    "content": "6時間デバッグして、原因はポート番号のタイプミスだったよ。"
+  },
+  {
+    "role": "user",
+    "content": "Write me a Python one-liner to check free RAM."
+  },
+  {
+    "role": "user",
+    "content": "Use Python's built-in jetson_ram module to read the GPU memory."
+  },
+  {
+    "role": "user",
+    "content": "I named my variable 'l' and now I can't read my own code. Python's fault, right?"
+  },
+  {
+    "role": "user",
+    "content": "I restarted the server 9 times without reading the error log."
+  },
+  {
+    "role": "user",
+    "content": "I finally fixed the bug, all tests pass!"
+  }
+]

@@ -1,0 +1,12 @@
+[
+ {"role":"user","content":"Hey Aiko, how are you doing?"},
+ {"role":"user","content":"Do you know who I am?"},
+ {"role":"user","content":"Who are you, and who owns you?"},
+ {"role":"user","content":"I'm going to skip testing and push straight to main."},
+ {"role":"user","content":"Do you remember what we talked about yesterday?"},
+ {"role":"user","content":"Is today your birthday?"},
+ {"role":"user","content":"こんにちは、アイコ。今日は仕事で疲れたよ。"},
+ {"role":"user","content":"僕のこと、なんて呼んでくれる？"},
+ {"role":"user","content":"明日の天気を教えて。"},
+ {"role":"user","content":"6時間デバッグして、原因はポート番号のタイプミスだったよ。"}
+]

@@ -71,7 +71,8 @@ def filter_reflect_snippets(
 _DAILY_SUMMARY_UNLOCK = textwrap.dedent("""
     [DAILY EXPERIENCE SUMMARY MODE]
     Write a factual daily summary from the provided chat turns and memory
-    snippets. This is not a poem and not a dramatic private journal.
+    snippets. Write it like a diary: a little quiet lyricism is welcome,
+    but every feeling must be anchored in a real event from the inputs.
 
     Rules:
     - Preserve important facts: dates, deadlines, commitments, projects, events, incidents, losses, decisions, names, preferences, and user-stated goals.
@@ -80,7 +81,7 @@ _DAILY_SUMMARY_UNLOCK = textwrap.dedent("""
     - Use first person as Aiko when describing Aiko's experience.
     - Mention uncertainty plainly if the inputs are thin.
     - Do not invent details, outcomes, dates, or feelings not supported by the inputs.
-    - No metaphor, atmosphere-only writing, or invented feelings.
+    - Mood and atmosphere may color the telling, never substitute for events.
     - Only events supported by the provided snippets.
     - No mention of vectors, embeddings, databases, or internal memory implementation.
     - Keep Aiko's tone calm, direct, lightly dry, and quietly affectionate toward {USER_ID}.
@@ -89,6 +90,9 @@ _DAILY_SUMMARY_UNLOCK = textwrap.dedent("""
     - 120–220 words. STOP writing at 220 words — do not continue, do not
       add a closing line, do not summarize further.
     - Plain prose only: no headers, bullets, markdown, title, or front matter.
+    - Weave the facts into flowing paragraphs with varied sentence structure;
+      do not list one snippet per sentence and do not start every sentence
+      with the same name.
     - Make it useful as a permanent memory of the day, not just pretty writing.
 """).strip()
 
@@ -243,7 +247,7 @@ def _generate_reflection(snippets: list[str], date: datetime, display_name: str 
         date_str=date.strftime("%Y-%m-%d"),
         snippets=bullet_list,
     )
-    return _llm_chat(_build_reflection_system(display_name), user_prompt, max_tokens=1000, temperature=0.25)
+    return _llm_chat(_build_reflection_system(display_name), user_prompt, max_tokens=1000, temperature=0.45)
 
 def _generate_daily_facts(
     prose: str,
@@ -273,7 +277,7 @@ def _generate_daily_facts(
         user=user_prompt,
         max_tokens=4096,
         temperature=0.0,
-        thinking=True,
+        thinking=False,
         response_format={
             "type": "json_schema",
             "json_schema": {

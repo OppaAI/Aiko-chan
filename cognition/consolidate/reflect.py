@@ -280,7 +280,7 @@ def _generate_daily_facts(
         user=user_prompt,
         max_tokens=4096,
         temperature=0.0,
-        thinking=False,
+        thinking=True,  # measured: OFF satisifices to [] on real notes; ON works (~1-3 min, nightly-OK)
         response_format={
             "type": "json_schema",
             "json_schema": {
@@ -468,14 +468,30 @@ def generate_and_post(
             if f and len(f) <= 200
             and not any(s in f.casefold() for s in _SKIP)
         ]
+        # Pin gate (inverted): the salience allowlist proved far too strict
+        # (pinned ~nothing — even "prefers dark mode" misses it). Instead pin
+        # everything except trivial chatter, which stores unpinned/prunable.
+        _TRIVIAL_RE = re.compile(
+            r"^(?:hi|hello|hey|yo|good\s?(?:morning|afternoon|evening|night)|"
+            r"how are you(?: doing(?: today)?)?|thanks?(?: a lot)?|thank you|"
+            r"ok(?:ay)?|yes|no|bye(?:bye)?|good ?night)\b[^.!?]*[.!?]?$",
+            re.IGNORECASE,
+        )
+        from cognition.memory.entity import SALIENCE_POLICY_RE
         for fact in facts_filtered:
             try:
-                mem_id = memorize.add_raw(f"{date_tag} {fact}", user_id=uid, pinned=True)
+                text = fact.strip()
+                trivial = (
+                    (len(text) < 15 or bool(_TRIVIAL_RE.match(text)))
+                    and not SALIENCE_POLICY_RE.search(text)
+                )
+                mem_id = memorize.add_raw(f"{date_tag} {fact}", user_id=uid, pinned=not trivial)
                 if mem_id:
-                    pinned_count += 1
-                    member_ids.append(mem_id)
+                    if not trivial:
+                        pinned_count += 1
+                        member_ids.append(mem_id)
             except Exception as e:
-                log.warning(f"Failed to pin fact {fact!r}: {e}")
+                log.warning(f"Failed to store fact {fact!r}: {e}")
 
     scene_id = None
     if memorize is not None and member_ids:

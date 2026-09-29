@@ -247,6 +247,13 @@ AIKO_FLY_SENSE_MODE: "live"  # Phase 6/11: real sensory -> fly pathways.
 AIKO_FLY_ACTION_MODE: "live"  # Phase 10+: action selection.
 AIKO_FLY_BODY_MODE: "live"  # Phase 10B: DN -> motor/VNC/body incl. Freenove backend.
 AIKO_FLY_PERSONA_MODE: "live"  # Phase 11: persona-conditioned modulators.
+# -- Phase 12: metrics + Jetson-safe fullbrain dial --
+# Full-brain step ~470ms; throttle so chat stays responsive next to Ministral.
+AIKO_FULLBRAIN_EVERY_N: "3"  # Run whole-brain step every N MB turns (1 = every turn).
+AIKO_FULLBRAIN_MIN_INTERVAL_S: "2.0"  # Minimum seconds between fullbrain steps.
+# Action blend is also env-overridable (code default weight 0.25).
+# AIKO_FLY_ACTION_WEIGHT: "0.25"
+
 
 
 

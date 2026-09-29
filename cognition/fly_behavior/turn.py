@@ -118,24 +118,46 @@ def apply_turn_priors(
                     # drive gates the circadian rhythm gain below.
                     try:
                         from cognition.fly_registry import get_fullbrain
+                        from cognition.flymemory.fullbrain import mark_stepped, should_step
+                        import time as _time
 
                         fb = get_fullbrain()
                         if fb is not None:
-                            step = fb.step(kc, mb.kc_body_ids)
-                            dn = float(step.get("dn_drive", 0.0))
-                            # DN drive is O(5e-5) (measured 4.6e-5..5.4e-5);
-                            # map gently around the 1.0 baseline — a real
-                            # neural signal, never a wild swing.
-                            out["motor_vigor"] = round(
-                                max(0.8, min(1.2, 1.0 + 3000.0 * (dn - 50e-6))), 3
-                            )
-                            out["clock_drive"] = round(
-                                float(step.get("clock_drive", 0.0)), 5
-                            )
-                            out["brain_arousal"] = round(
-                                float(step.get("arousal", 0.0)), 5
-                            )
-                            out["whole_brain"] = True
+                            if not should_step():
+                                out["whole_brain"] = False
+                                out["whole_brain_throttled"] = True
+                                try:
+                                    from cognition.fly_behavior import metrics as _fly_metrics
+                                    _fly_metrics.record_fullbrain(ran=False, user_id=user_id)
+                                except Exception:
+                                    pass
+                            else:
+                                _t0 = _time.perf_counter()
+                                step = fb.step(kc, mb.kc_body_ids)
+                                _ms = (_time.perf_counter() - _t0) * 1000.0
+                                mark_stepped()
+                                dn = float(step.get("dn_drive", 0.0))
+                                # DN drive is O(5e-5) (measured 4.6e-5..5.4e-5);
+                                # map gently around the 1.0 baseline — a real
+                                # neural signal, never a wild swing.
+                                out["motor_vigor"] = round(
+                                    max(0.8, min(1.2, 1.0 + 3000.0 * (dn - 50e-6))), 3
+                                )
+                                out["clock_drive"] = round(
+                                    float(step.get("clock_drive", 0.0)), 5
+                                )
+                                out["brain_arousal"] = round(
+                                    float(step.get("arousal", 0.0)), 5
+                                )
+                                out["whole_brain"] = True
+                                out["whole_brain_ms"] = round(_ms, 1)
+                                try:
+                                    from cognition.fly_behavior import metrics as _fly_metrics
+                                    _fly_metrics.record_fullbrain(
+                                        ran=True, ms=_ms, user_id=user_id
+                                    )
+                                except Exception:
+                                    pass
                     except Exception as exc:
                         log.debug("whole-brain step skipped: %s", str(exc))
             except Exception as exc:

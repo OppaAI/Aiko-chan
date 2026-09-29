@@ -71,6 +71,15 @@ def _modes() -> dict:
             "MEMORY_FLYDN_MODE": env_str("MEMORY_FLYDN_MODE", "off"),
             "MEMORY_FLYAL_MODE": env_str("MEMORY_FLYAL_MODE", "off"),
             "FLY_SOUL_TEACH_ON_BOOT": env_str("FLY_SOUL_TEACH_ON_BOOT", "off"),
+            "AIKO_FLY_ACTION_MODE": env_str("AIKO_FLY_ACTION_MODE", "shadow"),
+            "AIKO_FLY_ACTION_WEIGHT": env_str("AIKO_FLY_ACTION_WEIGHT", "0.25"),
+            "AIKO_FULLBRAIN_EVERY_N": env_str("AIKO_FULLBRAIN_EVERY_N", "1"),
+            "AIKO_FULLBRAIN_MIN_INTERVAL_S": env_str("AIKO_FULLBRAIN_MIN_INTERVAL_S", "0"),
+            "AIKO_FLY_REPLAY_MODE": env_str("AIKO_FLY_REPLAY_MODE", "shadow"),
+            "AIKO_FLYWORLD_MODE": env_str("AIKO_FLYWORLD_MODE", "shadow"),
+            "AIKO_FLY_SENSE_MODE": env_str("AIKO_FLY_SENSE_MODE", "shadow"),
+            "AIKO_FLY_BODY_MODE": env_str("AIKO_FLY_BODY_MODE", "shadow"),
+            "AIKO_FLY_PERSONA_MODE": env_str("AIKO_FLY_PERSONA_MODE", "shadow"),
         }
     except Exception:
         return {}
@@ -511,6 +520,22 @@ def fly_activity(request: Request) -> JSONResponse:
         logger.debug("fly_activity failed: %s", exc)
     return JSONResponse(
         {"user_id": uid, "activity": activity, "senses": senses, "stage": "6"},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/metrics")
+def fly_metrics(request: Request) -> JSONResponse:
+    """Phase 12: aggregate action + fullbrain metrics for safe dialing."""
+    uid = _uid(request)
+    try:
+        from cognition.fly_behavior.metrics import snapshot
+        payload = snapshot(uid)
+    except Exception as exc:
+        logger.debug("fly metrics failed: %s", exc)
+        payload = {"error": str(exc), "stage": "12"}
+    return JSONResponse(
+        {"user_id": uid, **payload},
         headers={"Cache-Control": "no-store"},
     )
 

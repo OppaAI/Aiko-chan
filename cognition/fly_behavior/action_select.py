@@ -322,6 +322,12 @@ def score_candidates(
             ),
             "ts": ts,
         }
+        # Phase 12: aggregate metrics (never raises).
+        try:
+            from cognition.fly_behavior import metrics as _fly_metrics
+            _fly_metrics.record_action(record, user_id=user_id)
+        except Exception:
+            pass
         # Fail-soft: the body pipeline runs once for a per-user stateful turn.
         try:
             from cognition.fly_behavior import body as _body_layer
@@ -407,6 +413,12 @@ def note_feedback(user_id: str | None, feedback: str) -> dict:
     except Exception as exc:
         out["reason"] = f"teach_failed: {exc}"
         log.debug("action_select note_feedback skipped: %s", exc)
+    # Phase 12 metrics
+    try:
+        from cognition.fly_behavior import metrics as _fly_metrics
+        _fly_metrics.record_feedback(out, user_id=user_id)
+    except Exception:
+        pass
     return out
 
 

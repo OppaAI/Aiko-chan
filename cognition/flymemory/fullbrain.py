@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +46,44 @@ _lock = threading.RLock()
 _instance: "FullBrain | None" = None
 _missing_logged = False
 _load_started = False
+_step_count = 0
+_last_step_ts = 0.0
+_throttle_lock = threading.RLock()
+
+
+def should_step(*, force: bool = False) -> bool:
+    """Phase 12: Jetson-safe fullbrain throttle.
+
+    AIKO_FULLBRAIN_EVERY_N — run at most every N candidate steps (default 1).
+    AIKO_FULLBRAIN_MIN_INTERVAL_S — minimum seconds between steps (default 0).
+    Never raises.
+    """
+    global _step_count, _last_step_ts
+    if force:
+        return True
+    try:
+        every_n = max(1, int(os.environ.get("AIKO_FULLBRAIN_EVERY_N", "1") or 1))
+    except Exception:
+        every_n = 1
+    try:
+        min_iv = max(0.0, float(os.environ.get("AIKO_FULLBRAIN_MIN_INTERVAL_S", "0") or 0))
+    except Exception:
+        min_iv = 0.0
+    now = time.time()
+    with _throttle_lock:
+        _step_count += 1
+        if every_n > 1 and (_step_count % every_n) != 0:
+            return False
+        if min_iv > 0 and (now - _last_step_ts) < min_iv:
+            return False
+        return True
+
+
+def mark_stepped() -> None:
+    global _last_step_ts
+    with _throttle_lock:
+        _last_step_ts = time.time()
+
 
 
 def ensure_data() -> Path | None:

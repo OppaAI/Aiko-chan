@@ -196,14 +196,15 @@ def _salvage_truncated_facts(raw: str) -> list[str]:
     strings = re.findall(r'"((?:[^"\\]|\\.)*)"\s*,?', raw)
     return [s.strip() for s in strings if s.strip() and len(s) <= 200]
 
-def _llm_chat(system: str, user: str, max_tokens: int = 400, temperature: float = 0.75, response_format: dict | None = None) -> str:
+def _llm_chat(system: str, user: str, max_tokens: int = 400, temperature: float = 0.75, response_format: dict | None = None, thinking: bool = False) -> str:
     kwargs = {}
     if response_format is not None:
         kwargs["response_format"] = response_format
     # NOTE (Agent A1, measured): the server preset ignores chat-template-kwargs,
-    # so server-default-off is unreliable — send thinking OFF explicitly per
-    # request. Thinking-on rambles unbounded here (9k+ chars, timeouts).
-    kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+    # so server-default-off is unreliable — send explicitly per request.
+    # Thinking ON rambles unbounded on open prose (9k+ chars) but is REQUIRED
+    # for JSON fact tasks (validated: off returns lazy []).
+    kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": thinking}}
     resp = _get_llm_client().chat.completions.create(
         model=LLM_MODEL,
         messages=[
@@ -272,6 +273,7 @@ def _generate_daily_facts(
         user=user_prompt,
         max_tokens=4096,
         temperature=0.0,
+        thinking=True,
         response_format={
             "type": "json_schema",
             "json_schema": {

@@ -88,6 +88,9 @@ def _llm_chat(system: str, user: str, max_tokens: int = 400, temperature: float 
     kwargs = {}
     if response_format is not None:
         kwargs["response_format"] = response_format
+    # Hybrid-reasoning models (Agent A1) need thinking room + enabled thinking
+    # even for short generations; background path.
+    kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": True}}
     resp = _get_llm_client().chat.completions.create(
         model=LLM_MODEL,
         messages=[
@@ -97,7 +100,7 @@ def _llm_chat(system: str, user: str, max_tokens: int = 400, temperature: float 
         stream=False,
         max_tokens=max_tokens,
         temperature=temperature,
-        timeout=120,
+        timeout=300,
         **kwargs,
     )
     return _strip_think(resp.choices[0].message.content or "")
@@ -162,7 +165,7 @@ def _generate_feelings(prose: str, display_name: str | None = None) -> str:
 def _generate_image_prompt(prose: str) -> str:
     """Ask Aiko to imagine a scene from the daily summary."""
     system = f"{_load_soul()}\n\n{_IMAGE_PROMPT_SYSTEM}"
-    raw = _llm_chat(system, _IMAGE_PROMPT_USER.format(prose=prose[:600]), max_tokens=80)
+    raw = _llm_chat(system, _IMAGE_PROMPT_USER.format(prose=prose[:600]), max_tokens=1024)
     return raw.strip('"\'').strip()
 
 def _load_reference_images() -> list[str]:

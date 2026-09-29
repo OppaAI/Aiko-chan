@@ -94,10 +94,19 @@ Failure logging policy — one log line per failure, with traceback + context:
 from __future__ import annotations                          # evaluates type annotations later
 
 from collections.abc import Callable                        # for defining boot functions
-from concurrent.futures import ThreadPoolExecutor           # for parallel subsystem boot
+from concurrent.futures import Future                       # result carrier for the daemon boot threads below
+from concurrent.futures import TimeoutError as FuturesTimeoutError  # bounded boot waits — a hung subsystem must not wedge an unattended boot
 from dataclasses import dataclass                           # for dataclass to hold subsystem refs
 from typing import Any                                      # Any still lives in typing — collections.abc has no equivalent
 import threading                                            # for booting up cognition core and memory system in parallel
+
+# Upper bounds for the parallel boot phase. Aiko runs unattended on the
+# Jetson — a subsystem that hangs (wedged sqlite-vec init, stalled model
+# load) must degrade loudly, not trap the boot forever. Memory init is
+# normally seconds (270M embedder + sqlite-vec + cleanup); think init is
+# bounded separately by the LLM server's own readiness.
+_MEM_BOOT_TIMEOUT_S = 300
+_THINK_BOOT_TIMEOUT_S = 600
 
 # Must run before the system.* imports below — those modules read secrets
 # from os.environ at import time, and this decrypts .env.age into os.environ.
@@ -140,7 +149,7 @@ class BootResult:
 BootCallback = Callable[[str], None]                        # Callback for boot progress: takes step key (string)
 
 
-def start_speak() -> "AikoSpeak | None":
+def start_speak() -> AikoSpeak | None:
     """Construct + warm up the TTS client (MioTTS HTTP client + health ping).
 
     Never raises: returns None when the subsystem can't start, mirroring the
@@ -160,7 +169,7 @@ def start_speak() -> "AikoSpeak | None":
     return speak
 
 
-def start_listen() -> "AikoListen | None":
+def start_listen() -> AikoListen | None:
     """Construct the ASR listener (models stay lazy until first mic arm).
 
     Never raises: returns None when the subsystem can't start. Used by
@@ -254,8 +263,15 @@ class AikoWakeup:
 
             think = _boot_step('think_start', lambda: AikoThink())                            # initiate cognitive core
             _boot_step('think_warmup', lambda: (think.start_warmup(), think.join_warmup()))   # start warmup thread, then block until it finishes
-            _boot_step('think_mem_wait', lambda: mem_ready_evt.wait())                        # block until memorize thread finishes
-            _boot_step('think_inject', lambda: (think.set_memorize(memorize_getter()), think.start_idle_learner()))  # inject memory backend + start idle learner (no-ops if memorize is None)
+            mem_ok = _boot_step('think_mem_wait', lambda: mem_ready_evt.wait(timeout=_MEM_BOOT_TIMEOUT_S))  # bounded: a wedged memory init must not trap the think thread
+            if mem_ok:
+                _boot_step('think_inject', lambda: (think.set_memorize(memorize_getter()), think.start_idle_learner()))  # inject memory backend + start idle learner (no-ops if memorize is None)
+            else:
+                # Memory init hung past the timeout (its finally always sets the
+                # event on return/raise, so a timeout means a true hang). Think
+                # must not hang here on an unattended boot — run degraded.
+                on_skip('think_inject')
+                log.warning("[wakeup] mem_ready_evt timed out after %ds — think continuing without memory.", _MEM_BOOT_TIMEOUT_S)
             # NOTE: semantic-cache prewarm moved to system/prepare.run_post_auth() —
             # as guest it couldn't persist per-user npz caches anyway, and post-login
             # it loads the real user's existing disk cache instead of recomputing.
@@ -290,21 +306,41 @@ class AikoWakeup:
             finally:                                                                          # whether success or failure,
                 mem_ready_evt.set()                                                           # signal memory ready; wake any waiting thread
 
-        with ThreadPoolExecutor(max_workers=2) as ex:                                         # parallel memory and cognition boot
-            mem_future = ex.submit(init_memorize)                                             # memory boot on thread 1
-            think_future = ex.submit(init_think, lambda: mem_future.result())                 # cognitive core boot on thread 2 (waits for memory)
+        # ── parallel boot ─────────────────────────────────────────────────
+        # Plain daemon threads (not ThreadPoolExecutor): a boot worker that
+        # wedges in C (sqlite-vec init, model load) must never trap process
+        # exit. The bounded waits below degrade/raise loudly on a hang, and
+        # daemon threads let the interpreter shut down anyway so systemd can
+        # restart us. Results ride concurrent.futures.Future objects, keeping
+        # the old semantics: memorize's future never raises (init_memorize
+        # catches Exception internally and returns None); think's future
+        # re-raises, caught below.
+        mem_future: Future = Future()
+        think_future: Future = Future()
 
-            # memorize's .result() never raises — init_memorize() always returns something
-            # (None on failure, logged internally), so no try/except needed here.
-            # think's .result() DOES re-raise on failure — caught below so we can still
-            # drain mem_future before deciding whether boot failed.
-            think_ref: AikoThink | None = None                                                # will hold AikoThink reference
-            think_exc: Exception | None = None                                                # holds exception from cognitive core initialization for error chaining
-            try:                                                                              # retrieve cognitive core initialization result
-                think_ref = think_future.result()                                             # block until cognitive core initialization completes
-            except Exception as exc:                                                          # if error,
-                think_exc = exc                                                               # logged once and chained into the raise later
-            memorize = mem_future.result()                                                    # grab the results of memory system
+        def _run_future(fut: Future, fn: Callable[[], Any]) -> None:
+            try:
+                fut.set_result(fn())
+            except BaseException as exc:                      # mirror ThreadPoolExecutor: capture everything, .result() re-raises
+                fut.set_exception(exc)
+
+        threading.Thread(target=_run_future, args=(mem_future, init_memorize),
+                         name="aiko-boot-mem", daemon=True).start()
+        threading.Thread(target=_run_future,
+                         args=(think_future, lambda: init_think(lambda: mem_future.result())),
+                         name="aiko-boot-think", daemon=True).start()
+
+        think_ref: AikoThink | None = None                                                # will hold AikoThink reference
+        think_exc: Exception | None = None                                                # holds exception from cognitive core initialization for error chaining
+        try:                                                                              # retrieve cognitive core initialization result
+            think_ref = think_future.result(timeout=_THINK_BOOT_TIMEOUT_S)                # bounded: a hung think init fails loudly (systemd restarts) instead of wedging boot
+        except Exception as exc:                                                          # if error (incl. FuturesTimeoutError),
+            think_exc = exc                                                               # logged once and chained into the raise later
+        try:
+            memorize = mem_future.result(timeout=_MEM_BOOT_TIMEOUT_S)                     # bounded: falls back to memorize=None below on timeout
+        except FuturesTimeoutError:
+            log.warning("[wakeup] memory boot timed out after %ds — continuing without persistent memory.", _MEM_BOOT_TIMEOUT_S)
+            memorize = None
 
         # ── fly catalog warmup (fire-and-forget) ──────────────────────────────
         # First evaluation parses ~489MB of connectome JSON; done lazily that

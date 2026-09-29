@@ -40,15 +40,15 @@ never touched, so --backup stays fast on 8 GB.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import shutil
 import sqlite3
 import subprocess
-import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 
 
@@ -107,7 +107,7 @@ def manifest_root() -> Path:
 # ── small helpers ─────────────────────────────────────────────────────────────
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _utc_stamp() -> str:
@@ -132,18 +132,14 @@ def _should_skip_settings(rel: Path) -> bool:
         return True
     if name.endswith(LOCK_SUFFIXES):
         return True
-    if name.endswith(".tmp"):
-        return True
-    return False
+    return bool(name.endswith(".tmp"))
 
 
 def _should_skip_code(rel: Path) -> bool:
     parts = rel.parts
     if any(part in CODE_EXCLUDES_DIRS for part in parts):
         return True
-    if rel.suffix.lower() in CODE_EXCLUDES_SUFFIXES:
-        return True
-    return False
+    return rel.suffix.lower() in CODE_EXCLUDES_SUFFIXES
 
 
 # ── quiesced SQLite snapshot ──────────────────────────────────────────────────
@@ -162,10 +158,11 @@ def quiesce_sqlite(src: Path, dst: Path, user_id: str) -> None:
         try:
             from system.secure import connect_sqlite, sqlite_encryption_enabled
 
-            if sqlite_encryption_enabled():
-                src_conn = connect_sqlite(src, user_id=user_id)
-            else:
-                src_conn = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=10.0)
+            src_conn = (
+                connect_sqlite(src, user_id=user_id)
+                if sqlite_encryption_enabled()
+                else sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=10.0)
+            )
         except Exception as exc:
             raise BackupError(f"cannot open {src} for snapshot: {exc}") from exc
         try:
@@ -175,10 +172,8 @@ def quiesce_sqlite(src: Path, dst: Path, user_id: str) -> None:
             finally:
                 dst_conn.close()
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 src_conn.close()
-            except Exception:
-                pass
     except BackupError:
         raise
     except Exception as exc:
@@ -195,19 +190,18 @@ def sqlite_integrity_ok(path: Path, user_id: str) -> bool:
         try:
             from system.secure import connect_sqlite, sqlite_encryption_enabled
 
-            if sqlite_encryption_enabled():
-                conn = connect_sqlite(path, user_id=user_id)
-            else:
-                conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10.0)
+            conn = (
+                connect_sqlite(path, user_id=user_id)
+                if sqlite_encryption_enabled()
+                else sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10.0)
+            )
         except Exception:
             return False
         try:
             rows = conn.execute("PRAGMA integrity_check").fetchall()
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 conn.close()
-            except Exception:
-                pass
         return bool(rows) and str(rows[0][0]).lower() == "ok"
     except Exception:
         return False
@@ -363,9 +357,12 @@ def verify_staging(staging: Path, manifest: BackupManifest) -> None:
             raise BackupError(f"staged file missing: {rel}")
         if sha256_file(path) != entry["sha256"]:
             raise BackupError(f"checksum mismatch: {rel}")
-        if entry.get("integrity") == "ok" and _is_sqlite_file(path):
-            if not sqlite_integrity_ok(path, manifest.user_id):
-                raise BackupError(f"integrity re-check failed: {rel}")
+        if (
+            entry.get("integrity") == "ok"
+            and _is_sqlite_file(path)
+            and not sqlite_integrity_ok(path, manifest.user_id)
+        ):
+            raise BackupError(f"integrity re-check failed: {rel}")
     manifest.verified = True
 
 
@@ -395,7 +392,7 @@ def manifest_fresh_enough(manifest: BackupManifest, max_age_seconds: int = MANIF
     except ValueError:
         return False
     if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
+        when = when.replace(tzinfo=UTC)
     return (_utc_now() - when).total_seconds() <= max_age_seconds
 
 
@@ -421,10 +418,9 @@ def transport_to_dest(staging: Path, dest: str, backup_id: str, dry_run: bool = 
             raise BackupError(f"USB mount not present at {usb_mount()} — unlock/mount it first")
         shutil.copytree(staging, target, dirs_exist_ok=True)
         return f"usb → {target}"
-    if name == "microsd":
+    if name == "microsd" and (staging / "settings").exists():
         # Unencrypted tier: code snapshot only, never settings/DBs.
-        if (staging / "settings").exists():
-            raise BackupError("microsd is UNENCRYPTED — refusing settings/DB snapshot there (use usb/nas)")
+        raise BackupError("microsd is UNENCRYPTED — refusing settings/DB snapshot there (use usb/nas)")
         target = microsd_path() / backup_id
         if dry_run:
             return f"microsd → {target} (dry-run)"
@@ -548,18 +544,14 @@ def perform_factory_reset(user_id: str = "", max_age_seconds: int = MANIFEST_MAX
     removed_bytes = 0
     for path in sorted(target.rglob("*"), reverse=True):
         if path.is_symlink() or path.is_file():
-            try:
+            with contextlib.suppress(OSError):
                 removed_bytes += path.stat().st_size
                 path.unlink()
                 removed_files += 1
-            except OSError:
-                pass
     for path in sorted(target.rglob("*"), reverse=True):
         if path.is_dir():
-            try:
+            with contextlib.suppress(OSError):
                 path.rmdir()
-            except OSError:
-                pass
     return {
         "user_id": uid,
         "removed_files": removed_files,

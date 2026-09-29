@@ -113,10 +113,7 @@ KARAOKE_WPS = float(os.getenv("KARAOKE_WPS", "2.6"))  # fallback reveal pace (wo
 # (llama-server compatible) for real counts; falls back to a crude
 # whitespace-split estimate if that endpoint isn't reachable.
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:8080/v1").rstrip("/")
-if LLM_BASE_URL.endswith("/v1"):
-    _TOKENIZE_BASE_URL = LLM_BASE_URL[: -len("/v1")]
-else:
-    _TOKENIZE_BASE_URL = LLM_BASE_URL
+_TOKENIZE_BASE_URL = LLM_BASE_URL[: -len("/v1")] if LLM_BASE_URL.endswith("/v1") else LLM_BASE_URL
 
 # ── debug ANSI colors ────────────────────────────────────────────────────────
 # Kept as plain ANSI escapes. Used by the --debug context-dump block below,
@@ -719,7 +716,7 @@ class TypewriterSync:
     def __init__(self, ui, speak) -> None:
         self._ui = ui
         self._speak = speak
-        self._q: "queue.Queue[tuple[str, float] | None]" = queue.Queue()
+        self._q: queue.Queue[tuple[str, float] | None] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._fallback_buf: list[str] = []
@@ -908,7 +905,7 @@ def run_session(ui, args) -> None:
     last_stream_draw = 0.0
 
     # Karaoke typewriter state — created after `speak` boots below.
-    typewriter: "TypewriterSync | None" = None
+    typewriter: TypewriterSync | None = None
     _sentence_buf: list[str] = []
 
     def token_cb(token):
@@ -1250,7 +1247,7 @@ def run_session(ui, args) -> None:
         session_active.set()
         if listen is not None and hasattr(listen, "extend_activation"):
             listen.extend_activation()
-    
+
         original_speak = think._get_speak()
         muted = not tts_enabled or not PROACTIVE_SPEAK
         if muted:
@@ -1415,10 +1412,15 @@ def run_session(ui, args) -> None:
                 in_think_block = False
                 think_closed   = False
 
-                def _think_token_cb(token):
+                # Bind raw_chunks as a default arg: this callback is defined inside
+                # the REPL loop and the name is rebound every iteration. Today
+                # think.chat() invokes it synchronously, so the closure would
+                # be safe — but binding makes that guarantee structural, not
+                # accidental, if the callback ever escapes to another thread.
+                def _think_token_cb(token, _chunks=raw_chunks):
                     nonlocal in_think_block, think_closed
-                    raw_chunks.append(token)
-                    assembled = "".join(raw_chunks)
+                    _chunks.append(token)
+                    assembled = "".join(_chunks)
 
                     if not think_closed:
                         if "<think>" in assembled and not in_think_block:
@@ -1756,7 +1758,7 @@ def run_session(ui, args) -> None:
                 if completion_text:
                     ctx_entries.append(("output", (llm_lat or 0) * 1000, out_tok, completion_text))
 
-                def _ctx_group(l: str) -> str:
+                def _ctx_group(label: str) -> str:
                     for prefix, grp in (("sys","ctx"),("mem","ctx"),("kb","ctx"),
                                         ("wiki","ctx"),("knowledge","ctx"),
                                         ("exp","ctx"),("experience","ctx"),
@@ -1764,7 +1766,7 @@ def run_session(ui, args) -> None:
                                         ("skill","inst"),("task","inst"),
                                         ("web","web"),
                                         ("chat","hist")):
-                        if l.startswith(prefix) or prefix in l:
+                        if label.startswith(prefix) or prefix in label:
                             return grp
                     return "turn"
                 _GROUP_LABEL = {"ctx":"context", "inst":"instructions",
@@ -1803,7 +1805,7 @@ def run_session(ui, args) -> None:
                     current_latency["total_tokens"] = in_tok_val + out_tok_val
 
                 gantt_items: list[tuple[str, float, int, str]] = []
-                for label, lat_ms, tok, content in ctx_entries:
+                for label, lat_ms, tok, _content in ctx_entries:
                     if tok > 0:
                         gantt_items.append((label, lat_ms, tok, _ctx_color(label)))
                 turn_total_ms = _latency_seconds(current_latency, "submitted_at", "turn_done_at")
@@ -1819,8 +1821,8 @@ def run_session(ui, args) -> None:
                 for label, lat_ms, tok, content in ctx_entries:
                     _log_ctx(log, label, tok, lat_ms, content)
                 log.info("[ctx] gantt: %s",
-                         " | ".join(f"{l}={lat:.0f}ms/{t}tok"
-                                    for l, lat, t, _ in gantt_items))
+                         " | ".join(f"{label}={lat:.0f}ms/{t}tok"
+                                    for label, lat, t, _ in gantt_items))
 
             if typewriter is not None and _sentence_buf:
                 typewriter.feed_sentence("".join(_sentence_buf))

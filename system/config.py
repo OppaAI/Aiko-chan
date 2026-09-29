@@ -85,7 +85,13 @@ def _strip_comment(line: str) -> str:
 
 
 def _simple_yaml_load(text: str) -> dict[str, Any]:
-    """Tiny fallback parser for Aiko's simple config/*.yaml files."""
+    """Tiny fallback parser for Aiko's simple config/*.yaml files.
+
+    Flat mappings + top-level lists only. Nested mappings need real
+    PyYAML — raising loudly here beats silently exporting the wrong
+    keys (an indented `b:` would otherwise surface as a top-level `B`,
+    misconfiguring the whole process with no error).
+    """
     data: dict[str, Any] = {}
     current_key: str | None = None
     pending_empty: set[str] = set()
@@ -108,6 +114,12 @@ def _simple_yaml_load(text: str) -> dict[str, Any]:
             continue
         if ":" not in line:
             continue
+        if line != line.lstrip():
+            raise RuntimeError(
+                "nested YAML mapping found but PyYAML is not installed — "
+                "install pyyaml (a declared dependency) instead of relying "
+                "on the flat fallback parser"
+            )
         key, value = line.split(":", 1)
         key = key.strip()
         value = value.strip()

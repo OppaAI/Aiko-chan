@@ -242,7 +242,7 @@ def _generate_reflection(snippets: list[str], date: datetime, display_name: str 
         date_str=date.strftime("%Y-%m-%d"),
         snippets=bullet_list,
     )
-    return _llm_chat(_build_reflection_system(display_name), user_prompt, max_tokens=1000, temperature=0.45)
+    return _llm_chat(_build_reflection_system(display_name), user_prompt, max_tokens=1000, temperature=0.25)
 
 def _generate_daily_facts(
     prose: str,

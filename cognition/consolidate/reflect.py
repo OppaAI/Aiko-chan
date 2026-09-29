@@ -211,7 +211,7 @@ def _llm_chat(system: str, user: str, max_tokens: int = 400, temperature: float 
         stream=False,
         max_tokens=max_tokens,
         temperature=temperature,
-        timeout=120,
+        timeout=300,
         **kwargs,
     )
     return (resp.choices[0].message.content or "").strip()

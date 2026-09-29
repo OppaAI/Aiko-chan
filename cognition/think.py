@@ -606,6 +606,9 @@ def _is_greeting_only(user_input: str) -> bool:
 # picked, not compete with them for the turn.
 _DEEP_THINK_RE = re.compile(
     r"\b(?:"
+    r"who am i|who are you|do you know who i am|tell me who i am|"
+    r"am i (?:still |really )?oppa|are you (?:still |really )?aiko|"
+    r"do you understand (?:who|that) i am|"
     r"think (?:more |a bit )?(?:deeply|thoroughly|carefully|harder|longer)|"
     r"think (?:this |it |that )?through(?: (?:carefully|thoroughly|properly))?|"
     r"really think (?:about|through|it over)|"

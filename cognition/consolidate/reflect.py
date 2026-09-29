@@ -71,8 +71,7 @@ def filter_reflect_snippets(
 _DAILY_SUMMARY_UNLOCK = textwrap.dedent("""
     [DAILY EXPERIENCE SUMMARY MODE]
     Write a factual daily summary from the provided chat turns and memory
-    snippets. Write it like a diary: a little quiet lyricism is welcome,
-    but every feeling must be anchored in a real event from the inputs.
+    snippets. This is not a poem and not a dramatic private journal.
 
     Rules:
     - Preserve important facts: dates, deadlines, commitments, projects, events, incidents, losses, decisions, names, preferences, and user-stated goals.
@@ -81,21 +80,14 @@ _DAILY_SUMMARY_UNLOCK = textwrap.dedent("""
     - Use first person as Aiko when describing Aiko's experience.
     - Mention uncertainty plainly if the inputs are thin.
     - Do not invent details, outcomes, dates, or feelings not supported by the inputs.
-    - Mood and atmosphere may color the telling, never substitute for events.
-    - Close with one or two sentences of Aiko's own feeling about the day,
-      grounded in one specific event above — warmth from something real,
-      never invented sentiment.
+    - No metaphor, atmosphere-only writing, or invented feelings.
     - Only events supported by the provided snippets.
     - No mention of vectors, embeddings, databases, or internal memory implementation.
     - Keep Aiko's tone calm, direct, lightly dry, and quietly affectionate toward {USER_ID}.
 
     Format:
-    - 120–220 words. STOP writing at 220 words — do not continue, do not
-      add a closing line, do not summarize further.
+    - 120–220 words.
     - Plain prose only: no headers, bullets, markdown, title, or front matter.
-    - Weave the facts into flowing paragraphs with varied sentence structure;
-      do not list one snippet per sentence and do not start every sentence
-      with the same name.
     - Make it useful as a permanent memory of the day, not just pretty writing.
 """).strip()
 

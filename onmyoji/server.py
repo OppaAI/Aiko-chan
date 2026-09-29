@@ -86,13 +86,23 @@ def _client():
 
 
 def _chat(system: str, user: str, *, max_tokens: int = 400, temperature: float = 0.7) -> str:
-    resp = _client().chat.completions.create(
+    # NPC dialogue is latency-sensitive gameplay; it needs voice, not
+    # chain-of-thought. Disable thinking per request.
+    try:
+        from cognition.think import THINK_OFF_EXTRA_BODY
+        think_off = THINK_OFF_EXTRA_BODY
+    except Exception:
+        think_off = None
+    create_kwargs = dict(
         model=LLM_MODEL,
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
         max_tokens=max_tokens,
         temperature=temperature,
         extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
+    if think_off is not None:
+        create_kwargs["extra_body"] = think_off
+    resp = _client().chat.completions.create(**create_kwargs)
     return (resp.choices[0].message.content or "").strip()
 
 

@@ -626,11 +626,16 @@ def _distill(
             f"{evidence_bundle}"
         )
         try:
+            from cognition.think import _effective_max_tokens
+            synthesis_tokens = _effective_max_tokens(DEEP_STUDY_SYNTHESIS_MAX_TOKENS)
+        except Exception:
+            synthesis_tokens = DEEP_STUDY_SYNTHESIS_MAX_TOKENS
+        try:
             resp = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 stream=False,
-                max_tokens=2048,
+                max_tokens=synthesis_tokens,
                 temperature=0.2,
                 # Synthesis is deep work (Agent A1): thinking ON.
                 extra_body={"chat_template_kwargs": {"enable_thinking": True}},

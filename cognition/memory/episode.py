@@ -931,6 +931,13 @@ class EpisodicStore:
                 vec = list(self._embedder.embed([trace]))[0]
                 blob = _pack_vector(vec)
                 with self._lock:
+                    # The episode may have been cleared (EpisodicStore.clear_user)
+                    # while we were embedding — don't orphan a vec row for it.
+                    still_there = self._conn.execute(
+                        "SELECT 1 FROM emc_storage WHERE id = ?", (storage_id,)
+                    ).fetchone()
+                    if still_there is None:
+                        continue
                     self._conn.execute(
                         "UPDATE emc_storage SET encoding = ? WHERE id = ?",
                         (blob, storage_id),
@@ -944,6 +951,52 @@ class EpisodicStore:
                 log.debug("EMC background embed skipped: %s", e)
             finally:
                 self._embed_queue.task_done()
+
+    def clear_user(self, user_id: str | None = None) -> int:
+        """Delete ALL episodic data for a user: staging + storage rows and
+        their FTS/vec index entries. Called by AikoMemorize.clear() so /clear
+        really wipes everything — episodic recall (EMC-3) feeds every turn's
+        context, and leaving these rows behind would let Aiko recall
+        'cleared' episodes.
+
+        Runs under the store's own lock (the same one the background embed
+        worker takes), drains the per-user embed queue, and drops the recall
+        cache + pending touches, so nothing in flight can resurrect data.
+        Returns the number of emc_storage rows deleted.
+        """
+        uid = user_id or self._user_id
+        with self._lock:
+            ids = [
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT id FROM emc_storage WHERE user_id = ?", (uid,)
+                ).fetchall()
+            ]
+            if ids:
+                placeholders = ",".join("?" * len(ids))
+                self._conn.execute(
+                    f"DELETE FROM emc_vec WHERE rowid IN ({placeholders})", ids
+                )
+                self._conn.execute(
+                    f"DELETE FROM emc_fts WHERE rowid IN ({placeholders})", ids
+                )
+            self._conn.execute("DELETE FROM emc_storage WHERE user_id = ?", (uid,))
+            self._conn.execute("DELETE FROM emc_staging WHERE user_id = ?", (uid,))
+            self._conn.commit()
+            # The store is per-user, so its whole embed queue belongs to uid.
+            try:
+                while True:
+                    self._embed_queue.get_nowait()
+                    self._embed_queue.task_done()
+            except queue.Empty:
+                pass
+            self._pending_touch.clear()
+            if self._touch_timer is not None:
+                self._touch_timer.cancel()
+                self._touch_timer = None
+            with self._recall_cache_lock:
+                self._recall_cache.clear()
+        return len(ids)
 
     def staging_count(self, user_id: str | None = None) -> int:
         uid = user_id or self._user_id
@@ -1524,11 +1577,16 @@ def _llm_distill(client, model: str, moments: list[str]) -> list[str]:
     block = "\n\n".join(f"[{i+1}]\n{m}" for i, m in enumerate(moments))
     prompt = _DISTILL_PROMPT.format(moments=block[:6000])
     try:
+        from cognition.think import _effective_max_tokens
+        distill_tokens = _effective_max_tokens(EMC_DREAM_MAX_TOKENS)
+    except Exception:
+        distill_tokens = EMC_DREAM_MAX_TOKENS
+    try:
         resp = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             stream=False,
-            max_tokens=1024,
+            max_tokens=distill_tokens,
             temperature=0.0,
             timeout=120.0,
             # Fact distillation needs thinking (Agent A1); background path.

@@ -12,7 +12,16 @@ import re
 
 _EXTRACT_MIN_CHARS = int(os.getenv("MEMORY_EXTRACT_MIN_CHARS", 80))
 _EXTRACT_MAX_TOKENS = int(os.getenv("MEMORY_EXTRACT_MAX_TOKENS", 512))
-_EXTRACT_TIMEOUT = float(os.getenv("MEMORY_EXTRACT_TIMEOUT", 18))
+# Fact extraction is a simple deterministic task (temperature=0.0) that barely
+# benefits from long reasoning, so it gets its own small think budget instead
+# of the chat-tuned LLM_THINK_BUDGET (default 512). Keeps extraction latency
+# bounded on the Jetson when the backend is a thinking model.
+_EXTRACT_THINK_BUDGET = int(os.getenv("MEMORY_EXTRACT_THINK_BUDGET", 128))
+# Covers the worst case (512 JSON + 128 think tokens) down to ~5 tok/s under
+# Jetson GPU contention. Generous on purpose: this runs on a background
+# worker thread, so a too-long timeout only delays the queue — while a
+# too-short one silently drops that turn's facts.
+_EXTRACT_TIMEOUT = float(os.getenv("MEMORY_EXTRACT_TIMEOUT", 120))
 
 _HEDGE_SIGNALS = frozenset([
     "might", "probably", "seems", "i think", "perhaps", "maybe",

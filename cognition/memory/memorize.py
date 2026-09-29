@@ -180,6 +180,7 @@ from .imprint import (
     _EXTRACT_MAX_TOKENS,
     _EXTRACT_MIN_CHARS,
     _EXTRACT_PROMPT,
+    _EXTRACT_THINK_BUDGET,
     _EXTRACT_TIMEOUT,
     _HEDGE_RE,
     _force_subject_name,
@@ -206,15 +207,20 @@ from .episode import MEMORY_WM_CAPACITY  # re-exported from episode for compat
 def _thinker_headroom() -> int:
     """Extra max_tokens for fact extraction when the LLM backend thinks.
 
-    Thinking-channel models burn the whole prediction budget reasoning
-    before emitting the JSON facts (same failure as chat turns — empty
-    content, `finish=length`). Detection lives in cognition.think; read it
-    lazily to avoid a top-level import cycle (think.py imports this package).
+    Thinking-channel models burn prediction budget reasoning before emitting
+    the JSON facts (same failure as chat turns — empty content,
+    `finish=length`). Uses the extraction-specific _EXTRACT_THINK_BUDGET
+    (MEMORY_EXTRACT_THINK_BUDGET, default 128) rather than the chat-tuned
+    _LLM_THINK_BUDGET — fact extraction is a simple deterministic task that
+    doesn't need 512 tokens of reasoning, and the smaller budget keeps
+    worst-case extraction latency bounded on the Jetson. Detection lives in
+    cognition.think; read it lazily to avoid a top-level import cycle
+    (think.py imports this package).
     """
     try:
-        from cognition.think import _LLM_THINK_BUDGET, _LLM_THINKING_HINT, _THINKER_DETECTED
+        from cognition.think import _LLM_THINKING_HINT, _THINKER_DETECTED
         if _LLM_THINKING_HINT or _THINKER_DETECTED:
-            return int(_LLM_THINK_BUDGET)
+            return int(_EXTRACT_THINK_BUDGET)
     except Exception:
         pass
     return 0
@@ -4381,6 +4387,21 @@ class AikoMemorize:
                 factors=["manual clear: all memories deleted for user"],
             )
         self._mem.delete_all(user_id=user_id)
+        # Episodic recall is live (EMC-3 feeds every turn's context), so its
+        # tables must go too — otherwise /clear leaves recallable episodes
+        # behind. The delete goes through the episodic store itself: it owns
+        # the lock its background embed worker takes, so no orphan vec/fts
+        # rows can be written mid-clear.
+        if self.episodic is not None:
+            try:
+                _emc_store = self.episodic.get_store(user_id=user_id)
+                if _emc_store is not None:
+                    _n_emc = _emc_store.clear_user(user_id)
+                    log.info(f"Cleared {_n_emc} episodic traces for user '{user_id}'.")
+            except Exception:
+                log.warning(
+                    "Episodic clear failed for user '%s' — semantic memories were still cleared.",
+                    user_id, exc_info=True)
         self._clear_search_cache()
         log.info(f"Cleared all memories for user '{user_id}'.")
 

@@ -625,7 +625,14 @@ for example "*{_ai} considers the question.*". Do not use XML or colon labels.""
             multimodal_messages = [system_msg, {"role": "user", "content": user_content}]
     standard_messages = [system_msg, {"role": "user", "content": prompt}]
     def _create(messages: list[dict]):
-        return _get_llm_client().chat.completions.create(
+        # Short social replies need zero reasoning; a thinking model would
+        # burn the 180-token budget before writing the reply.
+        try:
+            from cognition.think import THINK_OFF_EXTRA_BODY
+            think_off = THINK_OFF_EXTRA_BODY
+        except Exception:
+            think_off = None
+        create_kwargs = dict(
             model=env("LLM_MODEL", "ministral"),
             messages=messages,
             temperature=0.7,
@@ -633,6 +640,9 @@ for example "*{_ai} considers the question.*". Do not use XML or colon labels.""
             timeout=float(env("LLM_TIMEOUT", "30")),
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
+        if think_off is not None:
+            create_kwargs["extra_body"] = think_off
+        return _get_llm_client().chat.completions.create(**create_kwargs)
 
     def _create_without_system_on_role_error(messages: list[dict], label: str):
         try:
@@ -716,7 +726,13 @@ def _extract_image_request_prompt(comment: str) -> str:
         "For anything else (questions about images, praise, no actual request), reply exactly NONE."
     )
     try:
-        resp = _get_llm_client().chat.completions.create(
+        # Binary classifier ("NONE" vs scene description); zero reasoning needed.
+        try:
+            from cognition.think import THINK_OFF_EXTRA_BODY
+            think_off = THINK_OFF_EXTRA_BODY
+        except Exception:
+            think_off = None
+        create_kwargs = dict(
             model=env("LLM_MODEL", "ministral"),
             messages=[
                 {"role": "system", "content": system},
@@ -727,6 +743,9 @@ def _extract_image_request_prompt(comment: str) -> str:
             timeout=float(env("LLM_TIMEOUT", "30")),
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
+        if think_off is not None:
+            create_kwargs["extra_body"] = think_off
+        resp = _get_llm_client().chat.completions.create(**create_kwargs)
         raw = (resp.choices[0].message.content or "").strip()
     except Exception:
         return ""

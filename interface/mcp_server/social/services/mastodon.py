@@ -402,7 +402,14 @@ No quotation marks or speaker labels. Unicode emoji only when helpful."""
     llm = _get_llm()
     if llm is None:
         return ""
-    resp = llm.chat.completions.create(
+    # Short social reply; zero reasoning needed — a thinking model would
+    # burn the 180-token budget before writing the reply.
+    try:
+        from cognition.think import THINK_OFF_EXTRA_BODY
+        think_off = THINK_OFF_EXTRA_BODY
+    except Exception:
+        think_off = None
+    create_kwargs = dict(
         model=env("LLM_MODEL", "ministral"),
         messages=[
             {
@@ -416,6 +423,9 @@ No quotation marks or speaker labels. Unicode emoji only when helpful."""
         timeout=float(env("LLM_TIMEOUT", "30")),
         extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
+    if think_off is not None:
+        create_kwargs["extra_body"] = think_off
+    resp = llm.chat.completions.create(**create_kwargs)
     text = _message_text(resp.choices[0].message)
     if not text:
         raise RuntimeError("empty Mastodon reply")

@@ -88,6 +88,11 @@ def _get_llm_client() -> OpenAI:
 
 def _chat(system: str, user: str, max_tokens: int = 900, temperature: float = 0.1) -> str:
     client = _get_llm_client()
+    try:
+        from cognition.think import _effective_max_tokens
+        max_tokens = _effective_max_tokens(max_tokens)
+    except Exception:
+        pass
     resp = client.chat.completions.create(
         model=LLM_MODEL,
         messages=[

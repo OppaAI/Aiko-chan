@@ -1483,7 +1483,14 @@ def _verify_final_answer(owner, user_input: str, answer: str, state: TaskState) 
         f"Candidate answer:\n{stripped}"
     )
     try:
-        resp = owner._client.chat.completions.create(
+        # The verdict is fully determined by the prompt; a thinking model
+        # would burn the 160-token budget before emitting the JSON.
+        from cognition.think import THINK_OFF_EXTRA_BODY
+        think_off = THINK_OFF_EXTRA_BODY
+    except Exception:
+        think_off = None
+    try:
+        create_kwargs = dict(
             model=owner._llm_model,
             messages=[{"role": "user", "content": prompt}],
             stream=False,
@@ -1507,6 +1514,9 @@ def _verify_final_answer(owner, user_input: str, answer: str, state: TaskState) 
                 },
             },
         )
+        if think_off is not None:
+            create_kwargs["extra_body"] = think_off
+        resp = owner._client.chat.completions.create(**create_kwargs)
         raw = (resp.choices[0].message.content or "").strip()
         data = json.loads(raw)
         ok = _coerce_verifier_bool(data.get("pass"))
@@ -1709,6 +1719,15 @@ def _stream_agent_message(owner, messages, tools, token_callback):
     """Stream an agentic LLM call, feeding text tokens to token_callback.
     Returns (SimpleNamespace, usage) matching the non-streaming shape.
     """
+    # Tool planning is where a thinking model earns its keep — give it
+    # headroom instead of disabling thinking. Lazy import: cognition.think
+    # imports this module, so a top-level import would be circular.
+    try:
+        from cognition.think import _effective_max_tokens
+    except Exception:
+        def _effective_max_tokens(base: int) -> int:  # type: ignore[no-redef]
+            return int(base)
+    agent_max_tokens = _effective_max_tokens(AGENT_MAX_TOKENS)
     send_messages = _agent_messages_sendable(owner, messages)
     if AGENT_REACT_BACKEND in {"needle", "needle_multi"}:
         try:
@@ -1725,7 +1744,7 @@ def _stream_agent_message(owner, messages, tools, token_callback):
     try:
         stream = owner._client.chat.completions.create(
             model=owner._llm_model, messages=send_messages, tools=tools,
-            tool_choice="auto", stream=True, max_tokens=AGENT_MAX_TOKENS,
+            tool_choice="auto", stream=True, max_tokens=agent_max_tokens,
             temperature=0.3,
             # ReAct steps stay no-think (Agent A1): thinking would starve
             # tool-calls within AGENT_MAX_TOKENS and stall the loop.
@@ -1743,7 +1762,7 @@ def _stream_agent_message(owner, messages, tools, token_callback):
             send_messages = merge(list(send_messages))
             stream = owner._client.chat.completions.create(
                 model=owner._llm_model, messages=send_messages, tools=tools,
-                tool_choice="auto", stream=True, max_tokens=AGENT_MAX_TOKENS,
+                tool_choice="auto", stream=True, max_tokens=agent_max_tokens,
                 temperature=0.3,
                 extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )

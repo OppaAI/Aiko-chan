@@ -85,6 +85,16 @@ def _strip_think(raw: str) -> str:
     return raw.strip()
 
 def _llm_chat(system: str, user: str, max_tokens: int = 400, temperature: float = 0.75, response_format: dict | None = None) -> str:
+    # Thinking-model headroom: a thinker burns max_tokens reasoning before
+    # emitting content (empty/truncated output, finish=length). At max_tokens=80
+    # (image prompt) a thinker without headroom returns nothing at all.
+    # Lazy import avoids any import cycle — cognition.think doesn't import
+    # this package.
+    try:
+        from cognition.think import _effective_max_tokens, THINK_OFF_EXTRA_BODY
+        max_tokens = _effective_max_tokens(max_tokens)
+    except Exception:
+        THINK_OFF_EXTRA_BODY = None
     kwargs = {}
     if response_format is not None:
         kwargs["response_format"] = response_format

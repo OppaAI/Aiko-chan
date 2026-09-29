@@ -313,6 +313,14 @@ def _effective_max_tokens(base: int) -> int:
     if _LLM_THINKING_HINT or _THINKER_DETECTED:
         return int(base) + _LLM_THINK_BUDGET
     return int(base)
+
+
+# Per-request thinking disable for Qwen3-style hybrid thinkers (Agents-A1).
+# Deterministic small calls — intent classification, JSON verification, short
+# social replies — need zero chain-of-thought; thinking only burns their
+# token budget and adds latency. Pass as extra_body=THINK_OFF_EXTRA_BODY.
+# Harmless if the server ignores unknown body fields.
+THINK_OFF_EXTRA_BODY = {"chat_template_kwargs": {"enable_thinking": False}}
 _ROUTE_ENABLED = os.getenv("ROUTE_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
 
 # ROUTE_MODE selects the classification METHOD only (see yaml comment for
@@ -1626,7 +1634,9 @@ class AikoThink:
                     "Label:"
                 )}],
                 stream=False, max_tokens=6, temperature=0.0, top_p=1.0, timeout=LLM_TIMEOUT,
-                extra_body={"cache_prompt": _LLM_CACHE_PROMPT},
+                # The route label needs zero reasoning; a thinking model would
+                # burn the 6-token budget before emitting the label.
+                extra_body={**THINK_OFF_EXTRA_BODY, "cache_prompt": _LLM_CACHE_PROMPT},
             )
             label = (resp.choices[0].message.content or "chat").strip().lower()
             label = re.sub(r"[^a-z_].*$", "", label)

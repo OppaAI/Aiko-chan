@@ -385,6 +385,13 @@ def deliberate(
     """One constrained call to the main chat model. Returns the same tuple."""
     if client is None:
         return None
+    # Deliberation is where a thinking model earns its keep — add headroom
+    # instead of disabling thinking.
+    try:
+        from cognition.think import _effective_max_tokens
+        deliberate_tokens = _effective_max_tokens(DELIBERATE_MAX_TOKENS)
+    except Exception:
+        deliberate_tokens = DELIBERATE_MAX_TOKENS
     prompt = _build_situation_prompt(situation, canon_block, parties)
     try:
         resp = client.chat.completions.create(
@@ -394,7 +401,7 @@ def deliberate(
                 {"role": "user", "content": prompt},
             ],
             stream=False,
-            max_tokens=DELIBERATE_MAX_TOKENS,
+            max_tokens=deliberate_tokens,
             temperature=0.0,
             timeout=DELIBERATE_TIMEOUT,
             # Deliberation is judgment: thinking ON (quality over speed).

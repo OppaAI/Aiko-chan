@@ -97,10 +97,20 @@ def chat_completions_create(client, **kwargs: Any):
     ``timeout``. If the SDK/client rejects the injected timeout kwarg
     (TypeError), retries once without it so local OpenAI-compatible servers
     still work. Caller-provided timeout is never stripped.
+
+    Also adds think headroom to ``max_tokens`` when the backend is a known
+    thinking model (see cognition.think._effective_max_tokens): a thinker
+    burns the prediction budget reasoning before emitting content.
     """
     injected_timeout = "timeout" not in kwargs
     if injected_timeout:
         kwargs = {**kwargs, "timeout": llm_timeout_seconds()}
+    if "max_tokens" in kwargs:
+        try:
+            from cognition.think import _effective_max_tokens
+            kwargs = {**kwargs, "max_tokens": _effective_max_tokens(kwargs["max_tokens"])}
+        except Exception:
+            pass
     try:
         return client.chat.completions.create(**kwargs)
     except TypeError as exc:

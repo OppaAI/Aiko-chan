@@ -930,6 +930,11 @@ def _llm_select_media(candidates: list[MediaCandidate]) -> list[MediaSelection]:
     user = _MEDIA_SELECT_USER.format(items=items_block)
 
     try:
+        from cognition.think import _effective_max_tokens
+        select_tokens = _effective_max_tokens(500)
+    except Exception:
+        select_tokens = 500
+    try:
         resp = _LLM_CLIENT.chat.completions.create(
             model=LLM_MODEL,
             messages=[
@@ -937,7 +942,7 @@ def _llm_select_media(candidates: list[MediaCandidate]) -> list[MediaSelection]:
                 {"role": "user", "content": user},
             ],
             stream=False,
-            max_tokens=500,
+            max_tokens=select_tokens,
             temperature=0.6,
             timeout=90,
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
@@ -1230,6 +1235,11 @@ def _llm_polish_video_description(video_path: Path, text_path: Path) -> dict[str
 
     fallback_title = explicit_title or video_path.stem.replace("_", " ").replace("-", " ").strip() or video_path.stem
     try:
+        from cognition.think import _effective_max_tokens
+        polish_tokens = _effective_max_tokens(600)
+    except Exception:
+        polish_tokens = 600
+    try:
         resp = _LLM_CLIENT.chat.completions.create(
             model=LLM_MODEL,
             messages=[
@@ -1237,7 +1247,7 @@ def _llm_polish_video_description(video_path: Path, text_path: Path) -> dict[str
                 {"role": "user", "content": user},
             ],
             stream=False,
-            max_tokens=600,
+            max_tokens=polish_tokens,
             temperature=0.5,
             timeout=90,
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},

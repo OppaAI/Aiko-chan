@@ -267,6 +267,7 @@ def _mastodon_image_request(text: str) -> str:
             temperature=0.2,
             max_tokens=150,
             timeout=float(env("LLM_TIMEOUT", "30")),
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         raw = (resp.choices[0].message.content or "").strip()
     except Exception:
@@ -413,6 +414,7 @@ No quotation marks or speaker labels. Unicode emoji only when helpful."""
         temperature=0.7,
         max_tokens=180,
         timeout=float(env("LLM_TIMEOUT", "30")),
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
     text = _message_text(resp.choices[0].message)
     if not text:

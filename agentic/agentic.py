@@ -1487,8 +1487,10 @@ def _verify_final_answer(owner, user_input: str, answer: str, state: TaskState) 
             model=owner._llm_model,
             messages=[{"role": "user", "content": prompt}],
             stream=False,
-            max_tokens=160,
+            max_tokens=1024,
             temperature=0.2,
+            # Verification verdicts need real judgment (Agent A1).
+            extra_body={"chat_template_kwargs": {"enable_thinking": True}},
             response_format={
                 "type": "json_schema",
                 "json_schema": {
@@ -1725,6 +1727,9 @@ def _stream_agent_message(owner, messages, tools, token_callback):
             model=owner._llm_model, messages=send_messages, tools=tools,
             tool_choice="auto", stream=True, max_tokens=AGENT_MAX_TOKENS,
             temperature=0.3,
+            # ReAct steps stay no-think (Agent A1): thinking would starve
+            # tool-calls within AGENT_MAX_TOKENS and stall the loop.
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
     except Exception as exc:
         # Same template rejection the chat path handles: retry once with the
@@ -1740,6 +1745,7 @@ def _stream_agent_message(owner, messages, tools, token_callback):
                 model=owner._llm_model, messages=send_messages, tools=tools,
                 tool_choice="auto", stream=True, max_tokens=AGENT_MAX_TOKENS,
                 temperature=0.3,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
         else:
             raise

@@ -242,6 +242,7 @@ def reply_owner_email(report_json: str = "", *, state=None) -> str:
                     messages=[{"role": "user", "content": prompt}],
                     max_tokens=800,
                     temperature=0.7,
+                    extra_body={"chat_template_kwargs": {"enable_thinking": False}},
                 )
                 answer = (resp.choices[0].message.content or "").strip() if resp.choices else ""
             if not answer:

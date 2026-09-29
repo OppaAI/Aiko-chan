@@ -397,6 +397,8 @@ def deliberate(
             max_tokens=DELIBERATE_MAX_TOKENS,
             temperature=0.0,
             timeout=DELIBERATE_TIMEOUT,
+            # Deliberation is judgment: thinking ON (quality over speed).
+            extra_body={"chat_template_kwargs": {"enable_thinking": True}},
         )
         raw = (resp.choices[0].message.content or "").strip()
     except Exception as exc:

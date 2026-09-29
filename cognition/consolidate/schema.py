@@ -95,8 +95,10 @@ def _chat(system: str, user: str, max_tokens: int = 900, temperature: float = 0.
             {"role": "user", "content": user},
         ],
         stream=False,
-        max_tokens=max_tokens,
+        max_tokens=max(max_tokens, 2048),
         temperature=temperature,
+        # Schema consolidation is deep work (Agent A1): thinking ON.
+        extra_body={"chat_template_kwargs": {"enable_thinking": True}},
     )
     return (resp.choices[0].message.content or "").strip()
 

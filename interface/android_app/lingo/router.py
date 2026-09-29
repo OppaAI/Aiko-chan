@@ -759,7 +759,8 @@ async def translate(request: TranslateRequest, session: dict = Depends(get_lingo
                 {"role": "user", "content": user_prompt}
             ],
             response_format={"type": "json_object"},
-            timeout=120.0
+            timeout=120.0,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         content = response.choices[0].message.content
         data = parse_lingo_json(content)
@@ -814,7 +815,8 @@ async def conversation_start(request: StartRequest, http_request: Request, sessi
                     {"role": "user", "content": user_prompt}
                 ],
                 stream=True,
-                timeout=120.0
+                timeout=120.0,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
             full_content = ""
             is_streaming_jp = False
@@ -1032,7 +1034,8 @@ async def conversation_respond(request: RespondRequest, http_request: Request,
             model=think._llm_model,
             messages=messages,
             timeout=120.0,
-            temperature=0.3
+            temperature=0.3,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         flat_content = (response.choices[0].message.content or "").replace("**", "").replace("`", "")
         data = _parse_dialogue_tags(flat_content)
@@ -1073,7 +1076,8 @@ async def conversation_respond_stream(request: RespondRequest, http_request: Req
                 messages=messages,
                 stream=True,
                 timeout=120.0,
-                temperature=0.3
+                temperature=0.3,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
             full_content = ""
             is_streaming_jp = False
@@ -1177,7 +1181,8 @@ async def conversation_hint(http_request: Request, session: dict = Depends(get_l
                 {"role": "user", "content": "Hint please"}
             ],
             response_format={"type": "json_object"},
-            timeout=120.0
+            timeout=120.0,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         data = parse_lingo_json(response.choices[0].message.content)
         jp = data.get("japanese") or data.get("japaneseText") or ""
@@ -1485,6 +1490,7 @@ def _llm_random_words(uid: str, count: int = _RANDOM_WORD_COUNT,
             ],
             response_format={"type": "json_object"},
             timeout=25.0,  # bounded: word-of-day falls back to static deck
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         data = parse_lingo_json(response.choices[0].message.content)
         out = []

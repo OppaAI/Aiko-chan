@@ -630,8 +630,10 @@ def _distill(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 stream=False,
-                max_tokens=DEEP_STUDY_SYNTHESIS_MAX_TOKENS,
+                max_tokens=2048,
                 temperature=0.2,
+                # Synthesis is deep work (Agent A1): thinking ON.
+                extra_body={"chat_template_kwargs": {"enable_thinking": True}},
             )
             synthesis = (resp.choices[0].message.content or "").strip()
             if synthesis:

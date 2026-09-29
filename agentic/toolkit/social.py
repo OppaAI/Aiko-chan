@@ -876,6 +876,7 @@ def _caption_media(path: Path) -> MediaCandidate:
             max_tokens=120,
             temperature=0.2,
             timeout=60,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         raw = (resp.choices[0].message.content or "").strip()
     except Exception as e:
@@ -939,6 +940,7 @@ def _llm_select_media(candidates: list[MediaCandidate]) -> list[MediaSelection]:
             max_tokens=500,
             temperature=0.6,
             timeout=90,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         data = _extract_json(resp.choices[0].message.content or "")
     except Exception as e:
@@ -1238,6 +1240,7 @@ def _llm_polish_video_description(video_path: Path, text_path: Path) -> dict[str
             max_tokens=600,
             temperature=0.5,
             timeout=90,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         data = _extract_json(resp.choices[0].message.content or "")
     except Exception as e:

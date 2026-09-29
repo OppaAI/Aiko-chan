@@ -308,8 +308,9 @@ def reflect_now(uid: str, game: str, think,
                  "content": "You coach game AI. Reply with exactly one JSON object, no other text."},
                 {"role": "user", "content": prompt_fn(recent, st)},
             ],
-            max_tokens=300,
+            max_tokens=1024,
             timeout=60.0,
+            extra_body={"chat_template_kwargs": {"enable_thinking": True}},
         )
         text = (response.choices[0].message.content or "").strip()
     except Exception:

@@ -232,6 +232,7 @@ class VocabExtractor:
                 }],
                 response_format={"type": "json_object"},
                 timeout=5.0,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
             content = response.choices[0].message.content
             data = json.loads(content)

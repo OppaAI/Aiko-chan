@@ -312,6 +312,7 @@ def _banter_for_go(
             ],
             max_tokens=60,
             timeout=30.0,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         text = (response.choices[0].message.content or "").strip().splitlines()
         line = (text[0] if text else "").strip().strip("\"'")[:140]

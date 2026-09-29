@@ -1528,9 +1528,11 @@ def _llm_distill(client, model: str, moments: list[str]) -> list[str]:
             model=model,
             messages=[{"role": "user", "content": prompt}],
             stream=False,
-            max_tokens=EMC_DREAM_MAX_TOKENS,
+            max_tokens=1024,
             temperature=0.0,
-            timeout=45.0,
+            timeout=120.0,
+            # Fact distillation needs thinking (Agent A1); background path.
+            extra_body={"chat_template_kwargs": {"enable_thinking": True}},
         )
         raw = (resp.choices[0].message.content or "").strip()
         return _parse_facts(raw)

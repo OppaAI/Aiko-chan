@@ -93,8 +93,8 @@ CCC:
 
   # ── L3 deliberation (main LLM) ────────────────────────────────────────────
   DELIBERATE_MODEL: ""        # empty => reuse LLM_MODEL
-  DELIBERATE_MAX_TOKENS: 220
-  DELIBERATE_TIMEOUT: 20.0
+  DELIBERATE_MAX_TOKENS: 1024 # thinking models burn budget reasoning first; 220 starves verdicts
+  DELIBERATE_TIMEOUT: 90.0
 
   # ── speech policy ─────────────────────────────────────────────────────────
   # Never volunteer moral commentary. A pastoral_note is voiced only on a

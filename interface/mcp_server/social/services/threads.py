@@ -301,6 +301,7 @@ def _describe_image_url(url: str) -> str:
             max_tokens=100,
             temperature=0.2,
             timeout=15,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         return (resp.choices[0].message.content or "").strip()
     except Exception:
@@ -630,6 +631,7 @@ for example "*{_ai} considers the question.*". Do not use XML or colon labels.""
             temperature=0.7,
             max_tokens=180,
             timeout=float(env("LLM_TIMEOUT", "30")),
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
 
     def _create_without_system_on_role_error(messages: list[dict], label: str):
@@ -723,6 +725,7 @@ def _extract_image_request_prompt(comment: str) -> str:
             temperature=0.2,
             max_tokens=150,
             timeout=float(env("LLM_TIMEOUT", "30")),
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         raw = (resp.choices[0].message.content or "").strip()
     except Exception:

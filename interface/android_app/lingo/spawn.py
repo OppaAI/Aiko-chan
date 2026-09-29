@@ -320,6 +320,7 @@ def _llm_spawn_batch(count: int | None = None, level: str = "N5") -> List[dict]:
             ],
             response_format={"type": "json_object"},
             timeout=90.0,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         import json, re
         raw = response.choices[0].message.content or ""

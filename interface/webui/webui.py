@@ -669,6 +669,7 @@ class AikoWeb:
             ]}],
             max_tokens=300,
             timeout=timeout,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         choices = getattr(response, "choices", None) or []
         if not choices:

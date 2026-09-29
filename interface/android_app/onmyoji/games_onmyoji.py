@@ -185,6 +185,7 @@ async def _voice_line(journey: JourneyState, target: str, user_text: str) -> str
             ],
             max_tokens=150,
             timeout=30.0,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         msg = response.choices[0].message
         content = msg.content

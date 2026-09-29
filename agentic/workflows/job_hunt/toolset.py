@@ -818,7 +818,8 @@ def enrich_posting_fields_with_llm(
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_msg},
             ],
-            max_tokens=400,
+            # Thinking models burn budget reasoning first; 400 starves content.
+            max_tokens=2048,
         )
         if usage and state is not None:
             state.set("_usage", usage)

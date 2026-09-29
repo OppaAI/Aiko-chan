@@ -88,8 +88,9 @@ def _llm_chat(system: str, user: str, max_tokens: int = 400, temperature: float 
     kwargs = {}
     if response_format is not None:
         kwargs["response_format"] = response_format
-    # NOTE (Agent A1): thinking stays OFF — measured unbounded rambling that
-    # starves content. Server default governs; budgets carry the task.
+    # NOTE (Agent A1, measured): server preset ignores the global flag, so
+    # send thinking OFF explicitly per request. Thinking-on rambles here.
+    kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
     resp = _get_llm_client().chat.completions.create(
         model=LLM_MODEL,
         messages=[
@@ -164,7 +165,7 @@ def _generate_feelings(prose: str, display_name: str | None = None) -> str:
 def _generate_image_prompt(prose: str) -> str:
     """Ask Aiko to imagine a scene from the daily summary."""
     system = f"{_load_soul()}\n\n{_IMAGE_PROMPT_SYSTEM}"
-    raw = _llm_chat(system, _IMAGE_PROMPT_USER.format(prose=prose[:600]), max_tokens=1024)
+    raw = _llm_chat(system, _IMAGE_PROMPT_USER.format(prose=prose[:600]), max_tokens=300)
     return raw.strip('"\'').strip()
 
 def _load_reference_images() -> list[str]:

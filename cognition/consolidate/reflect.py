@@ -86,7 +86,8 @@ _DAILY_SUMMARY_UNLOCK = textwrap.dedent("""
     - Keep Aiko's tone calm, direct, lightly dry, and quietly affectionate toward {USER_ID}.
 
     Format:
-    - 120–220 words.
+    - 120–220 words. STOP writing at 220 words — do not continue, do not
+      add a closing line, do not summarize further.
     - Plain prose only: no headers, bullets, markdown, title, or front matter.
     - Make it useful as a permanent memory of the day, not just pretty writing.
 """).strip()
@@ -199,9 +200,10 @@ def _llm_chat(system: str, user: str, max_tokens: int = 400, temperature: float 
     kwargs = {}
     if response_format is not None:
         kwargs["response_format"] = response_format
-    # NOTE (Agent A1): thinking must stay OFF here — measured 9k+ chars of
-    # unbounded rambling that starves content and blows timeouts. Server
-    # default (enable_thinking=false) governs; adequate max_tokens does rest.
+    # NOTE (Agent A1, measured): the server preset ignores chat-template-kwargs,
+    # so server-default-off is unreliable — send thinking OFF explicitly per
+    # request. Thinking-on rambles unbounded here (9k+ chars, timeouts).
+    kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
     resp = _get_llm_client().chat.completions.create(
         model=LLM_MODEL,
         messages=[
@@ -240,7 +242,7 @@ def _generate_reflection(snippets: list[str], date: datetime, display_name: str 
         date_str=date.strftime("%Y-%m-%d"),
         snippets=bullet_list,
     )
-    return _llm_chat(_build_reflection_system(display_name), user_prompt, max_tokens=6000, temperature=0.25)
+    return _llm_chat(_build_reflection_system(display_name), user_prompt, max_tokens=1000, temperature=0.25)
 
 def _generate_daily_facts(
     prose: str,

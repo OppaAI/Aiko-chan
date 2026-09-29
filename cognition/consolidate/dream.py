@@ -169,7 +169,21 @@ def _generate_image_prompt(prose: str) -> str:
     """Ask Aiko to imagine a scene from the daily summary."""
     system = f"{_load_soul()}\n\n{_IMAGE_PROMPT_SYSTEM}"
     raw = _llm_chat(system, _IMAGE_PROMPT_USER.format(prose=prose[:600]), max_tokens=300)
-    return raw.strip('"\'').strip()
+    raw = raw.strip('\'"').strip()
+    # Guardrail: a person must appear. One retry with an explicit order.
+    low = raw.casefold()
+    if raw and "aiko" not in low and "oppa" not in low:
+        log.info("Image prompt names nobody — retrying once with explicit order.")
+        retry = _llm_chat(
+            system,
+            _IMAGE_PROMPT_USER.format(prose=prose[:600])
+            + "\n\nMUST include Aiko and/or OppaAI in the scene.",
+            max_tokens=300,
+        ).strip('\'"').strip()
+        rlow = retry.casefold()
+        if retry and ("aiko" in rlow or "oppa" in rlow):
+            return retry
+    return raw
 
 def _load_reference_images() -> list[str]:
     """Load Aiko and user reference images as base64 strings."""

@@ -199,9 +199,9 @@ def _llm_chat(system: str, user: str, max_tokens: int = 400, temperature: float 
     kwargs = {}
     if response_format is not None:
         kwargs["response_format"] = response_format
-    # Reflection/extraction is deep work: hybrid-reasoning models (Agent A1)
-    # return empty prose with thinking off. Always enable here; background path.
-    kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": True}}
+    # NOTE (Agent A1): thinking must stay OFF here — measured 9k+ chars of
+    # unbounded rambling that starves content and blows timeouts. Server
+    # default (enable_thinking=false) governs; adequate max_tokens does rest.
     resp = _get_llm_client().chat.completions.create(
         model=LLM_MODEL,
         messages=[

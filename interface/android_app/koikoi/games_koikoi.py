@@ -333,6 +333,7 @@ async def _ai_lead_pick(game: dict, options: list[tuple[int, list[int]]]
             ],
             max_tokens=40,
             timeout=30.0,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         text = (response.choices[0].message.content or "").strip()
         start, end = text.index("{"), text.rindex("}") + 1

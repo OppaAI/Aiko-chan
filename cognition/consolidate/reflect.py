@@ -240,7 +240,7 @@ def _generate_reflection(snippets: list[str], date: datetime, display_name: str 
         date_str=date.strftime("%Y-%m-%d"),
         snippets=bullet_list,
     )
-    return _llm_chat(_build_reflection_system(display_name), user_prompt, max_tokens=500, temperature=0.25)
+    return _llm_chat(_build_reflection_system(display_name), user_prompt, max_tokens=2500, temperature=0.25)
 
 def _generate_daily_facts(
     prose: str,
@@ -268,7 +268,7 @@ def _generate_daily_facts(
     raw = _llm_chat(
         system="You are a precise fact-extraction assistant.",
         user=user_prompt,
-        max_tokens=1536,
+        max_tokens=2560,
         temperature=0.0,
         response_format={
             "type": "json_schema",

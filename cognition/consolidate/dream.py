@@ -51,9 +51,6 @@ _IMAGE_PROMPT_SYSTEM = textwrap.dedent("""
     Write a scene prompt (under 60 words) for an anime illustration model.
     Focus on mood, atmosphere, and activity — let the memories guide what
     the image should show.
-    People rule: your world is just the two of you — every scene includes
-    Aiko, OppaAI, or both, whichever fits the day. Never an empty scene
-    with neither of you.
 
     Return ONLY the prompt text. No explanation, no quotes, no preamble.
 """).strip()

@@ -1,5 +1,5 @@
 """
-Onmyoji: deterministic journey state (hard state stays in code).
+Game: deterministic journey state (hard state stays in code).
 
 The LLM narrates around this state but never overrides it: date,
 location, inventory, standings, bond, entities, and ritual outcomes live

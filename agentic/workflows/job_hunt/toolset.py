@@ -363,6 +363,14 @@ def _job_relevance_score(posting: dict[str, Any], keywords: list[str]) -> int:
     score += sum(2 for keyword in keywords if _matches_job_keyword(summary, keyword))
     if _NON_TECH_TITLE_RE.search(title):
         score -= 20
+    # Completeness bonus: prefer postings that can actually enrich (API-sourced
+    # with org/location/salary) over thin RSS/email digests the enricher must
+    # leave half-empty. Capped so keywords still dominate.
+    filled = sum(
+        1 for key in ("organization", "location", "salary", "description", "employment_type")
+        if str(posting.get(key) or "").strip()
+    )
+    score += min(filled, 4) * 3
     return score
 
 
@@ -726,6 +734,9 @@ def _llm_chat_completion(client, *, model: str, messages: list[dict[str, str]], 
         "max_tokens": max_tokens,
         "temperature": 0.0,
         "response_format": {"type": "json_object"},
+        # Structured extraction needs thinking on hybrid-reasoning models
+        # (Agent A1 returns empty with it off). Background path.
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
     }
     try:
         resp = chat_completions_create(client, **base)

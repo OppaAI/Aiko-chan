@@ -259,7 +259,7 @@ def _generate_daily_facts(
     _retry: bool = False,
     display_name: str | None = None,
 ) -> list[str]:
-    notes = "\n".join(f"- {s}" for s in snippets[:REFLECT_MAX_MEMS]) or "- none"
+    notes = "\n".join(f"- {s[:300]}" for s in snippets[:REFLECT_MAX_MEMS]) or "- none"
     prompt_template = _DAILY_FACTS_PROMPT
     if _retry:
         prompt_template += (
@@ -408,11 +408,23 @@ def generate_and_post(
 
     snippets: list[str] = []
     seen:     set[str]  = set()
+    _GREET_RE = re.compile(
+        r"^(?:hi|hello|hey|yo|good\s?(?:morning|afternoon|evening|night)|"
+        r"how are you(?: doing(?: today)?)?|thanks?(?: a lot)?|thank you|"
+        r"ok(?:ay)?|yes|no|bye(?:bye)?|good ?night)\b[^.!?]*[.!?]?$",
+        re.IGNORECASE,
+    )
+    from cognition.memory.entity import SALIENCE_POLICY_RE as _SAL_RE
     for m in memories:
         text = (m.get("memory") or m.get("text") or "").strip()
         if not text or text in seen:
             continue
         seen.add(text)
+        # Trivia filter BEFORE the 50-cap so greetings can't crowd out
+        # important memories. Salience keywords always survive.
+        t = text.strip()
+        if (len(t) < 15 or bool(_GREET_RE.match(t))) and not _SAL_RE.search(t):
+            continue
         snippets.append(text)
 
     log.info(f"Generating daily summary from {len(snippets)} memory snippets...")

@@ -734,9 +734,9 @@ def _llm_chat_completion(client, *, model: str, messages: list[dict[str, str]], 
         "max_tokens": max_tokens,
         "temperature": 0.0,
         "response_format": {"type": "json_object"},
-        # Structured extraction needs thinking on hybrid-reasoning models
-        # (Agent A1 returns empty with it off). Background path.
-        "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
+        # NOTE (Agent A1): thinking stays OFF — validated: direct answers in
+        # seconds; thinking-on rambles. Server default governs.
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
     }
     try:
         resp = chat_completions_create(client, **base)

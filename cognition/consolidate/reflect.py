@@ -82,6 +82,9 @@ _DAILY_SUMMARY_UNLOCK = textwrap.dedent("""
     - Mention uncertainty plainly if the inputs are thin.
     - Do not invent details, outcomes, dates, or feelings not supported by the inputs.
     - Mood and atmosphere may color the telling, never substitute for events.
+    - Close with one or two sentences of Aiko's own feeling about the day,
+      grounded in one specific event above — warmth from something real,
+      never invented sentiment.
     - Only events supported by the provided snippets.
     - No mention of vectors, embeddings, databases, or internal memory implementation.
     - Keep Aiko's tone calm, direct, lightly dry, and quietly affectionate toward {USER_ID}.

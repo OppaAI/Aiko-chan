@@ -257,7 +257,6 @@ def _build_hugo_post(
     feelings:   str | None,
     image_slug: str | None,
     date:       datetime,
-    write_time: datetime,
     mem_count:  int,
 ) -> tuple[str, str]:
     """
@@ -277,7 +276,11 @@ def _build_hugo_post(
     front_matter = (
         f'---\n'
         f'title: "{date_str} Daily Reflection"\n'
-        f'date: {write_time.strftime("%Y-%m-%dT%H:%M:%S+00:00")}\n'
+        # The diary entry is *about* the target date, so the frontmatter date
+        # uses it too (noon UTC avoids midnight TZ-boundary misbucketing in
+        # Hugo). Using write_time here put every entry one day late, making
+        # adjacent days look like they repeat the same events.
+        f'date: {date_str}T12:00:00+00:00\n'
         f'draft: false\n'
         f'tags:\n'
         f'{tags_yaml}\n'
@@ -410,8 +413,6 @@ def dream_and_post(
     Returns dict: {success, slug, word_count, feelings, image_generated, pushed}
     """
     t_start = time.perf_counter()
-    local_tz   = datetime.now().astimezone().tzinfo
-    write_time = datetime.now(local_tz)
 
     prose = (prose or "").strip()
     if not prose:
@@ -435,7 +436,6 @@ def dream_and_post(
         feelings=feelings,
         image_slug=slug if image_generated else None,
         date=date,
-        write_time=write_time,
         mem_count=snippets_count,
     )
 

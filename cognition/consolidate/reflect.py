@@ -48,6 +48,44 @@ _DAILY_BLOB_RE = re.compile(
     r"(\d{4}-\d{2}-\d{2})",
     re.IGNORECASE,
 )
+# Legacy scene-row format ("YYYY-MM-DD: ...") written before scenes switched
+# to the bracket tag. Same drop semantics as _DAILY_TAG_RE: without this,
+# old scene rows (created just after midnight, describing the previous day)
+# slip through the filter and get re-summarized night after night.
+_DAILY_SCENE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}):\s")
+# Monthly roll-up pins ("[YYYY-MM] ...") summarize a whole month, not the
+# target day. They don't match _DAILY_TAG_RE (no day part), so without this
+# they slip into the 1st-of-month's diary as if they happened that day.
+_DAILY_MONTH_RE = re.compile(r"^\[(\d{4}-\d{2})\]\s")
+
+# Third-person conjugations of "prefer" for nightly facts ("Oppa prefers ...").
+# _IMPORTANCE_RE only has the bare first-person form.
+_PREFER_CONJ_RE = re.compile(r"\bprefers?\b|\bpreferred\b", re.IGNORECASE)
+
+# Minimum intrinsic score for a nightly fact to earn a pin. Facts below this
+# are logged and skipped — pinning is forever (pinned rows are immune to
+# cleanup, dream pruning, and merge losses), so filler must not get pinned.
+# Tune via env; 0.15 keeps anything naming a person + a number, or carrying
+# a preference/identity keyword, and drops bare filler observations.
+NIGHTLY_PIN_MIN_SCORE = float(os.getenv("NIGHTLY_PIN_MIN_SCORE", "0.15"))
+
+
+def _score_nightly_fact(fact: str) -> float:
+    """Intrinsic keep-score for one nightly fact, 0..1.
+
+    Concrete facts name names/numbers or carry preference/identity keywords
+    ("birthday", "prefer", ...); filler observations ("chatted for a while")
+    score ~0 and are dropped by the pin gate so they never become immortal
+    pinned rows.
+    """
+    from cognition.memory.grasp import _IMPORTANCE_RE, score_entity
+
+    score = score_entity(fact, "")
+    # _IMPORTANCE_RE was written for first-person chat ("i prefer"); nightly
+    # facts are third-person, so also catch conjugated forms ("prefers").
+    if _IMPORTANCE_RE.search(fact) or _PREFER_CONJ_RE.search(fact):
+        score += 0.45
+    return max(0.0, min(1.0, score))
 
 def filter_reflect_snippets(
     memories: list[dict],
@@ -62,6 +100,16 @@ def filter_reflect_snippets(
             continue
         m_tag = _DAILY_TAG_RE.match(text)
         if m_tag and m_tag.group(1) != target:
+            continue
+        m_scene = _DAILY_SCENE_RE.match(text)
+        if m_scene and m_scene.group(1) != target:
+            continue
+        if _DAILY_MONTH_RE.match(text):
+            continue
+        # Schema gists ("X is a recurring topic for ...") are timeless
+        # generalizations written by dream() about previous days — never
+        # diary fodder for the target day.
+        if (m.get("kind") or "") == "schema":
             continue
         if _DAILY_BLOB_RE.match(text):
             continue
@@ -342,7 +390,9 @@ def _delete_existing_daily_pins(memorize, date: datetime, user_id: str | None = 
     deleted = 0
     for m in all_mems:
         text = m.get("memory") or ""
-        if not (text.startswith(date_tag) or text.startswith(day_record_prefix) or text.startswith(f"Day record for {date_str}:")):
+        scene_match = _DAILY_SCENE_RE.match(text)
+        if not (text.startswith(date_tag) or text.startswith(day_record_prefix) or text.startswith(f"Day record for {date_str}:")
+                or (scene_match and scene_match.group(1) == date_str)):
             continue
         mem_id = m.get("id")
         if not mem_id:
@@ -483,6 +533,13 @@ def generate_and_post(
         )
         from cognition.memory.entity import SALIENCE_POLICY_RE
         for fact in facts_filtered:
+            fscore = _score_nightly_fact(fact)
+            if fscore < NIGHTLY_PIN_MIN_SCORE:
+                log.info(
+                    "nightly pin: gate dropped low-score fact (%.2f < %.2f): %r",
+                    fscore, NIGHTLY_PIN_MIN_SCORE, fact[:80],
+                )
+                continue
             try:
                 text = fact.strip()
                 trivial = (
@@ -501,7 +558,11 @@ def generate_and_post(
     if memorize is not None and member_ids:
         try:
             first_sent = (prose or "").strip().split(". ")[0]
-            scene_summary = f"{date_str}: {first_sent}" if first_sent else f"Daily episode for {date_str}"
+            # Bracket-tagged so the daily-artifact filter (_DAILY_TAG_RE) and
+            # _delete_existing_daily_pins recognize it as this date's record.
+            # The old "YYYY-MM-DD: ..." format slipped through the filter and
+            # got re-summarized night after night (same events, new dates).
+            scene_summary = f"[{date_str}] {first_sent}" if first_sent else f"[{date_str}] Daily episode"
             scene_id = memorize.build_scene(
                 summary=scene_summary, member_ids=member_ids, user_id=uid, pinned=True
             )

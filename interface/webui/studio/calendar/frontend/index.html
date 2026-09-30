@@ -1,7 +1,147 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Aiko Calendar Studio</title><link rel="stylesheet" href="static/style.css"></head>
-<body><header><div><p class="eyebrow">Aiko · local chief of staff</p><h1>Calendar Studio</h1></div><button id="new-item">+ Plan something</button></header>
-<main><section class="brief" aria-label="Daily brief"><div><span>Open</span><strong id="open-count">—</strong></div><div><span>Due today</span><strong id="due-count">—</strong></div><div><span>Overdue</span><strong id="overdue-count">—</strong></div><div class="brief-next"><span>Next up</span><p id="next-up">Loading your day…</p></div></section>
-<section class="workspace"><div class="agenda"><div class="section-heading"><div><p class="eyebrow" id="today">Today</p><h2>Agenda & appointments</h2></div><button class="ghost" id="refresh">Refresh</button></div><div id="agenda-list" class="agenda-list"></div><h2 class="schedule-heading">Aiko scheduler</h2><div id="schedule-list" class="schedule-list"></div></div>
-<div class="board"><div class="section-heading"><div><p class="eyebrow">Projects</p><h2>Work board</h2></div></div><div class="columns" id="board-columns"></div></div></section></main>
-<dialog id="editor"><form method="dialog" id="item-form"><div class="modal-head"><h2 id="modal-title">Plan an item</h2><button class="close" value="cancel">×</button></div><label>What needs attention?<input name="title" required maxlength="160" placeholder="Prepare project brief"></label><div class="row"><label>Type<select name="kind"><option value="task">Task</option><option value="appointment">Appointment</option><option value="draft">Email / message draft</option><option value="workflow">Aiko workflow</option></select></label><label>Status<select name="status"><option value="todo">To do</option><option value="doing">In progress</option><option value="waiting">Waiting</option><option value="done">Done</option></select></label></div><div class="row"><label>Starts<input name="start_at" type="datetime-local"></label><label>Due<input name="due_at" type="datetime-local"></label></div><div class="row"><label>Project<input name="project" placeholder="Personal, Aiko, Client…"></label><label>Priority<select name="priority"><option value="normal">Normal</option><option value="high">High</option><option value="urgent">Urgent</option><option value="low">Low</option></select></label></div><label>Notes / draft<textarea name="notes" rows="4" placeholder="Context, a draft to send, or instructions for Aiko…"></textarea></label><details><summary>Schedule with Aiko</summary><div class="row schedule-fields"><label>Time<input name="schedule_time" type="time" value="09:00"></label><label>Repeat<select name="schedule_frequency"><option value="once">Once</option><option value="daily">Daily</option><option value="weekdays">Weekdays</option><option value="weekly">Weekly</option></select></label></div><label class="check"><input name="schedule_enabled" type="checkbox"> Create a local scheduler reminder</label></details><div class="actions"><button class="danger" type="button" id="delete-item" hidden>Delete</button><button value="cancel" class="ghost">Cancel</button><button type="submit">Save plan</button></div></form></dialog><script src="static/script.js"></script></body></html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Aiko Calendar Studio</title>
+<link rel="stylesheet" href="shared/css/tokens.css">
+<link rel="stylesheet" href="shared/css/studio-theme.css">
+<link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+<header>
+  <div>
+    <p class="eyebrow">Aiko · local chief of staff</p>
+    <h1>Calendar Studio</h1>
+  </div>
+  <div class="header-actions">
+    <button id="new-schedule" class="btn">+ Scheduled task</button>
+    <button id="new-item" class="btn btn-primary">+ Plan something</button>
+  </div>
+</header>
+<main>
+  <section class="brief" aria-label="Daily brief">
+    <div><span>Open</span><strong id="open-count">—</strong></div>
+    <div><span>Due today</span><strong id="due-count">—</strong></div>
+    <div><span>Overdue</span><strong id="overdue-count">—</strong></div>
+    <div class="brief-next"><span>Next up</span><p id="next-up">Loading your day…</p></div>
+  </section>
+  <section class="workspace">
+    <div class="agenda">
+      <div class="section-heading">
+        <div><p class="eyebrow" id="today">Today</p><h2>Agenda &amp; appointments</h2></div>
+        <button class="btn ghost" id="refresh">Refresh</button>
+      </div>
+      <div id="agenda-list" class="agenda-list"></div>
+      <h2 class="schedule-heading">Aiko scheduler</h2>
+      <p class="hint">Every scheduled task, editable. Paused ones are dimmed — re-enable them here.</p>
+      <div id="schedule-list" class="schedule-list"></div>
+    </div>
+    <div class="board">
+      <div class="section-heading">
+        <div><p class="eyebrow">Projects</p><h2>Work board</h2></div>
+      </div>
+      <div class="columns" id="board-columns"></div>
+    </div>
+  </section>
+</main>
+
+<dialog id="editor">
+  <form method="dialog" id="item-form">
+    <div class="modal-head"><h2 id="modal-title">Plan an item</h2><button class="close" value="cancel">×</button></div>
+    <label>What needs attention?<input name="title" required maxlength="160" placeholder="Prepare project brief"></label>
+    <div class="row">
+      <label>Type<select name="kind"><option value="task">Task</option><option value="appointment">Appointment</option><option value="draft">Email / message draft</option><option value="workflow">Aiko workflow</option></select></label>
+      <label>Status<select name="status"><option value="todo">To do</option><option value="doing">In progress</option><option value="waiting">Waiting</option><option value="done">Done</option></select></label>
+    </div>
+    <div class="row">
+      <label>Starts<input name="start_at" type="datetime-local"></label>
+      <label>Due<input name="due_at" type="datetime-local"></label>
+    </div>
+    <div class="row">
+      <label>Project<input name="project" placeholder="Personal, Aiko, Client…"></label>
+      <label>Priority<select name="priority"><option value="normal">Normal</option><option value="high">High</option><option value="urgent">Urgent</option><option value="low">Low</option></select></label>
+    </div>
+    <label>Notes / draft<textarea name="notes" rows="4" placeholder="Context, a draft to send, or instructions for Aiko…"></textarea></label>
+    <details><summary>Schedule with Aiko</summary>
+      <div class="row schedule-fields">
+        <label>Time<input name="schedule_time" type="time" value="09:00"></label>
+        <label>Repeat<select name="schedule_frequency"><option value="once">Once</option><option value="daily">Daily</option><option value="weekdays">Weekdays</option><option value="weekly">Weekly</option></select></label>
+      </div>
+      <label class="check"><input name="schedule_enabled" type="checkbox"> Create a local scheduler reminder</label>
+    </details>
+    <div class="actions">
+      <button class="danger" type="button" id="delete-item" hidden>Delete</button>
+      <button value="cancel" class="btn ghost">Cancel</button>
+      <button type="submit" class="btn btn-primary">Save plan</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="schedule-editor">
+  <form method="dialog" id="schedule-form">
+    <div class="modal-head"><h2 id="schedule-modal-title">New scheduled task</h2><button class="close" value="cancel">×</button></div>
+    <label>Scheduled task<input name="s_title" required maxlength="160" placeholder="Water the plants"></label>
+    <label>Instructions for Aiko<textarea name="s_task" rows="3" placeholder="What should Aiko do when this fires?"></textarea></label>
+    <div class="row">
+      <label>Time<input name="s_time" type="time" value="09:00"></label>
+      <label>Repeat
+        <select name="s_frequency">
+          <option value="once">Once</option>
+          <option value="interval">Every N minutes</option>
+          <option value="hourly">Hourly</option>
+          <option value="daily" selected>Daily</option>
+          <option value="weekdays">Weekdays</option>
+          <option value="weekly">Weekly</option>
+          <option value="custom_weekdays">Custom weekdays</option>
+          <option value="biweekly">Every 2 weeks</option>
+          <option value="monthly">Monthly</option>
+        </select>
+      </label>
+    </div>
+    <div class="row" id="interval-row" hidden>
+      <label>Every (minutes)<input name="s_interval_minutes" type="number" min="1" value="15"></label>
+      <div></div>
+    </div>
+    <div id="weekday-row" hidden>
+      <span class="field-label">Days</span>
+      <div class="weekdays">
+        <label class="check"><input type="checkbox" name="s_weekday" value="0">Mon</label>
+        <label class="check"><input type="checkbox" name="s_weekday" value="1">Tue</label>
+        <label class="check"><input type="checkbox" name="s_weekday" value="2">Wed</label>
+        <label class="check"><input type="checkbox" name="s_weekday" value="3">Thu</label>
+        <label class="check"><input type="checkbox" name="s_weekday" value="4">Fri</label>
+        <label class="check"><input type="checkbox" name="s_weekday" value="5">Sat</label>
+        <label class="check"><input type="checkbox" name="s_weekday" value="6">Sun</label>
+      </div>
+    </div>
+    <div class="row">
+      <label>Timezone<input name="s_timezone" placeholder="America/Vancouver"></label>
+      <label>Action
+        <select name="s_action">
+          <option value="announce">Announce (speak it)</option>
+          <option value="agentic" selected>Agentic (Aiko does it)</option>
+          <option value="tool">Tool call</option>
+        </select>
+      </label>
+    </div>
+    <div class="row">
+      <label class="check"><input name="s_enabled" type="checkbox" checked> Enabled</label>
+      <label class="check"><input name="s_requires_idle" type="checkbox"> Only when I'm idle</label>
+    </div>
+    <div class="row" id="idle-row" hidden>
+      <label>Idle at least (minutes)<input name="s_idle_minutes" type="number" min="1" value="10"></label>
+      <div></div>
+    </div>
+    <p class="hint" id="schedule-next-due"></p>
+    <div class="actions">
+      <button class="danger" type="button" id="delete-schedule" hidden>Delete</button>
+      <button value="cancel" class="btn ghost">Cancel</button>
+      <button type="submit" class="btn btn-primary">Save task</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="static/script.js"></script>
+</body>
+</html>

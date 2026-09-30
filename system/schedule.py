@@ -785,6 +785,8 @@ def schedule_job_record(
     interval_seconds: int | str | None = None,
     tool_call: dict[str, Any] | None = None,
     skill: str | None = None,
+    requires_idle: bool = False,
+    idle_seconds: int | str | None = None,
     user_id: str | None = None,
 ) -> dict:
     """Create and persist a scheduled job record, returning the stored dict.
@@ -823,6 +825,15 @@ def schedule_job_record(
         relative_days=normalized_relative_days,
         interval_seconds=interval_seconds,
     )
+    requires_idle = bool(requires_idle)
+    normalized_idle_seconds: int | None = None
+    if idle_seconds not in (None, ""):
+        try:
+            normalized_idle_seconds = int(idle_seconds)
+        except (TypeError, ValueError):
+            raise ValueError("idle_seconds must be an integer number of seconds")
+        if normalized_idle_seconds is not None and normalized_idle_seconds < 0:
+            raise ValueError("idle_seconds must be >= 0")
     job = {
         "id": uuid.uuid4().hex[:12],
         "title": title.strip() or "Scheduled job",
@@ -842,6 +853,8 @@ def schedule_job_record(
         "handler": handler,
         "tool_call": normalized_tool_call,
         "skill": normalized_skill,
+        "requires_idle": requires_idle,
+        "idle_seconds": normalized_idle_seconds,
     }
     jobs = _read_all(user_id=user_id)
     jobs.append(job)
@@ -882,6 +895,110 @@ def restore_schedule_record(record: dict, user_id: str | None = None) -> bool:
             _write_all(jobs, user_id=user_id)
             return True
     return False
+
+
+def update_schedule_record(job_id: str, updates: dict[str, Any], user_id: str | None = None) -> dict | None:
+    """Update fields of a scheduled job record, returning the updated record.
+
+    Editable fields: title, task, time_of_day, frequency, timezone,
+    days_of_week, relative_days, interval_seconds, action, handler, tool_call,
+    skill, enabled, requires_idle, idle_seconds.
+
+    When any timing field changes, next_due is recalculated from now so the
+    new schedule takes effect immediately. Returns None when no record
+    matches job_id.
+    """
+    if not isinstance(updates, dict):
+        raise ValueError("updates must be a dict")
+    jobs = _read_all(user_id=user_id)
+    for index, job in enumerate(jobs):
+        if job.get("id") != job_id:
+            continue
+        updated = dict(job)
+        timing_changed = False
+        for key in ("title", "task"):
+            if key in updates and updates[key] is not None:
+                updated[key] = str(updates[key]).strip() or updated.get(key, "Scheduled job")
+        if "time_of_day" in updates and updates["time_of_day"] is not None:
+            _parse_time_of_day(str(updates["time_of_day"]))  # validate
+            updated["time_of_day"] = str(updates["time_of_day"])
+            timing_changed = True
+        if "frequency" in updates and updates["frequency"] is not None:
+            frequency = str(updates["frequency"]).lower().strip()
+            if frequency not in FREQUENCIES:
+                raise ValueError(f"frequency must be one of: {', '.join(sorted(FREQUENCIES))}")
+            updated["frequency"] = frequency
+            timing_changed = True
+        if "timezone" in updates:
+            updated["timezone"] = bioclock.timezone_name(updates["timezone"])
+            timing_changed = True
+        if "days_of_week" in updates:
+            updated["days_of_week"] = _normalize_weekdays(updates["days_of_week"])
+            timing_changed = True
+        if "relative_days" in updates:
+            updated["relative_days"] = _normalize_relative_days(updates["relative_days"])
+            timing_changed = True
+        if "interval_seconds" in updates:
+            value = updates["interval_seconds"]
+            updated["interval_seconds"] = int(value) if value not in (None, "") else None
+            if updated["frequency"] == "interval":
+                seconds = updated["interval_seconds"] or 60
+                if seconds < 60:
+                    raise ValueError("interval_seconds must be at least 60")
+            timing_changed = True
+        if "action" in updates and updates["action"] is not None:
+            action = str(updates["action"]).lower().strip()
+            if action not in {"announce", "agentic", "tool"}:
+                raise ValueError("action must be 'announce', 'agentic', or 'tool'")
+            updated["action"] = action
+        if "handler" in updates:
+            updated["handler"] = str(updates["handler"]).strip() or None if updates["handler"] else None
+        if "tool_call" in updates:
+            tool_call = updates["tool_call"]
+            if tool_call is None:
+                updated["tool_call"] = None
+            else:
+                if not isinstance(tool_call, dict) or not isinstance(tool_call.get("name"), str) or not tool_call["name"].strip():
+                    raise ValueError("tool_call must contain a non-empty tool name")
+                arguments = tool_call.get("arguments", tool_call.get("args", {}))
+                if not isinstance(arguments, dict):
+                    raise ValueError("tool_call arguments must be an object")
+                updated["tool_call"] = {"name": tool_call["name"].strip(), "arguments": arguments}
+        if "skill" in updates:
+            skill = updates["skill"]
+            updated["skill"] = skill.strip() if isinstance(skill, str) and skill.strip() else None
+        if "enabled" in updates:
+            updated["enabled"] = bool(updates["enabled"])
+        if "requires_idle" in updates:
+            updated["requires_idle"] = bool(updates["requires_idle"])
+        if "idle_seconds" in updates:
+            value = updates["idle_seconds"]
+            updated["idle_seconds"] = int(value) if value not in (None, "") else None
+            if updated["idle_seconds"] is not None and updated["idle_seconds"] < 0:
+                raise ValueError("idle_seconds must be >= 0")
+        if timing_changed:
+            updated["next_due"] = calculate_next_due(
+                updated.get("time_of_day", "06:00"),
+                updated.get("frequency", "daily"),
+                updated.get("timezone"),
+                updated.get("days_of_week"),
+                relative_days=updated.get("relative_days"),
+                interval_seconds=updated.get("interval_seconds"),
+            ).isoformat()
+        jobs[index] = updated
+        _write_all(jobs, user_id=user_id)
+        return updated
+    return None
+
+
+def delete_schedule_record(job_id: str, user_id: str | None = None) -> bool:
+    """Permanently remove a scheduled job record; returns True when removed."""
+    jobs = _read_all(user_id=user_id)
+    kept = [job for job in jobs if job.get("id") != job_id]
+    if len(kept) == len(jobs):
+        return False
+    _write_all(kept, user_id=user_id)
+    return True
 
 
 # Backwards-compatible reminder names used by older tools/tests.
@@ -1441,6 +1558,14 @@ def bootstrap_non_system_jobs(
     except Exception:
         log.exception("Failed to bootstrap social schedule jobs.")
 
+    # Aiko-Playground autonomous build loop: one idempotent interval job.
+    # Ordinary schedule record — visible/editable/pausable in Calendar Studio.
+    try:
+        from system.playground import ensure_playground_job
+        ensure_playground_job(timezone=timezone, user_id=user_id)
+    except Exception:
+        log.exception("Failed to seed Aiko-Playground idle-build schedule job.")
+
 
 def ensure_deep_study_window_jobs(timezone: str | None = None, user_id: str | None = None) -> None:
     """Idempotently seed the four recurring jobs that bound Aiko's
@@ -1527,6 +1652,8 @@ class DueJob:
     action: str = "agentic"
     tool_call: dict[str, Any] | None = None
     skill: str | None = None
+    requires_idle: bool = False
+    idle_seconds: int | None = None
 
 
 DueReminder = DueJob
@@ -2356,6 +2483,8 @@ class ScheduleRunner:
                             action=job.get("action", "agentic"),
                             tool_call=job.get("tool_call"),
                             skill=job.get("skill"),
+                            requires_idle=bool(job.get("requires_idle", False)),
+                            idle_seconds=job.get("idle_seconds"),
                         ),
                         tz_name,
                     ))

@@ -2475,6 +2475,9 @@ class AikoThink:
         """Announce or execute a due scheduled job without blocking the scheduler."""
         text = f"{job.title}. {job.task}"
         log.info("[schedule] due %s action=%s: %s", job.id, job.action, text)
+        if job.requires_idle and not self._idle_requirement_met(job):
+            log.info("[schedule] job %s requires idle; user active — skipping this round.", job.id)
+            return
         if job.action == "announce":
             _play_beep()
             speak = self._get_speak()
@@ -2493,6 +2496,23 @@ class AikoThink:
             threading.Thread(target=ctx.run, args=(self._run_scheduled_tool_job, job), daemon=True).start()
             return
         threading.Thread(target=ctx.run, args=(self._run_scheduled_agentic_job, job), daemon=True).start()
+
+    def _idle_requirement_met(self, job: DueJob) -> bool:
+        """True when a requires_idle job may fire (user genuinely idle).
+
+        Falls back to "not idle" when no idle tracker is running — an idle-only
+        job must never fire just because the tracker is unavailable.
+        """
+        try:
+            from system.orchestrate import get_idle_seconds
+        except Exception:
+            log.warning("[schedule] idle tracker unavailable; treating job %s as not-idle.", job.id)
+            return False
+        idle = get_idle_seconds()
+        if idle is None:
+            return False
+        threshold = job.idle_seconds if job.idle_seconds is not None else 600
+        return idle >= threshold
 
     def _run_scheduled_tool_job(self, job: DueJob) -> None:
         """Invoke one registered agentic tool from a schedule.json record."""

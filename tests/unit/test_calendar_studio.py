@@ -227,3 +227,152 @@ def test_calendar_mutations_are_serialized(monkeypatch, tmp_path):
 
     assert max_active_loads == 1
     assert {item["title"] for item in original_load()} == {"One", "Two"}
+
+
+# ── direct scheduler record management (/api/schedules) ──────────────────────
+
+def _schedule_input(**overrides):
+    params = {"title": "Water plants", "time_of_day": "08:00", "frequency": "daily"}
+    params.update(overrides)
+    return api.ScheduleInput(**params)
+
+
+def test_list_schedules_includes_disabled(monkeypatch):
+    records = [_scheduler_record("s1"), _scheduler_record("s2")]
+    records[1]["enabled"] = False
+    monkeypatch.setattr(api, "list_schedule_records", lambda include_disabled=True: records if include_disabled else [records[0]])
+    result = api.list_schedules()
+    assert [r["id"] for r in result["schedules"]] == ["s1", "s2"]
+
+
+def test_create_schedule_passes_all_fields_and_notifies(monkeypatch):
+    captured = {}
+    record = _scheduler_record("new-1")
+    def fake_create(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return record
+    monkeypatch.setattr(api, "schedule_job_record", fake_create)
+    notified = []
+    monkeypatch.setattr(api, "notify_scheduler_new_job", lambda: notified.append(True))
+
+    result = api.create_schedule(_schedule_input(
+        frequency="interval", interval_seconds=900, timezone="America/Vancouver",
+        days_of_week=["mon"], action="agentic", requires_idle=True, idle_seconds=600,
+    ))
+    assert result["id"] == "new-1"
+    assert notified == [True]
+    title, task, time_of_day, frequency, timezone, days_of_week, action = captured["args"]
+    assert (title, time_of_day, frequency, timezone, action) == (
+        "Water plants", "08:00", "interval", "America/Vancouver", "agentic")
+    assert days_of_week == ["mon"]
+    assert captured["kwargs"]["interval_seconds"] == 900
+    assert captured["kwargs"]["requires_idle"] is True
+    assert captured["kwargs"]["idle_seconds"] == 600
+
+
+def test_create_schedule_can_start_disabled(monkeypatch):
+    record = _scheduler_record("new-1")
+    monkeypatch.setattr(api, "schedule_job_record", lambda *a, **k: record)
+    cancelled = []
+    monkeypatch.setattr(api, "cancel_schedule_record", lambda sid: cancelled.append(sid) or True)
+    monkeypatch.setattr(api, "list_schedule_records", lambda include_disabled=True: [dict(record, enabled=False)])
+    monkeypatch.setattr(api, "notify_scheduler_new_job", lambda: None)
+
+    result = api.create_schedule(_schedule_input(enabled=False))
+    assert result["enabled"] is False
+    assert cancelled == ["new-1"]
+
+
+def test_create_schedule_rejects_invalid_spec(monkeypatch):
+    def boom(*a, **k):
+        raise ValueError("frequency must be one of: ...")
+    monkeypatch.setattr(api, "schedule_job_record", boom)
+    with pytest.raises(HTTPException, match="Invalid scheduler settings"):
+        api.create_schedule(_schedule_input(frequency="bogus"))
+
+
+def test_update_schedule_edits_record_in_place(monkeypatch):
+    calls = []
+    updated = _scheduler_record("s1", time_of_day="18:00", frequency="weekly")
+    updated["timezone"] = "America/Vancouver"
+    updated["days_of_week"] = [0]
+    def fake_update(sid, updates):
+        calls.append((sid, updates))
+        return updated
+    monkeypatch.setattr(api, "update_schedule_record", fake_update)
+    notified = []
+    monkeypatch.setattr(api, "notify_scheduler_new_job", lambda: notified.append(True))
+
+    result = api.update_schedule("s1", api.SchedulePatch(
+        time_of_day="18:00", frequency="weekly", timezone="America/Vancouver",
+        days_of_week=["mon"], enabled=True,
+    ))
+    assert result["time_of_day"] == "18:00"
+    assert result["days_of_week"] == [0]  # weekdays preserved, not dropped
+    assert result["timezone"] == "America/Vancouver"  # timezone preserved
+    assert notified == [True]
+    assert calls[0][0] == "s1"
+    sent = calls[0][1]
+    assert sent["time_of_day"] == "18:00" and sent["frequency"] == "weekly"
+
+
+def test_update_schedule_404_when_missing(monkeypatch):
+    monkeypatch.setattr(api, "update_schedule_record", lambda sid, updates: None)
+    with pytest.raises(HTTPException, match="not found"):
+        api.update_schedule("missing", api.SchedulePatch(title="x"))
+
+
+def test_update_schedule_rejects_invalid_spec(monkeypatch):
+    def boom(sid, updates):
+        raise ValueError("frequency must be one of: ...")
+    monkeypatch.setattr(api, "update_schedule_record", boom)
+    with pytest.raises(HTTPException, match="Invalid scheduler settings"):
+        api.update_schedule("s1", api.SchedulePatch(frequency="bogus"))
+
+
+def test_schedule_endpoints_never_take_a_user_id(monkeypatch):
+    """Cross-user isolation: the API resolves identity from the session only."""
+    calls = []
+    monkeypatch.setattr(api, "update_schedule_record", lambda sid, updates: calls.append((sid, updates)) or _scheduler_record(sid))
+    monkeypatch.setattr(api, "notify_scheduler_new_job", lambda: None)
+    # Pydantic models have no user_id field — a client cannot smuggle one in.
+    assert "user_id" not in api.ScheduleInput.model_fields
+    assert "user_id" not in api.SchedulePatch.model_fields
+    api.update_schedule("s1", api.SchedulePatch(title="x"))
+    # ...and the endpoint never forwards one positionally or by keyword.
+    assert calls == [("s1", {"title": "x"})]
+
+
+def test_delete_schedule(monkeypatch):
+    monkeypatch.setattr(api, "delete_schedule_record", lambda sid: sid == "s1")
+    notified = []
+    monkeypatch.setattr(api, "notify_scheduler_new_job", lambda: notified.append(True))
+    assert api.remove_schedule("s1") == {"ok": True}
+    assert notified == [True]
+    with pytest.raises(HTTPException, match="not found"):
+        api.remove_schedule("missing")
+
+
+def test_schedule_input_rejects_unknown_action():
+    with pytest.raises(Exception):
+        api.ScheduleInput(title="x", action="explode")
+
+
+# ── shared studio theme wiring ───────────────────────────────────────────────
+
+def test_calendar_uses_shared_studio_theme():
+    html = (api.FRONTEND_DIR / "index.html").read_text(encoding="utf-8")
+    assert "shared/css/tokens.css" in html
+    assert "shared/css/studio-theme.css" in html
+    # The old light-theme palette must be gone.
+    css = (api.FRONTEND_DIR / "style.css").read_text(encoding="utf-8")
+    assert "--paper:#f6f8fb" not in css and "--blue:#376bf3" not in css
+    for name in ("tokens.css", "studio-theme.css", "base.css"):
+        assert (api.SHARED_DIR / "css" / name).is_file(), name
+
+
+def test_shared_static_mount_registered():
+    paths = [getattr(route, "path", "") for route in api.app.routes]
+    assert "/shared" in paths
+    assert "/static" in paths

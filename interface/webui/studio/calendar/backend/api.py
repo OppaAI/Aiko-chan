@@ -26,7 +26,15 @@ from pydantic import BaseModel, Field
 
 from interface.webui.studio.session_binding import bind_login_session
 from system import bioclock
-from system.schedule import cancel_schedule_record, list_schedule_records, notify_scheduler_new_job, restore_schedule_record, schedule_job_record
+from system.schedule import (
+    cancel_schedule_record,
+    delete_schedule_record,
+    list_schedule_records,
+    notify_scheduler_new_job,
+    restore_schedule_record,
+    schedule_job_record,
+    update_schedule_record,
+)
 from system.userspace import user_state_path
 
 app = FastAPI(title="Aiko Calendar Studio")
@@ -34,7 +42,9 @@ bind_login_session(app)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
+SHARED_DIR = Path(__file__).resolve().parents[2] / "shared"
 app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="calendar-frontend")
+app.mount("/shared", StaticFiles(directory=str(SHARED_DIR), html=True), name="calendar-shared")
 
 STATUSES = {"backlog", "todo", "doing", "waiting", "done", "cancelled"}
 
@@ -49,6 +59,44 @@ class ItemInput(BaseModel):
     project: str = Field(default="", max_length=80)
     priority: Literal["low", "normal", "high", "urgent"] = "normal"
     schedule: dict[str, Any] | None = None
+
+
+class ScheduleInput(BaseModel):
+    """Direct editor for one Aiko scheduler record (no calendar item needed)."""
+
+    title: str = Field(min_length=1, max_length=160)
+    task: str = Field(default="", max_length=4000)
+    time_of_day: str = "09:00"
+    frequency: str = "daily"
+    timezone: str | None = None
+    days_of_week: list[str] | str | None = None
+    interval_seconds: int | None = None
+    action: Literal["announce", "agentic", "tool"] = "announce"
+    handler: str | None = None
+    tool_call: dict[str, Any] | None = None
+    skill: str | None = None
+    requires_idle: bool = False
+    idle_seconds: int | None = None
+    enabled: bool = True
+
+
+class SchedulePatch(BaseModel):
+    """Partial update — only the fields present are changed."""
+
+    title: str | None = None
+    task: str | None = None
+    time_of_day: str | None = None
+    frequency: str | None = None
+    timezone: str | None = None
+    days_of_week: list[str] | str | None = None
+    interval_seconds: int | None = None
+    action: str | None = None
+    handler: str | None = None
+    tool_call: dict[str, Any] | None = None
+    skill: str | None = None
+    requires_idle: bool | None = None
+    idle_seconds: int | None = None
+    enabled: bool | None = None
 
 
 def _store_path() -> Path:
@@ -333,6 +381,86 @@ def delete_item(item_id: str) -> dict[str, bool]:
             if schedule:
                 _restore_schedule(schedule)
             raise
+    return {"ok": True}
+
+
+@app.get("/api/schedules")
+def list_schedules() -> dict[str, Any]:
+    """Every scheduler record for this user, including disabled ones."""
+    try:
+        schedules = list_schedule_records(include_disabled=True)
+    except Exception as exc:
+        raise HTTPException(500, "Scheduler data could not be read.") from exc
+    return {"schedules": schedules}
+
+
+@app.post("/api/schedules", status_code=201)
+def create_schedule(spec: ScheduleInput) -> dict[str, Any]:
+    """Create a scheduler record directly (not tied to a calendar item)."""
+    try:
+        record = schedule_job_record(
+            spec.title,
+            spec.task or spec.title,
+            spec.time_of_day,
+            spec.frequency,
+            spec.timezone,
+            spec.days_of_week,
+            spec.action,
+            handler=spec.handler,
+            interval_seconds=spec.interval_seconds,
+            tool_call=spec.tool_call,
+            skill=spec.skill,
+            requires_idle=spec.requires_idle,
+            idle_seconds=spec.idle_seconds,
+        )
+        if not spec.enabled:
+            cancel_schedule_record(record["id"])
+            record = next(
+                (r for r in list_schedule_records(include_disabled=True) if r.get("id") == record["id"]),
+                record,
+            )
+        notify_scheduler_new_job()
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, f"Invalid scheduler settings: {exc}") from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, "Scheduler record could not be created.") from exc
+    return record
+
+
+@app.put("/api/schedules/{schedule_id}")
+def update_schedule(schedule_id: str, patch: SchedulePatch) -> dict[str, Any]:
+    """Edit a scheduler record in place — title, timing, action, enabled, etc.
+
+    Timing changes recalculate next_due from now. User identity comes only from
+    the signed web session; there is no user_id parameter to override.
+    """
+    updates = {k: v for k, v in patch.model_dump().items() if v is not None}
+    # days_of_week=[] is meaningful (clear the list) — model_dump drops None
+    # only, so an explicit [] survives here.
+    try:
+        updated = update_schedule_record(schedule_id, updates)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, f"Invalid scheduler settings: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(500, "Scheduler record could not be updated.") from exc
+    if updated is None:
+        raise HTTPException(404, "Scheduler record not found.")
+    notify_scheduler_new_job()
+    return updated
+
+
+@app.delete("/api/schedules/{schedule_id}")
+def remove_schedule(schedule_id: str) -> dict[str, bool]:
+    """Permanently delete a scheduler record."""
+    try:
+        removed = delete_schedule_record(schedule_id)
+    except Exception as exc:
+        raise HTTPException(500, "Scheduler record could not be deleted.") from exc
+    if not removed:
+        raise HTTPException(404, "Scheduler record not found.")
+    notify_scheduler_new_job()
     return {"ok": True}
 
 

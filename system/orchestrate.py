@@ -469,6 +469,32 @@ def _seconds_until_proactive_silence_ends() -> float:
     return 3600.0
 
 
+# ── idle tracking for idle-gated scheduler jobs ─────────────────────────────
+# The scheduler's playground tick (and any future requires_idle job) needs to
+# know how long the user has actually been idle. The ProactiveIdleRunner owns
+# the authoritative activity timestamp; it registers itself here on creation
+# so scheduler code can ask without importing UI machinery.
+
+_idle_runner: "ProactiveIdleRunner | None" = None
+
+
+def register_idle_runner(runner: "ProactiveIdleRunner | None") -> None:
+    """Register the active idle tracker (or None to unregister)."""
+    global _idle_runner
+    _idle_runner = runner
+
+
+def get_idle_seconds() -> float | None:
+    """Seconds since last user activity, or None when no tracker is running."""
+    runner = _idle_runner
+    if runner is None:
+        return None
+    try:
+        return runner.idle_seconds()
+    except Exception:
+        return None
+
+
 class ProactiveIdleRunner:
     """Lightweight monitor that lets Aiko send gentle idle check-ins.
 
@@ -496,6 +522,7 @@ class ProactiveIdleRunner:
         self._next_checkin_after = self._random_first_idle_delay()
         self._resting = False
         self._thread: threading.Thread | None = None
+        register_idle_runner(self)
 
     def set_speak(self, speak) -> None:
         """Hot-swap the TTS backend (e.g. after lazy /voice init in --text mode)."""
@@ -514,6 +541,7 @@ class ProactiveIdleRunner:
         self._wakeup.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
+        register_idle_runner(None)
 
     def touch(self) -> None:
         """Record user activity and reset the idle timer."""
@@ -540,6 +568,11 @@ class ProactiveIdleRunner:
         """Return whether proactive messages are currently enabled."""
         with self._lock:
             return self._enabled
+
+    def idle_seconds(self) -> float:
+        """Seconds since the last recorded user activity."""
+        with self._lock:
+            return time.monotonic() - self._last_activity
 
     def _next_message(self) -> str:
         messages = PROACTIVE_MESSAGES or ["You've been quiet for a bit. Still with me?"]

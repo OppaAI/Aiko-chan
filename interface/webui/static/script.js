@@ -336,7 +336,7 @@ function deliverAikoMessage(parsed) {
   if (!aikoCommitFresh(parsed.dialogueText)) return;
   if (parsed.emoji) applyAikoEmotion(parsed.emoji);
   captionCommit(parsed.dialogueText, parsed.emoji);
-  transcriptLog.push({ t: Date.now(), emoji: parsed.emoji, text: parsed.dialogueText,
+  transcriptLog.push({ t: Date.now(), sender: 'aiko', emoji: parsed.emoji, text: parsed.dialogueText,
                        action: parsed.action, nonVerbal: parsed.nonVerbalText });
   if (transcriptVisible) renderTranscript();
   postResponseBehavior(parsed);
@@ -385,16 +385,20 @@ function postResponseBehavior(parsed) {
   if (bits.length) addSysLine('Aiko ' + bits.join(' '));
 }
 
-// transcript (her full history, on demand)
+// transcript (full two-sided history, on demand — chronological)
 function renderTranscript() {
   document.querySelectorAll('#chat-panel .transcript-row').forEach(el => el.remove());
   if (!transcriptVisible) return;
-  for (const entry of transcriptLog) {
-    const { row, bubble } = createMessageRow('aiko');
+  const ordered = [...transcriptLog].sort((a, b) => (a.t || 0) - (b.t || 0));
+  for (const entry of ordered) {
+    const sender = entry.sender === 'you' ? 'you' : 'aiko';
+    const { row, bubble } = createMessageRow(sender);
     row.classList.add('transcript-row');
     const head = document.createElement('div');
     head.className = 'msg-prefix';
-    head.textContent = new Date(entry.t).toLocaleTimeString() + (entry.emoji ? ' ' + entry.emoji : '');
+    head.textContent = new Date(entry.t).toLocaleTimeString()
+      + (sender === 'aiko' && entry.emoji ? ' ' + entry.emoji : '')
+      + (sender === 'you' ? ' ' + (window.currentUsername || 'You') : '');
     bubble.appendChild(head);
     const body = document.createElement('div');
     body.innerHTML = esc(entry.text).replace(/\n/g, '<br>');
@@ -727,6 +731,9 @@ function addMessage(sender, text) {
   let insertEl;
   if (sender === 'you') {
     const { row, bubble } = createMessageRow('you');
+    transcriptLog.push({ t: Date.now(), sender: 'you', text });
+    row.classList.add('transcript-row');
+    if (transcriptVisible) renderTranscript();
     const prefix = document.createElement('span');
     prefix.className = 'msg-prefix';
     prefix.textContent = window.currentUsername || 'You';
@@ -792,7 +799,7 @@ function flushStream() {
     if (!aikoCommitFresh(parsed.dialogueText)) { streamActive = false; streamRawText = ''; streamExprApplied = null; toolStatus.textContent = ''; return; }
     if (parsed.emoji && parsed.emoji !== streamExprApplied) applyAikoEmotion(parsed.emoji);
     captionCommit(parsed.dialogueText, parsed.emoji);
-    transcriptLog.push({ t: Date.now(), emoji: parsed.emoji, text: parsed.dialogueText,
+    transcriptLog.push({ t: Date.now(), sender: 'aiko', emoji: parsed.emoji, text: parsed.dialogueText,
                          action: parsed.action, nonVerbal: parsed.nonVerbalText });
     if (transcriptVisible) renderTranscript();
     postResponseBehavior(parsed);

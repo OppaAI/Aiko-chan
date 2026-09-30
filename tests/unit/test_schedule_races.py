@@ -173,3 +173,59 @@ def test_ledger_prunes_every_persistent_user_on_each_start(monkeypatch):
         assert sleeps == [7 * 86400]
 
     assert pruned == ["github_alice", "github_bob"] * 2
+
+
+def test_delete_waits_for_scheduler_and_reloads_store(monkeypatch, tmp_path):
+    """Deletion waits for an in-flight dispatch and retains its saved progress."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+    import system.schedule as schedule
+
+    monkeypatch.setenv("USER_SPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(schedule, "schedule_path", lambda user_id=None: tmp_path / "schedule.json")
+    monkeypatch.setattr("cognition.fly_behavior.gf_global.should_cancel_scheduler", lambda uid: False)
+    schedule._invalidate_cache("u1")
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(schedule.bioclock, "local_now", lambda *args: now)
+    keep = schedule.schedule_job_record("Keep", "task", "09:00", user_id="u1")
+    drop = schedule.schedule_job_record("Drop", "task", "09:00", user_id="u1")
+    keep["next_due"] = (now - timedelta(minutes=1)).isoformat()
+    schedule._write_all([keep, drop], user_id="u1")
+    dispatch_started = threading.Event()
+    finish_dispatch = threading.Event()
+    delete_waiting = threading.Event()
+    lock = schedule._scheduler_run_lock
+
+    @contextmanager
+    def observed_lock(uid, name, *, blocking=False):
+        if blocking:
+            delete_waiting.set()
+        with lock(uid, name, blocking=blocking) as acquired:
+            yield acquired
+
+    monkeypatch.setattr(schedule, "_scheduler_run_lock", observed_lock)
+    def dispatch(event):
+        dispatch_started.set()
+        assert finish_dispatch.wait(5)
+
+    runner = object.__new__(schedule.ScheduleRunner)
+    runner._on_due = dispatch
+    runner._memorize = None
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        firing = pool.submit(runner._fire_due_user_jobs, "u1")
+        try:
+            assert dispatch_started.wait(5)
+            deleting = pool.submit(schedule.delete_schedule_record, drop["id"], "u1")
+            assert delete_waiting.wait(5)
+            assert not deleting.done()
+        finally:
+            finish_dispatch.set()
+        firing.result(timeout=5)
+        assert deleting.result(timeout=5) is True
+    schedule._invalidate_cache("u1")
+    remaining = schedule.list_schedule_records(user_id="u1")
+    assert [r["id"] for r in remaining] == [keep["id"]]
+    assert remaining[0]["last_ran_at"] == now.isoformat()
+    assert datetime.fromisoformat(remaining[0]["next_due"]) > now
+    schedule._invalidate_cache("u1")

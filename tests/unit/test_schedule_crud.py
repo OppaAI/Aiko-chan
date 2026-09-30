@@ -17,6 +17,7 @@ from system.schedule import DueJob
 @pytest.fixture()
 def user_store(monkeypatch, tmp_path):
     """Point the schedule JSON store at a throwaway file."""
+    monkeypatch.setenv("USER_SPACE_ROOT", str(tmp_path))
     monkeypatch.setattr(schedule, "schedule_path", lambda user_id=None: tmp_path / "schedule.json")
     # _read_all/_write_all cache per user; make sure the cache can't leak.
     schedule._invalidate_cache("u1")
@@ -138,3 +139,39 @@ def test_playground_skill_states_safety_contract():
     assert "sandbox/run.py" in skill
     assert "Aiko-chan" in skill  # must name what it must NOT touch
     assert "never" in skill.lower()
+
+
+def test_ensure_playground_job_preserves_paused_record(user_store):
+    first = ensure_playground_job(user_id=user_store)
+    schedule.cancel_schedule_record(first["id"], user_id=user_store)
+    second = ensure_playground_job(user_id=user_store)
+    assert second["id"] == first["id"]
+    assert second["enabled"] is False
+    records = schedule.list_schedule_records(include_disabled=True, user_id=user_store)
+    assert len(records) == 1
+
+
+@pytest.mark.parametrize("initial_action,initial_call,updates", [
+    ("agentic", None, {"action": "tool"}),
+    ("tool", {"name": "test", "arguments": {}}, {"tool_call": None}),
+    ("tool", {"name": "test", "arguments": {}}, {"action": "tool", "tool_call": None}),
+])
+def test_update_rejects_tool_without_configuration(user_store, initial_action, initial_call, updates):
+    record = schedule.schedule_job_record(
+        "Tool", "task", "09:00", action=initial_action, tool_call=initial_call, user_id=user_store,
+    )
+    with pytest.raises(ValueError, match="requires tool_call"):
+        schedule.update_schedule_record(record["id"], updates, user_id=user_store)
+    assert schedule.list_schedule_records(user_id=user_store) == [record]
+
+
+def test_update_accepts_valid_tool_transitions(user_store):
+    record = schedule.schedule_job_record("Tool", "task", "09:00", user_id=user_store)
+    call = {"name": "test", "arguments": {"value": 1}}
+    updated = schedule.update_schedule_record(record["id"], {"action": "tool", "tool_call": call}, user_id=user_store)
+    assert updated["tool_call"] == call
+    updated = schedule.update_schedule_record(record["id"], {"title": "Renamed"}, user_id=user_store)
+    assert updated["tool_call"] == call
+    updated = schedule.update_schedule_record(record["id"], {"action": "agentic", "tool_call": None}, user_id=user_store)
+    assert updated["action"] == "agentic"
+    assert updated["tool_call"] is None

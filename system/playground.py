@@ -117,14 +117,14 @@ def worker_skill_text() -> str:
 def ensure_playground_job(timezone: str | None = None, user_id: str | None = None) -> dict[str, Any]:
     """Seed the Playground idle-build schedule record (idempotent by title).
 
-    Returns the existing enabled record when one is already present, so every
+    Returns the existing record when one is already present, so every
     boot seeds at most one tick job. The record is an ordinary schedule entry:
     it appears in Calendar Studio and disabling it there pauses the loop.
     """
     from system.schedule import _read_all, notify_scheduler_new_job, schedule_job_record
 
     for job in _read_all(user_id=user_id):
-        if job.get("title") == PLAYGROUND_JOB_TITLE and job.get("enabled", True):
+        if job.get("title") == PLAYGROUND_JOB_TITLE:
             return job
     record = schedule_job_record(
         title=PLAYGROUND_JOB_TITLE,

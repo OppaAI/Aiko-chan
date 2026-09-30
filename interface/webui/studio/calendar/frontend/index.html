@@ -80,7 +80,7 @@
 
 <dialog id="schedule-editor">
   <form method="dialog" id="schedule-form">
-    <div class="modal-head"><h2 id="schedule-modal-title">New scheduled task</h2><button class="close" value="cancel">×</button></div>
+    <div class="modal-head"><h2 id="schedule-modal-title">New scheduled task</h2><button class="close" type="button" data-close-schedule aria-label="Close">×</button></div>
     <label>Scheduled task<input name="s_title" required maxlength="160" placeholder="Water the plants"></label>
     <label>Instructions for Aiko<textarea name="s_task" rows="3" placeholder="What should Aiko do when this fires?"></textarea></label>
     <div class="row">
@@ -121,7 +121,7 @@
         <select name="s_action">
           <option value="announce">Announce (speak it)</option>
           <option value="agentic" selected>Agentic (Aiko does it)</option>
-          <option value="tool">Tool call</option>
+          <option value="tool" hidden disabled>Tool call (existing configuration)</option>
         </select>
       </label>
     </div>
@@ -136,7 +136,7 @@
     <p class="hint" id="schedule-next-due"></p>
     <div class="actions">
       <button class="danger" type="button" id="delete-schedule" hidden>Delete</button>
-      <button value="cancel" class="btn ghost">Cancel</button>
+      <button type="button" data-close-schedule class="btn ghost">Cancel</button>
       <button type="submit" class="btn btn-primary">Save task</button>
     </div>
   </form>

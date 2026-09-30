@@ -9,6 +9,7 @@ const scheduleForm = $('#schedule-form');
 
 let data = { items: [], schedules: [] };
 let editing = null;          // calendar item being edited (or null for new)
+let scheduleTiming = null;  // original form values, used to preserve timing on edits
 let editingSchedule = null;  // scheduler record being edited (or null for new)
 
 const text = (value) => value || 'No details yet';
@@ -81,11 +82,11 @@ function render() {
   $('#schedule-list').innerHTML = schedules.length
     ? schedules.map((s) => {
         const paused = s.enabled === false;
-        return `<article class="schedule-row${paused ? ' paused' : ''}" data-schedule-id="${escapeHtml(s.id)}">` +
+        return `<button type="button" class="schedule-row${paused ? ' paused' : ''}" data-schedule-id="${escapeHtml(s.id)}">` +
           `<b>${escapeHtml(s.title)}${paused ? ' <span class="badge">paused</span>' : ''}</b>` +
           `<small>${escapeHtml(scheduleSummary(s))}</small>` +
           (s.next_due && !paused ? `<small class="next-due">next ${fmt(s.next_due)}</small>` : '') +
-          `</article>`;
+          `</button>`;
       }).join('')
     : '<p class="empty">No scheduled tasks yet.</p>';
 
@@ -193,12 +194,20 @@ function openScheduleEditor(record) {
   } else {
     $('#schedule-next-due').textContent = '';
   }
+  const toolOption = scheduleForm.elements['s_action'].querySelector('[value="tool"]');
+  toolOption.hidden = record?.action !== 'tool';
+  toolOption.disabled = record?.action !== 'tool';
+  scheduleTiming = new FormData(scheduleForm);
   syncScheduleFieldVisibility();
   scheduleDialog.showModal();
 }
 
 scheduleForm.elements['s_frequency'].onchange = syncScheduleFieldVisibility;
 scheduleForm.elements['s_requires_idle'].onchange = syncScheduleFieldVisibility;
+
+$$('[data-close-schedule]').forEach((button) => {
+  button.onclick = () => scheduleDialog.close();
+});
 
 $('#new-schedule').onclick = () => openScheduleEditor();
 
@@ -227,10 +236,23 @@ scheduleForm.onsubmit = async (e) => {
     payload.interval_seconds = Math.max(60, Math.round(Number(fd.get('s_interval_minutes') || 15) * 60));
   }
   if (payload.frequency === 'weekly' || payload.frequency === 'custom_weekdays') {
-    payload.days_of_week = fd.getAll('s_weekday').map(Number);
+    payload.days_of_week = fd.getAll('s_weekday').map((day) => DAY_NAMES[Number(day)].toLowerCase());
   }
   if (payload.requires_idle) {
     payload.idle_seconds = Math.max(60, Math.round(Number(fd.get('s_idle_minutes') || 10) * 60));
+  }
+  if (editingSchedule) {
+    const timingFields = {
+      time_of_day: 's_time', frequency: 's_frequency', timezone: 's_timezone',
+      interval_seconds: 's_interval_minutes', days_of_week: 's_weekday',
+    };
+    for (const [key, field] of Object.entries(timingFields)) {
+      if (['interval_seconds', 'days_of_week'].includes(key) &&
+          fd.get('s_frequency') !== scheduleTiming.get('s_frequency')) continue;
+      if (JSON.stringify(fd.getAll(field)) === JSON.stringify(scheduleTiming.getAll(field))) {
+        delete payload[key];
+      }
+    }
   }
   const url = editingSchedule ? `api/schedules/${editingSchedule.id}` : 'api/schedules';
   const response = await fetch(url, {

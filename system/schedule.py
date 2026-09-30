@@ -107,13 +107,13 @@ _knowledge_folder_watcher = None  # KnowledgeFolderWatcher instance (lazy)
 
 
 @contextmanager
-def _scheduler_run_lock(user_id: str, name: str):
+def _scheduler_run_lock(user_id: str, name: str, *, blocking: bool = False):
     """Serialize one scheduler stream across processes sharing user state."""
     path = user_state_path(f".locks/scheduler-{name}.lock", user_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
     except OSError:
         os.close(fd)
         yield False
@@ -976,6 +976,8 @@ def update_schedule_record(job_id: str, updates: dict[str, Any], user_id: str | 
             updated["idle_seconds"] = int(value) if value not in (None, "") else None
             if updated["idle_seconds"] is not None and updated["idle_seconds"] < 0:
                 raise ValueError("idle_seconds must be >= 0")
+        if updated.get("action") == "tool" and not updated.get("tool_call"):
+            raise ValueError("action=tool requires tool_call")
         if timing_changed:
             updated["next_due"] = calculate_next_due(
                 updated.get("time_of_day", "06:00"),
@@ -993,12 +995,29 @@ def update_schedule_record(job_id: str, updates: dict[str, Any], user_id: str | 
 
 def delete_schedule_record(job_id: str, user_id: str | None = None) -> bool:
     """Permanently remove a scheduled job record; returns True when removed."""
-    jobs = _read_all(user_id=user_id)
-    kept = [job for job in jobs if job.get("id") != job_id]
-    if len(kept) == len(jobs):
+    user_id = user_id or current_user_id()
+    with _scheduler_run_lock(user_id, "jobs", blocking=True) as acquired:
+        if not acquired:
+            raise RuntimeError("Could not lock the schedule store")
+        _invalidate_cache(user_id)
+        jobs = _read_all(user_id=user_id)
+        kept = [job for job in jobs if job.get("id") != job_id]
+        if len(kept) == len(jobs):
+            return False
+        _write_all(kept, user_id=user_id)
+        return True
+
+
+def _idle_requirement_met(job: dict) -> bool:
+    """Fail closed when idle tracking is unavailable or the user is active."""
+    try:
+        from system.orchestrate import get_idle_seconds
+        idle = get_idle_seconds()
+    except Exception:
+        log.warning("[schedule] idle tracker unavailable for job %s.", job.get("id"))
         return False
-    _write_all(kept, user_id=user_id)
-    return True
+    threshold = job.get("idle_seconds")
+    return idle is not None and idle >= (threshold if threshold is not None else 600)
 
 
 # Backwards-compatible reminder names used by older tools/tests.
@@ -2458,6 +2477,23 @@ class ScheduleRunner:
                     "weekly_social" if job.get("kind") == "system_weekly_social" else None
                 )
                 if handler_name != "deep_study_stop" and should_cancel_scheduler(user_id):
+                    continue
+                if job.get("requires_idle") and not _idle_requirement_met(job):
+                    now = bioclock.local_now(tz_name)
+                    # A skipped one-shot remains enabled; recurring jobs skip
+                    # this occurrence without claiming a successful dispatch.
+                    job["next_due"] = (
+                        now + timedelta(seconds=60) if job.get("frequency") == "once"
+                        else calculate_next_due(
+                            job.get("time_of_day", "06:00"),
+                            job.get("frequency", "daily"),
+                            tz_name,
+                            job.get("days_of_week"),
+                            after=now,
+                            interval_seconds=job.get("interval_seconds"),
+                        )
+                    ).isoformat()
+                    changed = True
                     continue
                 if handler_name and handler_name in _SYSTEM_HANDLERS:
                     try:

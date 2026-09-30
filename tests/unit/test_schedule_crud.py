@@ -139,6 +139,8 @@ def test_playground_skill_states_safety_contract():
     assert "sandbox/run.py" in skill
     assert "Aiko-chan" in skill  # must name what it must NOT touch
     assert "never" in skill.lower()
+    assert "LOG.md" in skill  # full coding log is a hard requirement
+    assert "web search" in skill.lower()  # research when stuck
 
 
 def test_ensure_playground_job_preserves_paused_record(user_store):

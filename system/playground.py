@@ -99,6 +99,29 @@ SESSION RULES
    in the public repo. Sanitize benchmark output before committing.
 10. End the session cleanly when the time box is up or the goal is done.
     Do not start a second goal in the same session.
+11. KEEP A FULL CODING LOG in work/<slug>/LOG.md — this is how your human
+    sees your work. Every session appends one dated section (format:
+    loop/SESSION_LOG_TEMPLATE.md) with: session start/end timestamps and
+    the exact reason it ended (goal done / time box reached / user active /
+    kill switch / blocked); if resuming, the previous session's end time
+    and what you pick back up; the plan; every file of code written or
+    changed and WHY (the reasoning, not just the diff); every sandbox/run.py
+    execution with the exact command, exit code, key output, and each error
+    plus what you changed to fix it; any web research (queries, what you
+    learned, what it changed); and the self-verification walk — each
+    acceptance criterion with the evidence it passes, honestly including
+    the ones that don't yet. LOG.md is committed; never put secrets in it.
+12. VERIFY IT YOURSELF. Never call code "working" unless you ran it through
+    sandbox/run.py yourself and read the output. When it errors, diagnose,
+    fix, and re-run yourself — the errors and fixes are part of the log.
+13. RESEARCH WHEN STUCK. You have web search: use it whenever you don't
+    know how to do something, an error message is unfamiliar, or you need
+    background to plan well. Log what you searched and what you took from it.
+14. INTERRUPT CLEANLY, RESUME EXACTLY. The tick fires only while your human
+    is idle; if he becomes active mid-session, checkpoint and end the
+    session immediately, logging the interruption time. The next idle tick
+    logs its own start time and resumes from CHECKPOINT.md — the log must
+    show the unbroken interrupted → continued chain.
 
 If anything above cannot be satisfied safely, stop and leave a CHECKPOINT.md
 explaining what blocked you. A stopped session is always better than a

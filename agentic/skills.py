@@ -411,11 +411,20 @@ def _resolve_skill_doc(name: str) -> "SkillDoc | None":
         if doc.skill_id.casefold() == cleaned or doc.name.casefold() == cleaned:
             return doc
     # Forward-compat: <stem>/SKILL.md directory layout (piece 5 naming).
+    # Match directory names case-insensitively but read through the real
+    # on-disk spelling (case-sensitive filesystems).
     for root in (SKILL_ROOT / "skillsets", _user_skillsets_path()):
         try:
-            candidate = root / cleaned / "SKILL.md"
+            entries = list(root.iterdir())
         except Exception:
             continue
+        match = next(
+            (e for e in entries if e.is_dir() and e.name.casefold() == cleaned),
+            None,
+        )
+        if match is None:
+            continue
+        candidate = match / "SKILL.md"
         if candidate.is_file():
             raw = candidate.read_text(encoding="utf-8", errors="replace")
             meta, _body = _front_matter(raw)

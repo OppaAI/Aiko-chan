@@ -2089,6 +2089,9 @@ class AikoThink:
         return self.chat(
             user_input, token_callback=token_callback, mem_kb_future=mem_kb_future,
             query_vec=query_vec, system_note=system_note, web_search=True,
+            # The full intent-routed web block below covers this turn; the
+            # lighter hint-regex net block must not fire a second search.
+            websearch_net=False,
         )
 
     def proactive_checkin(self, prompt_hint: str) -> str:
@@ -2839,12 +2842,18 @@ class AikoThink:
             sentence = (sentence or "").strip()
             if not sentence:
                 return True
-            # 1. local review, same as the full draft gets in _finalize_response
+            # 1. local review, same as the full draft gets in _finalize_response.
+            # Fail-closed: an unevaluated sentence must never reach TTS.
             try:
                 review = self._review_response(user_input, sentence)
             except Exception as exc:
                 log.warning("[think] sentence-stream review failed; aborting early audio: %s", exc)
-                review = {}
+                state["aborted"] = True
+                try:
+                    speak.stop_speech_stream()
+                except Exception:
+                    pass
+                return False
             if len(review.get("flags", [])) >= 2:
                 log.warning("[think] sentence-stream: sentence failed local review; aborting early audio")
                 state["aborted"] = True
@@ -2874,7 +2883,16 @@ class AikoThink:
                         pass
                     return False
             except Exception as exc:
-                log.warning("[think] sentence-stream gate_speak failed; continuing with caution: %s", exc)
+                # Fail-closed: the conscience gate could not evaluate this
+                # sentence, so it must not be spoken early. The full draft
+                # still gets its normal review+gate in _finalize_response.
+                log.warning("[think] sentence-stream gate_speak failed; aborting early audio: %s", exc)
+                state["aborted"] = True
+                try:
+                    speak.stop_speech_stream()
+                except Exception:
+                    pass
+                return False
             # Safe: feed to the sentence-streaming TTS pipeline while the
             # rest of the LLM response is still generating.
             try:
@@ -2933,7 +2951,7 @@ class AikoThink:
         stream_body = dialogue or display
         speak.start_speech_stream(token_callback)
         sentences, remainder = split_stream_sentences(stream_body)
-        for sentence in sentences:
+        for sentence, _rs, _re in sentences:
             speak.feed_speech_stream(sentence)
         if remainder.strip():
             speak.feed_speech_stream(remainder)
@@ -3051,17 +3069,22 @@ class AikoThink:
         consumed_raw = ""
 
         def _drain_sentence_buffer(final: bool = False) -> None:
-            """Split complete sentences out of the buffer into the sink."""
+            """Split complete sentences out of the buffer into the sink.
+
+            consumed_raw advances only through raw spans the sink ACCEPTED.
+            A rejected sentence was never spoken, so the finalize path must
+            still emit it — counting it as consumed would silently drop it.
+            """
             nonlocal sentence_buffer, consumed_raw, sink_active
             if not sink_active:
                 return
             prev = sentence_buffer
             sentences, sentence_buffer = split_stream_sentences(sentence_buffer)
-            consumed_raw += prev[: len(prev) - len(sentence_buffer)]
-            for s in sentences:
+            accepted_end = 0
+            for text, _rs, re_ in sentences:
                 _latency.mark("first_sentence")
                 try:
-                    keep_going = sentence_sink(s)
+                    keep_going = sentence_sink(text)
                 except Exception as exc:
                     log.warning("[think] sentence sink failed; aborting early audio: %s", exc)
                     keep_going = False
@@ -3070,17 +3093,23 @@ class AikoThink:
                     if hasattr(sentence_sink, "aborted"):
                         sentence_sink.aborted = True
                     break
+                accepted_end = re_
+            # Spans are contiguous from 0, so prev[:accepted_end] covers the
+            # accepted sentences plus their inter-sentence whitespace.
+            consumed_raw += prev[:accepted_end]
             if final and sink_active and sentence_buffer.strip():
                 # Stream ended mid-sentence: the tail still gets its gates.
                 tail = sentence_buffer.strip()
-                consumed_raw += sentence_buffer
+                tail_raw = sentence_buffer
                 sentence_buffer = ""
                 try:
                     keep_going = sentence_sink(tail)
                 except Exception as exc:
                     log.warning("[think] sentence sink failed on tail; aborting early audio: %s", exc)
                     keep_going = False
-                if not keep_going:
+                if keep_going:
+                    consumed_raw += tail_raw
+                else:
                     sink_active = False
                     if hasattr(sentence_sink, "aborted"):
                         sentence_sink.aborted = True
@@ -3593,12 +3622,17 @@ class _SentenceSink:
         return bool(self._fn(sentence))
 
 
-def split_stream_sentences(buffer: str) -> tuple[list[str], str]:
+def split_stream_sentences(buffer: str) -> tuple[list[tuple[str, int, int]], str]:
     """
     Parse the streaming buffer, extract completed sentences, and return
-    a list of completed sentences and the remaining partial sentence text.
+    a list of (stripped sentence, raw start, raw end) triples plus the
+    remaining partial sentence text.
+
+    The raw spans are contiguous from 0 and include inter-sentence
+    whitespace, so callers can map accepted sentences back onto the raw
+    buffer exactly (stripped text alone cannot be re-aligned).
     """
-    sentences = []
+    sentences: list[tuple[str, int, int]] = []
     start = 0
     i = 0
     while i < len(buffer):
@@ -3622,7 +3656,7 @@ def split_stream_sentences(buffer: str) -> tuple[list[str], str]:
 
         sentence = buffer[start:end].strip()
         if sentence:
-            sentences.append(sentence)
+            sentences.append((sentence, start, end))
         start = end
         i = end
 
@@ -3633,5 +3667,6 @@ def split_stream_sentences(buffer: str) -> tuple[list[str], str]:
             split_pt = max([p for p in split_pts if p <= 150] or [split_pts[-1]])
             sentence = remaining[:split_pt + 1].strip()
             tail = remaining[split_pt + 1:]
-            return ([sentence] if sentence else []), tail
+            base = len(buffer) - len(remaining)
+            return ([(sentence, base, base + split_pt + 1)] if sentence else []), tail
     return sentences, remaining

@@ -333,7 +333,7 @@
     {
       "handler": "agentic.toolkit.recall:retrieve_context",
       "name": "retrieve_context",
-      "description": "Pull long-term memory, learned knowledge, or past task experience on demand mid-task. Use when upfront context was omitted for low relevance or you need specifics — do not guess from the system prompt. stores: comma-separated subset of memory,knowledge,experience.",
+      "description": "Pull long-term memory, learned knowledge, past task experience, wiki operating cards, or skill instructions on demand mid-task. Use when upfront context was omitted for low relevance or you need specifics — do not guess from the system prompt. stores: comma-separated subset of memory,knowledge,experience,wiki,skill.",
       "props": {
         "query": {
           "type": "string"
@@ -876,7 +876,8 @@
       "react": true,
       "graph": true,
       "wiki": false,
-      "skill": false
+      "skill": false,
+      "always_on": true
     },
     {
       "handler": "agentic.toolkit.it_ops:log_triage",

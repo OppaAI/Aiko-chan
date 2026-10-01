@@ -46,5 +46,7 @@ loop) exists for rollback/comparison only. Do not use it for new runs.
   sources that worked, and note the gap in the final report.
 - **Zero jobs found:** say so plainly in one line. Do not pad with stale or
   off-topic listings.
-- **Oppa asks for a one-off search** (not the pipeline): use `search_jobs`
-  directly with explicit location/keywords instead of running the graph.
+- **Oppa asks for a one-off search** (not the pipeline): `search_jobs` is a
+  graph-only RSS step (`react: false`) and ignores query/location — do not
+  call it directly. Run keyword/location searches through the web research
+  path instead; `search_jobs` only runs inside the validated DAG.

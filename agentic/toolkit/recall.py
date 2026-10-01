@@ -100,7 +100,7 @@ def retrieve_context(query: str = "", stores: str = "memory,knowledge", limit: i
                 for h in hits
             ]
         if "wiki" in wanted:
-            from agentic.wiki import search_wiki
+            from agentic.wiki import search_wiki, _relevant_excerpt
             try:
                 items = search_wiki(query, limit=limit, embedder=emb) or []
             except Exception as e:
@@ -111,7 +111,9 @@ def retrieve_context(query: str = "", stores: str = "memory,knowledge", limit: i
                     "id": getattr(it, "item_id", ""),
                     "kind": getattr(it, "kind", ""),
                     "title": getattr(it, "title", "") or "",
-                    "text": (getattr(it, "text", "") or "")[:_TEXT_CHARS],
+                    # Query-relevant excerpt, not the document prefix: matches
+                    # can live anywhere in a long operating card.
+                    "text": _relevant_excerpt(it, query, emb, _TEXT_CHARS),
                 }
                 for it in items
             ]

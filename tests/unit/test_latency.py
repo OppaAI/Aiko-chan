@@ -240,3 +240,116 @@ def test_finalize_warns_and_emits_full_on_correction_divergence(monkeypatch):
     out = think._finalize_response("hi", draft, _spoken_prefix="First sentence.")
     assert out == "Completely different."
     assert emitted == ["Completely different."]
+
+
+# ---------------------------------------------------------------------------
+# Sentence-stream sink: fail-closed on evaluation errors (CodeRabbit fix 5)
+# ---------------------------------------------------------------------------
+
+
+def _fail_closed_sink_parts(monkeypatch, gate_raises=False, review_raises=False):
+    think = _bare_think(monkeypatch)
+    from cognition.conscience import hooks
+    if gate_raises:
+        def _boom(*, draft, **kw):
+            raise RuntimeError("gate exploded")
+        monkeypatch.setattr(hooks, "gate_speak", _boom)
+    if review_raises:
+        def _boom_review(user_input, text):
+            raise RuntimeError("review exploded")
+        think._review_response = _boom_review
+    speak = FakeSpeak()
+    state = {"aborted": False, "streaming": False, "spoken": []}
+    sink = think._make_sentence_sink("hi", speak, None, state)
+    return think, speak, state, sink
+
+
+def test_sentence_sink_aborts_on_gate_exception(monkeypatch):
+    """A gate_speak error must NOT let an unevaluated sentence reach TTS."""
+    _, speak, state, sink = _fail_closed_sink_parts(monkeypatch, gate_raises=True)
+    assert sink("Hello world.") is False
+    assert state["aborted"] is True
+    assert speak.fed == [], f"no unevaluated sentence may reach TTS, got {speak.fed!r}"
+
+
+def test_sentence_sink_aborts_on_review_exception(monkeypatch):
+    """A _review_response error must NOT let an unevaluated sentence reach TTS."""
+    _, speak, state, sink = _fail_closed_sink_parts(monkeypatch, review_raises=True)
+    assert sink("Hello world.") is False
+    assert state["aborted"] is True
+    assert speak.fed == [], f"no unevaluated sentence may reach TTS, got {speak.fed!r}"
+
+
+# ---------------------------------------------------------------------------
+# Sentence-stream drain: only accepted spans count as consumed (CodeRabbit 6)
+# ---------------------------------------------------------------------------
+
+
+def test_drain_counts_only_accepted_sentences(monkeypatch):
+    """A refused sentence is never spoken, so it must not count as consumed.
+
+    Regression: the old drain counted every parsed sentence (and the final
+    tail) as consumed before the sink accepted it, so _finalize_response
+    could skip emitting a sentence that was never spoken.
+    """
+    monkeypatch.setattr(think_module, "_SENTENCE_STREAM", True)
+    latency_mod.reset()
+    from cognition.conscience import hooks
+    monkeypatch.setattr(hooks, "gate_speak", lambda *, draft, **kw: None)
+
+    think = _stream_think(["Hello world. ", "Bad news here. ", "All good."])
+    think._review_response = (
+        lambda user_input, text: {"flags": ["bad", "worse"] if "Bad" in text else []}
+    )
+    speak = FakeSpeak()
+    state = {"aborted": False, "streaming": False, "spoken": []}
+    sink = _SentenceSink(think._make_sentence_sink("hi", speak, None, state))
+
+    text = think._stream_response([], system="", sentence_sink=sink)
+
+    assert text == "Hello world. Bad news here. All good."
+    # Only the accepted sentence was spoken...
+    assert speak.fed == ["Hello world."]
+    assert state["aborted"] is True
+    # ...and only its raw span counts as consumed — the refused sentence and
+    # everything after it stay un-consumed so finalize can still emit them.
+    assert sink.consumed_chars == len("Hello world. "), (
+        f"refused sentence counted as consumed: {sink.consumed_chars}"
+    )
+
+
+def test_drain_rejected_first_sentence_counts_nothing(monkeypatch):
+    """If the very first sentence is refused, consumed stays 0."""
+    monkeypatch.setattr(think_module, "_SENTENCE_STREAM", True)
+    latency_mod.reset()
+    from cognition.conscience import hooks
+    monkeypatch.setattr(hooks, "gate_speak", lambda *, draft, **kw: None)
+
+    think = _stream_think(["Nope. ", "Later."])
+    think._review_response = lambda user_input, text: {"flags": ["bad", "worse"]}
+    speak = FakeSpeak()
+    state = {"aborted": False, "streaming": False, "spoken": []}
+    sink = _SentenceSink(think._make_sentence_sink("hi", speak, None, state))
+
+    think._stream_response([], system="", sentence_sink=sink)
+
+    assert speak.fed == []
+    assert sink.consumed_chars == 0
+
+
+# ---------------------------------------------------------------------------
+# Latency report: intervals in timestamp order (CodeRabbit fix 8)
+# ---------------------------------------------------------------------------
+
+
+def test_latency_report_sorts_by_timestamp():
+    """Out-of-order marks (e.g. first_audio before final_token during
+    sentence streaming) must not produce negative intervals."""
+    t = latency_mod.TurnLatency()
+    # Simulate sentence streaming: audio starts before the stream ends.
+    t.marks["input_received"] = 1000.0
+    t.marks["first_audio"] = 1001.0
+    t.marks["final_token"] = 1002.0
+    report = t.report()
+    assert "first_audio→final_token=" in report
+    assert "=-" not in report, f"negative interval in {report!r}"

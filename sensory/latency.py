@@ -7,11 +7,11 @@ A tiny first-write-wins timestamp tracker shared by the chat pipeline
     input_received     typed text arrived at route()/chat()
     intent_embedded    intent embedding done (route_vec)
     recall_completed   chained recall done (memory → entity-link → knowledge)
+    conscience_inbound gate_respond done (route, pre-LLM)
     first_llm_token    first content token from the LLM stream
     first_sentence     first complete sentence parsed from the stream
     final_token        LLM stream complete
     local_review       _review_response done
-    conscience_inbound gate_respond done (route, pre-LLM)
     conscience_outbound gate_speak done (finalize, pre-emit)
     first_tts_synth    first successful MioTTS synthesis this turn
     first_audio        first audio playback started
@@ -34,11 +34,11 @@ STAGES = (
     "input_received",
     "intent_embedded",
     "recall_completed",
+    "conscience_inbound",
     "first_llm_token",
     "first_sentence",
     "final_token",
     "local_review",
-    "conscience_inbound",
     "conscience_outbound",
     "first_tts_synth",
     "first_audio",
@@ -65,15 +65,18 @@ class TurnLatency:
         return max(0.0, b - a)
 
     def report(self) -> str:
-        """One-line stage→stage breakdown, e.g. for the log."""
+        """One-line stage→stage breakdown, e.g. for the log.
+
+        Intervals are computed in timestamp order, not STAGES order:
+        sentence streaming can start audio before final_token, so
+        declaration order would produce negative intervals.
+        """
         if not self.marks:
             return "[latency] no marks this turn"
+        ordered = sorted(self.marks.items(), key=lambda kv: kv[1])
         parts = []
         prev = None
-        for stage in STAGES:
-            t = self.marks.get(stage)
-            if t is None:
-                continue
+        for stage, t in ordered:
             if prev is not None:
                 parts.append(f"{prev[0]}→{stage}={t - prev[1]:.3f}s")
             prev = (stage, t)

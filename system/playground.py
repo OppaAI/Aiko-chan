@@ -28,9 +28,11 @@ Safety contract (also repeated in the worker instructions):
 - Execute ALL built code through ``sandbox/run.py`` (path-confined, timeouts).
   Never run goal code directly.
 - The public repo must never contain secrets, credentials, private raw logs,
-  or sensitive machine data. SMTP password comes from the ``PLAYGROUND_SMTP_PASS``
-  environment variable, never from a file in the repo.
-- Exactly one completion email per finished goal, via ``loop/notify.py``.
+  or sensitive machine data. Completion email goes through Aiko's own
+  send_email tool (ProtonMail) to AIKO_EMAIL; loop/notify.py over SMTP
+  (PLAYGROUND_SMTP_PASS) is fallback-only.
+- Exactly one completion email per finished goal, via ``send_email``
+  (fallback: ``loop/notify.py``).
 - Instant kill switch: disabling the schedule record (e.g. in Calendar Studio)
   stops future ticks; a ``loop/disabled`` sentinel file in the Playground repo
   makes a running tick stand down immediately.
@@ -89,10 +91,13 @@ SESSION RULES
    how to run it), commit locally with a clear message.
 7. Push only if git credentials work non-interactively; never print or store
    tokens. If push fails, leave the commit local and note it in REPORT.md.
-8. Exactly ONE completion email per finished goal, via loop/notify.py.
-   Recipient defaults to oppa.ai.org@proton.me (or loop/config.yaml).
-   SMTP password comes ONLY from the PLAYGROUND_SMTP_PASS environment
-   variable. If it is unavailable, write the email body to
+8. Exactly ONE completion email per finished goal, sent with your own
+   send_email tool (ProtonMail) — primary path, no extra setup.
+   Recipient is AIKO_EMAIL from your environment (oppa.ai.org@proton.me)
+   unless loop/config.yaml sets email.to.
+   Fallback only: if send_email is unavailable, run loop/notify.py instead;
+   its SMTP password comes ONLY from the PLAYGROUND_SMTP_PASS environment
+   variable. If that is unavailable too, write the email body to
    work/<slug>/EMAIL_DRAFT.md and note that the email is pending — do not
    invent credentials and do not retry-send later.
 9. NEVER put secrets, API keys, private raw logs, or sensitive machine data

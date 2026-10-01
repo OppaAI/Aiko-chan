@@ -73,27 +73,35 @@ def clean_user_env(monkeypatch):
     reset_current_display_name(display_token)
 
 
-@pytest.mark.asyncio
-async def test_bind_user_context_is_request_local(monkeypatch):
-    web = AikoWeb.__new__(AikoWeb)
-    web._memorize = DummyMemorize()
+def test_bind_user_context_is_request_local(monkeypatch):
+    # Runs the whole scenario inside one asyncio.run so the coroutine, its
+    # contextvar sets, and the assertions share a single context — the same
+    # guarantee the old @pytest.mark.asyncio gave, without the plugin.
+    # Context changes must not leak into the outer (test) context either.
+    async def scenario():
+        web = AikoWeb.__new__(AikoWeb)
+        web._memorize = DummyMemorize()
 
-    user_token, display_token, display_name = await web._bind_user_context(
-        "alice", {"username": "Alice"}
-    )
-    try:
-        assert current_user_id() == "alice"
-        assert current_display_name() == "Alice"
-        assert display_name == "Alice"
-        assert os.getenv("AIKO_USER_ID") is None
-        assert web._memorize.switched == []
-        assert web._memorize.display_names == []
-        assert not hasattr(web, "_current_user_id")
-        assert not hasattr(web, "_current_display_name")
-    finally:
-        reset_current_display_name(display_token)
-        reset_current_user_id(user_token)
+        user_token, display_token, display_name = await web._bind_user_context(
+            "alice", {"username": "Alice"}
+        )
+        try:
+            assert current_user_id() == "alice"
+            assert current_display_name() == "Alice"
+            assert display_name == "Alice"
+            assert os.getenv("AIKO_USER_ID") is None
+            assert web._memorize.switched == []
+            assert web._memorize.display_names == []
+            assert not hasattr(web, "_current_user_id")
+            assert not hasattr(web, "_current_display_name")
+        finally:
+            reset_current_display_name(display_token)
+            reset_current_user_id(user_token)
 
+        assert current_user_id() == "guest"
+
+    asyncio.run(scenario())
+    # Nothing leaked out of the request context.
     assert current_user_id() == "guest"
 
 
@@ -101,7 +109,7 @@ def test_get_input_uses_queued_identity_not_shared_state(monkeypatch):
     web = AikoWeb.__new__(AikoWeb)
     web._input_q = queue.Queue()
     web._input_q.put(("hello", "bob", "Bobby"))
-    web._broadcast = lambda payload: None
+    web._broadcast = lambda payload, **_kwargs: None
     web._push_vitals = lambda: None
 
     assert web.get_input() == "hello"
@@ -304,8 +312,9 @@ def test_concurrent_user_active_calls_run_post_auth_once(monkeypatch):
 
     memorize = Memorize()
     from system.wakeup import BootResult
-    boot_result = BootResult(memorize=memorize, think=None, speak=None, perceive=None, observe=None, navigate=None)
+    boot_result = BootResult(memorize=memorize, think=None, speak=None, listen=None)
     web = AikoWeb(boot_result=boot_result, defer_servers=True)
+    web.set_boot_result(boot_result)  # what main.py does after wakeup.boot()
 
     barrier = threading.Barrier(2)
     def active_with_barrier(uid):
@@ -344,8 +353,9 @@ def test_concurrent_user_active_different_users(monkeypatch):
 
     memorize = Memorize()
     from system.wakeup import BootResult
-    boot_result = BootResult(memorize=memorize, think=None, speak=None, perceive=None, observe=None, navigate=None)
+    boot_result = BootResult(memorize=memorize, think=None, speak=None, listen=None)
     web = AikoWeb(boot_result=boot_result, defer_servers=True)
+    web.set_boot_result(boot_result)  # what main.py does after wakeup.boot()
 
     barrier = threading.Barrier(2)
     def active_with_barrier(uid):

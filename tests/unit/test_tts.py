@@ -25,10 +25,14 @@ import re
 import urllib.request
 
 import numpy as np
-import sounddevice as sd
 import scipy.io.wavfile as wav_io
-from faster_whisper import WhisperModel
 from scipy.signal import resample_poly
+
+# NOTE: sounddevice / faster-whisper are imported lazily inside the functions
+# that use them (record_until_silence, speak, load_whisper) — same pattern as
+# sensory/listen.py and sensory/speak.py. Module-level imports would break
+# pytest collection on machines without PortAudio or the Whisper weights
+# stack, and this file collects zero tests (manual hardware diagnostic).
 
 # ── config ────────────────────────────────────────────────────────────────────
 
@@ -74,7 +78,9 @@ def sanitize(text: str) -> str:
 
 # ── stt ───────────────────────────────────────────────────────────────────────
 
-def load_whisper() -> WhisperModel:
+def load_whisper():
+    from faster_whisper import WhisperModel
+
     print(f"[STT] Loading whisper-{WHISPER_MODEL} on {WHISPER_DEVICE}...")
     model = WhisperModel(WHISPER_MODEL, device=WHISPER_DEVICE, compute_type="float16")
     print("[STT] Ready.")
@@ -83,6 +89,8 @@ def load_whisper() -> WhisperModel:
 
 def record_until_silence() -> np.ndarray:
     """Record audio until silence is detected or max duration reached."""
+    import sounddevice as sd
+
     print("[STT] Listening... (speak now)")
     chunk = int(SAMPLE_RATE * 0.1)
     max_chunks = int(RECORD_SECONDS / 0.1)
@@ -120,7 +128,7 @@ def record_until_silence() -> np.ndarray:
     return audio
 
 
-def transcribe(model: WhisperModel, audio: np.ndarray) -> str:
+def transcribe(model, audio: np.ndarray) -> str:
     segments, info = model.transcribe(
         audio,
         language=WHISPER_LANG,
@@ -169,6 +177,11 @@ def speak(text: str) -> None:
         method="POST",
     )
     try:
+        # Import inside the handler: sounddevice initializes PortAudio on
+        # import, which raises when the host library is absent. Keeping it
+        # here lets the except below report a TTS error instead of escaping.
+        import sounddevice as sd
+
         with urllib.request.urlopen(req, timeout=60) as r:
             body = json.loads(r.read())
         wav_bytes = base64.b64decode(body["audio"])

@@ -23,14 +23,14 @@ from system.config import load_config
 load_config()
 
 # ─── Import modules to benchmark ──────────────────────────────────────────────
-from agentic import schema
+from agentic import graph_engine as schema
 from agentic.capability import match_capabilities, filtered_tool_schemas
 from agentic.toolkit.synthesize import synthesize_report, kb_search, combine_evidence, condense_text
 from agentic.toolkit.research import condense_evidence
 from agentic.toolkit.plan import save_note, create_checklist, make_plan
 from agentic.toolkit.reports import write_report
 from agentic.agentic import _validate_args, _classify_result, _owner_embedder
-from cognition.knowledge import search_knowledge, knowledge_context_for, ingest_text, connect
+from cognition.knowledge import search_knowledge, knowledge_context_for, ingest_text
 from cognition.reason import batch_cosine_scores, keyword_overlap_score
 
 
@@ -73,7 +73,8 @@ class MockLLMClient:
 # ─── Fixtures ─────────────────────────────────────────────────────────────────
 @pytest.fixture(scope="module")
 def embedder():
-    return FakeEmbedder()
+    from cognition.knowledge.schema import EMBED_DIMS
+    return FakeEmbedder(dim=EMBED_DIMS)
 
 
 @pytest.fixture(scope="module")
@@ -297,35 +298,50 @@ class TestReasoningPerformance:
 
 
 # ─── Memory/Knowledge Benchmarks ─────────────────────────────────────────────
+def _bench_connect(path, user_id="bench_user"):
+    """Open a throwaway knowledge DB at *path* with the current schema.
+
+    Production ``connect()`` resolves the canonical store DB per user and no
+    longer takes a file path, so benchmarks build their own DB the same way
+    production does: ``initialize_store_db`` with the knowledge DDL.
+    """
+    from cognition.knowledge.schema import _DDL
+    from cognition.memory.vecstore import initialize_store_db
+    return initialize_store_db(str(path), _DDL, user_id=user_id, vector=True)
+
+
 class TestMemoryPerformance:
     """Benchmarks for memory/knowledge operations."""
 
     def test_search_knowledge_latency(self, benchmark, embedder, tmp_path):
         """Benchmark search_knowledge with seeded DB."""
         db_path = tmp_path / "bench.db"
-        conn = connect(str(db_path))
+        seed_conn = _bench_connect(db_path)
 
         # Seed 1000 docs
-        from cognition.knowledge import _knn, _fts, KNOWLEDGE_KNN_LIMIT, KNOWLEDGE_FTS_LIMIT
         import sqlite_vec
         now = "2024-01-01T00:00:00"
         for i in range(1000):
             doc_id = f"doc-{i}"
-            conn.execute("INSERT INTO learned_docs (id, user_id, title, source, kind, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            seed_conn.execute("INSERT INTO learned_docs (id, user_id, title, source, kind, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                          (doc_id, "bench_user", f"Doc {i}", "bench", "ingested", now))
             text = f"Content about topic {i}. " * 5
             chunk_id = f"{doc_id}-chunk-0"
             vec = embedder.embed_query(text)
-            conn.execute("INSERT INTO learned_chunks (id, doc_id, chunk_index, text, created_at) VALUES (?, ?, ?, ?, ?)",
-                         (chunk_id, doc_id, 0, text, now))
-            conn.execute("INSERT INTO learned_chunks_vec (id, embedding) VALUES (?, ?)",
+            seed_conn.execute("INSERT INTO learned_chunks (id, doc_id, user_id, chunk_index, text, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                         (chunk_id, doc_id, "bench_user", 0, text, now))
+            seed_conn.execute("INSERT INTO learned_chunks_vec (id, embedding) VALUES (?, ?)",
                          (chunk_id, sqlite_vec.serialize_float32(vec.tolist())))
-            conn.execute("INSERT INTO learned_chunks_fts (id, text) VALUES (?, ?)",
-                         (chunk_id, text))
-        conn.commit()
+            # learned_chunks_fts is synced by a trigger on learned_chunks
+        seed_conn.commit()
+        seed_conn.close()
 
         def _run():
-            with patch("cognition.knowledge.connect", return_value=conn):
+            # Production closes the connection per call, so every benchmark
+            # iteration needs a fresh handle — reusing one would time
+            # failed searches against a closed connection after round one.
+            with patch("cognition.knowledge.search.connect",
+                       side_effect=lambda uid=None: _bench_connect(db_path)):
                 return search_knowledge("topic 500", limit=10, embedder=embedder, user_id="bench_user")
 
         results = benchmark(_run)
@@ -334,26 +350,29 @@ class TestMemoryPerformance:
     def test_knowledge_context_for_latency(self, benchmark, embedder, tmp_path):
         """Benchmark knowledge_context_for formatting."""
         db_path = tmp_path / "bench.db"
-        conn = connect(str(db_path))
+        seed_conn = _bench_connect(db_path)
         import sqlite_vec
         now = "2024-01-01T00:00:00"
         for i in range(100):
             doc_id = f"doc-{i}"
-            conn.execute("INSERT INTO learned_docs (id, user_id, title, source, kind, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            seed_conn.execute("INSERT INTO learned_docs (id, user_id, title, source, kind, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                          (doc_id, "bench_user", f"Doc {i}", "bench", "ingested", now))
             text = f"Content about {i}. " * 10
             chunk_id = f"{doc_id}-chunk-0"
             vec = embedder.embed_query(text)
-            conn.execute("INSERT INTO learned_chunks (id, doc_id, chunk_index, text, created_at) VALUES (?, ?, ?, ?, ?)",
-                         (chunk_id, doc_id, 0, text, now))
-            conn.execute("INSERT INTO learned_chunks_vec (id, embedding) VALUES (?, ?)",
+            seed_conn.execute("INSERT INTO learned_chunks (id, doc_id, user_id, chunk_index, text, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                         (chunk_id, doc_id, "bench_user", 0, text, now))
+            seed_conn.execute("INSERT INTO learned_chunks_vec (id, embedding) VALUES (?, ?)",
                          (chunk_id, sqlite_vec.serialize_float32(vec.tolist())))
-            conn.execute("INSERT INTO learned_chunks_fts (id, text) VALUES (?, ?)",
-                         (chunk_id, text))
-        conn.commit()
+            # learned_chunks_fts is synced by a trigger on learned_chunks
+        seed_conn.commit()
+        seed_conn.close()
 
         def _run():
-            with patch("cognition.knowledge.connect", return_value=conn):
+            # Fresh handle per iteration: production closes the connection
+            # per call (see test_search_knowledge_latency above).
+            with patch("cognition.knowledge.search.connect",
+                       side_effect=lambda uid=None: _bench_connect(db_path)):
                 return knowledge_context_for("topic 50", limit=10, embedder=embedder, user_id="bench_user")
 
         ctx = benchmark(_run)

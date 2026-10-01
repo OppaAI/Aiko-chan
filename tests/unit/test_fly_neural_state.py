@@ -8,36 +8,45 @@ from cognition.fly_behavior import sleep_sched
 from cognition.neural_state import NeuralState, clear_neural_state, get_neural_state, peek_neural_state
 
 
+def _clear_seen():
+    lateral_horn._seen_fp.clear()
+    lateral_horn._seen_vec.clear()
+
+
+def _seen_users():
+    return set(lateral_horn._seen_fp) | set(lateral_horn._seen_vec)
+
+
 def test_lateral_horn_ignores_blank_identity(monkeypatch):
     monkeypatch.setattr(lateral_horn, "_mode", lambda: "live")
-    lateral_horn._seen.clear()
+    _clear_seen()
 
     neutral = {"mode": "live", "familiarity": 0.5, "novel": False}
     assert lateral_horn.context_prior("same context", user_id=None) == neutral
     assert lateral_horn.context_prior("same context", user_id="   ") == neutral
-    assert lateral_horn._seen == {}
+    assert lateral_horn._seen_fp == {} and lateral_horn._seen_vec == {}
 
 
 def test_lateral_horn_uses_trimmed_identity(monkeypatch):
     monkeypatch.setattr(lateral_horn, "_mode", lambda: "live")
-    lateral_horn._seen.clear()
+    _clear_seen()
 
     first = lateral_horn.context_prior("same context", user_id="  alice  ")
     second = lateral_horn.context_prior("same context", user_id="alice")
 
     assert first["novel"] is True
     assert second["novel"] is False
-    assert set(lateral_horn._seen) == {"alice"}
+    assert _seen_users() == {"alice"}
 
 
 def test_lateral_horn_read_only_lookup_does_not_record(monkeypatch):
     monkeypatch.setattr(lateral_horn, "_mode", lambda: "live")
-    lateral_horn._seen.clear()
+    _clear_seen()
 
     prior = lateral_horn.context_prior("unseen context", user_id="alice", record=False)
 
     assert prior["novel"] is True
-    assert lateral_horn._seen == {}
+    assert lateral_horn._seen_fp == {} and lateral_horn._seen_vec == {}
 
 
 def test_shadow_maintenance_logs_pressure_prediction_without_acting(monkeypatch, caplog):

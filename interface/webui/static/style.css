@@ -17,9 +17,9 @@
 }
 
 :root {
-  --bg: #fff5f7;
-  --bg2: #f8f0ff;
-  --border: rgba(224, 187, 228, 0.4);
+  --bg: #fdeef4;
+  --bg2: #f9e2eb;
+  --border: rgba(233, 150, 180, 0.45);
   --pink: #ff9eb5;
   --purple: #c8a2c8;
   --mauve: #d8a8d8;
@@ -30,7 +30,7 @@
   --aiko: #c2185b;
   --sys: #9d84b6;
   --input-fg: #5a3d5c;
-  --scrollbar: #e0bbe4;
+  --scrollbar: #eaa9c1;
 
   --text: #5a3d5c;
 
@@ -41,13 +41,13 @@
   --brand-patreon: #ffb3ba;
   --brand-patreon-fg: #5a1e1e;
 
-  --glass-bg: rgba(255, 255, 255, 0.55);
-  --glass-border: rgba(255, 255, 255, 0.85);
-  --glass-highlight: rgba(255, 255, 255, 0.9);
+  --glass-bg: rgba(255, 244, 248, 0.6);
+  --glass-border: rgba(255, 228, 238, 0.9);
+  --glass-highlight: rgba(255, 240, 246, 0.9);
 }
 
 body {
-  background: linear-gradient(135deg, #fff5f7 0%, #f8f0ff 25%, #f0f8ff 50%, #fffaf0 75%, #f5fff5 100%);
+  background: linear-gradient(135deg, #fdeef4 0%, #fbdfe7 30%, #f9d9e4 55%, #f6e3ec 80%, #fdeef4 100%);
   font-family: var(--font-main);
   color: var(--text);
   height: var(--app-height, 100dvh);

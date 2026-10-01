@@ -29,9 +29,13 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 // Transparent companion shell (Tauri, flagged by companion.js before this
 // deferred module runs) needs a fully clear canvas so the desktop shows
-// through; browsers keep the classic opaque backdrop.
+// through; browsers keep a theme backdrop instead (dark navy / light pink).
+const VRM_BG_DARK = 0x0c0614;
+const VRM_BG_LIGHT = 0xfbdfe7;
+const VRM_GRID_DARK = [0x1a0a2a, 0x100820];
+const VRM_GRID_LIGHT = [0xd8a7b8, 0xeccfdd];
 if (window.aikoIsTauri) renderer.setClearColor(0x000000, 0);
-else renderer.setClearColor(0x0a0a0f);
+else renderer.setClearColor(document.documentElement.dataset.theme === 'light' ? VRM_BG_LIGHT : VRM_BG_DARK);
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(8, 1, 0.1, 100);
@@ -56,7 +60,22 @@ scene.add(rim);
 const fillL = new THREE.DirectionalLight(0xd4b0ff, 0.3);
 fillL.position.set(0, -1, 2);
 scene.add(fillL);
-scene.add(new THREE.GridHelper(10, 20, 0x1a0a2a, 0x100820));
+let grid = new THREE.GridHelper(10, 20, ...(document.documentElement.dataset.theme === 'light' ? VRM_GRID_LIGHT : VRM_GRID_DARK));
+scene.add(grid);
+
+// Theme backdrop: light mode gets a light-pink canvas (+ matching grid),
+// dark mode the classic navy. Tauri stays fully transparent.
+function applyVrmTheme(theme) {
+  if (window.aikoIsTauri) return;
+  renderer.setClearColor(theme === 'light' ? VRM_BG_LIGHT : VRM_BG_DARK);
+  const colors = theme === 'light' ? VRM_GRID_LIGHT : VRM_GRID_DARK;
+  scene.remove(grid);
+  if (grid.geometry) grid.geometry.dispose();
+  if (grid.material) grid.material.dispose();
+  grid = new THREE.GridHelper(10, 20, ...colors);
+  scene.add(grid);
+}
+try { window.addEventListener('aiko-theme', (e) => applyVrmTheme(e && e.detail === 'light' ? 'light' : 'dark')); } catch (_) {}
 
 function resize() {
   const w = vrmSide.clientWidth;

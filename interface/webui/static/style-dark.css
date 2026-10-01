@@ -23,11 +23,11 @@
 }
 
 :root {
-  --bg: #0a0a0f;
-  --bg2: #0e0e17;
-  --border: #1e1428;
+  --bg: #0c0614;
+  --bg2: #160e22;
+  --border: #2a1e40;
   --pink: #c651a8;
-  --purple: #a888e8;
+  --purple: #c084fc;
   --mauve: #d8bcff;
   --cyan: #51d4c8;
   --dim: #4a3a6a;
@@ -36,7 +36,7 @@
   --aiko: #c8a8f0;
   --sys: #4a3a6a;
   --input-fg: #c8b8e8;
-  --scrollbar: #1e1428;
+  --scrollbar: #2a1e40;
 
   --text: #cdbfe6;
 
@@ -119,14 +119,14 @@ body {
 
   #content {
     pointer-events: auto;
-    background: linear-gradient(180deg, transparent 0%, rgba(10, 10, 15, .75) 40%, rgba(10, 10, 15, .92) 100%);
+    background: linear-gradient(180deg, transparent 0%, rgba(12, 6, 20, .75) 40%, rgba(12, 6, 20, .92) 100%);
     max-height: 30vh;
     padding: 16px 14px 6px;
   }
 
   #voice-status {
     pointer-events: auto;
-    background: rgba(10, 10, 15, .75);
+    background: rgba(12, 6, 20, .75);
     border-top: none;
     padding: 2px 14px;
   }
@@ -219,7 +219,7 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  background: linear-gradient(180deg, rgba(10, 10, 15, .9) 0%, transparent 100%);
+  background: linear-gradient(180deg, rgba(12, 6, 20, .9) 0%, transparent 100%);
   pointer-events: none;
   font-size: 11px;
   letter-spacing: .15em;
@@ -260,7 +260,7 @@ body {
   pointer-events: none;
   font-size: 10px;
   color: var(--dim);
-  background: rgba(10, 10, 15, .55);
+  background: rgba(12, 6, 20, .55);
   border: 1px solid rgba(30, 20, 40, .7);
   border-radius: 4px;
   padding: 6px 8px;
@@ -792,7 +792,7 @@ body {
 .auth-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(10, 10, 15, 0.7);
+  background: rgba(12, 6, 20, 0.7);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   display: flex;

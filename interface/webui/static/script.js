@@ -67,6 +67,7 @@ const themeToggleBtn = document.getElementById('theme-toggle');
 function applyTheme(theme) {
   const dark = theme === 'dark';
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  try { window.dispatchEvent(new CustomEvent('aiko-theme', { detail: dark ? 'dark' : 'light' })); } catch (_) {}
   const lightLink = document.getElementById('theme-style-light');
   const darkLink = document.getElementById('theme-style-dark');
   if (lightLink && darkLink) {

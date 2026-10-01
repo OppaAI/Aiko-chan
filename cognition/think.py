@@ -1034,14 +1034,14 @@ class AikoThink:
         try:
             from cognition.attention import for_identity
             state = for_identity(user_id)
-            ok, reason, action = state.should_attempt(user_input, mode="route")
-            gate_result = (ok, reason, action)
+            ok, gate_reason, gate_action = state.should_attempt(user_input, mode="route")
+            gate_result = (ok, gate_reason, gate_action)
             snap = state.snapshot()
             _brain_trace.record_step(
                 "attention.should_attempt",
                 layer="gate",
                 inputs={"user_input": user_input, "mode": "route", "user_id": user_id},
-                outputs={"ok": ok, "reason": reason, "action": action},
+                outputs={"ok": ok, "reason": gate_reason, "action": gate_action},
                 factors=[
                     f"energy={snap.get('energy')}",
                     f"uncertainty={snap.get('uncertainty')}",
@@ -1054,9 +1054,9 @@ class AikoThink:
                 ],
             )
             if not ok:
-                log.info("[route] should_attempt action=%s reason=%s", action, reason)
+                log.info("[route] should_attempt action=%s reason=%s", gate_action, gate_reason)
                 reply = self._soft_gate_reply(
-                    user_input, action, reason, token_callback=token_callback,
+                    user_input, gate_action, gate_reason, token_callback=token_callback,
                 )
                 _finish_route_tracking()
                 return reply
@@ -1783,11 +1783,11 @@ class AikoThink:
                 except Exception as exc:
                     log.debug("[agentic_chat] should_attempt skipped: %s", exc)
                     gate_result = (True, "gate unavailable", "proceed")
-            ok, reason, action = gate_result
+            ok, gate_reason, gate_action = gate_result
             if not ok:
-                log.info("[agentic_chat] should_attempt action=%s reason=%s", action, reason)
+                log.info("[agentic_chat] should_attempt action=%s reason=%s", gate_action, gate_reason)
                 return self._soft_gate_reply(
-                    user_input, action, reason, token_callback=token_callback,
+                    user_input, gate_action, gate_reason, token_callback=token_callback,
                     mem_kb_future=mem_kb_future, query_vec=query_vec,
                 )
 

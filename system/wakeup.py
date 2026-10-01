@@ -99,6 +99,7 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError  # bounded bo
 from dataclasses import dataclass                           # for dataclass to hold subsystem refs
 from typing import Any                                      # Any still lives in typing — collections.abc has no equivalent
 import threading                                            # for booting up cognition core and memory system in parallel
+import time                                                 # for TTS warmup timing (latency instrumentation)
 
 # Upper bounds for the parallel boot phase. Aiko runs unattended on the
 # Jetson — a subsystem that hangs (wedged sqlite-vec init, stalled model
@@ -156,6 +157,7 @@ def start_speak() -> AikoSpeak | None:
     non-fatal voice boot semantics in AikoWakeup.boot(). Used by boot() and
     by the /voice toggle for on-demand init when --text skipped TTS at boot.
     """
+    _warmup_t0 = time.monotonic()
     try:
         speak = AikoSpeak(silent=True)
     except Exception:
@@ -166,6 +168,11 @@ def start_speak() -> AikoSpeak | None:
     except Exception:
         log.exception("[wakeup] TTS warmup failed — Aiko will run without voice output.")
         return None
+    try:
+        _warmup_done = time.monotonic() - _warmup_t0
+        log.info("[latency] tts_warmup=%.3fs (MioTTS /health ping at boot)", _warmup_done)
+    except Exception:
+        pass
     return speak
 
 

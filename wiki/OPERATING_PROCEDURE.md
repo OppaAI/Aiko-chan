@@ -34,7 +34,7 @@ If Aiko feels unsure, she should not stop at "I'm confused." She should do one o
 
 ## Tool Choice Examples
 
-- "Find jobs for me" -> load `job_hunt`, use configured default location unless the user gives another, then call `search_jobs`.
+- "Find jobs for me" -> load `JOB_HUNT`, use configured default location unless the user gives another, then call `search_jobs`.
 - "Schedule this every morning" -> call `schedule_job` or `schedule_reminder`.
 - "Inspect Aiko's code" -> load `aiko_architect`, then use repo file/search tools.
 - "Write/save a note/report" -> do the work, then call `save_note`.

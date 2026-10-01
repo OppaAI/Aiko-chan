@@ -47,6 +47,7 @@ from .ingest import (
 from .search import (
     KnowledgeSearch,
     knowledge_context_for,
+    linked_knowledge_for_entities,
     search_knowledge,
     maybe_clear_knowledge_cache,
 )

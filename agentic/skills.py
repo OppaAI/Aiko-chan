@@ -398,6 +398,56 @@ def load_skillset(skill_id: str, max_chars: int = 12_000) -> str:
     return f"[skill not found: {skill_id}]"
 
 
+def _resolve_skill_doc(name: str) -> "SkillDoc | None":
+    """Resolve a skill by human name or id (case-insensitive).
+
+    Also recognizes the `<name>/SKILL.md` layout so skills authored as a
+    directory with a SKILL.md file resolve the same way as `<id>.md` files.
+    """
+    cleaned = (name or "").strip().replace("/", "").replace("\\", "").casefold()
+    if not cleaned:
+        return None
+    for doc in discover_skill_docs():
+        if doc.skill_id.casefold() == cleaned or doc.name.casefold() == cleaned:
+            return doc
+    # Forward-compat: <stem>/SKILL.md directory layout (piece 5 naming).
+    for root in (SKILL_ROOT / "skillsets", _user_skillsets_path()):
+        try:
+            candidate = root / cleaned / "SKILL.md"
+        except Exception:
+            continue
+        if candidate.is_file():
+            raw = candidate.read_text(encoding="utf-8", errors="replace")
+            meta, _body = _front_matter(raw)
+            return SkillDoc(
+                skill_id=meta.get("id", cleaned),
+                name=meta.get("name") or _heading_name(_body, cleaned.replace("_", " ").title()),
+                path=candidate,
+                summary=meta.get("summary") or _first_paragraph(_body),
+                triggers=_split_csv(meta.get("triggers", "")),
+                tools=_split_csv(meta.get("tools", "")),
+                sources=_split_csv(meta.get("sources", "")),
+            )
+    return None
+
+
+@tool(TOOLS["load_skill"])
+def load_skill(name: str, max_chars: int = 12_000) -> str:
+    """Load one full skill document by name (or id). Lazy full-load
+    counterpart to the discovery surface (list_skillsets /
+    search_skillsets_json): the agent reads name+description first and
+    pulls the complete instructions only when it actually needs them."""
+    doc = _resolve_skill_doc(name)
+    if doc is None:
+        known = ", ".join(sorted({d.name for d in discover_skill_docs()})) or "none"
+        return f"[skill not found: {name}] Known skills: {known}"
+    try:
+        text = doc.path.read_text(encoding="utf-8", errors="replace")[:max(1, min(max_chars, 50_000))]
+    except OSError as e:
+        return f"[skill load failed: {e}]"
+    return f"<skill id=\"{doc.skill_id}\" name=\"{doc.name}\">\n{text}\n</skill>"
+
+
 def skill_context_for(
     query: str, limit: int = 2, max_chars: int = 6000, embedder: Embedder | None = None,
 ) -> str:

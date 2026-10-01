@@ -12,6 +12,7 @@ person to review and copy into agentic/skillsets/ by hand (or via CLI).
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -148,12 +149,94 @@ def propose_skill_from_run(
 # skillset. It never writes into agentic/skillsets/ — only into
 # workspace/skillsets_staging/, where a person still has to copy it into the
 # trusted tree by hand.
+#
+# Explicit validation rules for promotion to a VALIDATED DAG live in
+# validate_dag_promotion below. A proposal becomes a validated DAG only when
+# every rule passes: the path must be repeated (several successful runs with
+# the same tool order), recent (latest run a success), and clean (every
+# success scored >= 0.7). One-off or shaky runs stay as drafts no matter who
+# asks.
+_DAG_PROMOTE_MIN_SUCCESSES = int(os.getenv("DAG_PROMOTE_MIN_SUCCESSES", "3"))
+_DAG_PROMOTE_MIN_SCORE = float(os.getenv("DAG_PROMOTE_MIN_SCORE", "0.7"))
 
 _SUCCESS_BLOCK_RE = re.compile(
     r"## Observed run \(success\)\n\nReusable tool order: (?P<order>.+?)\n\n"
     r"```json\n(?P<json>.+?)\n```",
     re.DOTALL,
 )
+
+
+# Matches every observed-run block (success or failure) so the validator can
+# see the full recent history, not just successes.
+_OBSERVED_RUN_RE = re.compile(
+    r"## Observed run \((?P<status>success|failure)\)\n\n"
+    r"(?:Reusable tool order: (?P<order>.+?)\n\n|Avoid / failed approach notes:[^\n]*\n\n)"
+    r"```json\n(?P<json>.+?)\n```",
+    re.DOTALL,
+)
+
+
+def _observed_runs(proposal_text: str) -> list[dict[str, Any]]:
+    """Parse every observed-run block in a proposal file, oldest first."""
+    runs = []
+    for m in _OBSERVED_RUN_RE.finditer(proposal_text):
+        try:
+            block = json.loads(m.group("json"))
+        except Exception:
+            block = {}
+        runs.append({
+            "status": m.group("status"),
+            "order": (m.group("order") or "").strip(),
+            "score": block.get("score"),
+            "tools": block.get("tools") or [],
+        })
+    return runs
+
+
+def validate_dag_promotion(slug: str, user_id: str | None = None) -> tuple[bool, list[str]]:
+    """Explicit validation rules for promoting a proposal to a validated DAG.
+
+    Returns (ok, reasons). A proposal becomes a validated DAG only when:
+      1. it exists and has observed runs;
+      2. at least _DAG_PROMOTE_MIN_SUCCESSES successful runs were observed
+         (the path is *repeated*, not a one-off);
+      3. every successful run scored >= _DAG_PROMOTE_MIN_SCORE (clean);
+      4. all successful runs share the same tool order (a stable path);
+      5. the latest observed run is a success (recent — no unresolved
+         failure after the last success).
+    """
+    reasons: list[str] = []
+    proposal_path = skill_proposal_dir(user_id) / f"{slug}.md"
+    if not proposal_path.exists():
+        return False, [f"no skill proposal found for slug={slug!r}"]
+    try:
+        text = proposal_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return False, [f"could not read proposal: {exc}"]
+    runs = _observed_runs(text)
+    if not runs:
+        return False, ["proposal has no observed runs yet"]
+    successes = [r for r in runs if r["status"] == "success"]
+    if len(successes) < _DAG_PROMOTE_MIN_SUCCESSES:
+        reasons.append(
+            f"only {len(successes)} successful observed run(s); "
+            f"need >= {_DAG_PROMOTE_MIN_SUCCESSES} for a validated DAG"
+        )
+    low = [r for r in successes
+           if not isinstance(r["score"], (int, float)) or float(r["score"]) < _DAG_PROMOTE_MIN_SCORE]
+    if low:
+        reasons.append(
+            f"{len(low)} successful run(s) scored below {_DAG_PROMOTE_MIN_SCORE:.2f}"
+        )
+    orders = {r["order"] for r in successes if r["order"]}
+    if len(orders) > 1:
+        reasons.append(
+            f"successful runs disagree on tool order ({len(orders)} variants); "
+            "not a stable repeated path"
+        )
+    if runs[-1]["status"] != "success":
+        reasons.append("latest observed run was a failure — resolve it before promotion")
+    return (not reasons), reasons
 
 
 def _latest_success_block(proposal_text: str) -> dict[str, Any] | None:
@@ -206,6 +289,7 @@ def promote_skill_proposal(
     *,
     user_id: str | None = None,
     dry_run: bool = True,
+    validated: bool = False,
 ) -> Path:
     """Read a proposal draft and build a candidate skillset in staging.
 
@@ -217,15 +301,31 @@ def promote_skill_proposal(
     dry_run=False: actually write the candidate skillset JSON to
     workspace/skillsets_staging/<slug>.json and return that path.
 
+    validated=False (default): the candidate is staged as a draft with
+    ``review_status: pending_human_review`` — it is NOT a validated DAG.
+    validated=True: the proposal must first pass :func:`validate_dag_promotion`;
+    on success the candidate is staged with ``review_status: validated_dag``
+    and the validation outcome recorded in the payload.
+
     Raises FileNotFoundError if no proposal exists for `slug`, and
     ValueError if the proposal has no successful observed run yet (a
-    proposal with only failures has nothing safe to promote).
+    proposal with only failures has nothing safe to promote) or, when
+    validated=True, if the promotion rules do not pass.
     """
     proposal_path = skill_proposal_dir(user_id) / f"{slug}.md"
     if not proposal_path.exists():
         raise FileNotFoundError(f"no skill proposal found for slug={slug!r} at {proposal_path}")
 
     text = proposal_path.read_text(encoding="utf-8")
+    validation_outcome: dict[str, Any] | None = None
+    if validated:
+        ok, reasons = validate_dag_promotion(slug, user_id=user_id)
+        if not ok:
+            raise ValueError(
+                f"skill proposal {slug!r} does not meet validated-DAG rules: "
+                + "; ".join(reasons)
+            )
+        validation_outcome = {"validated_dag": True, "rules": reasons or ["all rules passed"]}
     block = _latest_success_block(text)
     if block is None:
         raise ValueError(
@@ -259,8 +359,10 @@ def promote_skill_proposal(
         "triggers": [],
         "requires_any": [],
         "nodes": nodes,
-        "review_status": "pending_human_review",
+        "review_status": "validated_dag" if validation_outcome else "pending_human_review",
     }
+    if validation_outcome:
+        candidate["validation"] = validation_outcome
 
     staging_path = skillset_staging_dir(user_id) / f"{slug}.json"
     if dry_run:

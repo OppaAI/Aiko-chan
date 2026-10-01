@@ -80,6 +80,7 @@ from system import bioclock
 from cognition import reason
 from cognition.memory import learn
 from cognition.memory.vecstore import _QUERY_INSTRUCT
+from sensory import latency as _latency
 
 # NOTE: weekly_social handler is registered by system.schedule
 # (register_social_handlers via register_system_handlers_only at boot) — do
@@ -156,6 +157,20 @@ _LLM_CACHE_PROMPT = os.getenv("LLM_CACHE_PROMPT", "1").strip().lower() not in {"
 # non-thinking models (ministral) — the suffix would be visible prompt
 # noise to a template that doesn't strip it.
 _LLM_NO_THINK = os.getenv("LLM_NO_THINK", "").strip().lower() in {"1", "true", "yes", "on"}
+
+# Piece 3 (MioTTS latency): when on, the earliest *safe* complete sentence is
+# fed to the sentence-streaming TTS pipeline while the rest of the LLM
+# response is still generating, instead of waiting for the full draft to
+# clear review + gate_speak. Every streamed sentence still passes the two
+# required checks at sentence level — local _review_response and the
+# outbound gate_speak conscience gate — before any audio is synthesized for
+# it. Default OFF: full-draft gating first, then sentence TTS.
+#
+# Tradeoff (explicitly accepted): audio for a sentence that passed its own
+# gates cannot be recalled if the later full-draft review/correction wants
+# to rewrite it. Corrections fire only on >=2 review flags (rare), and any
+# divergence between spoken audio and final text is logged loudly.
+_SENTENCE_STREAM = os.getenv("AIKO_SENTENCE_STREAM", "").strip().lower() in {"1", "true", "yes", "on"}
 _NO_THINK_SUFFIX = " /no_think"
 
 
@@ -194,8 +209,9 @@ def _apply_no_think(messages: list[dict]) -> list[dict]:
     return out
 CONTEXT_WINDOW_TURNS = env_int("CONTEXT_WINDOW_TURNS", 8)
 
-# Shared default recall/knowledge depth across all three chat paths
-# (localchat/webchat/agentic) — see _fetch_memory_and_knowledge below.
+# Shared default recall/knowledge depth across the chat paths —
+# see _fetch_chained_knowledge (localchat/webchat) and
+# _fetch_memory_and_knowledge (agentic, until piece 2).
 MEMORY_RECALL_LIMIT = env_int("MEMORY_RECALL_LIMIT", 3)
 KNOWLEDGE_RECALL_LIMIT = env_int("KNOWLEDGE_RECALL_LIMIT", 3)
 # Recall hard-timeout — a slow local embed (llama.cpp) must not block the turn.
@@ -574,18 +590,15 @@ _LEARNED_KNOWLEDGE_HINT_RE = re.compile(
 )
 
 
-def _needs_learned_knowledge(raw_input: str, memories: list[dict] | None, knowledge_block: str) -> bool:
-    """On-demand gate for learned-knowledge injection in chat/webchat.
+def _memory_cannot_answer(raw_input: str, memories: list[dict] | None) -> bool:
+    """Memory-side of the on-demand knowledge gate.
 
-    Memory stays always-on (cheap, personal). Knowledge is dropped unless:
-    - no usable memories survived, or top memory confidence is low, or
-    - weakest kept memory still below MEMORY_MIN_SCORE*1.5, or
-    - explicit learned-note/research phrasing.
-    Fetch still happens concurrently (no extra latency); this only saves prompt tokens + confusion.
+    True when memory is absent/weak for this turn, or the turn explicitly
+    asks about learned notes/research — i.e. when an explicit knowledge
+    search is worth its embedding + vector-search cost. This runs BEFORE
+    the knowledge fetch (pre-fetch gating); the old design fetched first
+    and gated only the injection.
     """
-    kb = _blank_empty_knowledge(knowledge_block)
-    if not kb:
-        return False
     mems = memories or []
     if not mems:
         return True
@@ -607,6 +620,22 @@ def _needs_learned_knowledge(raw_input: str, memories: list[dict] | None, knowle
     if _LEARNED_KNOWLEDGE_HINT_RE.search(raw_input or ""):
         return True
     return False
+
+
+def _needs_learned_knowledge(raw_input: str, memories: list[dict] | None, knowledge_block: str) -> bool:
+    """On-demand gate for learned-knowledge injection in chat/webchat.
+
+    Memory stays always-on (cheap, personal). Knowledge is dropped unless:
+    - no usable memories survived, or top memory confidence is low, or
+    - weakest kept memory still below MEMORY_MIN_SCORE*1.5, or
+    - explicit learned-note/research phrasing.
+    Kept for the legacy future-based recall path; the chained recall path
+    gates at fetch time via _memory_cannot_answer instead.
+    """
+    kb = _blank_empty_knowledge(knowledge_block)
+    if not kb:
+        return False
+    return _memory_cannot_answer(raw_input, memories)
 
 # ── semantic intent examples ──────────────────────────────────────────────────
 
@@ -952,11 +981,13 @@ class AikoThink:
     def route(self, user_input: str, token_callback=None, system_note: str | None = None) -> str:
         """Main entry point. Quaternary routing.
 
-        Intent is resolved before memory/KB recall. Greeting-only turns are
+        Intent is resolved before recall. Greeting-only turns are
         intentionally cheap: they go straight to the LLM with persona + recent
         chat history only and skip memory recall, KB recall, and memory
-        extraction/writeback. Non-greeting turns then start the shared
-        memory+KB future and pass it to the selected handler.
+        extraction/writeback. Local/webchat turns run the chained recall
+        inside chat(): memory → entity-link knowledge hop → conditional
+        explicit knowledge search (no parallel future). Agentic turns keep
+        the shared memory+KB future.
 
         Deep-think fast path: an explicit ask to think more carefully
         (_is_deep_think_request) is checked FIRST, before quaternary intent
@@ -980,6 +1011,11 @@ class AikoThink:
 
         self._note_user_activity()
         _route_t0 = time.monotonic()
+        # Piece 3 (latency): new typed turn — reset the per-turn tracker and
+        # mark input receipt. Scheduler/agentic jobs that bypass route() get
+        # their marks from chat() onward; stages before recall stay absent.
+        _latency.reset()
+        _latency.mark("input_received")
         # Phase 5: outcome → teach. Praise/correction on this turn teaches the
         # MB about the *last* recorded action (route decision or tool call),
         # closing the loop: state → bias → action → outcome → update.
@@ -1093,6 +1129,7 @@ class AikoThink:
                 return reply
             if decision == "caution" and note:
                 system_note = (f"{system_note}" + "\n" + note).strip() if system_note else note
+            _latency.mark("conscience_inbound")
         except Exception as exc:
             log.warning("[route] conscience gate failed; continuing with caution: %s", exc)
             fallback_note = (
@@ -1128,6 +1165,7 @@ class AikoThink:
 
             intent, route_vec = self._route_intent(user_input)
             log.info("[route] intent=%s", intent)
+            _latency.mark("intent_embedded")
 
             if intent == "greeting":
                 from cognition.conscience.ledger import ledger_for
@@ -1162,11 +1200,10 @@ class AikoThink:
                             embedder, user_input, instruct=_QUERY_INSTRUCT)
                 except Exception:
                     query_vec = None
-            mem_kb_future = CONTEXT_POOL.submit(
-                self._fetch_memory_and_knowledge, user_input, query_vec
-            )
-
+            mem_kb_future = None
             # Live giant-fiber interrupt: never escalate to agentic/web tools.
+            # Checked BEFORE the agentic recall future is started so a
+            # forced-localchat turn never pays for the memory+KB fetch.
             try:
                 from cognition.neural_state import get_neural_state
                 if get_neural_state(user_id).interrupt:
@@ -1176,6 +1213,11 @@ class AikoThink:
                 pass
 
             if intent == "agentic":
+                # Agentic keeps the shared memory+KB future (reworked in
+                # piece 2); chat paths recall sequentially inside chat().
+                mem_kb_future = CONTEXT_POOL.submit(
+                    self._fetch_memory_and_knowledge, user_input, query_vec
+                )
                 _brain_trace.record_step(
                     "think.route",
                     layer="route",
@@ -1189,18 +1231,18 @@ class AikoThink:
                     "think.route",
                     layer="route",
                     inputs={"user_input": user_input, "intent": "webchat"},
-                    outputs={"handler": "webchat", "vector_reused": route_vec is not None},
+                    outputs={"handler": "webchat → chat(web_search=True)", "vector_reused": route_vec is not None},
                     factors=["webchat_score >= 0.72 and gap >= min_gap"],
                 )
-                return self.webchat(user_input, token_callback=token_callback, mem_kb_future=mem_kb_future, query_vec=query_vec, system_note=system_note)
+                return self.webchat(user_input, token_callback=token_callback, query_vec=query_vec, system_note=system_note)
             _brain_trace.record_step(
                 "think.route",
                 layer="route",
                 inputs={"user_input": user_input, "intent": "localchat"},
-                outputs={"handler": "chat", "vector_reused": route_vec is not None, "mem_kb_future_started": mem_kb_future is not None},
+                outputs={"handler": "chat", "vector_reused": route_vec is not None, "recall": "chained inside chat()"},
                 factors=["no label cleared greeting/agentic/webchat thresholds"],
             )
-            return self.chat(user_input, token_callback=token_callback, mem_kb_future=mem_kb_future, query_vec=query_vec, system_note=system_note)
+            return self.chat(user_input, token_callback=token_callback, query_vec=query_vec, system_note=system_note)
         finally:
             try:
                 from cognition.attention import for_identity
@@ -1360,6 +1402,213 @@ class AikoThink:
                 log.error("Memory/KB fetch failed: %s", e)
                 return [], "<knowledge_context>\nLookup failed.\n</knowledge_context>"
         return self._fetch_memory_and_knowledge(user_input, query_vector=None)
+
+    def _fetch_memory_only(
+        self, user_input: str, query_vector: np.ndarray | None = None,
+        mem_limit: int = MEMORY_RECALL_LIMIT,
+    ) -> list[dict]:
+        """Memory recall only — no knowledge fetch.
+
+        First step of the chained chat recall: memory is always-on and
+        cheap; knowledge follows via the entity-link hop
+        (_fetch_linked_knowledge) and, only when memory cannot answer,
+        an explicit search (_fetch_chained_knowledge).
+        """
+        memorize = self._get_memorize()
+        if memorize is None:
+            log.warning("[think] Memory unavailable — skipping memory recall.")
+            return []
+        recall_query = self._recall_query(user_input)
+        query_for_call = query_vector if recall_query == user_input else None
+        try:
+            memories = memorize.search(recall_query, limit=mem_limit, query_vector=query_for_call)
+        except Exception as e:
+            log.error("Memory search failed: %s", e)
+            memories = []
+        if MEMORY_MIN_SCORE > 0:
+            before = len(memories)
+            memories = [m for m in memories if m.get("_recall_score", 0.0) >= MEMORY_MIN_SCORE]
+            if len(memories) < before:
+                log.debug(
+                    "[memory] filtered %d/%d below MEMORY_MIN_SCORE=%.4f",
+                    before - len(memories), before, MEMORY_MIN_SCORE,
+                )
+        return memories
+
+    def _super_node_entities(self) -> set[str]:
+        """Best-effort super-node entity set for link-hop seed filtering.
+
+        Super-nodes (entities mentioned in a large fraction of memories,
+        e.g. the user's name) match a near-random slice of the KB, so the
+        one-link-down hop excludes them from its seeds.
+        """
+        try:
+            mem = self._get_memorize()
+            backend = getattr(mem, "_mem", None)
+            if backend is None:
+                return set()
+            uid = mem.get_user_id() if hasattr(mem, "get_user_id") else current_user_id()
+            lock = getattr(backend, "_db_lock", None)
+            if lock is not None:
+                with lock:
+                    backend._refresh_high_freq_entities(uid)
+            else:
+                backend._refresh_high_freq_entities(uid)
+            return {str(e) for e in (backend._high_freq_entities or set())}
+        except Exception as exc:
+            log.debug("[think] super-node lookup skipped: %s", exc)
+            return set()
+
+    def _fetch_linked_knowledge(
+        self, memories: list[dict], raw_input: str, limit: int = 3,
+    ) -> str:
+        """One-link-down knowledge hop: recalled memories → entities → linked chunks.
+
+        Pure SQLite entity-overlap lookup — no embedding call, no vector
+        search. Returns a formatted <knowledge_context> block, or "" when
+        nothing links.
+        """
+        if not memories:
+            return ""
+        try:
+            from cognition.memory.narrative import seed_entities_from_memories
+            seeds = seed_entities_from_memories(memories, query=raw_input)
+        except Exception as exc:
+            log.debug("[think] linked-knowledge seeds skipped: %s", exc)
+            return ""
+        try:
+            supers = self._super_node_entities()
+            if supers:
+                seeds = [s for s in seeds if s not in supers]
+        except Exception as exc:
+            log.debug("[think] super-node filter skipped: %s", exc)
+        if not seeds:
+            return ""
+        try:
+            from cognition.knowledge import linked_knowledge_for_entities
+            return linked_knowledge_for_entities(seeds, limit=limit, max_chars=2000)
+        except Exception as exc:
+            log.debug("[think] linked knowledge hop failed: %s", exc)
+            return ""
+
+    def _fetch_chained_knowledge(
+        self,
+        raw_input: str,
+        memories: list[dict],
+        query_vec: np.ndarray | None,
+        *,
+        know_limit: int = KNOWLEDGE_RECALL_LIMIT,
+    ) -> str:
+        """Chained knowledge recall for chat.
+
+        1. One-link-down hop (cheap, no embedding): knowledge chunks sharing
+           entities with the recalled memories.
+        2. Explicit vector search — only when memory cannot answer this turn
+           (no/weak memories, or explicit learned-note phrasing).
+
+        Returns the concatenated <knowledge_context> blocks ("" when none).
+        """
+        blocks: list[str] = []
+        linked = _blank_empty_knowledge(self._fetch_linked_knowledge(memories, raw_input))
+        if linked:
+            blocks.append(linked)
+            log.debug("[think] linked knowledge hop: %d chars", len(linked))
+        if _memory_cannot_answer(raw_input, memories):
+            recall_query = self._recall_query(raw_input)
+            memorize = self._get_memorize()
+            embedder = getattr(getattr(memorize, "_mem", None), "_embedder", None) if memorize else None
+            try:
+                explicit = _blank_empty_knowledge(knowledge_context_for(
+                    recall_query, limit=know_limit, max_chars=2000, embedder=embedder
+                ))
+            except Exception as exc:
+                log.warning("[think] explicit knowledge search failed: %s", exc)
+                explicit = ""
+            if explicit:
+                blocks.append(explicit)
+        return "\n\n".join(blocks)
+
+    def _websearch_full_block(self, query: str, token_callback=None) -> str:
+        """Full web-search block for intent-routed webchat turns.
+
+        Extracted from the old webchat(): SearXNG lookup with one retry,
+        strict "answer ONLY using these results" injection (or an explicit
+        search-failed block). Returns "" only on unexpected failure — the
+        normal no-results case returns the <search_failed> block.
+        """
+        from agentic.toolkit.websearch import web_search as _web_search
+        from urllib.parse import urlparse as _urlparse
+
+        def _format_hits(query: str, results: list) -> tuple[str, list]:
+            if not results:
+                return "", []
+            lines = [f"[Web search results for: {query}]"]
+            sources: list[dict] = []
+            for i, result in enumerate(results, 1):
+                title = (result.get("title") or "").strip()
+                url = (result.get("url") or "").strip()
+                content = (result.get("content") or "").strip()
+                lines.append(f"{i}. {title}\n   {url}\n   {content}")
+                domain = ""
+                try:
+                    domain = _urlparse(url).netloc.lower().removeprefix("www.")
+                except Exception:
+                    domain = ""
+                if url:
+                    sources.append({"title": title or url, "url": url, "domain": domain})
+            context = "\n\n".join(lines) + f"\n\nUser asked: {query}"
+            return context, sources
+
+        max_results = int(os.getenv("SEARXNG_MAX_RESULTS", 3))
+        display_name = current_display_name()
+        if token_callback:
+            token_callback("__STATUS__:searching\n")
+            token_callback(f"__SEARCHING__:{query}\n")
+        results, search_err = _web_search(query, max_results)
+        if search_err:
+            log.warning("[webchat] search error: %s", search_err)
+        context, sources = _format_hits(query, results or [])
+
+        if not context:
+            log.info("[webchat] First search returned nothing, retrying once...")
+            if token_callback:
+                token_callback("__STATUS__:retry\n")
+                token_callback("__RETRYING__\n")
+            try:
+                results, search_err = _web_search(query, 1)
+                if search_err:
+                    log.warning("[webchat] retry error: %s", search_err)
+                context, sources = _format_hits(query, results or [])
+            except Exception as e:
+                log.warning("[webchat] Retry failed: %s", e)
+                context, sources = "", []
+
+        if sources and token_callback:
+            token_callback("__SOURCES__:" + json.dumps(sources, ensure_ascii=False) + "\n")
+
+        if context:
+            if token_callback:
+                token_callback("__STATUS__:ok\n")
+            return (
+                f"<search_results query='{query}'>\n"
+                f"Answer ONLY using these search results:\n\n"
+                f"{context}\n"
+                f"</search_results>"
+            )
+        if token_callback:
+            token_callback("__STATUS__:offline\n")
+        return (
+            "<search_failed>\n"
+            f"Web search returned no usable results. You are speaking with {display_name}.\n"
+            "Respond as Aiko in one or two short natural sentences:\n"
+            "- Briefly acknowledge you could not reach live internet information (vary wording; "
+            "no fixed script, no system tokens, no phrases like 'using local knowledge').\n"
+            "- Do NOT invent time-sensitive facts (weather, scores, headlines, prices).\n"
+            "- If memory or knowledge context genuinely helps a non-live question, offer that "
+            "briefly; otherwise say you do not have current information.\n"
+            "- Stay in character. No meta commentary about tools or pipelines.\n"
+            "</search_failed>"
+        )
 
     def _note_user_activity(self) -> None:
         """Clear the rest flag on real user activity so learn.idle_learner_loop
@@ -1823,7 +2072,13 @@ class AikoThink:
                     self._last_chat_time = time.time()
 
     def webchat(self, user_input: str, token_callback=None, mem_kb_future=None, query_vec: np.ndarray | None = None, system_note: str | None = None) -> str:
-        """Web-aware chat: web_search + optional webfetch fallback."""
+        """Web-aware chat: thin wrapper over chat(web_search=True).
+
+        The recall chain, prompt building, and turn handling all live in
+        chat() now; webchat only keeps the personal-sharing guard and sets
+        the web_search flag (the old "/web" tag idea, carried as a parameter
+        so it never leaks into the prompt or history).
+        """
         # Guard: experience-sharing narration must never be answered from
         # search results ("Answer ONLY using these results" would discard
         # what the user just told us). Fall back to plain chat, which keeps
@@ -1831,229 +2086,10 @@ class AikoThink:
         if _is_personal_sharing(user_input):
             log.info("[route] webchat override -> chat (personal sharing)")
             return self.chat(user_input, token_callback=token_callback, mem_kb_future=mem_kb_future, query_vec=query_vec, system_note=system_note)
-        speak = self._get_speak()
-        if speak and speak.is_playing():
-            speak.stop()
-
-        # Memory + KB — either resolved from route()'s pre-intent future,
-        # or fetched directly if this was called standalone.
-        memories, knowledge_block = self._resolve_mem_kb(user_input, mem_kb_future)
-        from cognition.attention import for_identity
-        memories = for_identity(current_user_id()).prioritize_memories(user_input, memories)
-        if memories and all(
-            (isinstance(m, dict) and (m.get("_reconstruction_confidence") or "").lower() == "low")
-            for m in memories
-        ):
-            memories = []
-        _related_override = None
-        try:
-            if _blank_empty_knowledge(knowledge_block):
-                from cognition.memory.narrative import (
-                    related_experience,
-                    seed_entities_from_memories,
-                )
-                _mem_for_exp = self._get_memorize()
-                _emb_for_exp = getattr(getattr(_mem_for_exp, "_mem", None), "_embedder", None)
-                _related_override = {
-                    "knowledge": [],
-                    "experience": related_experience(
-                        user_input, seed_entities_from_memories(memories, query=user_input),
-                        embedder=_emb_for_exp,
-                    ),
-                }
-        except Exception:
-            _related_override = None
-        if _related_override is not None:
-            memory_block = self._get_memorize().format_for_context(
-                memories, query=user_input, query_vector=query_vec,
-                related=_related_override,
-            )
-        else:
-            memory_block = self._get_memorize().format_for_context(
-              memories, query=user_input, query_vector=query_vec
-            )
-        persona_block = self._get_memorize().persona_context()
-        situation_block = ""
-        metacognitive_block = ""
-        try:
-            state = for_identity(current_user_id())
-            situation_block = state.situation_context(user_input, memories, knowledge_block)
-            metacognitive_block = state.metacognitive_context(user_input, memories)
-        except Exception:
-            pass
-
-        # Build base system (persona + memory + knowledge)
-        system = self._current_system_prompt()
-        system += "\n\n" + bioclock.current_datetime_block()
-        if persona_block:
-            system = f"{system}\n\n{persona_block}"
-        if memory_block:
-            system = f"{system}\n\n{memory_block}"
-        if situation_block:
-            system = f"{system}\n\n{situation_block}"
-        if metacognitive_block:
-            system = f"{system}\n\n{metacognitive_block}"
-        _kb_clean = _blank_empty_knowledge(knowledge_block)
-        if _kb_clean and _needs_learned_knowledge(user_input, memories, knowledge_block):
-            system = f"{system}\n\n{_kb_clean}"
-        notices_block = _format_system_notices(system_note)
-        if notices_block:
-            system = f"{system}\n\n{notices_block}"
-
-        # Search directly with the raw user input — same approach as /web.
-        # No LLM-based query condensation: it adds latency, depends on a
-        # small router model that often produces worse queries than the
-        # original text, and /web already proves the raw path works.
-        display_name = current_display_name()
-        if token_callback:
-            token_callback("__STATUS__:searching\n")
-            token_callback(f"__SEARCHING__:{user_input}\n")
-
-        max_results = int(os.getenv("SEARXNG_MAX_RESULTS", 3))
-        from agentic.toolkit.websearch import web_search as _web_search
-        from urllib.parse import urlparse as _urlparse
-
-        def _format_hits(query: str, results: list) -> tuple[str, list]:
-            if not results:
-                return "", []
-            lines = [f"[Web search results for: {query}]"]
-            sources: list[dict] = []
-            for i, result in enumerate(results, 1):
-                title = (result.get("title") or "").strip()
-                url = (result.get("url") or "").strip()
-                content = (result.get("content") or "").strip()
-                lines.append(f"{i}. {title}\n   {url}\n   {content}")
-                domain = ""
-                try:
-                    domain = _urlparse(url).netloc.lower().removeprefix("www.")
-                except Exception:
-                    domain = ""
-                if url:
-                    sources.append({"title": title or url, "url": url, "domain": domain})
-            context = "\n\n".join(lines) + f"\n\nUser asked: {query}"
-            return context, sources
-
-        results, search_err = _web_search(user_input, max_results)
-        if search_err:
-            log.warning("[webchat] search error: %s", search_err)
-        context, sources = _format_hits(user_input, results or [])
-
-        if not context:
-            log.info("[webchat] First search returned nothing, retrying once...")
-            if token_callback:
-                token_callback("__STATUS__:retry\n")
-                token_callback("__RETRYING__\n")
-            try:
-                results, search_err = _web_search(user_input, 1)
-                if search_err:
-                    log.warning("[webchat] retry error: %s", search_err)
-                context, sources = _format_hits(user_input, results or [])
-            except Exception as e:
-                log.warning("[webchat] Retry failed: %s", e)
-                context, sources = "", []
-
-        if sources and token_callback:
-            token_callback("__SOURCES__:" + json.dumps(sources, ensure_ascii=False) + "\n")
-
-        # Inject web context if available
-        if context:
-            if token_callback:
-                token_callback("__STATUS__:ok\n")
-            system = (
-                f"{system}\n\n"
-                f"<search_results query='{user_input}'>\n"
-                f"Answer ONLY using these search results:\n\n"
-                f"{context}\n"
-                f"</search_results>"
-            )
-        else:
-            if token_callback:
-                token_callback("__STATUS__:offline\n")
-            system = (
-                f"{system}\n\n"
-                "<search_failed>\n"
-                f"Web search returned no usable results. You are speaking with {display_name}.\n"
-                "Respond as Aiko in one or two short natural sentences:\n"
-                "- Briefly acknowledge you could not reach live internet information (vary wording; "
-                "no fixed script, no system tokens, no phrases like 'using local knowledge').\n"
-                "- Do NOT invent time-sensitive facts (weather, scores, headlines, prices).\n"
-                "- If memory or knowledge context genuinely helps a non-live question, offer that "
-                "briefly; otherwise say you do not have current information.\n"
-                "- Stay in character. No meta commentary about tools or pipelines.\n"
-                "</search_failed>"
-            )
-
-        # Build message history (same as chat())
-        llm_prompt = user_input
-        if self._reasoning:
-            llm_prompt = f"{user_input}\n\nThink through this carefully."
-
-        with self._history_lock:
-            self._history.append({"role": "user", "content": user_input})
-            if len(self._history) > CONTEXT_WINDOW_TURNS * 10:
-                self._history = self._history[-(CONTEXT_WINDOW_TURNS * 10):]
-            trimmed = self._history[-(CONTEXT_WINDOW_TURNS * 2):]
-
-        trimmed = self._sanitize_history(trimmed)
-        if trimmed and trimmed[-1]["role"] == "user" and llm_prompt != user_input:
-            trimmed = trimmed[:-1] + [{"role": "user", "content": llm_prompt}]
-
-        # Log debug info
-        self.last_prompt_debug = {
-            "mode": "webchat",
-            "system_prompt": system,
-            "memory_prompt": memory_block or "<memory_context>\nNo memories.\n</memory_context>",
-            "knowledge_prompt": knowledge_block,
-            "web_prompt": _extract_search_results_block(system),
-            "previous_chat_messages": [dict(m) for m in trimmed],
-        }
-
-        # Live working-memory (<grasp>) block — same explicit injection as
-        # chat(); replaces the old grasp_hub _stream_response wrapper.
-        try:
-            _wm_mem = self._get_memorize()
-            if _wm_mem is not None:
-                _wm_block = _wm_mem.wm_context_block()
-                if _wm_block:
-                    system = f"{system}\n\n{_wm_block}"
-        except Exception:
-            pass
-
-        # Meta-cognitive self-check (Anthropic constitutional AI style) — verify
-        # alignment, evidence sufficiency, no invention, before streaming.
-        meta_check_notes: list[str] = []
-        hit_count = 0
-        try:
-            memorize = self._get_memorize()
-            memory_evidence_exists = False
-            hits = []
-            if memorize is not None:
-                # Quick evidence check: does search have relevant hits?
-                query_for_evidence = user_input[:200]
-                hits = memorize.search(query_for_evidence, user_id=memorize.get_user_id(), limit=3)
-                memory_evidence_exists = bool(hits)
-                hit_count = len(hits)
-            meta_check_notes.append(
-                f"Self-check: user preferences aligned? Evidence sufficient? "
-                f"Inventing facts? Memory hits: {hit_count}"
-            )
-            if meta_check_notes:
-                meta_block = "<meta_check>" + " | ".join(meta_check_notes) + "</meta_check>"
-                system += f"\n\n{meta_block}"
-        except Exception:
-            log.debug("Meta-cognitive self-check skipped (no error in response)")
-
-        # Stream response
-        raw_response = self._stream_response(trimmed, system=system, token_callback=token_callback, emit=False)
-        raw_response = self._finalize_response(user_input, raw_response, token_callback, already_emitted=False)
-
-        # Store in history
-        with self._history_lock:
-            self._history.append({"role": "assistant", "content": raw_response})
-
-        self._store_async(user_input, raw_response)
-        self._reasoning = False
-        return raw_response
+        return self.chat(
+            user_input, token_callback=token_callback, mem_kb_future=mem_kb_future,
+            query_vec=query_vec, system_note=system_note, web_search=True,
+        )
 
     def proactive_checkin(self, prompt_hint: str) -> str:
         """Generate one short proactive check-in without storing it as a user turn."""
@@ -2154,11 +2190,23 @@ class AikoThink:
         store_turn: bool = True,
         query_vec: np.ndarray | None = None,
         websearch_net: bool = True,
+        web_search: bool = False,
         system_note: str | None = None,
         deep_think: bool = False,
         return_deep_think_summary: bool = False,
     ) -> str | tuple[str, str | None]:
         """Standard chat: persona plus optional memory/KB context.
+
+        Recall is chained, not parallel: memory → entity-link knowledge hop
+        (one link down from recalled memories, no embedding) → explicit
+        knowledge search only when memory cannot answer. No CONTEXT_POOL
+        future is needed on this path; mem_kb_future is kept only for
+        legacy/test callers.
+
+        web_search — intent-routed webchat turns set this (the old webchat()
+        is now a thin wrapper). Runs the full web-search block; local turns
+        never pay for it. Distinct from websearch_net, the lighter
+        hint-triggered lookup for local turns.
 
         deep_think — see module docstring "Deep-think mode". Sets
         self._reasoning + self._deep_think for the duration of this call
@@ -2172,6 +2220,15 @@ class AikoThink:
         speak = self._get_speak()
         if speak and speak.is_playing():
             speak.stop()
+
+        # Piece 3: direct chat() callers (deep-think summary, web-answer)
+        # bypass route(). If the tracker still holds a completed turn
+        # (first_audio already fired), start fresh so the report isn't
+        # polluted by the previous turn's marks. The route()→chat() path
+        # already reset, so this is a no-op there.
+        if _latency.elapsed("input_received", "first_audio") is not None:
+            _latency.reset()
+        _latency.mark("input_received")
 
         if deep_think:
             self._reasoning = True
@@ -2187,6 +2244,7 @@ class AikoThink:
         with _brain_trace.step("think.chat", layer="context",
                                inputs={"user_input": user_input, "raw_input": raw_input, "skip_memory": skip_memory,
                                        "store_turn": store_turn, "websearch_net": websearch_net,
+                                       "web_search": web_search,
                                        "deep_think": deep_think}) as ctx:
             situation_block = ""
             metacognitive_block = ""
@@ -2198,18 +2256,18 @@ class AikoThink:
             else:
                 memorize = self._get_memorize()
                 from cognition.attention import for_identity
-                if deep_think and mem_kb_future is None:
-                    # No pre-started future (deep-think fast path bypasses
-                    # route()'s CONTEXT_POOL future) — fetch directly with
-                    # the wider deep-think recall limits instead of the
-                    # normal MEMORY_RECALL_LIMIT/KNOWLEDGE_RECALL_LIMIT.
-                    memories, knowledge_block = self._fetch_memory_and_knowledge(
-                        raw_input, query_vector=query_vec,
-                        mem_limit=DEEP_THINK_MEMORY_LIMIT,
-                        know_limit=DEEP_THINK_KNOWLEDGE_LIMIT,
-                    )
-                else:
+                mem_limit = DEEP_THINK_MEMORY_LIMIT if deep_think else MEMORY_RECALL_LIMIT
+                know_limit = DEEP_THINK_KNOWLEDGE_LIMIT if deep_think else KNOWLEDGE_RECALL_LIMIT
+                if mem_kb_future is not None:
+                    # Legacy path: a pre-started future (tests / external
+                    # callers). route() no longer passes one for chat.
                     memories, knowledge_block = self._resolve_mem_kb(raw_input, mem_kb_future)
+                else:
+                    # Chained recall: memory → entity-link knowledge hop →
+                    # explicit knowledge search only when memory can't answer.
+                    memories = self._fetch_memory_only(
+                        raw_input, query_vector=query_vec, mem_limit=mem_limit,
+                    )
                 memories = for_identity(current_user_id()).prioritize_memories(raw_input, memories)
                 deep_think_meta = {}
                 if deep_think:
@@ -2222,6 +2280,12 @@ class AikoThink:
                     for m in memories
                 ):
                     memories = []
+                if mem_kb_future is None:
+                    # Knowledge follows memory in the chain (after prioritize /
+                    # weak-set drop so the hop and the gate see final memories).
+                    knowledge_block = self._fetch_chained_knowledge(
+                        raw_input, memories, query_vec, know_limit=know_limit,
+                    )
                 # Skip cross-store related_knowledge when primary knowledge already
                 # hit — both search the same query, so this only duplicates chunks.
                 # Keep related_experience (different store, still useful).
@@ -2295,9 +2359,18 @@ class AikoThink:
                     volatile_system += "\n\n<memory_context>\nNo relevant memories found.\n</memory_context>"
                 # Learned knowledge is on-demand in chat: memory is always-on,
                 # knowledge only when memory is absent/weak or explicitly asked.
-                # Deep-think keeps the wider evidence by design.
+                # The chained recall path (mem_kb_future is None) already gated
+                # at fetch time — the link hop is cheap associative context and
+                # the explicit search only ran when memory couldn't answer — so
+                # a non-blank block is injected as-is. The legacy future path
+                # keeps the old injection-time gate.
                 _kb_clean = _blank_empty_knowledge(knowledge_block)
-                if _kb_clean and (deep_think or _needs_learned_knowledge(raw_input, memories, knowledge_block)):
+                _kb_inject = bool(_kb_clean) and (
+                    deep_think
+                    or mem_kb_future is None
+                    or _needs_learned_knowledge(raw_input, memories, knowledge_block)
+                )
+                if _kb_inject:
                     volatile_system = f"{volatile_system}\n\n{_kb_clean}"
                 # Codebase RAG — when user explicitly asks from your codebase/code
                 if not skip_memory and any(k in (raw_input or "").lower() for k in ("codebase", "from your code", "from your codebase", "attention gate", "how does your code", "where is", "repo", "source file")):
@@ -2341,7 +2414,17 @@ class AikoThink:
                         f"</search_results>"
                     )
 
-            web_present = bool(net_context)
+            # Intent-routed webchat: the full web-search block (SearXNG with
+            # retry, "answer ONLY using these results", or an explicit
+            # search-failed block). Only on web_search turns — local chat
+            # never pays web latency.
+            web_block = ""
+            if web_search and not skip_memory:
+                web_block = self._websearch_full_block(raw_input, token_callback)
+                if web_block:
+                    volatile_system = f"{volatile_system}\n\n{web_block}"
+
+            web_present = bool(net_context or web_block)
             if deep_think and not skip_memory:
                 deep_think_summary = _deep_think_format_summary(
                     query=raw_input,
@@ -2378,6 +2461,20 @@ class AikoThink:
                         volatile_system = f"{volatile_system}\n\n{_wm_block}"
                 except Exception:
                     pass
+
+            # Meta-cognitive self-check for web_search turns (constitutional
+            # style): verify alignment, evidence sufficiency, no invention.
+            # Reuses the already-retrieved memories — no redundant second
+            # memorize.search() like the old webchat() did.
+            if web_search and not skip_memory:
+                try:
+                    _meta_notes = (
+                        "Self-check: user preferences aligned? Evidence sufficient? "
+                        f"Inventing facts? Memory hits: {len(memories)}"
+                    )
+                    volatile_system = f"{volatile_system}\n\n<meta_check>{_meta_notes}</meta_check>"
+                except Exception:
+                    log.debug("Meta-cognitive self-check skipped (no error in response)")
 
             if deep_think:
                 volatile_system = f"{volatile_system}\n\n{_DEEP_THINK_GUIDE}"
@@ -2423,7 +2520,7 @@ class AikoThink:
                 trimmed = trimmed[:-1] + [{"role": "user", "content": llm_prompt}]
 
             self.last_prompt_debug = {
-                "mode": "greeting" if skip_memory else ("deep_think" if deep_think else "localchat"),
+                "mode": "greeting" if skip_memory else ("webchat" if web_search else ("deep_think" if deep_think else "localchat")),
                 "system_prompt": core_system + ("\n\n" + volatile_system if volatile_system else ""),
                 "memory_prompt": memory_block or "<memory_context>\nNo memories.\n</memory_context>",
                 "knowledge_prompt": knowledge_block,
@@ -2454,14 +2551,40 @@ class AikoThink:
                 ],
             )
 
+            _latency.mark("recall_completed")
+            # Piece 3: optional sentence streaming — the earliest *safe*
+            # complete sentence goes to TTS while the rest of the LLM
+            # response is still generating. Off by default; reasoning and
+            # deep-think turns keep full-draft gating.
+            speak = self._get_speak()
+            stream_state: dict = {"aborted": False, "streaming": False, "spoken": []}
+            sink = None
+            if _SENTENCE_STREAM and speak is not None and not self._reasoning and not deep_think:
+                sink = _SentenceSink(self._make_sentence_sink(raw_input, speak, token_callback, stream_state))
+            stream_kwargs: dict = {}
+            if sink is not None:
+                # Sentence-stream mode: token_callback is driven by the
+                # speech-stream worker (karaoke-paced), not the LLM stream.
+                stream_kwargs["token_callback"] = None
+                stream_kwargs["sentence_sink"] = sink
             raw_response = self._stream_response(
                 trimmed,
                 system=core_system,
                 system_tail=volatile_system,
                 token_callback=token_callback,
                 emit=False,
+                **stream_kwargs,
             )
-            raw_response = self._finalize_response(raw_input, raw_response, token_callback, already_emitted=False)
+            spoken_prefix = raw_response[: sink.consumed_chars] if sink is not None else ""
+            if sink is not None and stream_state.get("streaming"):
+                try:
+                    speak.stop_speech_stream()
+                except Exception:
+                    pass
+            raw_response = self._finalize_response(
+                raw_input, raw_response, token_callback,
+                already_emitted=False, _spoken_prefix=spoken_prefix,
+            )
 
             with self._history_lock:
                 self._history.append({"role": "assistant", "content": raw_response})
@@ -2678,7 +2801,7 @@ class AikoThink:
         if not text:
             return
 
-        # Display: emoji kept, ACTION: none dropped, dialogue preserved (markdown ok).
+        # Display: emoji kept, dialogue preserved (markdown ok).
         # TTS: dialogue-only via extract_dialogue_for_tts inside speak.feed/play_async.
         try:
             from sensory.speak import format_for_display
@@ -2697,12 +2820,86 @@ class AikoThink:
             speak.feed(text)  # extract_dialogue_for_tts runs inside play_async
             speak.play_async()
 
+    def _make_sentence_sink(self, user_input: str, speak, token_callback, state: dict):
+        """Build the per-sentence gate+feed callable for AIKO_SENTENCE_STREAM.
+
+        Every complete sentence passes the same two checks the full draft
+        would face — local _review_response and the outbound gate_speak
+        conscience gate — before any audio is synthesized for it. A sentence
+        that fails either check aborts early audio (the stream is stopped)
+        and the full draft falls back to the normal finalize path.
+        Karaoke/typewriter timing is preserved: words are still paced to
+        real TTS audio durations via the speech stream worker.
+        """
+        from cognition.conscience.hooks import gate_speak
+
+        def _sink(sentence: str) -> bool:
+            if state.get("aborted"):
+                return False
+            sentence = (sentence or "").strip()
+            if not sentence:
+                return True
+            # 1. local review, same as the full draft gets in _finalize_response
+            try:
+                review = self._review_response(user_input, sentence)
+            except Exception as exc:
+                log.warning("[think] sentence-stream review failed; aborting early audio: %s", exc)
+                review = {}
+            if len(review.get("flags", [])) >= 2:
+                log.warning("[think] sentence-stream: sentence failed local review; aborting early audio")
+                state["aborted"] = True
+                try:
+                    speak.stop_speech_stream()
+                except Exception:
+                    pass
+                return False
+            # 2. outbound conscience gate, same as the full draft gets
+            try:
+                memorize = self._get_memorize()
+                mem_inner = getattr(memorize, "_mem", None) if memorize is not None else None
+                embedder = getattr(mem_inner, "_embedder", None)
+                replaced = gate_speak(
+                    draft=sentence,
+                    user_input=user_input,
+                    llm_client=getattr(self, "_client", None),
+                    embedder=embedder,
+                    already_emitted=False,
+                )
+                if replaced is not None and replaced.strip() != sentence:
+                    log.warning("[think] sentence-stream: gate_speak refused a sentence; aborting early audio")
+                    state["aborted"] = True
+                    try:
+                        speak.stop_speech_stream()
+                    except Exception:
+                        pass
+                    return False
+            except Exception as exc:
+                log.warning("[think] sentence-stream gate_speak failed; continuing with caution: %s", exc)
+            # Safe: feed to the sentence-streaming TTS pipeline while the
+            # rest of the LLM response is still generating.
+            try:
+                if not state.get("streaming"):
+                    speak.start_speech_stream(token_callback)
+                    state["streaming"] = True
+                speak.feed_speech_stream(sentence)
+                state.setdefault("spoken", []).append(sentence)
+            except Exception as exc:
+                log.warning("[think] sentence-stream feed failed; aborting early audio: %s", exc)
+                state["aborted"] = True
+                try:
+                    speak.stop_speech_stream()
+                except Exception:
+                    pass
+                return False
+            return True
+
+        return _sink
+
     def _emit_finalized_response(self, text: str, token_callback=None) -> None:
         """Emit only text that has completed review and conscience gating.
 
         Karaoke typewriter stays on: words are paced to TTS, but only the
-        dialogue body is streamed (leading emoji is shown once up front;
-        ACTION: none is never typed or spoken).
+        dialogue body is streamed (leading emoji is shown once up front).
         """
         if not text:
             return
@@ -2724,7 +2921,7 @@ class AikoThink:
         except Exception:
             display, dialogue = text, text
 
-        # Show emoji / real ACTION immediately; karaoke only the dialogue body
+        # Show emoji prefix immediately; karaoke only the dialogue body
         # so typewriter and TTS stay on the same speakable text.
         if dialogue and display.endswith(dialogue):
             prefix = display[: len(display) - len(dialogue)].rstrip()
@@ -2792,12 +2989,21 @@ class AikoThink:
             or "raise_exception" in msg and "system" in msg
         )
 
-    def _stream_response(self, messages: list[dict], system: str = "", token_callback=None, emit: bool = False, system_tail: str = "") -> str:
+    def _stream_response(self, messages: list[dict], system: str = "", token_callback=None, emit: bool = False, system_tail: str = "", sentence_sink=None) -> str:
         """Collect a complete model response without exposing it to UI or TTS.
 
         ``emit`` remains as a compatibility argument for callers and tests, but
         final output is deliberately deferred to _finalize_response so the
         complete draft passes gate_speak before any token or audio is emitted.
+
+        ``sentence_sink``: optional callable(sentence: str) -> bool, honored
+        only when AIKO_SENTENCE_STREAM=1. Complete sentences are parsed
+        incrementally as tokens arrive and handed to the sink (plus a final
+        flush of the remainder when the stream ends). The sink returns True
+        to keep streaming or False to abort early audio; the full text is
+        still collected and returned either way. When the sink exposes
+        ``consumed_chars`` / ``aborted`` attributes they are updated here so
+        the caller can skip re-emitting already-spoken audio.
         """
         full_response = []
         if self._reasoning:
@@ -2836,6 +3042,48 @@ class AikoThink:
 
         stream_success = False
         reasoning_buffer: list[str] = []
+
+        # Piece 3 (sentence streaming): parse complete sentences incrementally
+        # and hand them to the sink for sentence-level gating + early TTS.
+        # Off unless AIKO_SENTENCE_STREAM=1 AND the caller provided a sink.
+        sink_active = sentence_sink is not None and _SENTENCE_STREAM
+        sentence_buffer = ""
+        consumed_raw = ""
+
+        def _drain_sentence_buffer(final: bool = False) -> None:
+            """Split complete sentences out of the buffer into the sink."""
+            nonlocal sentence_buffer, consumed_raw, sink_active
+            if not sink_active:
+                return
+            prev = sentence_buffer
+            sentences, sentence_buffer = split_stream_sentences(sentence_buffer)
+            consumed_raw += prev[: len(prev) - len(sentence_buffer)]
+            for s in sentences:
+                _latency.mark("first_sentence")
+                try:
+                    keep_going = sentence_sink(s)
+                except Exception as exc:
+                    log.warning("[think] sentence sink failed; aborting early audio: %s", exc)
+                    keep_going = False
+                if not keep_going:
+                    sink_active = False
+                    if hasattr(sentence_sink, "aborted"):
+                        sentence_sink.aborted = True
+                    break
+            if final and sink_active and sentence_buffer.strip():
+                # Stream ended mid-sentence: the tail still gets its gates.
+                tail = sentence_buffer.strip()
+                consumed_raw += sentence_buffer
+                sentence_buffer = ""
+                try:
+                    keep_going = sentence_sink(tail)
+                except Exception as exc:
+                    log.warning("[think] sentence sink failed on tail; aborting early audio: %s", exc)
+                    keep_going = False
+                if not keep_going:
+                    sink_active = False
+                    if hasattr(sentence_sink, "aborted"):
+                        sentence_sink.aborted = True
 
         try:
             stream = self._client.chat.completions.create(
@@ -2884,8 +3132,24 @@ class AikoThink:
                     reasoning_buffer.append(reason_part)
 
                 full_response.append(token)
+                if token:
+                    _latency.mark("first_llm_token")
+                    if sink_active:
+                        sentence_buffer += token
+                        if "\n" in token or "\r" in token or any(
+                            c in _STREAM_SENTENCE_END for c in token
+                        ):
+                            _drain_sentence_buffer()
 
+            _drain_sentence_buffer(final=True)
+            _latency.mark("final_token")
             text = "".join(full_response).strip()
+            if sentence_sink is not None and hasattr(sentence_sink, "consumed_chars"):
+                # Map the consumed raw prefix onto the stripped text so the
+                # caller can skip re-emitting already-spoken audio exactly.
+                raw = "".join(full_response)
+                lead = len(raw) - len(raw.lstrip())
+                sentence_sink.consumed_chars = max(0, len(consumed_raw) - lead)
             reasoning_text = "".join(reasoning_buffer).strip()
             _note_stream_reasoned(bool(reasoning_text) and not bool(text))
             if reasoning_text:
@@ -3075,8 +3339,9 @@ class AikoThink:
             sanitized.pop(0)
         return sanitized
 
-    def _finalize_response(self, user_input: str, draft: str, token_callback=None, *, already_emitted: bool = False) -> str:
+    def _finalize_response(self, user_input: str, draft: str, token_callback=None, *, already_emitted: bool = False, _spoken_prefix: str = "") -> str:
         review = self._review_response(user_input, draft)
+        _latency.mark("local_review")
         response = self._correct_response(user_input, draft, review)
         if response != draft:
             self._review_response(user_input, response)
@@ -3099,6 +3364,7 @@ class AikoThink:
                     log.info("[finalize] conscience replaced outbound draft")
         except Exception as exc:
             log.warning("[finalize] conscience speak gate failed; preserving draft under caution: %s", exc)
+        _latency.mark("conscience_outbound")
         try:
             from cognition.attention import for_identity
             speak = self._get_speak()
@@ -3147,6 +3413,22 @@ class AikoThink:
             return response
         if already_emitted and token_callback and hasattr(token_callback, "reset"):
             token_callback.reset()
+        if _spoken_prefix and response.startswith(_spoken_prefix):
+            # Piece 3 (sentence streaming): this leading text was already
+            # gated per-sentence and spoken; emit only the remainder so it
+            # is not synthesized twice.
+            rest = response[len(_spoken_prefix):]
+            if rest.strip():
+                self._emit_finalized_response(rest, token_callback=token_callback)
+            return response
+        if _spoken_prefix:
+            # Full-draft review/correction rewrote already-spoken audio.
+            # The spoken sentences passed their own gates; the corrected
+            # text is what gets stored/displayed. Accepted tradeoff, logged.
+            log.warning(
+                "[finalize] sentence-stream: full-draft review changed already-spoken "
+                "text; spoken audio diverges from final text"
+            )
         self._emit_finalized_response(response, token_callback=token_callback)
         return response
 
@@ -3290,6 +3572,25 @@ def _is_stream_noise(char: str) -> bool:
     if 0x2B00 <= codepoint <= 0x2BFF:
         return True
     return unicodedata.category(char)[0] == "S"
+
+
+class _SentenceSink:
+    """Callable wrapper carrying sentence-stream bookkeeping.
+
+    ``consumed_chars``: number of leading chars of the stripped draft that
+    were handed to (and accepted by) the sink — i.e. already gated and
+    spoken, so _finalize_response must not re-emit them.
+    ``aborted``: True when the sink refused a sentence and early audio was
+    stopped; the full draft still goes through the normal finalize path.
+    """
+
+    def __init__(self, fn) -> None:
+        self._fn = fn
+        self.consumed_chars = 0
+        self.aborted = False
+
+    def __call__(self, sentence: str) -> bool:
+        return bool(self._fn(sentence))
 
 
 def split_stream_sentences(buffer: str) -> tuple[list[str], str]:

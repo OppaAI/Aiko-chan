@@ -106,6 +106,8 @@ def test_refusal_route_flushes_before_reply(monkeypatch):
 
 
 def test_non_greeting_route_starts_memory_after_intent(monkeypatch):
+    # Chained recall: localchat runs recall sequentially inside chat(), so
+    # route() must NOT start the shared memory+KB future for it.
     think = _bare_think()
     events: list[str] = []
 
@@ -122,10 +124,40 @@ def test_non_greeting_route_starts_memory_after_intent(monkeypatch):
             return Future()
 
     monkeypatch.setattr(think_module, "CONTEXT_POOL", ImmediatePool())
-    monkeypatch.setattr(think, "_fetch_memory_and_knowledge", lambda *a, **kw: ([], "<knowledge_context />"))
-    monkeypatch.setattr(think, "chat", lambda *a, **kw: "ok")
+    monkeypatch.setattr(think, "chat", lambda *a, **kw: events.append("chat") or "ok")
 
     assert think.route("tell me about routers") == "ok"
+    assert events == ["intent", "chat"]
+    assert "submit_mem_kb" not in events
+
+
+def test_agentic_route_starts_shared_mem_kb_future(monkeypatch):
+    # Agentic keeps the shared future until piece 2 reworks it.
+    think = _bare_think()
+    events: list[str] = []
+
+    monkeypatch.setattr(think, "_route_intent", lambda user_input: events.append("intent") or ("agentic", None))
+
+    class ImmediatePool:
+        def submit(self, fn, *args):
+            events.append("submit_mem_kb")
+
+            class Future:
+                def result(self_inner):
+                    return ([], "<knowledge_context />")
+
+            return Future()
+
+    monkeypatch.setattr(think_module, "CONTEXT_POOL", ImmediatePool())
+    monkeypatch.setattr(think, "_fetch_memory_and_knowledge", lambda *a, **kw: ([], "<knowledge_context />"))
+
+    def fake_agentic(user_input, **kwargs):
+        assert kwargs.get("mem_kb_future") is not None
+        return "agentic ok"
+
+    monkeypatch.setattr(think, "agentic_chat", fake_agentic)
+
+    assert think.route("research quantum error correction for me") == "agentic ok"
     assert events == ["intent", "submit_mem_kb"]
 
 

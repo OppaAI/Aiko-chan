@@ -131,7 +131,7 @@ MEMORY_RECALL_TIMEOUT  = float(os.getenv("MEMORY_RECALL_TIMEOUT", 5.0))
 # reordered by created_at descending among themselves (see module docstring
 # stage 3). Independent of MEMORY_RANK_RECENCY_WEIGHT's continuous blend.
 MEMORY_RECENCY_RERANK_ENABLED = _env_bool("MEMORY_RECENCY_RERANK_ENABLED", "1")
-MEMORY_RECENCY_RERANK_THRESHOLD = float(os.getenv("MEMORY_RECENCY_RERANK_THRESHOLD", "0.012"))
+MEMORY_RECENCY_RERANK_THRESHOLD = float(os.getenv("MEMORY_RECENCY_RERANK_THRESHOLD", "0.02"))
 
 # Phase 21: context-match recall (encoding specificity). At recall we infer the
 # query's valence/arousal with the same cheap heuristics used at write time,

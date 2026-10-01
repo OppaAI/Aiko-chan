@@ -159,7 +159,7 @@ DREAM_BOOST_USE_STORED_TAGS: "1"  # Prefer salience_hit / valence_tag over text-
 MEMORY_CROSS_STORE_ENABLED: "1"  # Attach related knowledge/experience after personal memory recall.
 MEMORY_CROSS_STORE_MAX_KNOWLEDGE: "2"  # Max knowledge chunks attached per recall.
 MEMORY_CROSS_STORE_MAX_EXPERIENCE: "2"  # Max experience rows attached per recall.
-MEMORY_CROSS_STORE_MIN_ENTITY_OVERLAP: "1"  # Min shared entities to keep a related hit (0 = score-only).
+MEMORY_CROSS_STORE_MIN_ENTITY_OVERLAP: "2"  # Min shared entities to keep a related hit (0 = score-only).
 MEMORY_CROSS_STORE_CONTEXT_CHARS: "800"  # Max chars for related_* blocks in context.
 
 # Studio layers
@@ -278,7 +278,7 @@ KNN_MATCH_K_MIN: "16"     # Absolute floor for the oversampled k. Reduced from 3
 
 # -- Pinned recency-among-relevant rerank --
 MEMORY_RECENCY_RERANK_ENABLED: "1"  # Toggle recency-among-relevant reranking; boolean options (1/0, true/false, yes/no, on/off).
-MEMORY_RECENCY_RERANK_THRESHOLD: "0.012"  # Min final score for a candidate to be considered "relevant enough" to be reordered by recency instead of by raw score.
+MEMORY_RECENCY_RERANK_THRESHOLD: "0.02"  # Min final score for a candidate to be considered "relevant enough" to be reordered by recency instead of by raw score.
 
 # -- Experience and consolidation --
 MONTHLY_CONSOLIDATION_ENABLED: "1"  # Monthly consolidation toggle; options: 1/0, true/false, yes/no, on/off.

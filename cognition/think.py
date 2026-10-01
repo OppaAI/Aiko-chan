@@ -543,6 +543,71 @@ def _should_use_local_knowledge(user_input: str) -> bool:
     """
     return bool(_LOCAL_KNOWLEDGE_RE.search(user_input))
 
+
+_EMPTY_KNOWLEDGE_MARKERS = (
+    "No matching learned knowledge found.",
+    "No matching local knowledge found.",
+    "No relevant memories found.",
+    "Lookup failed.",
+    "Lookup timed out.",
+)
+
+
+def _blank_empty_knowledge(block: str) -> str:
+    """Return '' for placeholder No-match/Lookup-failed blocks (mirrors agentic._blank_empty_context)."""
+    if not block:
+        return ""
+    for _m in _EMPTY_KNOWLEDGE_MARKERS:
+        if _m in block:
+            return ""
+    # A knowledge_context wrapper with no actual <knowledge_chunk> carries nothing.
+    if "<knowledge_context>" in block and "<knowledge_chunk" not in block:
+        return ""
+    return block
+
+
+_LEARNED_KNOWLEDGE_HINT_RE = re.compile(
+    r"\b(what (do you know|did you learn)|you (learned|researched|studied)|"
+    r"your (notes?|research|knowledge)|learned knowledge|tell me about .*(project|topic)|"
+    r"remind me what you (know|found)|from your (notes|research|study))\b",
+    re.IGNORECASE,
+)
+
+
+def _needs_learned_knowledge(raw_input: str, memories: list[dict] | None, knowledge_block: str) -> bool:
+    """On-demand gate for learned-knowledge injection in chat/webchat.
+
+    Memory stays always-on (cheap, personal). Knowledge is dropped unless:
+    - no usable memories survived, or top memory confidence is low, or
+    - weakest kept memory still below MEMORY_MIN_SCORE*1.5, or
+    - explicit learned-note/research phrasing.
+    Fetch still happens concurrently (no extra latency); this only saves prompt tokens + confusion.
+    """
+    kb = _blank_empty_knowledge(knowledge_block)
+    if not kb:
+        return False
+    mems = memories or []
+    if not mems:
+        return True
+    try:
+        top_conf = (mems[0].get("_reconstruction_confidence") or "").lower() if isinstance(mems[0], dict) else ""
+        if top_conf == "low":
+            return True
+        # All-low confidence -> memory isn't grounding this turn, let knowledge try.
+        if mems and all((isinstance(m, dict) and (m.get("_reconstruction_confidence") or "").lower() == "low") for m in mems):
+            return True
+        try:
+            top_score = float(mems[0].get("_recall_score", 0.0) or 0.0)
+            if top_score < MEMORY_MIN_SCORE * 1.5:
+                return True
+        except (TypeError, ValueError):
+            pass
+    except Exception:
+        pass
+    if _LEARNED_KNOWLEDGE_HINT_RE.search(raw_input or ""):
+        return True
+    return False
+
 # ── semantic intent examples ──────────────────────────────────────────────────
 
 import subprocess
@@ -1177,9 +1242,7 @@ class AikoThink:
                 outputs={"query": enriched, "tail_chars": len(tail), "enriched_query_preview": enriched[:600]},
                 factors=["pronoun resolution: recent chat tail folded into query for memory recall"],
             )
-        if not tail:
-            return user_input
-        return f"{user_input}\n{tail}"[:600]
+        return enriched
 
     def _fetch_memory_and_knowledge(
         self, user_input: str, query_vector: np.ndarray | None = None,
@@ -1776,9 +1839,38 @@ class AikoThink:
         memories, knowledge_block = self._resolve_mem_kb(user_input, mem_kb_future)
         from cognition.attention import for_identity
         memories = for_identity(current_user_id()).prioritize_memories(user_input, memories)
-        memory_block = self._get_memorize().format_for_context(
-          memories, query=user_input, query_vector=query_vec
-        )
+        if memories and all(
+            (isinstance(m, dict) and (m.get("_reconstruction_confidence") or "").lower() == "low")
+            for m in memories
+        ):
+            memories = []
+        _related_override = None
+        try:
+            if _blank_empty_knowledge(knowledge_block):
+                from cognition.memory.narrative import (
+                    related_experience,
+                    seed_entities_from_memories,
+                )
+                _mem_for_exp = self._get_memorize()
+                _emb_for_exp = getattr(getattr(_mem_for_exp, "_mem", None), "_embedder", None)
+                _related_override = {
+                    "knowledge": [],
+                    "experience": related_experience(
+                        user_input, seed_entities_from_memories(memories, query=user_input),
+                        embedder=_emb_for_exp,
+                    ),
+                }
+        except Exception:
+            _related_override = None
+        if _related_override is not None:
+            memory_block = self._get_memorize().format_for_context(
+                memories, query=user_input, query_vector=query_vec,
+                related=_related_override,
+            )
+        else:
+            memory_block = self._get_memorize().format_for_context(
+              memories, query=user_input, query_vector=query_vec
+            )
         persona_block = self._get_memorize().persona_context()
         situation_block = ""
         metacognitive_block = ""
@@ -1800,7 +1892,9 @@ class AikoThink:
             system = f"{system}\n\n{situation_block}"
         if metacognitive_block:
             system = f"{system}\n\n{metacognitive_block}"
-        system = f"{system}\n\n{knowledge_block}"
+        _kb_clean = _blank_empty_knowledge(knowledge_block)
+        if _kb_clean and _needs_learned_knowledge(user_input, memories, knowledge_block):
+            system = f"{system}\n\n{_kb_clean}"
         notices_block = _format_system_notices(system_note)
         if notices_block:
             system = f"{system}\n\n{notices_block}"
@@ -2119,9 +2213,44 @@ class AikoThink:
                 deep_think_meta = {}
                 if deep_think:
                     memories, deep_think_meta = _deep_think_rerank(memories, raw_input)
-                memory_block = memorize.format_for_context(
-                  memories, query=raw_input, query_vector=query_vec
-                ) if memorize is not None else ""
+                # Drop all-low weak sets: prioritize marks low when score<2.0
+                # (no query/context/goal overlap, not pinned/salient). Injecting
+                # those drifts small models off-topic; fall back to knowledge instead.
+                if memories and all(
+                    (isinstance(m, dict) and (m.get("_reconstruction_confidence") or "").lower() == "low")
+                    for m in memories
+                ):
+                    memories = []
+                # Skip cross-store related_knowledge when primary knowledge already
+                # hit — both search the same query, so this only duplicates chunks.
+                # Keep related_experience (different store, still useful).
+                _related_override = None
+                try:
+                    if _blank_empty_knowledge(knowledge_block):
+                        from cognition.memory.narrative import (
+                            related_experience,
+                            seed_entities_from_memories,
+                        )
+                        _seeds = seed_entities_from_memories(memories, query=raw_input)
+                        _mem_for_exp = self._get_memorize()
+                        _emb_for_exp = getattr(getattr(_mem_for_exp, "_mem", None), "_embedder", None)
+                        _related_override = {
+                            "knowledge": [],
+                            "experience": related_experience(
+                                raw_input, _seeds, embedder=_emb_for_exp,
+                            ),
+                        }
+                except Exception:
+                    _related_override = None
+                if _related_override is not None:
+                    memory_block = memorize.format_for_context(
+                        memories, query=raw_input, query_vector=query_vec,
+                        related=_related_override,
+                    ) if memorize is not None else ""
+                else:
+                    memory_block = memorize.format_for_context(
+                      memories, query=raw_input, query_vector=query_vec
+                    ) if memorize is not None else ""
                 persona_block = memorize.persona_context() if memorize is not None else ""
                 try:
                     from cognition.attention import for_identity
@@ -2142,8 +2271,12 @@ class AikoThink:
                     volatile_system = f"{volatile_system}\n\n{metacognitive_block}"
                 if not memory_block:
                     volatile_system += "\n\n<memory_context>\nNo relevant memories found.\n</memory_context>"
-                if knowledge_block:
-                    volatile_system = f"{volatile_system}\n\n{knowledge_block}"
+                # Learned knowledge is on-demand in chat: memory is always-on,
+                # knowledge only when memory is absent/weak or explicitly asked.
+                # Deep-think keeps the wider evidence by design.
+                _kb_clean = _blank_empty_knowledge(knowledge_block)
+                if _kb_clean and (deep_think or _needs_learned_knowledge(raw_input, memories, knowledge_block)):
+                    volatile_system = f"{volatile_system}\n\n{_kb_clean}"
                 # Codebase RAG — when user explicitly asks from your codebase/code
                 if not skip_memory and any(k in (raw_input or "").lower() for k in ("codebase", "from your code", "from your codebase", "attention gate", "how does your code", "where is", "repo", "source file")):
                     try:
@@ -2164,7 +2297,7 @@ class AikoThink:
                         raw_input, limit=3, max_chars=3000,
                         embedder=embedder,
                     )
-                    if wiki_context:
+                    if _blank_empty_knowledge(wiki_context):
                         volatile_system = f"{volatile_system}\n\n{wiki_context}"
                 except Exception as e:
                     log.error("Local wiki-knowledge lookup failed: %s", e)

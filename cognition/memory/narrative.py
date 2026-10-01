@@ -24,7 +24,7 @@ log = get_logger(__name__)
 CROSS_STORE_ENABLED = env_bool("MEMORY_CROSS_STORE_ENABLED", "1")
 MAX_KNOWLEDGE = max(0, env_int("MEMORY_CROSS_STORE_MAX_KNOWLEDGE", 2))
 MAX_EXPERIENCE = max(0, env_int("MEMORY_CROSS_STORE_MAX_EXPERIENCE", 2))
-MIN_ENTITY_OVERLAP = max(0, env_int("MEMORY_CROSS_STORE_MIN_ENTITY_OVERLAP", 1))
+MIN_ENTITY_OVERLAP = max(0, env_int("MEMORY_CROSS_STORE_MIN_ENTITY_OVERLAP", 2))
 
 
 def _text(row: dict[str, Any] | Any) -> str:

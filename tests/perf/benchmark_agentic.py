@@ -306,7 +306,8 @@ class TestMemoryPerformance:
         conn = connect(str(db_path))
 
         # Seed 1000 docs
-        from cognition.knowledge import _knn, _fts, KNOWLEDGE_KNN_LIMIT, KNOWLEDGE_FTS_LIMIT
+        from cognition.knowledge import KNOWLEDGE_KNN_LIMIT, KNOWLEDGE_FTS_LIMIT
+        from cognition.knowledge.search import _knn, _fts
         import sqlite_vec
         now = "2024-01-01T00:00:00"
         for i in range(1000):

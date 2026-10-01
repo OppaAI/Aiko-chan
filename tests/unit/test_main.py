@@ -1,20 +1,21 @@
 """
 tests/unit/test_main.py — unit tests for main.py (thin entry point).
 
-Covers parse_args validation, _setup_exit_logging gating, _run_trapped,
+Covers parse_args validation, _install_os_exit_trap gating,
 _handle_clear_mem/_handle_logout branches, and main() return-code contract.
 All heavy deps mocked — no FastAPI/uvicorn/model loads.
 Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run python -m pytest tests/unit/test_main.py -q --override-ini="addopts="
 """
 from __future__ import annotations
 
+import os
 import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 import main as main_module
-from main import _handle_clear_mem, _handle_logout, _run_trapped, _setup_exit_logging, parse_args
+from main import _handle_clear_mem, _handle_logout, _install_os_exit_trap, parse_args
 
 
 def _argv(*args):
@@ -89,39 +90,29 @@ class TestParseArgs:
         assert ns.logout is False
 
 
-class TestSetupExitLogging:
-    def test_no_patch_when_env_not_set(self, monkeypatch):
-        monkeypatch.delenv("AIKO_TRACE_EXIT", raising=False)
-        orig = main_module._os._exit
-        _setup_exit_logging(MagicMock())
-        assert main_module._os._exit is orig
+class TestInstallOsExitTrap:
+    def test_no_patch_when_disabled(self):
+        orig = os._exit
+        _install_os_exit_trap(MagicMock(), False)
+        assert os._exit is orig
 
-    def test_patches_when_enabled(self, monkeypatch):
-        monkeypatch.setenv("AIKO_TRACE_EXIT", "1")
-        orig = main_module._os._exit
+    def test_patches_logs_and_delegates_when_enabled(self, monkeypatch):
+        orig_exit = os._exit
+        fake_original = MagicMock()
+        # The wrapper resolves _original_os_exit as a module global at call
+        # time, so patching it keeps the test from really exiting.
+        monkeypatch.setattr(main_module, "_original_os_exit", fake_original)
+        log = MagicMock()
         try:
-            _setup_exit_logging(MagicMock())
-            assert main_module._os._exit is not orig
+            _install_os_exit_trap(log, True)
+            assert os._exit is not orig_exit
+            os._exit(42)
+            log.error.assert_called_once()
+            assert log.error.call_args[0][1] == 42
+            assert "os._exit" in log.error.call_args[0][0]
+            fake_original.assert_called_once_with(42)
         finally:
-            main_module._os._exit = orig
-            monkeypatch.delenv("AIKO_TRACE_EXIT", raising=False)
-
-
-class TestRunTrapped:
-    def test_success_no_log(self):
-        log = MagicMock()
-        _run_trapped(log, "ok", lambda: None)
-        log.exception.assert_not_called()
-
-    def test_exception_logged_and_reraised(self):
-        log = MagicMock()
-
-        def boom():
-            raise ValueError("oops")
-
-        with pytest.raises(ValueError, match="oops"):
-            _run_trapped(log, "boom", boom)
-        log.exception.assert_called_once()
+            os._exit = orig_exit
 
 
 class TestHandleClearMem:
@@ -135,24 +126,26 @@ class TestHandleClearMem:
         monkeypatch.setattr("builtins.input", raise_eof)
         assert _handle_clear_mem(MagicMock()) == 0
 
-    def test_confirm_y_calls_memorize(self, monkeypatch):
-        monkeypatch.setattr("builtins.input", lambda _: "y")
+    def test_confirm_y_and_phrase_wipes(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("USER_SPACE_ROOT", str(tmp_path))
+        answers = iter(["y", main_module._CONFIRM_PHRASE])
+        monkeypatch.setattr("builtins.input", lambda _: next(answers))
         fake_mem = MagicMock()
         fake_cls = MagicMock(return_value=fake_mem)
-        with patch.dict("sys.modules", {"cognition.memory.memorize": MagicMock(AikoMemorize=fake_cls)}):
-            # need real import path: patch where main imports
-            import main as m
-            with patch.object(m, "AikoMemorize", fake_cls, create=True):
-                # instead patch the import inside function via sys.modules trick
-                pass
-        # simpler: mock the module import directly
-        import importlib
-        mock_mod = MagicMock()
-        mock_mod.AikoMemorize = fake_cls
-        with patch.dict(sys.modules, {"cognition.memory.memorize": mock_mod}):
+        mock_memorize = MagicMock()
+        mock_memorize.AikoMemorize = fake_cls
+        mock_knowledge = MagicMock()
+        mock_experience = MagicMock()
+        with patch.dict(sys.modules, {
+            "cognition.memory.memorize": mock_memorize,
+            "cognition.knowledge.schema": mock_knowledge,
+            "agentic.experience.schema": mock_experience,
+        }):
             assert _handle_clear_mem(MagicMock()) == 0
         fake_cls.assert_called_once()
         fake_mem.clear.assert_called_once()
+        mock_knowledge.delete_all.assert_called_once()
+        mock_experience.delete_all.assert_called_once()
 
 
 class TestHandleLogout:

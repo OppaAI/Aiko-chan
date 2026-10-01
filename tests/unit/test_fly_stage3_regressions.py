@@ -54,7 +54,10 @@ def test_dn_prosody_requires_live_mode_and_preserves_zero_controls(monkeypatch):
         "volume": 1.0,
         "cancelled": False,
     }
-    assert calls == ["user-1", "user-1"]  # body.drive() influence record + dn_body vigor read
+    # Five read-only peeks, none of which may create state: the TTS cancel
+    # check, body_drive's cancel check, _drive's influence-record read,
+    # _drive's cancel check, and dn_body's vigor read.
+    assert calls == ["user-1"] * 5
 
 
 def test_antiloop_preserves_an_explicit_zero_score(monkeypatch):

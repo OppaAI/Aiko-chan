@@ -1,16 +1,7 @@
-"""Phase 19 unit tests — copy into repo tests/ and adapt imports if needed."""
+"""Phase 19 unit tests for the arousal/filter helpers in cognition.memory.entity."""
 from __future__ import annotations
 
-import os
-import sys
-from pathlib import Path
-
-# Allow importing patches when run from artifacts tree
-_PATCHES = Path(__file__).resolve().parents[1] / "patches"
-if str(_PATCHES) not in sys.path:
-    sys.path.insert(0, str(_PATCHES))
-
-from arousal_and_filter import (  # noqa: E402
+from cognition.memory.entity import (
     apply_neg_hard_filter,
     arousal_rank_bonus,
     infer_arousal_score,

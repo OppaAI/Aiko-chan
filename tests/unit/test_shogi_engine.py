@@ -1,28 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.util
-import sys
 import time
-from pathlib import Path
 
 import pytest
 
-
-ROOT = Path(__file__).resolve().parents[2]
-
-
-def _load_module(name: str, relative_path: str):
-    spec = importlib.util.spec_from_file_location(name, ROOT / relative_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-games_shogi = _load_module("games_shogi_under_test", "interface/android_app/shogi/games_shogi.py")
-yaneuraou = _load_module("yaneuraou_under_test", "interface/android_app/shogi/yaneuraou.py")
+# Import the real submodules (not spec_from_file_location under a synthetic
+# top-level name): games_shogi.py does `from . import records` and records.py
+# does `from .. import learn`, so both need their true package context.
+from interface.android_app.shogi import games_shogi, yaneuraou
 
 
 class _FakeProcess:
@@ -151,7 +137,7 @@ def test_make_move_runs_ai_search_in_worker_and_updates_engine(monkeypatch):
     )
 
     assert calls == [
-        (games_shogi._ai_move, (board, None, None), {"uid": "user"}),
+        (games_shogi._ai_move, (board, None, None), {"uid": "user", "use_engine": True}),
         (games_shogi._banter_for, ("3c3d", None, "playing", "an ordinary moment", None, ()), {}),
     ]
     assert response.engine == "random"
@@ -335,7 +321,7 @@ def test_banter_disabled_skips_llm_call(monkeypatch):
         games_shogi.make_move(games_shogi.MoveRequest(move="7g7f"), {"user_id": "user"})
     )
 
-    assert calls == [(games_shogi._ai_move, (board, None, None), {"uid": "user"})]
+    assert calls == [(games_shogi._ai_move, (board, None, None), {"uid": "user", "use_engine": True})]
     assert response.ai_comment == "Aiko plays 3c3d"
 
 
@@ -371,7 +357,7 @@ def test_start_white_ai_opens(monkeypatch):
     monkeypatch.setattr(games_shogi, "_turn_label", lambda board: "white")
     monkeypatch.setattr(games_shogi, "_status_for", lambda board: "playing")
 
-    async def fake_to_thread(function, *args):
+    async def fake_to_thread(function, *args, **kwargs):
         assert function is games_shogi._ai_move
         return Move("7g7f"), "yaneuraou"
 

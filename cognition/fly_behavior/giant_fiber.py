@@ -105,9 +105,11 @@ def should_abort_plan(user_id: str | None = None) -> bool:
     if _mode() != "live":
         return False
     try:
-        from cognition.neural_state import get_neural_state
+        from cognition.neural_state import peek_neural_state
 
-        st = get_neural_state(user_id)
+        st = peek_neural_state(user_id)
+        if st is None:
+            return False
         return bool(st.interrupt) or float(st.urgency or 0.0) >= 0.65
     except Exception:
         return False

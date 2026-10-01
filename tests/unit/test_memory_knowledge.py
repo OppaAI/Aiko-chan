@@ -29,18 +29,26 @@ from cognition.knowledge import (
     knowledge_context_for,
     ingest_text,
     ingest_file,
-    connect as _connect,
-    _knn,
-    _fts,
     EMBED_DIMS,
     KNOWLEDGE_KNN_LIMIT,
     KNOWLEDGE_FTS_LIMIT,
     KNOWLEDGE_RRF_K,
     KNOWLEDGE_RECALL_SCORE_THRESHOLD,
     KNOWLEDGE_CONTEXT_CHARS,
-    _search_cache_get,
-    _search_cache_set,
 )
+from cognition.knowledge.search import _knn, _fts, _search_cache_get, _search_cache_set
+
+
+def _connect(path, user_id="test_user"):
+    """Test helper: open a throwaway knowledge DB at *path* with the current schema.
+
+    Production ``connect()`` no longer takes a file path (it resolves the
+    canonical store DB per user), so tests build their own DB the same way
+    production does: ``initialize_store_db`` with the knowledge DDL.
+    """
+    from cognition.knowledge.schema import _DDL
+    from cognition.memory.vecstore import initialize_store_db
+    return initialize_store_db(str(path), _DDL, user_id=user_id, vector=True)
 
 
 class FakeEmbedder:
@@ -82,8 +90,8 @@ class TestDatabaseSetup:
 
     def test_connect_uses_user_isolation(self, tmp_path):
         """Different user_ids should resolve to isolated connections."""
-        db1 = _connect("user1")
-        db2 = _connect("user2")
+        db1 = _connect(tmp_path / "user1.db", user_id="user1")
+        db2 = _connect(tmp_path / "user2.db", user_id="user2")
         try:
             assert db1 is not db2
         finally:
@@ -95,7 +103,7 @@ class TestIngestText:
 
     def test_ingest_creates_doc_and_chunks(self, tmp_path):
         db_path = tmp_path / "test.db"
-        with patch("cognition.knowledge.connect", return_value=_connect(str(db_path))):
+        with patch("cognition.knowledge.ingest.connect", return_value=_connect(str(db_path))):
             doc_id = ingest_text(
                 title="Test Doc",
                 text="This is a test document. " * 10,
@@ -107,13 +115,13 @@ class TestIngestText:
 
     def test_ingest_empty_text_returns_none(self, tmp_path):
         db_path = tmp_path / "test.db"
-        with patch("cognition.knowledge.connect", return_value=_connect(str(db_path))):
+        with patch("cognition.knowledge.ingest.connect", return_value=_connect(str(db_path))):
             doc_id = ingest_text("Title", "", embedder=FakeEmbedder())
             assert doc_id is None
 
     def test_ingest_sanitizes_text(self, tmp_path):
         db_path = tmp_path / "test.db"
-        with patch("cognition.knowledge.connect", return_value=_connect(str(db_path))):
+        with patch("cognition.knowledge.ingest.connect", return_value=_connect(str(db_path))):
             doc_id = ingest_text(
                 "Title", "  \n\n  Content with  excessive   whitespace  \n\n  ",
                 embedder=FakeEmbedder()
@@ -129,12 +137,12 @@ class TestIngestFile:
         workspace.mkdir(parents=True, exist_ok=True)
         (workspace / "test.txt").write_text("File content for ingestion. " * 5)
 
-        with patch("cognition.knowledge.connect", return_value=_connect(str(tmp_path / "test.db"))):
+        with patch("cognition.knowledge.ingest.connect", return_value=_connect(str(tmp_path / "test.db"))):
             doc_id = ingest_file("test.txt", title="Test File", embedder=FakeEmbedder())
             assert doc_id is not None
 
     def test_ingest_nonexistent_file(self, tmp_path):
-        with patch("cognition.knowledge.connect", return_value=_connect(str(tmp_path / "test.db"))):
+        with patch("cognition.knowledge.ingest.connect", return_value=_connect(str(tmp_path / "test.db"))):
             doc_id = ingest_file("nonexistent/path.txt", embedder=FakeEmbedder())
             assert doc_id is None
 
@@ -207,19 +215,19 @@ class TestSearchKnowledge:
         self.conn.commit()
     
     def test_search_returns_relevant_results(self):
-        with patch("cognition.knowledge.connect", return_value=self.conn):
+        with patch("cognition.knowledge.search.connect", return_value=self.conn):
             results = search_knowledge("quantum qubits", limit=5, embedder=FakeEmbedder(), user_id="test_user")
             assert len(results) > 0
             # Should find quantum doc
             assert any("quantum" in r["text"].lower() for r in results)
 
     def test_search_filters_by_user(self):
-        with patch("cognition.knowledge.connect", return_value=self.conn):
+        with patch("cognition.knowledge.search.connect", return_value=self.conn):
             results = search_knowledge("quantum", limit=5, embedder=FakeEmbedder(), user_id="other_user")
             assert len(results) == 0
 
     def test_search_returns_scores(self):
-        with patch("cognition.knowledge.connect", return_value=self.conn):
+        with patch("cognition.knowledge.search.connect", return_value=self.conn):
             results = search_knowledge("quantum", limit=5, embedder=FakeEmbedder(), user_id="test_user")
             for r in results:
                 assert "score" in r
@@ -227,12 +235,12 @@ class TestSearchKnowledge:
                 assert 0 <= r["score"] <= 1
 
     def test_search_limit_respected(self):
-        with patch("cognition.knowledge.connect", return_value=self.conn):
+        with patch("cognition.knowledge.search.connect", return_value=self.conn):
             results = search_knowledge("computing", limit=1, embedder=FakeEmbedder(), user_id="test_user")
             assert len(results) <= 1
 
     def test_empty_query_returns_empty(self):
-        with patch("cognition.knowledge.connect", return_value=self.conn):
+        with patch("cognition.knowledge.search.connect", return_value=self.conn):
             results = search_knowledge("", embedder=FakeEmbedder(), user_id="test_user")
             assert results == []
 
@@ -275,7 +283,7 @@ class TestKnowledgeContextFor:
         self.conn.commit()
 
     def test_returns_xml_format(self):
-        with patch("cognition.knowledge.connect", return_value=self.conn):
+        with patch("cognition.knowledge.search.connect", return_value=self.conn):
             ctx = knowledge_context_for("test", limit=5, embedder=FakeEmbedder(), user_id="test_user")
             assert "<knowledge_context>" in ctx
             assert "</knowledge_context>" in ctx
@@ -287,22 +295,33 @@ class TestKnowledgeContextFor:
             assert "score" in ctx
 
     def test_no_results_returns_empty_message(self):
-        with patch("cognition.knowledge.connect", return_value=self.conn):
+        with patch("cognition.knowledge.search.connect", return_value=self.conn):
             ctx = knowledge_context_for("nonexistent query xyz", limit=5, embedder=FakeEmbedder(), user_id="test_user")
             assert "No matching learned knowledge found" in ctx
 
     def test_max_chars_limit(self):
-        with patch("cognition.knowledge.connect", return_value=self.conn):
+        with patch("cognition.knowledge.search.connect", return_value=self.conn):
             ctx = knowledge_context_for("test", limit=5, max_chars=50, embedder=FakeEmbedder(), user_id="test_user")
             # Content should be truncated
             assert len(ctx) < 500  # Well under default
 
     def test_cache_hit_returns_cached(self):
         """Second call with same query should use cache."""
-        with patch("cognition.knowledge.connect", return_value=self.conn):
-            ctx1 = knowledge_context_for("test query", limit=5, embedder=FakeEmbedder(), user_id="test_user")
-            ctx2 = knowledge_context_for("test query", limit=5, embedder=FakeEmbedder(), user_id="test_user")
+        # Production opens a fresh connection per call (and closes it in a
+        # finally), so mirror that: each connect() gets its own handle on the
+        # same tmp DB file. The cache key includes id(embedder), so reuse one
+        # instance for both calls.
+        opened = []
+        def fresh_conn(uid=None):
+            opened.append(uid)
+            return _connect(self.db_path)
+        with patch("cognition.knowledge.search.connect", side_effect=fresh_conn):
+            embedder = FakeEmbedder()
+            ctx1 = knowledge_context_for("test query", limit=5, embedder=embedder, user_id="test_user")
+            ctx2 = knowledge_context_for("test query", limit=5, embedder=embedder, user_id="test_user")
+            assert "<knowledge_chunk" in ctx1
             assert ctx1 == ctx2
+            assert len(opened) == 1  # second call served from cache, no DB hit
 
 
 class TestKNNAndFTS:
@@ -366,31 +385,34 @@ class TestCache:
     """Tests for search caching."""
 
     def test_cache_set_get(self):
-        _search_cache_get("test", "user1", 5)  # Clear any existing
-        _search_cache_set("test query", "user1", 5, [{"id": "1", "text": "cached"}])
-        cached = _search_cache_get("test query", "user1", 5)
+        _search_cache_set("test query", "user1", 5, "emb", [{"id": "1", "text": "cached"}])
+        cached = _search_cache_get("test query", "user1", 5, "emb")
         assert cached is not None
         assert cached[0]["id"] == "1"
 
     def test_cache_miss_different_params(self):
-        _search_cache_set("query", "user1", 5, [{"id": "1"}])
-        cached = _search_cache_get("query", "user1", 10)  # Different limit
+        _search_cache_set("query", "user1", 5, "emb", [{"id": "1"}])
+        cached = _search_cache_get("query", "user1", 10, "emb")  # Different limit
         assert cached is None
 
+    def test_cache_miss_different_embedder(self):
+        _search_cache_set("query", "user1", 5, "emb-a", [{"id": "1"}])
+        assert _search_cache_get("query", "user1", 5, "emb-b") is None
+
     def test_cache_ttl_expiry(self, monkeypatch):
-        import cognition.knowledge as knowledge_module
-        monkeypatch.setattr(knowledge_module, "_KNOWLEDGE_SEARCH_CACHE_TTL", 0.01)
-        _search_cache_set("query", "user1", 5, [{"id": "1"}])
+        import cognition.knowledge.search as search_module
+        monkeypatch.setattr(search_module, "_KNOWLEDGE_SEARCH_CACHE_TTL", 0.01)
+        _search_cache_set("query", "user1", 5, "emb", [{"id": "1"}])
         time.sleep(0.02)
-        cached = _search_cache_get("query", "user1", 5)
+        cached = _search_cache_get("query", "user1", 5, "emb")
         assert cached is None
 
     def test_cache_max_entries_eviction(self):
         # Fill beyond max
         for i in range(300):
-            _search_cache_set(f"query{i}", "user1", 5, [{"id": str(i)}])
+            _search_cache_set(f"query{i}", "user1", 5, "emb", [{"id": str(i)}])
         # Oldest should be evicted
-        cached = _search_cache_get("query0", "user1", 5)
+        cached = _search_cache_get("query0", "user1", 5, "emb")
         # May or may not be evicted depending on implementation
         # Just verify no crash
         assert cached is None or isinstance(cached, list)

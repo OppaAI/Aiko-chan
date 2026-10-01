@@ -2561,7 +2561,10 @@ class AikoMemorize:
                         self._conn.execute("PRAGMA optimize")
                         self._conn.commit()
                     except Exception:
-                        log.warning("memorize: PRAGMA optimize failed")
+                        # Best-effort pre-close optimize (consistent with
+                        # optimize() below, which logs at debug) — failure is
+                        # harmless since the connection is being closed anyway.
+                        log.debug("memorize: PRAGMA optimize failed")
                     try:
                         self._conn.close()
                     except Exception:

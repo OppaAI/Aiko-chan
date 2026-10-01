@@ -56,7 +56,7 @@ class TestVersion:
             parse_args()
         assert e.value.code == 0
         captured = capsys.readouterr()
-        assert "main.py" in captured.out + captured.err  # parser.exit() writes to stderr
+        assert "Aiko-chan" in captured.out + captured.err  # _VersionAction prints "Aiko-chan <version>", exits via parser.exit() -> stderr
 
     def test_no_metadata_scan_without_flag(self, monkeypatch):
         # The dist scan must not run on ordinary parses (edge boot cost).

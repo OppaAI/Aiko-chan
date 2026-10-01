@@ -18,6 +18,10 @@ import pytest
 os.environ.setdefault("WORKSPACE_ROOT", "/tmp/aiko_test_workspace")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Mirror interface/mcp_server/social/server.py: it inserts interface/mcp_server
+# so the social MCP package is importable as top-level `social`. Tests that
+# import interface.mcp_server.social.* submodules directly need the same layout.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "interface" / "mcp_server"))
 from system.config import load_config
 load_config()
 

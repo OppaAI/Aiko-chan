@@ -80,6 +80,9 @@ def _infer_with_client(monkeypatch, capture):
 def test_infer_reply_binds_owner_identity(monkeypatch):
     capture = {}
     _infer_with_client(monkeypatch, capture)
+    # The binding is what's under test, not userspace name resolution
+    # (no owner session exists in the test env).
+    monkeypatch.setattr(threads, "owner_display_name", lambda: "OppaAI")
     reply = {"id": "1", "username": "oppa.ai.bot", "text": "what did we do at PNE?"}
     out = threads._infer_reply(reply, [], memory_context="Long-term memories\n- OppaAI visited PNE with Aiko")
     assert out == "🙂 ok."

@@ -271,6 +271,10 @@ def test_dream_boost_wiring_modes(monkeypatch):
     assert mem._flymb_mode() == "shadow"
     monkeypatch.setenv("MEMORY_FLYMB_MODE", "live")
     assert mem._flymb_mode() == "live"
+    # Config files set these in the test env (via conftest load_config);
+    # drop them so the fallback-default wiring is what gets exercised.
+    monkeypatch.delenv("MEMORY_FLYMB_LTM_W", raising=False)
+    monkeypatch.delenv("MEMORY_FLYMB_DREAM_W", raising=False)
     assert mem._flymb_float("MEMORY_FLYMB_LTM_W", 0.01) == 0.01
     assert mem._flymb_float("MEMORY_FLYMB_DREAM_W", 0.2) == 0.2
 

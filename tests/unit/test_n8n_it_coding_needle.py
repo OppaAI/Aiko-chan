@@ -158,7 +158,7 @@ class TestDagStudioApi:
     def test_clean_nodes_rejects_cycle(self):
         from interface.webui.studio.dag.backend.api import _clean_nodes
 
-        _, errors = _clean_nodes([
+        _, errors, _ = _clean_nodes([
             {"id": "a", "tool": "sys_health", "args": {}, "depends_on": ["b"]},
             {"id": "b", "tool": "sys_health", "args": {}, "depends_on": ["a"]},
         ])
@@ -167,7 +167,7 @@ class TestDagStudioApi:
     def test_clean_nodes_rejects_unknown_dep(self):
         from interface.webui.studio.dag.backend.api import _clean_nodes
 
-        _, errors = _clean_nodes([{"id": "a", "tool": "sys_health", "args": {}, "depends_on": ["ghost"]}])
+        _, errors, _ = _clean_nodes([{"id": "a", "tool": "sys_health", "args": {}, "depends_on": ["ghost"]}])
         assert any("unknown dependency" in e for e in errors)
 
     def test_crud_validate_run(self):

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import difflib
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -218,7 +219,7 @@ def code_run_tests(target: str = "tests/unit/test_agentic_graph_engine.py", extr
         tpath = (REPO_ROOT / target.lstrip("/\\")).resolve()
         if tpath != REPO_ROOT and REPO_ROOT not in tpath.parents:
             return json_block("code_run_tests", {"ok": False, "error": "target escapes repository"})
-        cmd = ["python", "-m", "pytest", target, "-q", "-x", "--timeout=60" if False else "-q"]
+        cmd = [sys.executable, "-m", "pytest", target, "-q", "-x", "--timeout=60" if False else "-q"]
         # Keep flags minimal: caller extra is allowlisted, not raw shell.
         if (extra or "").strip() in {"-q", "-qq", "-v"}:
             pass  # already quiet
@@ -255,7 +256,7 @@ def code_lint(relative_path: str = "") -> str:
             return json_block("code_lint", {"ok": False, "error": "only .py files"})
         if not path.exists():
             return json_block("code_lint", {"ok": False, "error": "file not found"})
-        proc = subprocess.run(["python", "-m", "py_compile", str(path)],
+        proc = subprocess.run([sys.executable, "-m", "py_compile", str(path)],
                               capture_output=True, text=True, timeout=15)
         if proc.returncode == 0:
             return json_block("code_lint", {"ok": True, "path": relative, "clean": True})

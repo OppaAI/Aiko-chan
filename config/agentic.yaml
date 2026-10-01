@@ -85,7 +85,7 @@ NEEDLE_WORKERS: '[{"id":"research","role":"researcher","base_url":"http://127.0.
 MAX_AGENT_ITER: "6"  # Maximum tool/planning iterations per task; raise for complex tasks, lower for safety.
 AGENT_MAX_TOKENS: "512"  # Max model output tokens per agent step.
 LLM_TIMEOUT: "30"  # Per-request timeout (seconds) for agentic chat.completions calls (job-hunt enrich, synthesize_report, polish_text, ask_llm_json, etc.). Bounds stalled local/cloud backends so a single hang cannot block a graph node for the OpenAI SDK default (~600s).
-LLM_CTX_SIZE: "12288"  # Local llama-server context ceiling; used directly by agentic.py's context-budget guard now. Keep in sync with the actual llama-server --ctx-size.
+LLM_CTX_SIZE: "10240"  # Local llama-server context ceiling; used directly by agentic.py's context-budget guard now. Keep in sync with the actual llama-server --ctx-size.
 AGENT_CONTEXT_BUDGET_RATIO: "0.65"  # Fraction of LLM_CTX_SIZE the agent prompt (persona+memory+policy+wiki+skill+learned knowledge+experience+tool schemas) is allowed to occupy before blocks start getting dropped.
 AGENT_NOTE_MAX_CHARS: "5000"  # Max characters from notes/files injected into an agent step.
 AGENT_TOOL_RESULT_MAX_CHARS: "8000"  # Max characters retained from one tool result. Raised so research synthesis output isn't truncated.

@@ -1300,11 +1300,9 @@ class AikoThink:
                 memories = mem_future.result(timeout=MEMORY_RECALL_TIMEOUT)
             except concurrent.futures.TimeoutError:
                 log.warning("Memory recall timed out after %.1fs; skipping", MEMORY_RECALL_TIMEOUT)
-                know_future.cancel()
                 memories = []
             except Exception as e:
                 log.error("Memory search failed: %s", e)
-                know_future.cancel()
                 memories = []
 
             if MEMORY_MIN_SCORE > 0:
@@ -1317,7 +1315,10 @@ class AikoThink:
                     )
 
             try:
-                knowledge_block = know_future.result()
+                knowledge_block = know_future.result(timeout=MEMORY_RECALL_TIMEOUT)
+            except concurrent.futures.TimeoutError:
+                log.warning("Knowledge lookup timed out after %.1fs; skipping", MEMORY_RECALL_TIMEOUT)
+                knowledge_block = "<knowledge_context>\nLookup timed out.\n</knowledge_context>"
             except Exception as e:
                 log.error("Knowledge lookup failed: %s", e)
                 knowledge_block = "<knowledge_context>\nLookup failed.\n</knowledge_context>"

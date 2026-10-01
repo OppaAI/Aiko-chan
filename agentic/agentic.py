@@ -86,7 +86,7 @@ log = get_logger(__name__)
 
 MAX_AGENT_ITER = int(os.getenv("MAX_AGENT_ITER", 8))
 AGENT_MAX_TOKENS = int(os.getenv("AGENT_MAX_TOKENS", os.getenv("LLM_MAX_TOKENS", 512)))
-LLM_CTX_SIZE = int(os.getenv("LLM_CTX_SIZE", 12288))
+LLM_CTX_SIZE = int(os.getenv("LLM_CTX_SIZE", 10240))
 LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", 120))
 AGENT_CONTEXT_BUDGET_RATIO = float(os.getenv("AGENT_CONTEXT_BUDGET_RATIO", 0.65))
 # AGENT_MEMORY_DRAIN_TIMEOUT and AGENT_MEMORY_RECALL_LIMIT removed:

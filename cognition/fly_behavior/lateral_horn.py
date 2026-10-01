@@ -62,7 +62,8 @@ def context_prior(text: str, *, user_id: str | None = None, record: bool = True)
         vec = _cached_vec(text or "")
         if vec is not None:
             method = "embedding"
-            buf = _seen_vec.setdefault(key, deque(maxlen=_VEC_MAX))
+            # Read-only lookups must not create state (mirrors the fingerprint branch).
+            buf = _seen_vec.setdefault(key, deque(maxlen=_VEC_MAX)) if record else _seen_vec.get(key, ())
             best = 0.0
             for prev in buf:
                 best = max(best, _cosine(vec, prev))

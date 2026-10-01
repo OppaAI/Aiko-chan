@@ -22,19 +22,19 @@ Run with:
   pytest tests/test_wakeup.py -v
 
 Assumptions (adjust if your wakeup.py differs):
-  - AikoThink(user_id, speak=...) accepts a `speak` kwarg and exposes
-    .join_warmup(), ._client, ._llm_model, and a settable ._memorize.
+  - AikoThink() takes no boot args and exposes .start_warmup(),
+    .join_warmup(), .set_memorize(), .set_speak(), .start_idle_learner(),
+    .handle_scheduled_job(), and a settable ._memorize.
   - AikoMemorize(silent=...) exposes .cleanup() and .get_user_id().
   - AikoSpeak(silent=...) exposes .warmup().
-  - AikoListen() exposes .load_asr(), .load_vad(), .join_warmup(),
-    .start_barge_in_monitor().
-  - ScheduleRunner(...).start() does not block, and register_scheduler(),
-    register_system_handler(), ensure_workspace_knowledge_job(),
-    register_social_handlers() are safe to call with no live state.
-  - These are patched at their point of use inside wakeup.boot(), i.e. the
-    names as imported INSIDE system.wakeup, not their original modules --
-    adjust patch targets ("system.wakeup.AikoThink" etc.) if wakeup.py's
-    import style differs from what's shown in the file we reviewed.
+  - AikoListen() is constructed only at boot; models load lazily on first
+    mic arm via .ensure_ready() (.load_asr(), .load_vad(),
+    .start_barge_in_monitor()).
+  - wakeup.boot() hands scheduler startup to system.schedule.start_scheduler();
+    the tests neutralize that seam so boot() performs no real scheduling.
+    Patch targets are the names as imported INSIDE system.wakeup, not their
+    original modules -- adjust ("system.wakeup.AikoThink" etc.) if
+    wakeup.py's import style differs from what's shown in the file we reviewed.
 """
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ class FakeThink:
     """Stand-in for AikoThink. Records whether _memorize was injected and
     when, so tests can assert ordering against the mem_ready handshake."""
 
-    def __init__(self, user_id, speak=None, boot_delay=0.0):
+    def __init__(self, *a, boot_delay=0.0, **kw):
         self._client = "fake-client"
         self._llm_model = "fake-model"
         self._memorize = None
@@ -64,8 +64,17 @@ class FakeThink:
         if boot_delay:
             time.sleep(boot_delay)
 
+    def start_warmup(self):
+        pass
+
     def join_warmup(self):
         pass
+
+    def start_idle_learner(self):
+        pass
+
+    def set_speak(self, speak):
+        self._speak = speak
 
     def handle_scheduled_job(self, *a, **kw):
         pass
@@ -145,21 +154,6 @@ def _noop(*a, **kw):
     pass
 
 
-class FakeScheduleRunner:
-    def __init__(self, on_due=None, memorize=None, generate_and_post_fn=None,
-                 consolidate_fn=None):
-        self.on_due = on_due
-        self.memorize = memorize
-        self.started = False
-        self.notify_count = 0
-
-    def start(self):
-        self.started = True
-
-    def notify_new_job(self):
-        self.notify_count += 1
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared patching helper
 # ─────────────────────────────────────────────────────────────────────────────
@@ -173,18 +167,15 @@ def _patch_common(monkeypatch, *, think_cls=FakeThink, memorize_cls=FakeMemorize
     memorize_kwargs = memorize_kwargs or {}
 
     monkeypatch.setattr(wakeup_module, "AikoThink",
-                         lambda user_id, speak=None: think_cls(user_id, speak=speak, **think_kwargs))
+                         lambda: think_cls(**think_kwargs))
     monkeypatch.setattr(wakeup_module, "AikoMemorize",
                          lambda silent=True: memorize_cls(silent=silent, **memorize_kwargs))
     monkeypatch.setattr(wakeup_module, "AikoSpeak", FakeSpeak)
     monkeypatch.setattr(wakeup_module, "AikoListen", FakeListen)
-    monkeypatch.setattr(wakeup_module, "ScheduleRunner", FakeScheduleRunner)
-    monkeypatch.setattr(wakeup_module, "register_scheduler", _noop)
-    monkeypatch.setattr(wakeup_module, "register_system_handler", _noop)
-    monkeypatch.setattr(wakeup_module, "ensure_workspace_knowledge_job", _noop)
-    monkeypatch.setattr(wakeup_module, "register_social_handlers", _noop)
-    monkeypatch.setattr(wakeup_module, "generate_and_post", _noop)
-    monkeypatch.setattr(wakeup_module, "maybe_run_consolidation", _noop)
+    # Scheduler startup moved to system.schedule.start_scheduler, which
+    # wakeup.boot() calls directly. Neutralize that seam so boot() performs
+    # no real scheduling under test.
+    monkeypatch.setattr(wakeup_module, "start_scheduler", _noop)
 
     # register_deep_study_handlers lives on memory.learn -- patch the
     # attribute wakeup.py actually calls through (module-level import
@@ -312,14 +303,14 @@ class TestCallbackContract:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestFailurePaths:
-    def test_boot_does_not_raise_when_think_fails(self, monkeypatch):
+    def test_boot_raises_when_think_fails(self, monkeypatch):
+        """Think is the cognition core — boot() must fail loudly (not limp
+        along degraded) so the supervisor restarts instead of serving a
+        brainless Aiko. The RuntimeError chains the original failure."""
         _patch_common(monkeypatch, think_cls=FakeThinkThatRaises)
 
-        result = AikoWakeup().boot(on_loading=_noop, on_done=_noop, on_skip=_noop)
-
-        assert result.think is None
-        # scheduler must still be constructed with on_due=None, not crash
-        assert isinstance(result, BootResult)
+        with pytest.raises(RuntimeError, match="AikoThink boot failed"):
+            AikoWakeup().boot(on_loading=_noop, on_done=_noop, on_skip=_noop)
 
     def test_boot_does_not_raise_when_memorize_fails(self, monkeypatch):
         _patch_common(monkeypatch, memorize_cls=FakeMemorizeThatRaises)
@@ -339,5 +330,7 @@ class TestFailurePaths:
         assert isinstance(result.speak, FakeSpeak)
         assert isinstance(result.listen, FakeListen)
         assert result.speak.warmup_called
-        assert result.listen.asr_loaded and result.listen.vad_loaded
-        assert result.listen.warmup_joined and result.listen.barge_in_started
+        # ASR is lazy now: boot() constructs AikoListen but the models load
+        # on first mic arm via ensure_ready() — nothing should be loaded yet.
+        assert not result.listen.asr_loaded
+        assert not result.listen.vad_loaded

@@ -337,6 +337,9 @@ def test_suspect_short_mate_voided_not_recorded(sp, monkeypatch):
     appended = []
     monkeypatch.setattr(learnmod, "append_match",
                         lambda uid, game, rec: appended.append(rec))
+    import agentic.toolkit.jev as jevmod
+    monkeypatch.setattr(jevmod, "choice",
+                        lambda state, ins, crit: (sorted(crit)[0], {}, 0.9))
     orig_board = _ShogiMod.__dict__["Board"]
     _ShogiMod.Board = staticmethod(lambda: _Board(script_end=1))
     try:

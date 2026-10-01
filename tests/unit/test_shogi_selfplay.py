@@ -1,4 +1,4 @@
-"""Self-play (Aiko/Jev vs YaneuraOu) + Jev client. Engine + network mocked."""
+"""Self-play (Aiko/LLM vs YaneuraOu) + LLM choice. Engine + network mocked."""
 from __future__ import annotations
 
 import io
@@ -82,73 +82,73 @@ def _tmpdir(tmp_path, monkeypatch):
     yield
 
 
-# ── Jev client ────────────────────────────────────────────────────────────────
+# ── LLM choice ──────────────────────────────────────────────────────────
 
-class _HTTPResp:
-    def __init__(self, payload):
-        self._data = json.dumps(payload).encode()
-
-    def read(self):
-        return self._data
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
+class _ChatMsg:
+    def __init__(self, content):
+        self.content = content
 
 
-def _http_error(code, body=b"nope"):
-    return urllib.error.HTTPError("http://x", code, "err", {}, io.BytesIO(body))
+class _ChatChoice:
+    def __init__(self, content):
+        self.message = _ChatMsg(content)
 
 
-def test_jev_choice_parses(monkeypatch):
-    from agentic.toolkit import jev
-    monkeypatch.setenv("JEV_API_KEY", "k")
-    payload = {"model": "jev-latest",
-               "answers": {"q": {"type": "choice", "choice": "7g7f",
-                                 "probabilities": {"7g7f": 0.8, "2g2f": 0.2},
-                                 "confidence": 0.75}},
-               "usage": {}}
-    monkeypatch.setattr(jev.urllib.request, "urlopen", lambda *a, **k: _HTTPResp(payload))
-    opt, probs, conf = jev.choice("sfen", "pick", {"7g7f": "push", "2g2f": "push2"})
-    assert opt == "7g7f" and probs["7g7f"] == 0.8 and conf == 0.75
+class _ChatResp:
+    def __init__(self, content):
+        self.choices = [_ChatChoice(content)]
 
 
-def test_jev_auth_and_retry(monkeypatch):
-    from agentic.toolkit import jev
-    monkeypatch.setenv("JEV_API_KEY", "k")
+def _patch_llm(monkeypatch, content):
+    from agentic.toolkit import llm_choice
+    monkeypatch.setattr(llm_choice, "chat_completions_create",
+                        lambda *a, **k: _ChatResp(content))
+    monkeypatch.setattr(llm_choice, "_get_client", lambda: object())
+    return llm_choice
+
+
+def test_llm_choice_parses_exact_reply(monkeypatch):
+    llm = _patch_llm(monkeypatch, "7g7f")
+    opt, probs, conf = llm.choice({"sfen": "sfen0"}, "pick a move",
+                                  {"7g7f": "push pawn", "2g2f": "push pawn"})
+    assert opt == "7g7f" and probs == {} and conf == 0.0
+
+
+def test_llm_choice_finds_key_in_sentence(monkeypatch):
+    llm = _patch_llm(monkeypatch, "I choose take2 here.")
+    opt, _, _ = llm.choice({}, "pick", {"take1": "a", "take2": "b"})
+    assert opt == "take2"
+
+
+def test_llm_choice_rejects_garbage_reply(monkeypatch):
+    llm = _patch_llm(monkeypatch, "the weather is nice")
+    with pytest.raises(llm.LLMError):
+        llm.choice({}, "pick", {"7g7f": "push", "2g2f": "push2"})
+
+
+def test_llm_choice_rejects_empty_criteria(monkeypatch):
+    from agentic.toolkit import llm_choice
+    with pytest.raises(llm_choice.LLMError):
+        llm_choice.choice({}, "pick", {})
+
+
+def test_llm_choice_wraps_backend_failure(monkeypatch):
+    from agentic.toolkit import llm_choice
+    monkeypatch.setattr(llm_choice, "chat_completions_create",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("conn refused")))
+    monkeypatch.setattr(llm_choice, "_get_client", lambda: object())
+    with pytest.raises(llm_choice.LLMError):
+        llm_choice.choice({}, "pick", {"a": "b"})
+
+
+def test_llm_decide_retries_then_unavailable(monkeypatch):
+    from agentic.toolkit import llm_choice
+    monkeypatch.setattr(llm_choice.time, "sleep", lambda s: None)
     calls = []
-
-    def flaky(*a, **k):
-        calls.append(1)
-        if len(calls) < 3:
-            raise _http_error(429)
-        return _HTTPResp({"answers": {"q": {"type": "noul", "noul": 0.9}}, "usage": {}})
-
-    monkeypatch.setattr(jev.urllib.request, "urlopen", flaky)
-    monkeypatch.setattr(jev.time, "sleep", lambda s: None)
-    assert jev.noul("s", "urgent?") == 0.9
-    assert len(calls) == 3
-
-
-def test_jev_401_and_missing_key(monkeypatch):
-    from agentic.toolkit import jev
-    monkeypatch.setenv("JEV_API_KEY", "k")
-    monkeypatch.setattr(jev.urllib.request, "urlopen",
-                        lambda *a, **k: (_ for _ in ()).throw(_http_error(401)))
-    with pytest.raises(jev.JevAuthError):
-        jev.noul("s", "q?")
-    monkeypatch.delenv("JEV_API_KEY", raising=False)
-    with pytest.raises(jev.JevAuthError):
-        jev.noul("s", "q?")
-
-
-def test_jev_score_validates_criteria(monkeypatch):
-    from agentic.toolkit import jev
-    monkeypatch.setenv("JEV_API_KEY", "k")
-    with pytest.raises(ValueError):
-        jev.score("s", "rate?", ["only-one"])
+    with pytest.raises(llm_choice.LLMUnavailable):
+        llm_choice.decide(lambda: (calls.append(1), (_ for _ in ()).throw(RuntimeError("down")))[1],
+                          label="t")
+    assert len(calls) == 3  # SELFPLAY_LLM_RETRIES default
 
 
 # ── candidates / book ──────────────────────────────────────────────────────────
@@ -160,26 +160,26 @@ def test_candidates_capped_and_deterministic(sp):
     assert [u for _, u in [(m, m.usi()) for m, _ in sp.candidate_moves(b, 10)]] == ["2g2f", "7g7f"]
 
 
-def test_book_hit_skips_jev(sp, monkeypatch):
+def test_book_hit_skips_llm(sp, monkeypatch):
     import interface.android_app.shogi.selfplay as real
     real.save_book("u", {"sfen0": {"7g7f": [5, 0, 0], "2g2f": [0, 0, 5]}})
     called = []
-    import agentic.toolkit.jev as jevmod
-    monkeypatch.setattr(jevmod, "choice", lambda *a, **k: (called.append(1), ("x", {}, 0))[1])
+    import agentic.toolkit.llm_choice as llmmod
+    monkeypatch.setattr(llmmod, "choice", lambda *a, **k: (called.append(1), ("x", {}, 0))[1])
     b = _Board()
     usi, src = sp.aiko_choose_move("u", b, book=real.load_book("u"),
                                    rng=random.Random(0), loss_lines=[])
     assert usi == "7g7f" and src == "book" and not called
 
 
-def test_jev_down_voids_instead_of_guessing(sp, monkeypatch):
-    """No random fallback anymore: Jev failure voids (tested end-to-end below)."""
-    import agentic.toolkit.jev as jevmod
+def test_llm_down_voids_instead_of_guessing(sp, monkeypatch):
+    """No random fallback anymore: LLM failure voids (tested end-to-end below)."""
+    import agentic.toolkit.llm_choice as llmmod
     import interface.android_app.shogi.selfplay as real
-    monkeypatch.setattr(jevmod, "choice", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
-    monkeypatch.setattr(jevmod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(llmmod, "choice", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    monkeypatch.setattr(llmmod.time, "sleep", lambda s: None)
     b = _Board()
-    with pytest.raises(jevmod.JevUnavailable):
+    with pytest.raises(llmmod.LLMUnavailable):
         real.aiko_choose_move("u", b, book={}, rng=random.Random(0), loss_lines=[])
 
 def _patch_learning(sp, monkeypatch, mb=None):
@@ -208,8 +208,8 @@ class _FakeMB:
 
 
 def test_aiko_wins_and_learns(sp, monkeypatch):
-    import agentic.toolkit.jev as jevmod
-    monkeypatch.setattr(jevmod, "choice", lambda state, ins, crit: (sorted(crit)[0], {}, 0.9))
+    import agentic.toolkit.llm_choice as llmmod
+    monkeypatch.setattr(llmmod, "choice", lambda state, ins, crit: (sorted(crit)[0], {}, 0.9))
     monkeypatch.setattr(sp, "engine_choose_move", lambda board, movetime_ms=None: "2g2f")
     mb = _FakeMB()
     rec = _patch_learning(sp, monkeypatch, mb)
@@ -230,8 +230,8 @@ def test_aiko_wins_and_learns(sp, monkeypatch):
 
 
 def test_engine_win_and_loss_lines(sp, monkeypatch):
-    import agentic.toolkit.jev as jevmod
-    monkeypatch.setattr(jevmod, "choice", lambda state, ins, crit: (sorted(crit)[0], {}, 0.9))
+    import agentic.toolkit.llm_choice as llmmod
+    monkeypatch.setattr(llmmod, "choice", lambda state, ins, crit: (sorted(crit)[0], {}, 0.9))
     monkeypatch.setattr(sp, "engine_choose_move", lambda board, movetime_ms=None: "2g2f")
     rec = _patch_learning(sp, monkeypatch)
     orig_board = _ShogiMod.__dict__["Board"]
@@ -294,8 +294,8 @@ def test_color_is_random_coin_flip_not_store_driven(sp, monkeypatch):
     orig_total = learnmod.total_matches
     monkeypatch.setattr(learnmod, "total_matches",
                         lambda uid, game: calls.append(game) or 99)
-    import agentic.toolkit.jev as jevmod
-    monkeypatch.setattr(jevmod, "choice", lambda state, ins, crit: (sorted(crit)[0], {}, 0.9))
+    import agentic.toolkit.llm_choice as llmmod
+    monkeypatch.setattr(llmmod, "choice", lambda state, ins, crit: (sorted(crit)[0], {}, 0.9))
     monkeypatch.setattr(real, "engine_choose_move", lambda board, movetime_ms=None: "2g2f")
     orig_board = _ShogiMod.__dict__["Board"]
     _ShogiMod.Board = staticmethod(lambda: _Board(script_end=8))
@@ -337,6 +337,9 @@ def test_suspect_short_mate_voided_not_recorded(sp, monkeypatch):
     appended = []
     monkeypatch.setattr(learnmod, "append_match",
                         lambda uid, game, rec: appended.append(rec))
+    import agentic.toolkit.llm_choice as llmmod
+    monkeypatch.setattr(llmmod, "choice",
+                        lambda state, ins, crit: (sorted(crit)[0], {}, 0.9))
     orig_board = _ShogiMod.__dict__["Board"]
     _ShogiMod.Board = staticmethod(lambda: _Board(script_end=1))
     try:
@@ -349,19 +352,19 @@ def test_suspect_short_mate_voided_not_recorded(sp, monkeypatch):
 
 def test_book_bans_proven_losers_and_breaks_ties_randomly(sp, monkeypatch):
     import interface.android_app.shogi.selfplay as real
-    # Losing line with 4 visits, zero wins -> banned, falls through to Jev.
+    # Losing line with 4 visits, zero wins -> banned, falls through to the LLM.
     book = {"sfen0": {"7g7f": [0, 0, 4], "2g2f": [0, 0, 1]}}
     seen = {}
-    import agentic.toolkit.jev as jevmod
+    import agentic.toolkit.llm_choice as llmmod
 
     def _choice(state, ins, crit):
         seen["n"] = seen.get("n", 0) + 1
         return (sorted(crit)[0], {}, 0.9)
 
-    monkeypatch.setattr(jevmod, "choice", _choice)
+    monkeypatch.setattr(llmmod, "choice", _choice)
     b = _Board()
     usi, src = real.aiko_choose_move("u", b, book=book, rng=random.Random(1), loss_lines=[])
-    assert src == "jev"  # banned line skipped, Jev consulted
+    assert src == "llm"  # banned line skipped, LLM consulted
     # Equal-rate tie-break is not deterministic across seeds.
     book2 = {"sfen0": {"7g7f": [2, 0, 2], "2g2f": [2, 0, 2]}}
     picks = {real.aiko_choose_move("u", b, book=book2, rng=random.Random(s), loss_lines=[])[0]
@@ -369,10 +372,10 @@ def test_book_bans_proven_losers_and_breaks_ties_randomly(sp, monkeypatch):
     assert picks == {"2g2f", "7g7f"}
 
 
-def test_jev_retry_then_decide(sp, monkeypatch):
-    """Transient Jev failures retry; the move still comes from Jev."""
-    import agentic.toolkit.jev as jevmod
-    monkeypatch.setattr(jevmod.time, "sleep", lambda s: None)
+def test_llm_retry_then_decide(sp, monkeypatch):
+    """Transient LLM failures retry; the move still comes from the LLM."""
+    import agentic.toolkit.llm_choice as llmmod
+    monkeypatch.setattr(llmmod.time, "sleep", lambda s: None)
     calls = []
 
     def flaky(state, ins, crit):
@@ -381,19 +384,19 @@ def test_jev_retry_then_decide(sp, monkeypatch):
             raise RuntimeError("blip")
         return (sorted(crit)[0], {}, 0.9)
 
-    monkeypatch.setattr(jevmod, "choice", flaky)
+    monkeypatch.setattr(llmmod, "choice", flaky)
     b = _Board()
     usi, src = sp.aiko_choose_move("u", b, book={}, rng=random.Random(0), loss_lines=[])
-    assert (usi, src) == ("2g2f", "jev") and len(calls) == 3
+    assert (usi, src) == ("2g2f", "llm") and len(calls) == 3
 
 
-def test_jev_down_voids_game(sp, monkeypatch):
-    """Exhausted Jev voids the game: nothing recorded, nothing learned."""
-    import agentic.toolkit.jev as jevmod
+def test_llm_down_voids_game(sp, monkeypatch):
+    """Exhausted LLM voids the game: nothing recorded, nothing learned."""
+    import agentic.toolkit.llm_choice as llmmod
     import interface.android_app.learn as learnmod
     import agentic.experience.acquire as acq
-    monkeypatch.setattr(jevmod, "choice", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
-    monkeypatch.setattr(jevmod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(llmmod, "choice", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    monkeypatch.setattr(llmmod.time, "sleep", lambda s: None)
     appended = []
     monkeypatch.setattr(learnmod, "append_match",
                         lambda uid, game, rec: appended.append(rec))
@@ -405,20 +408,26 @@ def test_jev_down_voids_game(sp, monkeypatch):
         out = real.play_game("u", aiko_sente=True, rng=random.Random(0))
     finally:
         _ShogiMod.Board = orig_board
-    assert out["winner"] == "void" and out["end"] == "jev-down"
+    assert out["winner"] == "void" and out["end"] == "llm-down"
     assert appended == []
 
 
-def test_jev_auth_fails_fast(sp, monkeypatch):
-    """Bad key: no pointless retries."""
-    import agentic.toolkit.jev as jevmod
-    calls = []
-
-    def authed(state, ins, crit):
-        calls.append(1)
-        raise jevmod.JevAuthError("bad key")
-
-    monkeypatch.setattr(jevmod, "choice", authed)
-    with pytest.raises(jevmod.JevAuthError):
-        jevmod.decide(lambda: jevmod.choice({}, "i", {"a": "b"}), label="t")
-    assert len(calls) == 1
+def test_llm_garbage_reply_voids_game(sp, monkeypatch):
+    """An LLM reply naming no candidate is an LLMError: the game voids."""
+    import agentic.toolkit.llm_choice as llmmod
+    import interface.android_app.learn as learnmod
+    monkeypatch.setattr(llmmod, "choice",
+                        lambda *a, **k: (_ for _ in ()).throw(llmmod.LLMError("no candidate")))
+    monkeypatch.setattr(llmmod.time, "sleep", lambda s: None)
+    appended = []
+    monkeypatch.setattr(learnmod, "append_match",
+                        lambda uid, game, rec: appended.append(rec))
+    import interface.android_app.shogi.selfplay as real
+    orig_board = _ShogiMod.__dict__["Board"]
+    _ShogiMod.Board = staticmethod(lambda: _Board(script_end=30))
+    try:
+        out = real.play_game("u", aiko_sente=True, rng=random.Random(0))
+    finally:
+        _ShogiMod.Board = orig_board
+    assert out["winner"] == "void" and out["end"] == "llm-down"
+    assert appended == []

@@ -1,9 +1,9 @@
-"""Aiko self-play for Koi-Koi: Aiko (Jev) vs heuristic sparring partner.
+"""Aiko self-play for Koi-Koi: Aiko (LLM) vs heuristic sparring partner.
 
 No external engine exists for hanafuda — and none is needed. The built-in
 heuristic AI (ai.choose_play/flip/decision) plays the opponent seat with a
-HIGH blunder rate (beatable curriculum), while Aiko decides via Jev over
-the naturally tiny option sets (a handful of plays/flips, one koi decision).
+HIGH blunder rate (beatable curriculum), while Aiko decides via the chat LLM
+over the naturally tiny option sets (a handful of plays/flips, one koi decision).
 
 Seat mapping (documented, load-bearing): the engine occupies the "you" seat
 in the shared round machinery; the learning layer translates "you" wins to
@@ -17,7 +17,7 @@ Learning per finished match (game key "koikoi_selfplay"):
   4. FlyMB DAN teaching: win +1 / loss -1 on the match signature.
 
 Config (env): SELFPLAY_KOI_MONTHS (3), SELFPLAY_KOI_BLUNDER (easy),
-  SELFPLAY_JEV_CANDIDATES (12). Jev key: JEV_API_KEY via .env.age.
+  SELFPLAY_LLM_CANDIDATES (12). LLM endpoint: LLM_BASE_URL, model LLM_MODEL.
 """
 from __future__ import annotations
 
@@ -91,9 +91,9 @@ def aiko_choose_play(uid: str, hand: int, takes_list: list[list[int]], captured:
                      loss_lines: list[str]) -> tuple[list[int], str]:
     """Pick one take for an already-chosen hand card. Returns (take, source).
 
-    No random fallback: Jev failure raises (game voids) rather than guessing.
+    No random fallback: LLM failure raises (game voids) rather than guessing.
     """
-    from agentic.toolkit import jev as _jev
+    from agentic.toolkit import llm_choice as _llm
     takes = [list(t) for t in takes_list]
     if len(takes) <= 1:
         return (takes[0] if takes else []), "forced"
@@ -102,16 +102,16 @@ def aiko_choose_play(uid: str, hand: int, takes_list: list[list[int]], captured:
         if loss_lines else ""
     state = {"hand": hand, "captured": len(captured), "options": len(takes)}
     def _ask():
-        pick, _, _ = _jev.choice(
+        pick, _, _ = _llm.choice(
             state,
             "Choose Aiko's hanafuda play. Prefer takes that capture high-value "
             "cards and build toward yaku." + avoid,
             criteria,
         )
         if pick not in criteria:
-            raise _jev.JevError(f"unknown play pick {pick!r}")
+            raise _llm.LLMError(f"unknown play pick {pick!r}")
         return pick
-    return takes[int(_jev.decide(_ask, label="koikoi-play")[4:])], "jev"
+    return takes[int(_llm.decide(_ask, label="koikoi-play")[4:])], "llm"
 
 
 def aiko_choose_card(uid: str, options: list[tuple[int, list[int]]], captured: list[int],
@@ -132,38 +132,38 @@ def aiko_choose_card(uid: str, options: list[tuple[int, list[int]]], captured: l
         return h, take, src
     ordered = sorted(by_card.items(),
                      key=lambda kv: (-max(len(t) for t in kv[1]), kv[0]))[:max(1, cap)]
-    from agentic.toolkit import jev as _jev
+    from agentic.toolkit import llm_choice as _llm
     criteria = {f"card{i}": f"play card {h} ({len(takes)} takes available)"
                 for i, (h, takes) in enumerate(ordered)}
     def _ask():
-        pick, _, _ = _jev.choice(
+        pick, _, _ = _llm.choice(
             {"cards": [h for h, _ in ordered], "captured": len(captured)},
             "Choose which hanafuda card Aiko plays. Prefer cards with rich takes." +
             (" Avoid lines resembling these recent losses: " + " | ".join(loss_lines[:3]) if loss_lines else ""),
             criteria,
         )
         if pick not in criteria:
-            raise _jev.JevError(f"unknown card pick {pick!r}")
+            raise _llm.LLMError(f"unknown card pick {pick!r}")
         return pick
-    pick = _jev.decide(_ask, label="koikoi-card")
+    pick = _llm.decide(_ask, label="koikoi-card")
     h, takes = ordered[int(pick[4:])]
     if len(takes) == 1:
-        return h, takes[0], "jev"
+        return h, takes[0], "llm"
     take, _ = aiko_choose_play(uid, h, takes, captured, loss_lines)
-    return h, take, "jev"
+    return h, take, "llm"
 
 
 def aiko_choose_decision(captured: list[int], opp_captured: list[int], koi: int,
                          cards_left: int) -> tuple[str, str]:
-    """koi (continue) or stop (bank). Small option set: direct Jev choice."""
-    from agentic.toolkit import jev as _jev
+    """koi (continue) or stop (bank). Small option set: direct LLM choice."""
+    from agentic.toolkit import llm_choice as _llm
     from . import cards as C
     try:
         mine = C.yaku_points(C.detect_yaku(captured))
     except Exception:
         mine = 0
     def _ask():
-        pick, _, _ = _jev.choice(
+        pick, _, _ = _llm.choice(
             {"my_points_now": mine, "multiplier": koi + 1, "cards_left": cards_left,
              "opp_cards": len(opp_captured)},
             "Koi-koi (continue for multiplied stakes) or stop (bank points now)? "
@@ -171,9 +171,9 @@ def aiko_choose_decision(captured: list[int], opp_captured: list[int], koi: int,
             {"koi": "continue for higher stakes", "stop": "bank the points now"},
         )
         if pick not in ("koi", "stop"):
-            raise _jev.JevError(f"unknown decision pick {pick!r}")
+            raise _llm.LLMError(f"unknown decision pick {pick!r}")
         return pick
-    return _jev.decide(_ask, label="koikoi-decision"), "jev"
+    return _llm.decide(_ask, label="koikoi-decision"), "llm"
 
 
 def _recent_loss_signatures(uid: str, n: int = 3) -> list[str]:
@@ -206,7 +206,7 @@ def play_match(uid: str, games: int = 1, *, months: int | None = None,
     months = max(1, min(months, 12))
     book = load_book(uid)
     loss_lines = _recent_loss_signatures(uid)
-    cap = _env_int("SELFPLAY_JEV_CANDIDATES", 12)
+    cap = _env_int("SELFPLAY_LLM_CANDIDATES", 12)
     blunder = (os.getenv("SELFPLAY_KOI_BLUNDER") or "easy").strip() or "easy"
 
     game = {
@@ -246,10 +246,10 @@ def play_match(uid: str, games: int = 1, *, months: int | None = None,
                     try:
                         _aiko_turn(game, book, loss_lines, cap, rng, sources)
                     except Exception as exc:
-                        # Jev down (or undecidable): void the match rather than
+                        # LLM down (or undecidable): void the match rather than
                         # guessing — random plays would poison book + teaching.
-                        from agentic.toolkit.jev import JevUnavailable
-                        end = "jev-down" if isinstance(exc, JevUnavailable) else f"error: {type(exc).__name__}"
+                        from agentic.toolkit.llm_choice import LLMUnavailable
+                        end = "llm-down" if isinstance(exc, LLMUnavailable) else f"error: {type(exc).__name__}"
                         log.warning("koikoi selfplay: Aiko cannot move (%s), voiding match", end)
                         result.update(winner="void", end=end)
                         game["status"] = "finished"
@@ -274,7 +274,7 @@ def play_match(uid: str, games: int = 1, *, months: int | None = None,
         if result["winner"] == "void" and result.get("end") == "aborted" \
                 and game.get("status") == "finished":
             # Natural finish with no recorded outcome (e.g. all rounds
-            # exhausted): derive from totals. Void paths (stopped, jev-down,
+            # exhausted): derive from totals. Void paths (stopped, llm-down,
             # errors) already set end — never overwrite those.
             w = game.get("winner") or "draw"
             result.update(winner=("engine" if w == ENGINE_SEAT else w),

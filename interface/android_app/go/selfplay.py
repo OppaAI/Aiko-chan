@@ -1,12 +1,12 @@
-"""Aiko self-play for Go: Aiko (Jev) vs KataGo-or-baseline.
+"""Aiko self-play for Go: Aiko (LLM) vs KataGo-or-baseline.
 
 Board rules come from the local GoBoard engine (no KataGo needed to play);
 the opponent uses games_go._ai_move (KataGo when present, blunder/random
 fallback otherwise — winnable by default at easy blunder rates).
 
-Aiko moves by: opening book (ε-greedy on won lines) -> Jev `choice` over
+Aiko moves by: opening book (ε-greedy on won lines) -> LLM choice over
 heuristically capped candidates (captures first, deterministic order) ->
-random legal fallback (logged, game continues).
+no random fallback (game voids; a guessed move would teach fiction).
 
 Scoring is Tromp-Taylor area scoring implemented here (the local engine has
 no scorer; human games leave winner unknown on double pass). All stones
@@ -20,8 +20,9 @@ Learning per finished game (game key "go_selfplay"):
 
 Config (env): SELFPLAY_GO_SIZE (9), SELFPLAY_GO_KOMI (6.5),
   SELFPLAY_GO_MAX_MOVES (0 = size*size*3), SELFPLAY_BOOK_MIN_VISITS (3),
-  SELFPLAY_JEV_CANDIDATES (12), SELFPLAY_EXPLORATION (0.05).
-  Jev key: JEV_API_KEY via .env.age. Opponent strength: Go difficulty envs.
+  SELFPLAY_LLM_CANDIDATES (12), SELFPLAY_EXPLORATION (0.05).
+  LLM endpoint: LLM_BASE_URL (default http://localhost:8080/v1), model LLM_MODEL.
+  Opponent strength: Go difficulty envs.
 """
 from __future__ import annotations
 
@@ -206,12 +207,12 @@ def candidate_moves(board, cap: int) -> list[tuple[str, str]]:
 
 def aiko_choose_move(uid: str, board, *, book: dict, rng: random.Random,
                      loss_lines: list[str]) -> tuple[str, str]:
-    """Return (gtp, source): book | jev | forced.
+    """Return (gtp, source): book | llm | forced.
 
-    No random fallback: Jev failure voids the game rather than teaching fiction.
+    No random fallback: LLM failure voids the game rather than teaching fiction.
     """
-    from agentic.toolkit import jev as _jev
-    cap = _env_int("SELFPLAY_JEV_CANDIDATES", 12)
+    from agentic.toolkit import llm_choice as _llm
+    cap = _env_int("SELFPLAY_LLM_CANDIDATES", 12)
     cands = candidate_moves(board, cap)
     if not cands:
         raise RuntimeError("no legal moves (position should have ended)")
@@ -239,7 +240,7 @@ def aiko_choose_move(uid: str, board, *, book: dict, rng: random.Random,
              "history": list(board.history[-12:]), "candidates": [m for m, _ in cands]}
 
     def _ask():
-        pick, _, _ = _jev.choice(
+        pick, _, _ = _llm.choice(
             state,
             "Choose Aiko's Go move. Prefer captures and solid shape; "
             "play 3rd/4th line and star points early; avoid 1st/2nd line "
@@ -247,10 +248,10 @@ def aiko_choose_move(uid: str, board, *, book: dict, rng: random.Random,
             criteria,
         )
         if pick not in criteria:
-            raise _jev.JevError(f"unknown move pick {pick!r}")
+            raise _llm.LLMError(f"unknown move pick {pick!r}")
         return pick
 
-    return _jev.decide(_ask, label="go-move"), "jev"
+    return _llm.decide(_ask, label="go-move"), "llm"
 
 
 def engine_choose_move(board, *, uid=None) -> tuple[Optional[str], str]:
@@ -328,8 +329,8 @@ def play_game(uid: str, *, size: int | None = None,
                     mv, src = aiko_choose_move(uid, board, book=book, rng=rng,
                                                loss_lines=loss_lines)
                 except Exception as exc:
-                    from agentic.toolkit.jev import JevUnavailable
-                    end = "jev-down" if isinstance(exc, JevUnavailable) else f"error: {type(exc).__name__}"
+                    from agentic.toolkit.llm_choice import LLMUnavailable
+                    end = "llm-down" if isinstance(exc, LLMUnavailable) else f"error: {type(exc).__name__}"
                     log.warning("go selfplay: Aiko cannot move (%s), voiding game", end)
                     result.update(winner="void", end=end)
                     break
@@ -357,7 +358,7 @@ def play_game(uid: str, *, size: int | None = None,
             pass
         # Score ONLY clean completions: every abort path above sets end to
         # something other than the initial "aborted" (stopped, engine-error,
-        # illegal-*, error:*, jev-down). Never score a voided game.
+        # illegal-*, error:*, llm-down). Never score a voided game.
         if result["winner"] == "void" and result.get("end") == "aborted":
             bpts, wpts = tromp_taylor(board)
             if abs(bpts - wpts) < 1e-9:

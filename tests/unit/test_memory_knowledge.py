@@ -36,7 +36,10 @@ from cognition.knowledge import (
     KNOWLEDGE_RECALL_SCORE_THRESHOLD,
     KNOWLEDGE_CONTEXT_CHARS,
 )
-from cognition.knowledge.search import _knn, _fts, _search_cache_get, _search_cache_set
+from cognition.knowledge.search import (
+    _knn, _fts, _search_cache_get, _search_cache_set,
+    maybe_clear_knowledge_cache,
+)
 
 
 def _connect(path, user_id="test_user"):
@@ -103,7 +106,7 @@ class TestIngestText:
 
     def test_ingest_creates_doc_and_chunks(self, tmp_path):
         db_path = tmp_path / "test.db"
-        with patch("cognition.knowledge.ingest.connect", return_value=_connect(str(db_path))):
+        with patch("cognition.knowledge.schema.connect", return_value=_connect(str(db_path))):
             doc_id = ingest_text(
                 title="Test Doc",
                 text="This is a test document. " * 10,
@@ -115,13 +118,13 @@ class TestIngestText:
 
     def test_ingest_empty_text_returns_none(self, tmp_path):
         db_path = tmp_path / "test.db"
-        with patch("cognition.knowledge.ingest.connect", return_value=_connect(str(db_path))):
+        with patch("cognition.knowledge.schema.connect", return_value=_connect(str(db_path))):
             doc_id = ingest_text("Title", "", embedder=FakeEmbedder())
             assert doc_id is None
 
     def test_ingest_sanitizes_text(self, tmp_path):
         db_path = tmp_path / "test.db"
-        with patch("cognition.knowledge.ingest.connect", return_value=_connect(str(db_path))):
+        with patch("cognition.knowledge.schema.connect", return_value=_connect(str(db_path))):
             doc_id = ingest_text(
                 "Title", "  \n\n  Content with  excessive   whitespace  \n\n  ",
                 embedder=FakeEmbedder()
@@ -137,12 +140,12 @@ class TestIngestFile:
         workspace.mkdir(parents=True, exist_ok=True)
         (workspace / "test.txt").write_text("File content for ingestion. " * 5)
 
-        with patch("cognition.knowledge.ingest.connect", return_value=_connect(str(tmp_path / "test.db"))):
+        with patch("cognition.knowledge.schema.connect", return_value=_connect(str(tmp_path / "test.db"))):
             doc_id = ingest_file("test.txt", title="Test File", embedder=FakeEmbedder())
             assert doc_id is not None
 
     def test_ingest_nonexistent_file(self, tmp_path):
-        with patch("cognition.knowledge.ingest.connect", return_value=_connect(str(tmp_path / "test.db"))):
+        with patch("cognition.knowledge.schema.connect", return_value=_connect(str(tmp_path / "test.db"))):
             doc_id = ingest_file("nonexistent/path.txt", embedder=FakeEmbedder())
             assert doc_id is None
 
@@ -307,6 +310,11 @@ class TestKnowledgeContextFor:
 
     def test_cache_hit_returns_cached(self):
         """Second call with same query should use cache."""
+        # The search cache is process-global and its key includes
+        # id(embedder), which CPython can reuse after GC — a stale entry
+        # from an earlier test would make the first call below a cache
+        # hit and leave `opened` empty. Start from a clean cache.
+        maybe_clear_knowledge_cache()
         # Production opens a fresh connection per call (and closes it in a
         # finally), so mirror that: each connect() gets its own handle on the
         # same tmp DB file. The cache key includes id(embedder), so reuse one

@@ -165,8 +165,6 @@ def speak(text: str) -> None:
     text = sanitize(text)[:MAX_TTS_CHARS]
     if not text:
         return
-    import sounddevice as sd
-
     payload = json.dumps({
         "text": text,
         "reference": {"type": "preset", "preset_id": MIOTTS_PRESET},
@@ -179,6 +177,11 @@ def speak(text: str) -> None:
         method="POST",
     )
     try:
+        # Import inside the handler: sounddevice initializes PortAudio on
+        # import, which raises when the host library is absent. Keeping it
+        # here lets the except below report a TTS error instead of escaping.
+        import sounddevice as sd
+
         with urllib.request.urlopen(req, timeout=60) as r:
             body = json.loads(r.read())
         wav_bytes = base64.b64decode(body["audio"])

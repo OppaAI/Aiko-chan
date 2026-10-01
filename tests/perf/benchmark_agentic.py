@@ -23,7 +23,7 @@ from system.config import load_config
 load_config()
 
 # ─── Import modules to benchmark ──────────────────────────────────────────────
-from agentic import schema
+from agentic import graph_engine as schema
 from agentic.capability import match_capabilities, filtered_tool_schemas
 from agentic.toolkit.synthesize import synthesize_report, kb_search, combine_evidence, condense_text
 from agentic.toolkit.research import condense_evidence
@@ -326,7 +326,7 @@ class TestMemoryPerformance:
         conn.commit()
 
         def _run():
-            with patch("cognition.knowledge.connect", return_value=conn):
+            with patch("cognition.knowledge.search.connect", return_value=conn):
                 return search_knowledge("topic 500", limit=10, embedder=embedder, user_id="bench_user")
 
         results = benchmark(_run)
@@ -354,7 +354,7 @@ class TestMemoryPerformance:
         conn.commit()
 
         def _run():
-            with patch("cognition.knowledge.connect", return_value=conn):
+            with patch("cognition.knowledge.search.connect", return_value=conn):
                 return knowledge_context_for("topic 50", limit=10, embedder=embedder, user_id="bench_user")
 
         ctx = benchmark(_run)

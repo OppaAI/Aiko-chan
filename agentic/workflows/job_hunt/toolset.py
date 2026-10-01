@@ -143,6 +143,7 @@ _BOILERPLATE = {
     "recommended job", "see all", "recently viewed", "saved jobs",
     "noreply@", "no-reply@", "view all jobs", "see more jobs",
     "your job alert", "jobs you may be interested in",
+    "actively recruiting", "easy apply",
 }
 
 # Generic category labels from LinkedIn/Indeed recommendation emails
@@ -1438,6 +1439,16 @@ def _looks_like_job_title(line: str) -> bool:
     # Reject generic category labels (LinkedIn recommendation email sections)
     if line.casefold().strip() in _GENERIC_CATEGORIES:
         return False
+    # A ★ rating always marks a company/rating line (Glassdoor style), never a title.
+    if "★" in line:
+        return False
+    # A middle-dot separator marks a "company · location" detail line, never a title.
+    if "·" in line or "•" in line:
+        return False
+    # A bare location ("Vancouver", "Remote") is a detail line, not a title.
+    _org, _loc = _split_company_location(line)
+    if not _org and _loc:
+        return False
     # Prefer lines with role keywords or title-case multi-word
     role_kw = re.compile(
         r"\b(engineer|developer|architect|manager|analyst|specialist|"
@@ -1502,6 +1513,10 @@ def _extract_digest_cards(cleaned: str, *, sender: str = "", subject: str = "", 
         line = _MD_LINK_RE.sub(r"\1", raw).strip()
         line = re.sub(r"https?://\S+", "", line).strip()
         line = re.sub(r"^[\*\-\#\d\.\)\s]+", "", line).strip()
+        # Digest emails often echo the subject as a body header ("Jobs for Aiko");
+        # it is a header, never a job card.
+        if subject and line.casefold() == subject.casefold():
+            continue
         if line and not _is_boilerplate_line(line):
             lines.append(line)
     jobs: list[dict] = []

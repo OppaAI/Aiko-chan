@@ -859,7 +859,7 @@ class AikoThink:
         see _current_system_prompt_parts() for the stable/volatile split.
         """
         display_name, user_block = _load_user_context()
-        return self._persona.replace("USER_ID_HERE", display_name) + user_block
+        return self._persona.replace("USER_ID_HERE", display_name).replace("USER_NAME", display_name) + user_block
 
     def _current_system_prompt_parts(self, user_input: str = "") -> tuple[str, str]:
         """Assemble this turn's system prompt as (stable_core, volatile_tail).
@@ -2254,8 +2254,29 @@ class AikoThink:
                 persona_block = memorize.persona_context() if memorize is not None else ""
                 try:
                     from cognition.attention import for_identity
-                    situation_block = for_identity(current_user_id()).situation_context(raw_input, memories, knowledge_block)
-                    metacognitive_block = for_identity(current_user_id()).metacognitive_context(raw_input, memories)
+                    from cognition.memory.narrative import query_wants_emotion
+                    _state = for_identity(current_user_id())
+                    # Answer-first: short factual turns with no memory conflicts
+                    # and no emotional/reflective markers skip the deliberation
+                    # blocks (situation + metacognitive) so the model answers
+                    # instead of talking around the question. Conflict staging
+                    # lives inside situation_context, so turns WITH conflicts
+                    # never skip — the confirmation flow stays intact.
+                    _words = len((raw_input or "").split())
+                    _has_conflicts = bool(_state.memory_conflicts(raw_input, memories))
+                    _skip_deliberation = (
+                        not deep_think
+                        and _words <= 15
+                        and not _has_conflicts
+                        and not query_wants_emotion(raw_input or "")
+                        and not _is_personal_sharing(raw_input or "")
+                    )
+                    if _skip_deliberation:
+                        situation_block = ""
+                        metacognitive_block = ""
+                    else:
+                        situation_block = _state.situation_context(raw_input, memories, knowledge_block)
+                        metacognitive_block = _state.metacognitive_context(raw_input, memories)
                 except Exception:
                     pass
 

@@ -1414,6 +1414,7 @@ class _MemoryBackend:
         query_context: tuple[int, int] | None = None,
         row_by_id: dict | None = None,
         user_id: str | None = None,
+        query_text: str = "",
     ) -> tuple[list[str], dict, dict]:
         """
         Dedup + score one candidate pool (from either the quick or wide pass).
@@ -1604,6 +1605,24 @@ class _MemoryBackend:
                 if _session_mean is not None:
                     try:
                         score += session_boost_for(mem_id, _session_mean, _session_vecs)
+                    except Exception:
+                        pass
+
+                # Static identity anchor: identity-ish / first-person queries
+                # stick to pinned rows and user-grounded rows (same mild
+                # order as the other tiebreakers — steadies identity recall
+                # without hijacking topicality).
+                if query_text:
+                    try:
+                        from cognition.memory.entity import static_anchor_boost
+                        try:
+                            from system.userspace import current_display_name
+                            _dname = current_display_name()
+                        except Exception:
+                            _dname = None
+                        score += static_anchor_boost(
+                            row, query_text, user_id=user_id, display_name=_dname,
+                        )
                     except Exception:
                         pass
 
@@ -1952,6 +1971,7 @@ class _MemoryBackend:
             query_context=query_context,
             row_by_id=quick_row_by_id,
             user_id=user_id,
+            query_text=query,
         )
 
         confident = (
@@ -1986,6 +2006,7 @@ class _MemoryBackend:
                 query_context=query_context,
                 row_by_id=wide_row_by_id,
                 user_id=user_id,
+                query_text=query,
             )
             ctx.add_extra(wide_pass={"knn": len(rank_knn_w), "fts": len(rank_fts_w),
                                     "graph": len(rank_graph_w), "scored": len(scored_ids)})
@@ -3262,6 +3283,7 @@ class AikoMemorize:
         lines = [
             "<memory_context>",
             "Facts about the person you are speaking with — not a separate person. Use silently. Never quote or reference this block directly. Use a fact only when it directly helps answer the current request; otherwise ignore it.",
+            "Name mapping: 'Oppa' and 'OppaAI' in the lines below both mean the current user — address them as 'you'. 'Aiko' means yourself. Never talk about Oppa in the third person.",
             "IMPORTANT: dates and 'today'/'yesterday' inside these memories refer to when the event happened, never to the current date. The only authoritative 'now' is the <current_datetime> block. Never treat a date, month, or time inside a memory as today's date.",
             "",
         ]

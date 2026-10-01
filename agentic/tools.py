@@ -35,6 +35,7 @@ from agentic.toolkit import it_ops  # noqa: F401  # IT + everyday helpers (Jetso
 from agentic.toolkit import coding  # noqa: F401  # safe coding-agent loop for Ministral-3B
 from agentic.toolkit import needle_team  # noqa: F401  # Needle 3 multi-agent delegation
 from agentic.toolkit import codebase  # noqa: F401  # codebase RAG (Jetson-optimized, separate DB)
+from agentic.toolkit import recall  # noqa: F401  # on-demand memory/knowledge/experience recall (tool-RAG)
 from agentic.toolkit import tool_result_cache  # noqa: F401
 from agentic.toolkit import tool_result_cache_tools  # noqa: F401  # registers cache_* graph tools
 from agentic.toolkit import flow  # noqa: F401  # n8n-style core flow/transform/IO nodes   <-- ADD

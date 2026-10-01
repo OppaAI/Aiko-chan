@@ -345,6 +345,13 @@ MEMORY_SESSION_ANCHOR_ENABLED: "1"
 MEMORY_SESSION_ANCHOR_K: "8"           # Last K query vectors in this process/session
 MEMORY_SESSION_ANCHOR_WEIGHT: "0.006"  # Cosine-to-session-mean boost (same order as rank recency)
 
+# -- Static identity anchor (permanent counterpart to the session anchor) --
+# Identity-ish / first-person queries stick to pinned rows and rows carrying
+# user-alias entities (Oppa/OppaAI/display name). Same mild order as the
+# other rank tiebreakers — steadies identity recall without hijacking topicality.
+MEMORY_STATIC_ANCHOR_ENABLED: "1"
+MEMORY_STATIC_ANCHOR_WEIGHT: "0.008"  # Flat boost on identity-grounded rows for identity queries
+
 # -- Phase 18: knowledge / experience store parity --
 # Near-dup writes can supersede older rows (status=superseded + supersedes_id).
 # Optional entity/engram spreading is OFF by default (enable if desired).

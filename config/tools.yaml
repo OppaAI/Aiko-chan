@@ -331,6 +331,31 @@
       "skill": false
     },
     {
+      "handler": "agentic.toolkit.recall:retrieve_context",
+      "name": "retrieve_context",
+      "description": "Pull long-term memory, learned knowledge, or past task experience on demand mid-task. Use when upfront context was omitted for low relevance or you need specifics — do not guess from the system prompt. stores: comma-separated subset of memory,knowledge,experience.",
+      "props": {
+        "query": {
+          "type": "string"
+        },
+        "stores": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "domain": "memory",
+      "always_on": true,
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
       "handler": "agentic.toolkit.synthesize:combine_evidence",
       "name": "combine_evidence",
       "description": "Concatenate non-empty evidence blocks with a visible separator.",

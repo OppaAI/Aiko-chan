@@ -110,6 +110,13 @@ AGENT_VERIFY_MIN_SCORE = float(os.getenv("AGENT_VERIFY_MIN_SCORE", "0.70"))
 AGENT_TOOL_RETRY_BACKOFF = float(os.getenv("AGENT_TOOL_RETRY_BACKOFF", 0.4))
 AGENT_EXECUTOR_MODE = os.getenv("AGENT_EXECUTOR_MODE", "hybrid").strip().lower()  # react | graph | hybrid
 AGENT_INCLUDE_EXPERIENCE_CONTEXT = os.getenv("AGENT_INCLUDE_EXPERIENCE_CONTEXT", "0").lower() in {"1", "true", "yes", "on"}
+# Tool-RAG upfront floor (cosine block relevance, same scale as
+# batch_block_relevance_scores): knowledge/experience blocks scoring below
+# this are omitted upfront — the loop pulls specifics via retrieve_context
+# instead of paying prompt tokens for near-orthogonal blocks. Memory stays
+# in the fixed budget (never gated); wiki/skill/policy keep budget-only
+# behavior so task setup never loses its scaffolding.
+AGENT_UPFRONT_MIN_SCORE = float(os.getenv("AGENT_UPFRONT_MIN_SCORE", "0.10"))
 # ``needle`` uses the local Needle 3 playground /complete contract for the novel ReAct
 # path. Graph playbooks remain deterministic; low-confidence Needle outputs
 # intentionally fall back to the configured conversational LLM.
@@ -2127,6 +2134,21 @@ def run_agentic_chat(owner, user_input: str, token_callback=None, mem_kb_future=
     if "<past_task" not in experience_context:
         experience_context = ""
     scores["knowledge"] = reason.batch_block_relevance_scores(_embedder, user_input, [knowledge_context], query_vector=_query_vec)[0]
+
+    # Tool-RAG: omit low-relevance knowledge/experience upfront; the loop
+    # retrieves specifics with retrieve_context instead of reading noise.
+    # Memory is fixed-budget (never gated here).
+    if AGENT_UPFRONT_MIN_SCORE > 0:
+        if knowledge_context and scores.get("knowledge", 0.0) < AGENT_UPFRONT_MIN_SCORE:
+            log.info("[agentic] knowledge upfront score %.3f < %.2f — omitted, retrieve_context on demand",
+                     scores.get("knowledge", 0.0), AGENT_UPFRONT_MIN_SCORE)
+            knowledge_context = ("<knowledge_context>\nOmitted this turn (low relevance) — "
+                                 "use the retrieve_context tool to pull specifics on demand.\n</knowledge_context>")
+        if experience_context and scores.get("experience", 0.0) < AGENT_UPFRONT_MIN_SCORE:
+            log.info("[agentic] experience upfront score %.3f < %.2f — omitted, retrieve_context on demand",
+                     scores.get("experience", 0.0), AGENT_UPFRONT_MIN_SCORE)
+            experience_context = ("<experience_context>\nOmitted this turn (low relevance) — "
+                                  "use the retrieve_context tool to pull specifics on demand.\n</experience_context>")
 
     wiki_context, skill_context, knowledge_context, agentic_policy_context, experience_context, task_mode_guidance = _enforce_agentic_context_budget(
         owner._persona, agentic_policy_context, memory_context, user_input,

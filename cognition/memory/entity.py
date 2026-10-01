@@ -1495,3 +1495,76 @@ def session_boost_for(mid: str, mean: list[float] | None, vecs: dict[str, list[f
         return 0.0
     # Only reward alignment with current chat topic (not anti-topic)
     return MEMORY_SESSION_ANCHOR_WEIGHT * max(0.0, _anchor_cosine(v, mean))
+
+
+# ── static identity anchor ────────────────────────────────────────────────
+# Permanent counterpart to the session (dynamic) anchor: identity-ish or
+# first-person queries stick to pinned rows and rows carrying user-alias
+# entities (Oppa/OppaAI/display name). Same mild order as the other rank
+# tiebreakers so it steadies identity recall without hijacking topicality.
+MEMORY_STATIC_ANCHOR_ENABLED = env_flag("MEMORY_STATIC_ANCHOR_ENABLED", "1")
+MEMORY_STATIC_ANCHOR_WEIGHT = env_float("MEMORY_STATIC_ANCHOR_WEIGHT", 0.008)
+
+_IDENTITY_QUERY_RE = re.compile(
+    r"\b(who am i|my name|about me|do you know me|remember me|"
+    r"my (birthday|age|preferences?|likes?|location|email|name))\b"
+    r"|\bam i\b",
+    re.IGNORECASE,
+)
+_FIRST_PERSON_RE = re.compile(r"\b(i|me|my|mine|we|our|ours)\b", re.IGNORECASE)
+_STATIC_ANCHOR_KINDS = frozenset({"identity", "preference"})
+
+
+def user_alias_set(user_id: str | None = None, display_name: str | None = None) -> set[str]:
+    """Casefolded name tokens that refer to the current user in memories."""
+    out = {DEFAULT_USER_NAME.casefold(), "oppaai"}
+    for raw in (user_id, display_name):
+        if raw and str(raw).strip() and str(raw).strip().casefold() not in {"guest"}:
+            out.add(str(raw).strip().casefold())
+    return out
+
+
+def _row_entities_casefolded(row: Any) -> set[str]:
+    try:
+        raw = row.get("entities") if hasattr(row, "get") else row["entities"]
+    except Exception:
+        return set()
+    if not raw:
+        return set()
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            return set()
+    try:
+        return {str(e).strip().casefold() for e in raw if str(e).strip()}
+    except Exception:
+        return set()
+
+
+def static_anchor_boost(
+    row: Any,
+    query: str,
+    *,
+    user_id: str | None = None,
+    display_name: str | None = None,
+) -> float:
+    """Mild recall boost binding identity queries to user-grounded rows."""
+    if not MEMORY_STATIC_ANCHOR_ENABLED or MEMORY_STATIC_ANCHOR_WEIGHT <= 0:
+        return 0.0
+    q = query or ""
+    if not (_IDENTITY_QUERY_RE.search(q) or _FIRST_PERSON_RE.search(q)):
+        return 0.0
+    try:
+        pinned = bool(row.get("pinned")) if hasattr(row, "get") else bool(row["pinned"])
+    except Exception:
+        pinned = False
+    try:
+        kind = (row.get("kind") or "") if hasattr(row, "get") else (row["kind"] or "")
+        kind = str(kind).casefold()
+    except Exception:
+        kind = ""
+    aliases = user_alias_set(user_id, display_name)
+    if pinned or kind in _STATIC_ANCHOR_KINDS or bool(_row_entities_casefolded(row) & aliases):
+        return float(MEMORY_STATIC_ANCHOR_WEIGHT)
+    return 0.0

@@ -353,3 +353,70 @@ def test_latency_report_sorts_by_timestamp():
     report = t.report()
     assert "first_audio→final_token=" in report
     assert "=-" not in report, f"negative interval in {report!r}"
+
+
+# ---------------------------------------------------------------------------
+# gate_speak fail-closed mode (CodeRabbit: residual finding on fix 5)
+#
+# gate_speak swallows conscience_for().evaluate() errors internally and
+# returns the draft unchanged — which the sink reads as approval. The
+# sink-level try/except alone cannot see that failure, so gate_speak gets
+# an opt-in fail-closed mode for early sentence streaming.
+# ---------------------------------------------------------------------------
+
+
+def _failing_conscience(monkeypatch):
+    import cognition.conscience as conscience_mod
+
+    def _boom():
+        raise RuntimeError("conscience down")
+
+    monkeypatch.setattr(conscience_mod, "conscience_for", _boom)
+
+
+def test_gate_speak_fail_closed_reraises_eval_errors(monkeypatch):
+    from cognition.conscience import hooks
+
+    _failing_conscience(monkeypatch)
+    # Default preserves existing fail-open behavior for finalization.
+    assert hooks.gate_speak(draft="Hello.") == "Hello."
+    # Opt-in fail-closed surfaces the error to the caller.
+    with pytest.raises(RuntimeError, match="conscience down"):
+        hooks.gate_speak(draft="Hello.", fail_closed=True)
+
+
+def test_sentence_sink_enables_fail_closed_gate(monkeypatch):
+    from cognition.conscience import hooks
+
+    think = _bare_think(monkeypatch)
+    seen = {}
+
+    def _rec_gate_speak(*, draft, fail_closed=False, **kw):
+        seen["fail_closed"] = fail_closed
+        return None
+
+    monkeypatch.setattr(hooks, "gate_speak", _rec_gate_speak)
+    speak = FakeSpeak()
+    state = {"aborted": False, "streaming": False, "spoken": []}
+    sink = think._make_sentence_sink("hi", speak, None, state)
+    assert sink("Hello world.") is True
+    assert seen.get("fail_closed") is True
+
+
+def test_sentence_sink_aborts_when_gate_eval_fails_internally(monkeypatch):
+    """End-to-end: real gate_speak + failing conscience_for() must abort
+    early audio with nothing fed — the unevaluated sentence must not
+    reach TTS via gate_speak's internal fail-open draft return."""
+    _failing_conscience(monkeypatch)
+    # Minimal think WITHOUT _bare_think's gate_speak monkeypatch: use the
+    # real gate_speak so its internal except path is exercised.
+    think = object.__new__(AikoThink)
+    think._review_response = lambda user_input, text: {"flags": []}
+    think._get_memorize = lambda: None
+    think._client = None
+    speak = FakeSpeak()
+    state = {"aborted": False, "streaming": False, "spoken": []}
+    sink = think._make_sentence_sink("hi", speak, None, state)
+    assert sink("Hello world.") is False
+    assert state["aborted"] is True
+    assert speak.fed == [], f"unevaluated sentence reached TTS: {speak.fed!r}"

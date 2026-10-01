@@ -2873,6 +2873,11 @@ class AikoThink:
                     llm_client=getattr(self, "_client", None),
                     embedder=embedder,
                     already_emitted=False,
+                    # Fail-closed for early audio: an evaluation error must
+                    # surface here so the sink aborts instead of speaking an
+                    # unevaluated sentence. gate_speak's fail-open default
+                    # (return the draft) is preserved for _finalize_response.
+                    fail_closed=True,
                 )
                 if replaced is not None and replaced.strip() != sentence:
                     log.warning("[think] sentence-stream: gate_speak refused a sentence; aborting early audio")

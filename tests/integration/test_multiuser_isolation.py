@@ -51,7 +51,7 @@ class FakeEmbedder:
     def embed_batch(self, texts):
         return self.embed(texts)
 
-    def embed_query(self, text):
+    def embed_query(self, text, instruct: str = ""):
         return self._vec(text)
 
     def embed_queries(self, texts):

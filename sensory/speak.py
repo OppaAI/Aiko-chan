@@ -35,6 +35,7 @@ import unicodedata
 import queue
 from system.config import env_float, env_int
 from system.log import get_logger, silent_stderr
+from sensory import latency as _latency
 
 log = get_logger(__name__)
 
@@ -229,21 +230,24 @@ _THOUGHT_PAREN_RE = re.compile(r"\([^)]+\)")
 _FEELING_BRACKET_RE = re.compile(r"\[[^\]]+\]")
 _STRUCTURED_SEP_RE = re.compile(r"\n\s*---\s*\n")
 _EMOTION_LINE_RE = re.compile(r"(?im)^\s*EMOTION\s*:\s*([A-Za-z_][A-Za-z0-9_\-]*)\s*$")
-_ACTION_LINE_RE = re.compile(r"(?im)^\s*ACTION\s*:\s*(.+?)\s*$")
-_DISPLAY_STRUCTURAL_LINE_RE = re.compile(r"(?im)^[ \t]*(?:EMOTION|ACTION)\s*:[^\r\n]*(?:\r?\n|$)")
+_DISPLAY_STRUCTURAL_LINE_RE = re.compile(r"(?im)^[ \t]*EMOTION\s*:[^\r\n]*(?:\r?\n|$)")
 _ALLOWED_EMOTIONS = {
     "neutral", "happy", "shy", "sad", "annoyed", "surprised", "thinking",
 }
 
 
 def parse_aiko_response(text: str) -> dict:
-    """Split a model reply into emotion / action / dialogue channels."""
+    """Split a model reply into emotion / dialogue channels.
+
+    There is no forced action channel: the model weaves any physical gesture
+    naturally into its reply (or omits it), and that prose is ordinary
+    dialogue — visible in bubbles and speakable by TTS.
+    """
     if isinstance(text, (list, tuple)):
         raw = text[0] if text else ""
     else:
         raw = str(text or "")
     emotion = "neutral"
-    action = "none"
     body = raw.strip()
 
     body = re.sub(r"(?m)^\s*---+\s*$", "", body)
@@ -260,15 +264,10 @@ def parse_aiko_response(text: str) -> dict:
             emotion = _EMOJI_TO_EMOTION.get(symbol, symbol)
             body = _EMOJI_LEADING_RE.sub("", body)
 
-    ac_match = _ACTION_LINE_RE.search(body)
-    if ac_match:
-        action = (ac_match.group(1) or "none").strip() or "none"
-        body = _ACTION_LINE_RE.sub("", body)
-
     body = re.sub(r"(?m)^\s*---+\s*$", "", body)
     body = _EMOJI_HEADER_RE.sub("", body)
-    # Strip only the asterisk markers, keeping the wrapped words so actions
-    # and emphasis stay visible in bubbles and speakable in TTS.
+    # Strip only the asterisk markers, keeping the wrapped words so natural
+    # action prose and emphasis stay visible in bubbles and speakable in TTS.
     body = re.sub(r"\*\*([^*]+)\*\*", r"\1", body)
     body = re.sub(r"\*([^*]+)\*", r"\1", body)
     body = _THOUGHT_PAREN_RE.sub("", body)
@@ -277,7 +276,6 @@ def parse_aiko_response(text: str) -> dict:
     dialogue = re.sub(r"\s{2,}", " ", body).strip()
     return {
         "emotion": emotion,
-        "action": action,
         "dialogue": dialogue,
         "raw": raw,
     }
@@ -299,14 +297,14 @@ def _parse_for_display(text: str) -> str:
 
 
 def format_for_display(text: str) -> str:
-    """UI text with only structural ``EMOTION:`` and ``ACTION:`` lines removed."""
+    """UI text with only structural ``EMOTION:`` lines removed."""
     if not text:
         return ""
     return _parse_for_display(text)
 
 
 def dialogue_for_stream(text: str) -> str:
-    """Plain dialogue for karaoke sentence-splitting (no emoji / ACTION chrome)."""
+    """Plain dialogue for karaoke sentence-splitting (no emoji chrome)."""
     if not text:
         return ""
     return (parse_aiko_response(text).get("dialogue") or "").strip()
@@ -412,6 +410,8 @@ class AikoSpeak:
         if self._first_audio_fired.is_set():
             return
         self._first_audio_fired.set()
+        _latency.mark("first_audio")
+        log.info(_latency.report())
         callback = self._first_audio_callback
         if callback is not None:
             try:
@@ -568,6 +568,7 @@ class AikoSpeak:
                 os.remove(wav_path)
             except Exception as e:
                 log.warning(f"[speak] failed to delete temp file {wav_path}: {e}")
+            _latency.mark("first_tts_synth")
             return wav_bytes
         except Exception as e:
             log.error(f"[speak] synthesis error: {e}")
@@ -705,7 +706,7 @@ class AikoSpeak:
                 chunk = chunk_queue.get()
                 if chunk is None:
                     break
-                # Chunk may be a lone ACTION/emoji line after sentence split —
+                # Chunk may be a lone emoji line after sentence split —
                 # never fall back to typing/speaking the raw structured chrome.
                 clean = extract_dialogue_for_tts(chunk)
                 if not clean:
@@ -1015,7 +1016,7 @@ class AikoSpeak:
         """Queue a completed streamed sentence/chunk for immediate TTS.
 
         Prefer dialogue-only text from the caller; still re-extract here so a
-        stray ACTION/emoji line never reaches synthesis.
+        stray emoji line never reaches synthesis.
         """
         if not text:
             return

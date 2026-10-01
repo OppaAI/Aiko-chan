@@ -1,6 +1,7 @@
 """Knowledge search, context formatting, and search cache."""
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections import OrderedDict
@@ -250,6 +251,75 @@ def search_knowledge(
 
 def _attr(value: object) -> str:
     return escape(str(value or ""), quote=True)
+
+
+def linked_knowledge_for_entities(
+    seed_entities: list[str],
+    *,
+    limit: int = 3,
+    max_chars: int = 2000,
+    user_id: str | None = None,
+) -> str:
+    """One-link-down knowledge hop: memory entities → linked knowledge chunks.
+
+    Pure SQLite entity-overlap lookup — no embedding call and no vector
+    search, so this is cheap enough to run on every chat turn. A chunk
+    links when it shares at least MEMORY_CROSS_STORE_MIN_ENTITY_OVERLAP
+    (default 2) entities with the seeds. Callers should exclude super-node
+    entities from the seeds first (a super-node matches a near-random slice
+    of the KB).
+
+    Returns a formatted <knowledge_context> block, or "" when nothing links.
+    """
+    overlap_min = max(0, int(os.getenv("MEMORY_CROSS_STORE_MIN_ENTITY_OVERLAP", "2") or 2))
+    seeds = {str(e).strip().lower() for e in (seed_entities or []) if str(e).strip()}
+    if not seeds or limit <= 0:
+        return ""
+    uid = user_id or current_user_id()
+    conn = connect(uid)
+    try:
+        rows = conn.execute(
+            """
+            SELECT c.id, c.text, c.chunk_index, c.created_at, c.entities, c.status,
+                d.title, d.source, d.kind, d.id AS doc_id
+            FROM learned_chunks c
+            JOIN learned_docs d ON d.id = c.doc_id
+            WHERE c.user_id = ? AND (c.status = 'active' OR c.status IS NULL)
+            LIMIT 500
+            """,
+            (uid,),
+        ).fetchall()
+    except Exception as exc:
+        log.debug("linked knowledge hop skipped: %s", exc)
+        return ""
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    seen: set[str] = set()
+    ranked: list[dict] = []
+    for row in rows:
+        try:
+            ents = {str(e).strip().lower() for e in entities_from_json(row["entities"] or "[]") if e}
+        except Exception:
+            continue
+        ov = len(ents & seeds)
+        if ov < overlap_min:
+            continue
+        rid = str(row["id"])
+        if rid in seen:
+            continue
+        seen.add(rid)
+        d = dict(row)
+        d["score"] = float(ov)
+        ranked.append(d)
+    # Most shared entities first, newest chunk breaks ties.
+    ranked.sort(key=lambda d: (d["score"], str(d.get("created_at") or "")), reverse=True)
+    hits = ranked[:limit]
+    if not hits:
+        return ""
+    return _format_knowledge_context(hits, max_chars)
 
 
 def knowledge_context_for(

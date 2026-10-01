@@ -4,7 +4,7 @@ Tests for extracting spoken dialogue from Aiko messages containing emoji headers
 """
 
 import unittest
-from sensory.speak import extract_dialogue_for_tts, format_for_display
+from sensory.speak import extract_dialogue_for_tts, format_for_display, parse_aiko_response
 
 
 class TestDialogueExtraction(unittest.TestCase):
@@ -35,6 +35,8 @@ class TestDialogueExtraction(unittest.TestCase):
         self.assertEqual(result, "Hello, OppaAI!")
 
     def test_display_keeps_markdown_while_removing_structural_metadata(self):
+        # No forced ACTION channel: a literal ACTION line is ordinary text
+        # now; only EMOTION lines are structural.
         text = (
             "EMOTION: happy\n"
             "ACTION: *waves*\n"
@@ -44,9 +46,19 @@ class TestDialogueExtraction(unittest.TestCase):
         result = format_for_display(text)
         self.assertEqual(
             result,
+            "ACTION: *waves*\n"
             "Hello, *friend*! Read [the **guide**](https://example.com).\n"
             "- Keep this list item.",
         )
+
+    def test_no_action_channel_in_parse(self):
+        result = parse_aiko_response("EMOTION: happy\nACTION: tilt head\nHi there.")
+        self.assertNotIn("action", result)
+        self.assertEqual(result["emotion"], "happy")
+
+    def test_natural_action_prose_stays_speakable(self):
+        text = "*tilts head* That should work."
+        self.assertEqual(extract_dialogue_for_tts(text), "tilts head That should work.")
 
 
 if __name__ == "__main__":

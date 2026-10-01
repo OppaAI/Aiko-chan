@@ -101,8 +101,15 @@ def gate_respond(*, user_input: str, user_id: str | None, llm_client=None, embed
         return "caution", None, _CONSCIENCE_CAUTION
 
 
-def gate_speak(*, draft: str, user_input: str = "", llm_client=None, embedder=None, already_emitted: bool = False):
-    """Evaluate act=speak. Returns replacement text or None to keep draft."""
+def gate_speak(*, draft: str, user_input: str = "", llm_client=None, embedder=None, already_emitted: bool = False,
+             fail_closed: bool = False):
+    """Evaluate act=speak. Returns replacement text or None to keep draft.
+
+    fail_closed: when True, evaluation errors are re-raised instead of
+    preserving the draft. Early sentence streaming (cognition/think.py)
+    opts in: an unevaluated sentence must never reach TTS. Normal
+    finalization keeps the fail-open default.
+    """
     try:
         from cognition.conscience import conscience_for, REFUSE, ESCALATE
         verdict = conscience_for().evaluate(
@@ -133,6 +140,8 @@ def gate_speak(*, draft: str, user_input: str = "", llm_client=None, embedder=No
         return None
     except Exception as exc:
         log.warning("[ccc-hooks] speak gate failed; preserving draft under caution: %s", exc)
+        if fail_closed:
+            raise
         return draft
 
 

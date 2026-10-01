@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 
 def test_messenger_registry_excludes_one_way_platforms():
-    adapters = importlib.import_module("agentic.adapters")
+    adapters = importlib.import_module("interface.adapter")
     assert set(adapters.ADAPTER_REGISTRY) == {"discord", "telegram", "slack", "matrix"}
 
 

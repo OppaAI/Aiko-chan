@@ -56,13 +56,15 @@ def test_training_feedback_failure_precedes_success():
 
 
 def test_attention_state_is_bounded_and_retrieves_current_focus():
+    from system.config import env_int
+    max_turns = env_int("EDGE_COGNITION_MAX_TURNS", 7)  # configured bound, not a literal
     state = EdgeCognitiveState()
     for i in range(12):
         state.record(f"remember task {i}", f"Noted item {i}.")
     block = state.context("task 11")
     assert "task 11" in block
     assert "<edge_cognitive_state>" in block
-    assert len(state._events) == 7
+    assert len(state._events) == max_turns
     assert len(state._open_loops) == 3
 
 

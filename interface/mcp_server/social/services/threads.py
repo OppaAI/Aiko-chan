@@ -577,7 +577,7 @@ def _infer_reply(reply: dict, conversation: list[dict], memory_saved: bool = Fal
         f"\nNote: {reply.get('username')} is {owner_display_name()} — your owner, "
         "the person who builds you. You know them; speak with that familiarity, "
         "while keeping the reply suitable for a public thread.\n"
-        if author and owner and author == owner else ""
+        if _is_owner_author(author, owner) else ""
     )
     image_section = (
         f"\nYou have just generated and attached an image for this person based on this scene: <scene>{image_prompt}</scene>. "

@@ -96,6 +96,9 @@ def test_fallback_owner_memorize_constructs_binds_and_caches(monkeypatch):
         def switch_user(self, uid):
             constructed.append(("switch", uid))
 
+        def get_display_name(self):
+            return ""
+
     stub_module.AikoMemorize = StubAikoMemorize
     monkeypatch.setitem(sys.modules, "cognition.memory.memorize", stub_module)
     monkeypatch.setattr(monitor_daemon, "_owner_user_id", lambda: "github_123")

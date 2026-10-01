@@ -149,6 +149,22 @@ _EFFORT_TIERS = {
 _robots_cache = TTLCache(ttl_seconds=ROBOTS_CACHE_TTL_SECONDS)
 
 
+def _optional_import(name: str):
+    """Import an optional dependency, returning None when unavailable.
+
+    find_spec/import_module can raise ValueError (not just ImportError) when
+    sys.modules holds a spec-less entry — e.g. a lazy import racing an
+    environment rebuild. All fetch paths here are best-effort, so any
+    import-machinery weirdness degrades to None instead of failing the node.
+    """
+    try:
+        if importlib.util.find_spec(name) is None:
+            return None
+        return importlib.import_module(name)
+    except Exception:
+        return None
+
+
 def _get_robot_parser(origin: str) -> RobotFileParser:
     """Fetch and cache a RobotFileParser for one origin (scheme://netloc).
     Fails open (allow-all) if robots.txt is missing or unreachable."""
@@ -158,8 +174,8 @@ def _get_robot_parser(origin: str) -> RobotFileParser:
 
     parser = RobotFileParser()
     parser.set_url(f"{origin}/robots.txt")
-    if importlib.util.find_spec("requests") is not None:
-        requests = importlib.import_module("requests")
+    requests = _optional_import("requests")
+    if requests is not None:
         try:
             resp = requests.get(
                 f"{origin}/robots.txt", timeout=5,
@@ -201,9 +217,9 @@ def _discover_sitemap_urls(origin: str, query_hint: str = "", max_urls: int = RE
     'Sitemap:' directives first, falls back to /sitemap.xml."""
     if not RESEARCH_SITEMAP_ENABLED:
         return []
-    if importlib.util.find_spec("requests") is None:
+    requests = _optional_import("requests")
+    if requests is None:
         return []
-    requests = importlib.import_module("requests")
 
     candidates: list[str] = []
     try:
@@ -436,7 +452,7 @@ def _crawl4ai_fetch_many(urls: list[str], max_chars: int) -> dict[str, str]:
     Already filters out robots-disallowed URLs itself as defense in depth,
     though _deep_search_impl also filters before calling this.
     """
-    if not urls or importlib.util.find_spec("crawl4ai") is None:
+    if not urls or _optional_import("crawl4ai") is None:
         return {}
 
     allowed_urls = [u for u in urls if _source_agreement_allows(u)] if RESEARCH_RESPECT_ROBOTS else list(urls)

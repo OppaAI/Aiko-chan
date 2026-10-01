@@ -164,13 +164,15 @@ _LLM_NO_THINK = os.getenv("LLM_NO_THINK", "").strip().lower() in {"1", "true", "
 # clear review + gate_speak. Every streamed sentence still passes the two
 # required checks at sentence level — local _review_response and the
 # outbound gate_speak conscience gate — before any audio is synthesized for
-# it. Default OFF: full-draft gating first, then sentence TTS.
+# it. Default ON: stream the earliest safe sentences to TTS during
+# generation. Set AIKO_SENTENCE_STREAM=0 to go back to full-draft gating
+# first, then sentence TTS.
 #
 # Tradeoff (explicitly accepted): audio for a sentence that passed its own
 # gates cannot be recalled if the later full-draft review/correction wants
 # to rewrite it. Corrections fire only on >=2 review flags (rare), and any
 # divergence between spoken audio and final text is logged loudly.
-_SENTENCE_STREAM = os.getenv("AIKO_SENTENCE_STREAM", "").strip().lower() in {"1", "true", "yes", "on"}
+_SENTENCE_STREAM = os.getenv("AIKO_SENTENCE_STREAM", "1").strip().lower() not in {"0", "false", "no", "off", ""}
 _NO_THINK_SUFFIX = " /no_think"
 
 

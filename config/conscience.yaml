@@ -78,7 +78,6 @@ CCC:
   # ── conscience SLM (L2) ───────────────────────────────────────────────────
   # Second llama-server instance (e.g. `llama-server -m
   # <conscience-qwen35-08b.gguf> --port 8084`). It must be its own server,
-  # NOT :8081 — that port belongs to SearXNG (see docs/INSTALL.md).
   # INTERIM (no SLM trained yet): empty = run on the lexical scorer alone.
   # Safe since the weak-evidence cap (core.py) forces low-confidence reads to
   # escalate instead of refusing. Set the URL once the model is deployed.

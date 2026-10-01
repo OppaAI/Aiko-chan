@@ -330,7 +330,7 @@ MEMORY_VALENCE_FROM_LLM: "1"   # use extract valence_score when present
 
 # -- Phase 16: human-feel recall --
 MEMORY_STATE_TAGS_ENABLED: "1"
-MEMORY_NEG_RECALL_AVOID: "1"
+# (MEMORY_NEG_RECALL_AVOID is set once in the performance section below)
 MEMORY_NEG_RECALL_AVOID_WEIGHT: "0.015"   # subtract from rank when avoid applies
 MEMORY_NEG_RECALL_AVOID_EXCEPT: "1"      # skip avoid if query looks emotional/reflective
 MEMORY_SUPERSESSION_NARRATIVE: "1"
@@ -356,12 +356,12 @@ MEMORY_STATIC_ANCHOR_WEIGHT: "0.008"  # Flat boost on identity-grounded rows for
 # Near-dup writes can supersede older rows (status=superseded + supersedes_id).
 # Optional entity/engram spreading is OFF by default (enable if desired).
 KNOWLEDGE_SUPERSEDE_ON_DEDUP: "1"       # 1 = supersede near-dup instead of skip
-KNOWLEDGE_SPREADING_ENABLED: "0"
+KNOWLEDGE_SPREADING_ENABLED: "1"
 KNOWLEDGE_SPREADING_MAX_EXTRA: "2"
 KNOWLEDGE_SPREADING_SCORE_WEIGHT: "0.003"
 EXPERIENCE_SUPERSEDE_ON_NEAR_DUP: "1"
 EXPERIENCE_SUPERSEDE_THRESHOLD: "0.95"  # cosine sim to mark older run superseded
-EXPERIENCE_SPREADING_ENABLED: "0"
+EXPERIENCE_SPREADING_ENABLED: "1"
 EXPERIENCE_SPREADING_MAX_EXTRA: "2"
 EXPERIENCE_SPREADING_SCORE_WEIGHT: "0.003"
 
@@ -418,5 +418,5 @@ NEURAL_NET_ENABLED: "0"              # Neural activation propagation over entity
 MEMORY_SPREADING_ENABLED: "1"        # Spreading activation from seed entities (extra DB scans)
 MEMORY_CROSS_STORE_ENABLED: "1"      # Cross-store knowledge/experience attachment (extra searches)
 MEMORY_STATE_TAGS_ENABLED: "1"       # Local-hour state tags on every write (extra column)
-MEMORY_NEG_RECALL_AVOID: "0"         # Negative memory avoidance filter (extra scoring)
+MEMORY_NEG_RECALL_AVOID: "1"         # Negative memory avoidance filter (extra scoring)
 MEMORY_RECALL_CONTEXT_MATCH_ENABLED: "0"  # Query valence/arousal matching (extra inference)

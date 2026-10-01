@@ -88,8 +88,8 @@ def reset_current_display_name(token: contextvars.Token[str | None]) -> None:
 
 def current_display_name() -> str:
     """Return the user's display name (e.g. GitHub login).
-    Order: request-local context var -> active user_id
-    -> process-global CURRENT_DISPLAY_NAME env as last resort.
+    Order: request-local display name -> non-guest session user_id
+    -> process-global CURRENT_DISPLAY_NAME env -> current_user_id().
 
     The contextvar is preferred because web sessions and worker threads
     can overlap, so authenticated callers should set it per request/thread
@@ -101,13 +101,13 @@ def current_display_name() -> str:
     name = _CURRENT_DISPLAY_NAME.get()
     if name:
         return name
-    uid = current_user_id()
-    if uid != _DEFAULT_USER_ID:
+    uid = _CURRENT_USER_ID.get()
+    if uid and uid != _DEFAULT_USER_ID:
         return uid
     name = os.getenv("CURRENT_DISPLAY_NAME")
     if name:
         return name
-    return uid
+    return current_user_id()
 
 
 # Built-in owner aliases: raw provider-scoped ids (e.g. github_205369547)

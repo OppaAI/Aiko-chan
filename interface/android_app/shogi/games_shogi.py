@@ -768,7 +768,7 @@ async def resign(session: dict = Depends(_require_user)):
 
 
 # ── self-play sessions (Aiko vs YaneuraOu, background thread + polling) ─────
-# Games take minutes (a Jev call per Aiko move), so start() returns fast and
+# Games take minutes (an LLM call per Aiko move), so start() returns fast and
 # the app polls state(). One active session per user; stop() halts gracefully.
 
 _selfplay: dict[str, dict] = {}

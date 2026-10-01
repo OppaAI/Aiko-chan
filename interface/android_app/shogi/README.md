@@ -5,12 +5,9 @@
 
 ## Setup (Jetson)
 
-1. **API key** — Aiko decides via Jev. Add it without touching disk plaintext:
-   ```bash
-   ./util/edit_dotenv.sh        # append: JEV_API_KEY=<key from typesafe.ai>
-   ```
-   Never paste the key in chat/logs; the client only ever sends it as a
-   Bearer header. Optional: `JEV_MODEL` (default `jev-latest`).
+1. **LLM** — Aiko decides via the chat LLM (no key needed on the Jetson):
+   `LLM_BASE_URL` (default `http://localhost:8080/v1`), `LLM_MODEL`
+   (default `ministral`).
 2. **Engine** — ARM build with NN weights already in the tree:
    ```bash
    export YANEURAOU_PATH=/home/oppa-ai/jetson/YaneuraOu/source/YaneuraOu-by-gcc
@@ -22,13 +19,14 @@
 ## How a game works
 
 Colors alternate per game. Aiko moves by: opening **book** first
-(ε-greedy on her own won lines) → **Jev `choice`** over ≤10 capped
+(ε-greedy on her own won lines) → **LLM choice** over ≤10 capped
 candidates (captures/checks first, recent loss lines in the rubric) →
-random legal fallback (logged, game continues). YaneuraOu replies via USI.
+no random fallback: if the LLM is unreachable the game voids (logged).
+YaneuraOu replies via USI.
 Ends: checkmate, draw rules, engine resign, or 256-ply cap.
 
-Budget honesty: Jev is called **once per Aiko move** (~50 calls/game).
-`SELFPLAY_JEV_CANDIDATES` (default 10) bounds prompt size, not call count.
+Budget honesty: the LLM is called **once per Aiko move** (~50 calls/game).
+`SELFPLAY_LLM_CANDIDATES` (default 10) bounds prompt size, not call count.
 
 ## How she learns (every finished game)
 

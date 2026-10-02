@@ -52,14 +52,23 @@ python3 eval/conscience/eval_judge_models.py \
 
 Suggested candidates and where to get them:
 
-- **Qwen3.5-0.8B-Instruct** — `Qwen/Qwen3.5-0.8B` on Hugging Face
-  (instruct variant if published; else apply the official chat template).
-  The shape match for this judge: instruction-following over supplied norms.
-- **Tev1-0.8B** — `togethercomputer/Tev1-0.8b-experimental` (verify the exact
-  repo name; the 4B lives at `togethercomputer/Tev1-4B-experimental`).
-  Decision-model output (option letters, no Score/Noul primitive) — expect a
-  near-zero parse rate against this JSON interface. That is the finding.
-- **Laya 421M** — open-weight decision model; same interface caveat as Tev1.
+- **Qwen3.5-0.8B** — [Qwen/Qwen3.5-0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B).
+  Check the model page for an Instruct variant; otherwise use the base with
+  the official chat template (the harness sends a system prompt, so an
+  instruct-tuned checkpoint behaves best). The shape match for this judge:
+  instruction-following over supplied norms.
+- **Tev1** — [togethercomputer/Tev1-4B-experimental](https://huggingface.co/togethercomputer/Tev1-4B-experimental)
+  is the verified public checkpoint; a 0.8B was demoed by third parties but
+  its HF repo name could not be verified — check before downloading. Note the
+  4B at Q4 is ~2.5 GB, likely too heavy for the Jetson conscience slot; it is
+  still worth a run on the GPU box to see the parse-rate finding firsthand.
+  Tev1's model card recommends `temperature: 0, max_tokens: 8,
+  enable_thinking: false` — the harness deliberately does NOT use those; it
+  tests whether the model can serve AS the conscience under production
+  settings (temp 0, 96 max tokens, json_schema grammar).
+- **Laya 421M** — open-weight decision model; find the install guide from the
+  Jev community lists. Same interface caveat as Tev1: decision-letter output
+  against a JSON-verdict interface should score near-zero parse rate.
 
 Serve quantized (Q4_K_M or so); a 0.8B judge is ~500–800 MB resident.
 `--timeout` should be generous on CPU inference (the production default is

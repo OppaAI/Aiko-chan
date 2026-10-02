@@ -1109,14 +1109,15 @@ def load_playbooks() -> list[dict[str, Any]]:
     key = _playbooks_cache_key()
     with _playbooks_cache_lock:
         cached = _playbooks_cache
-    if cached is not None and cached[0] == key:
-        return copy.deepcopy(cached[1])
-    playbooks = _load_playbooks_uncached()
-    with _playbooks_cache_lock:
-        _playbooks_cache = (key, playbooks)
+        if cached is None or cached[0] != key:
+            # Serialized under the lock: concurrent agentic invocations that
+            # miss together run the ~400ms uncached load exactly once instead
+            # of stampeding it.
+            cached = (key, _load_playbooks_uncached())
+            _playbooks_cache = cached
     # The cache must never hand out its own objects: callers historically
     # received fresh objects every call, so always return a copy.
-    return copy.deepcopy(playbooks)
+    return copy.deepcopy(cached[1])
 
 
 def _load_playbooks_uncached() -> list[dict[str, Any]]:

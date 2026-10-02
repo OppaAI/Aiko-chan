@@ -165,6 +165,23 @@ class TestLoadPlaybooksCache:
         finally:
             schema._playbooks_cache = None
 
+    def test_graph_registration_invalidates_cache(self):
+        from agentic.workflows.common.graphs import _GRAPH_REGISTRY, register_graph
+
+        graph_id = "cache_probe_graph"
+        _GRAPH_REGISTRY.pop(graph_id, None)
+        schema._playbooks_cache = None
+        try:
+            first = schema.load_playbooks()
+            assert graph_id not in {p.get("id") for p in first}
+            register_graph(PlanGraph(id=graph_id, name="Cache Probe", goal="", nodes=()))
+            second = schema.load_playbooks()
+            probe = next(p for p in second if p.get("id") == graph_id)
+            assert probe["name"] == "Cache Probe"
+        finally:
+            _GRAPH_REGISTRY.pop(graph_id, None)
+            schema._playbooks_cache = None
+
 
 class TestPlaceholderSubstitution:
     """Tests for _substitute and _placeholder_extras."""

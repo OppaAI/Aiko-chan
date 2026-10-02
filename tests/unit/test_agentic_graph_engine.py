@@ -1148,6 +1148,36 @@ class TestGraphMemo:
         graph_memo._memo[key] = (expires - 7200, content)
         assert graph_memo._memo_get(key) is None
 
+    def test_max_entries_clamped_to_at_least_one(self, monkeypatch):
+        import importlib
+
+        from agentic import graph_memo
+
+        monkeypatch.setenv("AIKO_GRAPH_MEMO_MAX", "0")
+        importlib.reload(graph_memo)
+        try:
+            assert graph_memo._MAX_ENTRIES == 1
+            graph_memo._memo.clear()
+            key = graph_memo._memo_key("fetch_from_url", {"url": "http://example.com/z"}, None)
+            assert key is not None
+            # Used to raise StopIteration evicting from an empty dict.
+            graph_memo._memo_put(key, "fetch_from_url", "x")
+            assert graph_memo._memo_get(key) == "x"
+        finally:
+            monkeypatch.undo()
+            importlib.reload(graph_memo)
+            graph_memo._memo.clear()
+
+    def test_identity_failure_disables_memo(self, monkeypatch):
+        from agentic import graph_memo
+
+        def _boom():
+            raise RuntimeError("identity unavailable")
+
+        monkeypatch.setattr(graph_memo, "current_user_id", _boom)
+        # Fail closed: no shared "None"-identity key may be minted.
+        assert graph_memo._memo_key("fetch_from_url", {"url": "http://example.com/i"}, None) is None
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

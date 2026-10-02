@@ -39,7 +39,7 @@ from system.userspace import current_user_id
 log = get_logger(__name__)
 
 ENABLED = os.getenv("AIKO_GRAPH_MEMO", "1").strip().lower() not in {"0", "false", "no", "off"}
-_MAX_ENTRIES = int(os.getenv("AIKO_GRAPH_MEMO_MAX", "512"))
+_MAX_ENTRIES = max(1, int(os.getenv("AIKO_GRAPH_MEMO_MAX", "512")))
 
 # Tool -> TTL seconds. Keep this list minimal and verified; see module docstring.
 _MEMO_TTLS: dict[str, int] = {
@@ -77,7 +77,10 @@ def _memo_key(
     try:
         user_id = current_user_id()
     except Exception:
-        user_id = None
+        # Fail closed: an identity failure must never mint a key under a
+        # shared fallback identity (e.g. "None") that could replay one
+        # user's cached result to another caller.
+        return None
     h = hashlib.sha256()
     h.update(tool.encode("utf-8"))
     h.update(b"\x00")

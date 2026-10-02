@@ -115,6 +115,74 @@ class TestPlaybookStructure:
                 assert all(isinstance(t, str) and len(t) > 10 for t in p["semantic_triggers"])
 
 
+class TestLoadPlaybooksCache:
+    """Tests for the mtime-guarded load_playbooks() cache."""
+
+    def test_second_call_skips_uncached_load(self, monkeypatch):
+        schema._playbooks_cache = None
+        calls = []
+        real = schema._load_playbooks_uncached
+
+        def counting():
+            calls.append(1)
+            return real()
+
+        monkeypatch.setattr(schema, "_load_playbooks_uncached", counting)
+        try:
+            first = schema.load_playbooks()
+            second = schema.load_playbooks()
+            assert len(calls) == 1
+            assert first == second
+        finally:
+            schema._playbooks_cache = None
+
+    def test_cache_returns_isolated_copies(self):
+        schema._playbooks_cache = None
+        try:
+            first = schema.load_playbooks()
+            first[0]["id"] = "MUTATED"
+            first.append({"id": "injected"})
+            second = schema.load_playbooks()
+            assert all(p.get("id") != "MUTATED" for p in second)
+            assert all(p.get("id") != "injected" for p in second)
+        finally:
+            schema._playbooks_cache = None
+
+    def test_file_change_invalidates_cache(self, monkeypatch, tmp_path):
+        pb_file = tmp_path / "playbooks.json"
+        pb_file.write_text(json.dumps([{"id": "probe_pb", "name": "Probe v1"}]), encoding="utf-8")
+        monkeypatch.setattr(schema, "_playbook_file", lambda: pb_file)
+        schema._playbooks_cache = None
+        try:
+            first = schema.load_playbooks()
+            assert next(p for p in first if p["id"] == "probe_pb")["name"] == "Probe v1"
+            # Rewrite with a bumped mtime so the mtime guard trips even on
+            # coarse-grained filesystems.
+            pb_file.write_text(json.dumps([{"id": "probe_pb", "name": "Probe v2"}]), encoding="utf-8")
+            os.utime(pb_file, (time.time() + 5, time.time() + 5))
+            second = schema.load_playbooks()
+            assert next(p for p in second if p["id"] == "probe_pb")["name"] == "Probe v2"
+        finally:
+            schema._playbooks_cache = None
+
+    def test_graph_registration_invalidates_cache(self):
+        from agentic.workflows.common.graphs import _GRAPH_REGISTRY, register_graph
+
+        graph_id = "cache_probe_graph"
+        _GRAPH_REGISTRY.pop(graph_id, None)
+        schema._playbooks_cache = None
+        try:
+            first = schema.load_playbooks()
+            assert graph_id not in {p.get("id") for p in first}
+            register_graph(PlanGraph(id=graph_id, name="Cache Probe", goal="", nodes=()))
+            second = schema.load_playbooks()
+            probe = next(p for p in second if p.get("id") == graph_id)
+            assert probe["name"] == "Cache Probe"
+        finally:
+            _GRAPH_REGISTRY.pop(graph_id, None)
+            schema._playbooks_cache = None
+
+
 class TestPlaceholderSubstitution:
     """Tests for _substitute and _placeholder_extras."""
 

@@ -7,6 +7,7 @@ from html import escape
 
 from cognition.memory.memorize import entities_from_json, entity_overlap_score
 from cognition.memory.vecstore import rank_by_id, rrf_score, user_scoped_fts_search, user_scoped_vec_knn
+from cognition import reason
 from system.log import get_logger
 from system.userspace import current_user_id
 
@@ -89,7 +90,7 @@ def search_experience(query: str, limit: int = 3, embedder=None, user_id: str | 
 def _knn(conn: sqlite3.Connection, query: str, embedder, uid: str, limit: int) -> list[sqlite3.Row]:
     if embedder is None:
         return []
-    vector = embedder.embed_query(query, instruct=EXPERIENCE_QUERY_INSTRUCT)
+    vector = reason.cached_embed_query(embedder, query, EXPERIENCE_QUERY_INSTRUCT)
     return user_scoped_vec_knn(
         conn,
         vec_table="experiences_vec",

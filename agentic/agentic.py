@@ -363,7 +363,7 @@ def _history_relevance_scores(embedder, user_input: str, history_texts: list[str
         q_vec = np.asarray(query_vector, dtype=np.float32)
     else:
         try:
-            q_vec = np.asarray(embedder.embed_query(user_input), dtype=np.float32)
+            q_vec = reason.cached_embed_query(embedder, user_input)
         except Exception:
             return [0.0] * len(history_texts)
     scores = reason.batch_cosine_scores(q_vec, b_vecs)

@@ -313,7 +313,6 @@ def maintenance_run(user_id: str | None = None, memorize=None) -> dict:
         from cognition.knowledge import prune_knowledge
         emb = _resolve_embedder(memorize)
         results["prune_knowledge"] = prune_knowledge(
-            keep_days=30,
             min_access=2,
             archive_days=90,
             delete_days=180,

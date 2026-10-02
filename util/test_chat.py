@@ -53,9 +53,10 @@ def est_tokens(text):
 
 
 class Backend:
-    def __init__(self, name, url, system, history_dir, temp, max_tokens, ctx_budget):
+    def __init__(self, name, url, system, history_dir, temp, max_tokens, ctx_budget, model=""):
         self.name = name
         self.url = url.rstrip("/") + "/v1/chat/completions"
+        self.model = model
         self.system = system
         self.temp = temp
         self.max_tokens = max_tokens
@@ -102,6 +103,8 @@ class Backend:
             "chat_template_kwargs": {"enable_thinking": think},
             "messages": [{"role": "system", "content": self.system}] + self._window(),
         }
+        if self.model:
+            payload["model"] = self.model
         try:
             r = requests.post(self.url, json=payload, timeout=300)
             r.raise_for_status()
@@ -158,6 +161,8 @@ def main():
     ap.add_argument("--history-dir", default="chat_logs")
     ap.add_argument("--temp", type=float, default=0.7)
     ap.add_argument("--max-tokens", type=int, default=300)
+    ap.add_argument("--model", default="",
+                    help="model id/alias for the router proxy (e.g. ministral); empty = server default")
     ap.add_argument("--ctx-budget", type=int, default=6000,
                     help="prompt+reply token budget (server -c is 8192)")
     ap.add_argument("--replay", help="history json from another model; replay its user turns")
@@ -165,10 +170,10 @@ def main():
 
     system = load_soul(args.soul, args.user)
     backends = [Backend(args.name, args.url, system, args.history_dir,
-                        args.temp, args.max_tokens, args.ctx_budget)]
+                        args.temp, args.max_tokens, args.ctx_budget, args.model)]
     if args.name2 and args.url2:
         backends.append(Backend(args.name2, args.url2, system, args.history_dir,
-                                args.temp, args.max_tokens, args.ctx_budget))
+                                args.temp, args.max_tokens, args.ctx_budget, args.model))
 
     if args.replay:
         with open(args.replay, encoding="utf-8") as f:

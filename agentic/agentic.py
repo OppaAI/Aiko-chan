@@ -1876,7 +1876,7 @@ def _finalize_agentic_answer(owner, user_input: str, draft: str, token_callback=
     owner._emit(draft, token_callback=token_callback)
     return draft
 
-def run_agentic_chat(owner, user_input: str, token_callback=None, mem_kb_future=None, query_vec: np.ndarray | None = None, cap_vec: np.ndarray | None = None, output_model: Any | None = None) -> str:
+def run_agentic_chat(owner, user_input: str, token_callback=None, mem_kb_future=None, query_vec: np.ndarray | None = None, cap_vec: np.ndarray | None = None, output_model: Any | None = None, include_history: bool = True) -> str:
     """Run task mode using the owning AikoThink instance for model/memory/output.
 
     mem_kb_future: a concurrent.futures.Future from
@@ -1890,6 +1890,12 @@ def run_agentic_chat(owner, user_input: str, token_callback=None, mem_kb_future=
     query_vec — pre-computed _QUERY_INSTRUCT embedding of user_input.
     cap_vec  — pre-computed _CAPABILITY_INSTRUCT embedding of user_input.
     Both avoid redundant HTTP calls when provided.
+
+    include_history — scheduled ticks run False: every past tick appends its
+    giant skill prompt + failure transcript to owner._history, and relevance
+    selection keeps pulling those back in until each session's first call
+    exceeds the llama-server ctx on its own (observed 10.5k/10.2k death
+    spiral). Ticks resume from CHECKPOINT.md, never from chat history.
     """
     # Reuse the same HarrierEmbedder instance already warm for memory search
     # and intent routing for every RAG-selection call below (agentic policy,
@@ -2160,8 +2166,14 @@ def run_agentic_chat(owner, user_input: str, token_callback=None, mem_kb_future=
 
     # Core task-mode rules are always kept (small, operationally essential);
     # the verbose guidance is droppable under context-budget pressure.
+    # Task mode uses the stable persona core (SOUL.md + user profile) WITHOUT
+    # the volatile chat-cognition tail (mood/energy/reflection/preferences/
+    # lessons/priming/reasoning-guide): that tail costs thousands of tokens
+    # and the ReAct loop + verification provide task grounding instead.
+    # Full prompt was exceeding the llama-server ctx (11k > 10k) even after
+    # every droppable block shed — the fixed cost itself was the overflow.
     agent_system = (
-        f"{owner._current_system_prompt()}\n\n"
+        f"{owner._persona_core()}\n\n"
         f"{bioclock.current_datetime_block()}\n\n"        
         f"{agentic_policy_context}\n\n"
         f"{wiki_context}\n\n"
@@ -2175,12 +2187,12 @@ def run_agentic_chat(owner, user_input: str, token_callback=None, mem_kb_future=
     )
     messages = [
         {"role": "system", "content": agent_system},
-        *_recent_history_messages(owner, user_input, query_vector=_query_vec),
+        *(_recent_history_messages(owner, user_input, query_vector=_query_vec) if include_history else []),
         {"role": "user", "content": user_input},
     ]
     owner.last_prompt_debug = {
         "mode": "agentic",
-        "system_prompt": owner._current_system_prompt(),
+        "system_prompt": owner._persona_core(),
         "memory_prompt": memory_context,
         "web_prompt": "",
         "agentic_prompts": [

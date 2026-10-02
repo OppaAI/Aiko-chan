@@ -739,6 +739,7 @@ def test_agentic_interrupt_skips_run_learning(monkeypatch, interrupted, expected
     owner._fetch_memory_and_knowledge = lambda _text, query_vector=None: ([], "")
     owner._get_memorize = lambda: SimpleNamespace(format_for_context=lambda *_args, **_kwargs: "")
     owner._current_system_prompt = lambda: "system"
+    owner._persona_core = lambda: "system"
 
     profile = SimpleNamespace(
         capability_ids=[], tool_domains=set(), system_overlay="", max_iter=1, research_budget=0

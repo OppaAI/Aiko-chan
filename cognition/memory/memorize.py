@@ -2775,10 +2775,12 @@ class AikoMemorize:
 
     # ── write ─────────────────────────────────────────────────────────────────
 
-    def add(self, messages: list[dict], user_id: str | None = None, display_name: str | None = None) -> bool:
+    def add(self, messages: list[dict], user_id: str | None = None, display_name: str | None = None) -> int:
         """
         Store a conversation turn into long-term memory.
-        Returns True on success, False on failure.
+        Returns the number of facts persisted (0 when extraction found
+        nothing durable or the write failed). All existing callers only
+        test truthiness, so int is compatible with the old bool contract.
         """
         try:
             user_id = self._resolve_user_id(user_id)
@@ -2809,7 +2811,7 @@ class AikoMemorize:
                         outputs={"memories_saved": 0, "elapsed_s": round(elapsed, 3)},
                         factors=["no durable facts in this turn (greeting/no-op/dedup)"],
                     )
-            return True
+            return len(ids)
         except Exception as e:
             log.error(f"Save failed: {e}")
             if _brain_trace and _brain_trace.TRACE_ENABLED:
@@ -2818,7 +2820,7 @@ class AikoMemorize:
                     layer="write",
                     outputs={"error": str(e)},
                 )
-            return False
+            return 0
 
     def pin(self, messages: list[dict], user_id: str | None = None, display_name: str | None = None) -> bool:
         """

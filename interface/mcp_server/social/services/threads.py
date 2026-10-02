@@ -206,15 +206,28 @@ def _save_interaction_memory(reply: dict, reply_text: str, memorize) -> bool:
     try:
         timestamp = str(reply.get("timestamp") or "")
         prefix = f"[Threads {timestamp[:10]}] " if timestamp else "[Threads] "
-        memorize.add(
+        n = memorize.add(
             [
                 {"role": "user", "content": f"{prefix}{memorize.get_display_name()} said: {comment[:2000]}"},
                 {"role": "assistant", "content": f"{ai_name()} replied: {response[:2000]}"},
             ],
             user_id=memorize.get_user_id(),
             display_name=memorize.get_display_name(),
+        ) or 0
+        if n:
+            log.info("[threads] stored %d extracted fact(s) for reply %s", n, reply.get("id"))
+            return True
+        # Extraction found nothing durable — store the exchange verbatim
+        # (unpinned, prunable) so the conversation is never silently lost.
+        # Observed 2026-10-01: a substantive photo-ID correction exchange
+        # extracted zero facts and vanished despite interaction_memory=true.
+        verbatim = (
+            f"{prefix}{memorize.get_display_name()} talked with {ai_name()} on Threads: "
+            f"{comment[:500]} / {ai_name()} replied: {response[:500]}"
         )
-        return True
+        vid = memorize.add_raw(verbatim, memorize.get_user_id())
+        log.info("[threads] extraction empty, stored verbatim exchange: %s", bool(vid))
+        return bool(vid)
     except Exception:
         return False
 

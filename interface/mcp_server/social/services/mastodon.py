@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
 import subprocess
@@ -340,15 +341,28 @@ def _save_mastodon_interaction_memory(reply: dict, reply_text: str, memorize) ->
     try:
         timestamp = str(reply.get("timestamp") or "")
         prefix = f"[Mastodon {timestamp[:10]}] " if timestamp else "[Mastodon] "
-        memorize.add(
+        n = memorize.add(
             [
                 {"role": "user", "content": f"{prefix}{memorize.get_display_name()} said: {comment[:2000]}"},
                 {"role": "assistant", "content": f"{_ai_name()} replied: {response[:2000]}"},
             ],
             user_id=memorize.get_user_id(),
             display_name=memorize.get_display_name(),
+        ) or 0
+        if n:
+            logging.getLogger(__name__).info(
+                "[mastodon] stored %d extracted fact(s) for reply %s", n, reply.get("id"))
+            return True
+        # Extraction found nothing durable — store the exchange verbatim
+        # (unpinned, prunable) so the conversation is never silently lost.
+        verbatim = (
+            f"{prefix}{memorize.get_display_name()} talked with {_ai_name()} on Mastodon: "
+            f"{comment[:500]} / {_ai_name()} replied: {response[:500]}"
         )
-        return True
+        vid = memorize.add_raw(verbatim, memorize.get_user_id())
+        logging.getLogger(__name__).info(
+            "[mastodon] extraction empty, stored verbatim exchange: %s", bool(vid))
+        return bool(vid)
     except Exception:
         return False
 

@@ -79,6 +79,7 @@ resolved independently.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -772,6 +773,30 @@ def ensure_schedule_graphs(user_id: str | None = None) -> None:
     _ensure_job_post_config_marker(user_id=user_id)
 
 
+# Fields that define a job card's identity for deterministic deduplication.
+# Excluded: id (random per record), next_due/created_at/last_ran_at (timestamps),
+# enabled (state, not identity), kind (always "scheduled_job").
+_JOB_IDENTITY_FIELDS = (
+    "title", "task", "time_of_day", "frequency", "days_of_week",
+    "relative_days", "interval_seconds", "timezone", "action", "handler",
+    "tool_call", "skill", "requires_idle", "idle_seconds",
+)
+
+
+def _job_identity(job: dict) -> str:
+    """Deterministic identity hash for a job card.
+
+    Computed over the normalized what/when fields, so two calls that
+    describe the same job ("Daily" vs "daily", padded titles, equivalent
+    day lists) produce the same identity. Used by schedule_job_record's
+    dedupe to return the existing record instead of appending a duplicate.
+    """
+    canonical = {k: job.get(k) for k in _JOB_IDENTITY_FIELDS}
+    return hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    ).hexdigest()
+
+
 def schedule_job_record(
     title: str,
     task: str,
@@ -788,6 +813,7 @@ def schedule_job_record(
     requires_idle: bool = False,
     idle_seconds: int | str | None = None,
     user_id: str | None = None,
+    dedupe: bool = True,
 ) -> dict:
     """Create and persist a scheduled job record, returning the stored dict.
 
@@ -797,6 +823,11 @@ def schedule_job_record(
     on_due/chat with `task` (see _fire_due_user_jobs) — `title`/`task` are
     still stored for readability/logging but are otherwise unused for
     handler-based jobs.
+
+    `dedupe` (default True): when a stored record with the same deterministic
+    job identity already exists for the user (see _job_identity), return it
+    instead of appending a duplicate. Pass False to force a second record
+    with identical parameters.
     """
     action = (action or "agentic").lower().strip()
     if action not in {"announce", "agentic", "tool"}:
@@ -857,6 +888,13 @@ def schedule_job_record(
         "idle_seconds": normalized_idle_seconds,
     }
     jobs = _read_all(user_id=user_id)
+    if dedupe:
+        identity = _job_identity(job)
+        for existing in jobs:
+            if isinstance(existing, dict) and _job_identity(existing) == identity:
+                log.debug("schedule_job_record: duplicate of %s, returning existing",
+                          existing.get("id"))
+                return existing
     jobs.append(job)
     _write_all(jobs, user_id=user_id)
     return job

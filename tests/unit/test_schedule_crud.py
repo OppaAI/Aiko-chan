@@ -177,3 +177,79 @@ def test_update_accepts_valid_tool_transitions(user_store):
     updated = schedule.update_schedule_record(record["id"], {"action": "agentic", "tool_call": None}, user_id=user_store)
     assert updated["action"] == "agentic"
     assert updated["tool_call"] is None
+
+
+class TestScheduleJobDedup:
+    """Deterministic job-card deduplication in schedule_job_record."""
+
+    @pytest.fixture()
+    def two_user_store(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("USER_SPACE_ROOT", str(tmp_path))
+        monkeypatch.setattr(
+            schedule, "schedule_path",
+            lambda user_id=None: tmp_path / f"schedule_{user_id}.json",
+        )
+        for u in ("u1", "u2"):
+            schedule._invalidate_cache(u)
+        yield ("u1", "u2")
+        for u in ("u1", "u2"):
+            schedule._invalidate_cache(u)
+
+    def _count(self, uid):
+        return len(schedule.list_schedule_records(include_disabled=True, user_id=uid))
+
+    def test_identical_create_returns_existing(self, user_store):
+        uid = user_store
+        r1 = schedule.schedule_job_record("Job", "do thing", "09:00", frequency="daily", user_id=uid)
+        r2 = schedule.schedule_job_record("Job", "do thing", "09:00", frequency="daily", user_id=uid)
+        assert r1["id"] == r2["id"]
+        assert self._count(uid) == 1
+
+    def test_normalization_variants_dedup(self, user_store):
+        uid = user_store
+        r1 = schedule.schedule_job_record(
+            "  Job ", "do thing", "09:00", frequency="Daily", action="Agentic", user_id=uid)
+        r2 = schedule.schedule_job_record(
+            "Job", "do thing", "09:00", frequency="daily", action="agentic", user_id=uid)
+        assert r1["id"] == r2["id"]
+        assert self._count(uid) == 1
+
+    def test_different_schedule_creates_distinct(self, user_store):
+        uid = user_store
+        r1 = schedule.schedule_job_record("Job", "do thing", "09:00", frequency="daily", user_id=uid)
+        r2 = schedule.schedule_job_record("Job", "do thing", "10:00", frequency="daily", user_id=uid)
+        assert r1["id"] != r2["id"]
+        assert self._count(uid) == 2
+
+    def test_tool_call_difference_breaks_identity(self, user_store):
+        uid = user_store
+        r1 = schedule.schedule_job_record(
+            "J", "t", "09:00", action="tool",
+            tool_call={"name": "a", "arguments": {}}, user_id=uid)
+        r2 = schedule.schedule_job_record(
+            "J", "t", "09:00", action="tool",
+            tool_call={"name": "b", "arguments": {}}, user_id=uid)
+        assert r1["id"] != r2["id"]
+        assert self._count(uid) == 2
+
+    def test_dedupe_false_forces_duplicate(self, user_store):
+        uid = user_store
+        r1 = schedule.schedule_job_record("Job", "do thing", "09:00", user_id=uid)
+        r2 = schedule.schedule_job_record("Job", "do thing", "09:00", user_id=uid, dedupe=False)
+        assert r1["id"] != r2["id"]
+        assert self._count(uid) == 2
+
+    def test_dedup_is_user_scoped(self, two_user_store):
+        u1, u2 = two_user_store
+        r1 = schedule.schedule_job_record("Job", "do thing", "09:00", user_id=u1)
+        r2 = schedule.schedule_job_record("Job", "do thing", "09:00", user_id=u2)
+        assert r1["id"] != r2["id"]
+        assert self._count(u1) == 1
+        assert self._count(u2) == 1
+
+    def test_seeder_double_boot_creates_one(self, user_store):
+        """The motivating case: a boot seeder calling twice yields one job."""
+        uid = user_store
+        for _ in range(3):
+            ensure_playground_job(user_id=uid)
+        assert self._count(uid) == 1

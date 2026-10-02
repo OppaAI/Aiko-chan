@@ -326,6 +326,43 @@ def ensure_episode_schema(conn: sqlite3.Connection) -> list[str]:
     return _ensure(conn)
 
 
+def ensure_text_hash_schema(conn: sqlite3.Connection) -> list[str]:
+    """Idempotent ALTER TABLE for the text_hash column + (user_id, text_hash) index.
+
+    text_hash stores sha256(normalize_memory_text(memory)) per row so the
+    write path can short-circuit exact duplicates with one indexed lookup
+    instead of an embedding + KNN round-trip. Rows written before this
+    migration have NULL text_hash and simply never match the short-circuit;
+    they still dedup through the existing KNN path.
+    """
+    try:
+        cols = existing_columns(conn)
+    except sqlite3.Error:
+        return []
+    if "id" not in cols and "memory" not in cols:
+        return []
+
+    added: list[str] = []
+    if "text_hash" not in cols:
+        try:
+            conn.execute("ALTER TABLE memories ADD COLUMN text_hash TEXT")
+            added.append("text_hash")
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).casefold():
+                raise
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_user_texthash "
+            "ON memories(user_id, text_hash)"
+        )
+        conn.commit()
+    except sqlite3.Error as e:
+        log.debug("memory text_hash index: %s", e)
+    if added:
+        log.info("memory text_hash schema: added column %s", added)
+    return added
+
+
 def _active_sql(active_only: bool, alias: str = "m") -> str:
     """SQL fragment to restrict a query to active (non-superseded) memories.
 

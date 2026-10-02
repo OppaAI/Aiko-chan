@@ -2620,13 +2620,12 @@ class AikoThink:
             if sink is not None:
                 # Sentence-stream mode: token_callback is driven by the
                 # speech-stream worker (karaoke-paced), not the LLM stream.
-                stream_kwargs["token_callback"] = None
                 stream_kwargs["sentence_sink"] = sink
             raw_response = self._stream_response(
                 trimmed,
                 system=core_system,
                 system_tail=volatile_system,
-                token_callback=token_callback,
+                token_callback=None if sink is not None else token_callback,
                 emit=False,
                 **stream_kwargs,
             )

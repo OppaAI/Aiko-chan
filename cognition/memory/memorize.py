@@ -9,6 +9,7 @@ so the stable public surface is unchanged after the backend split.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -24,6 +25,7 @@ from pathlib import Path
 
 from system import bioclock
 from system import brain_trace as _brain_trace
+from system.config import env_flag
 from cognition import reason
 from cognition.memory.vecstore import initialize_store_db, _QUERY_INSTRUCT
 from system.userspace import current_display_name, current_user_id
@@ -143,6 +145,7 @@ from .schema import (
     ensure_l2_scene_schema,
     ensure_l3_schema_schema,
     ensure_phase_a_schema,
+    ensure_text_hash_schema,
     existing_columns,
     parse_json_array,
     vacuum_memory_db,
@@ -224,6 +227,22 @@ def _thinker_headroom() -> int:
     except Exception:
         pass
     return 0
+
+
+def _exact_text_hash(text: str) -> str:
+    """Stable content hash for the write-path exact-duplicate short-circuit.
+
+    Uses normalize_memory_text — the same normalization classify_write_op's
+    exact-match rule uses — so the hash fires exactly when the KNN path
+    would have returned 'noop' anyway. The hash just reaches that verdict
+    without an embedding + vector-search round-trip.
+    """
+    return hashlib.sha256(normalize_memory_text(text).encode("utf-8")).hexdigest()
+
+
+def _hash_dedup_enabled() -> bool:
+    """Kill-switch for the exact-hash write short-circuit (default on)."""
+    return env_flag("AIKO_MEMORY_HASH_DEDUP", "1")
 
 
 class _MemoryBackend:
@@ -341,6 +360,7 @@ class _MemoryBackend:
             ensure_l3_schema_schema(self._conn)
             ensure_entity_relations_schema(self._conn)
             ensure_episode_schema(self._conn)
+            ensure_text_hash_schema(self._conn)
 
     def _connect(self) -> sqlite3.Connection:
         return initialize_store_db(self._db_path, _DDL, user_id=self._user_id, vector=True)
@@ -692,6 +712,9 @@ class _MemoryBackend:
         if "arousal_score" in cols and a_score is not None:
             ext_cols.append("arousal_score")
             ext_vals.append(int(a_score))
+        if "text_hash" in cols:
+            ext_cols.append("text_hash")
+            ext_vals.append(_exact_text_hash(text))
         all_cols = base_cols + ext_cols
         placeholders = ", ".join("?" * len(all_cols))
         self._conn.execute(
@@ -716,6 +739,31 @@ class _MemoryBackend:
                 )
         except Exception as e:
             log.debug("entity_relations upsert skipped: %s", e)
+
+    def _exact_dup_hashes(self, user_id: str, texts: list[str]) -> set[str]:
+        """Hashes of `texts` already stored as active rows for this user.
+
+        The exact-duplicate short-circuit: one indexed lookup replaces an
+        embedding call + KNN search per fact. Only active rows match, so a
+        text whose row was superseded still flows through the normal
+        dedup/supersede path. Rows written before the text_hash migration
+        (NULL hash) never match; they dedup via KNN as before.
+        Purely additive — never changes the write verdict, only skips work.
+        """
+        if not texts or not _hash_dedup_enabled():
+            return set()
+        cols = existing_columns(self._conn)
+        if "text_hash" not in cols:
+            return set()
+        hashes = {_exact_text_hash(t) for t in texts}
+        placeholders = ", ".join("?" * len(hashes))
+        status_sql = " AND (status = 'active' OR status IS NULL)" if "status" in cols else ""
+        rows = self._conn.execute(
+            f"SELECT text_hash FROM memories WHERE user_id = ? "
+            f"AND text_hash IN ({placeholders}){status_sql}",
+            [user_id, *hashes],
+        ).fetchall()
+        return {str(r["text_hash"]) for r in rows if r["text_hash"]}
 
     def _maybe_supersede_neighbor(
         self, user_id: str, vector: list[float], text: str
@@ -764,6 +812,21 @@ class _MemoryBackend:
         pairs = self._extract_facts(messages, display_name=display_name)
         if not pairs:
             return []
+        # Exact-hash short-circuit: drop facts already stored (normalized
+        # identical) BEFORE the batched embedding + per-fact KNN dedup.
+        # classify_write_op would noop these anyway; the hash just skips
+        # the embedder and vector search for them.
+        dupes = self._exact_dup_hashes(user_id, [f for f, _ in pairs])
+        if dupes:
+            kept: list[tuple[str, Any]] = []
+            for fact, llm_sc in pairs:
+                if _exact_text_hash(fact) in dupes:
+                    log.debug("Skipping exact-duplicate fact (hash): %r", fact[:80])
+                else:
+                    kept.append((fact, llm_sc))
+            pairs = kept
+            if not pairs:
+                return []
         facts = [f for f, _ in pairs]
 
         # created_at is UTC everywhere (matches add_raw()/_touch_memories()/
@@ -865,6 +928,11 @@ class _MemoryBackend:
         """
         text = (memory or "").strip()
         if not text:
+            return None
+        # Exact-hash short-circuit: skip the embedding + KNN round-trip when
+        # this exact text is already stored for the user.
+        if _exact_text_hash(text) in self._exact_dup_hashes(user_id, [text]):
+            log.debug("Skipping exact-duplicate raw memory (hash): %r", text[:80])
             return None
         try:
             vector = self._embed(text)

@@ -790,8 +790,21 @@ def _job_identity(job: dict) -> str:
     describe the same job ("Daily" vs "daily", padded titles, equivalent
     day lists) produce the same identity. Used by schedule_job_record's
     dedupe to return the existing record instead of appending a duplicate.
+
+    Equivalent schedules canonicalize to the same identity: "9:00" and
+    "09:00" parse to the same time, and an omitted interval_seconds means
+    60s for interval-frequency jobs (matching calculate_next_due).
     """
     canonical = {k: job.get(k) for k in _JOB_IDENTITY_FIELDS}
+    raw_time = canonical.get("time_of_day")
+    if isinstance(raw_time, str):
+        try:
+            hour, minute = _parse_time_of_day(raw_time)
+            canonical["time_of_day"] = f"{hour:02d}:{minute:02d}"
+        except ValueError:
+            pass  # keep raw; stored records are validated at creation
+    if (canonical.get("frequency") or "daily").lower().strip() == "interval":
+        canonical["interval_seconds"] = int(canonical.get("interval_seconds") or 60)
     return hashlib.sha256(
         json.dumps(canonical, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
     ).hexdigest()
@@ -887,17 +900,28 @@ def schedule_job_record(
         "requires_idle": requires_idle,
         "idle_seconds": normalized_idle_seconds,
     }
-    jobs = _read_all(user_id=user_id)
-    if dedupe:
-        identity = _job_identity(job)
-        for existing in jobs:
-            if isinstance(existing, dict) and _job_identity(existing) == identity:
-                log.debug("schedule_job_record: duplicate of %s, returning existing",
-                          existing.get("id"))
-                return existing
-    jobs.append(job)
-    _write_all(jobs, user_id=user_id)
-    return job
+    # Serialize the read-check-append-write across processes sharing this
+    # user's schedule (same pattern as delete_schedule_record and
+    # _fire_due_user_jobs): another process may have changed schedule.json
+    # while this one waited for the lock, so the in-process cache is
+    # discarded after acquiring it. Without this, a stale read could miss
+    # an identical job and append a duplicate — or overwrite a newer schedule.
+    user_id = user_id or current_user_id()
+    with _scheduler_run_lock(user_id, "jobs", blocking=True) as acquired:
+        if not acquired:
+            raise RuntimeError("Could not lock the schedule store")
+        _invalidate_cache(user_id)
+        jobs = _read_all(user_id=user_id)
+        if dedupe:
+            identity = _job_identity(job)
+            for existing in jobs:
+                if isinstance(existing, dict) and _job_identity(existing) == identity:
+                    log.debug("schedule_job_record: duplicate of %s, returning existing",
+                              existing.get("id"))
+                    return existing
+        jobs.append(job)
+        _write_all(jobs, user_id=user_id)
+        return job
 
 
 def list_schedule_records(include_disabled: bool = False, user_id: str | None = None) -> list[dict]:

@@ -253,3 +253,30 @@ class TestScheduleJobDedup:
         for _ in range(3):
             ensure_playground_job(user_id=uid)
         assert self._count(uid) == 1
+
+    def test_time_format_variants_dedup(self, user_store):
+        """9:00 and 09:00 parse to the same time; one job, not two."""
+        uid = user_store
+        r1 = schedule.schedule_job_record("Job", "do thing", "9:00", user_id=uid)
+        r2 = schedule.schedule_job_record("Job", "do thing", "09:00", user_id=uid)
+        assert r1["id"] == r2["id"]
+        assert self._count(uid) == 1
+
+    def test_interval_default_seconds_dedups(self, user_store):
+        """Omitted interval_seconds means 60s (calculate_next_due); dedups vs explicit 60."""
+        uid = user_store
+        r1 = schedule.schedule_job_record(
+            "Tick", "tick", "00:00", frequency="interval", user_id=uid)
+        r2 = schedule.schedule_job_record(
+            "Tick", "tick", "00:00", frequency="interval", interval_seconds=60, user_id=uid)
+        assert r1["id"] == r2["id"]
+        assert self._count(uid) == 1
+
+    def test_interval_different_seconds_distinct(self, user_store):
+        uid = user_store
+        r1 = schedule.schedule_job_record(
+            "Tick", "tick", "00:00", frequency="interval", interval_seconds=900, user_id=uid)
+        r2 = schedule.schedule_job_record(
+            "Tick", "tick", "00:00", frequency="interval", interval_seconds=1800, user_id=uid)
+        assert r1["id"] != r2["id"]
+        assert self._count(uid) == 2

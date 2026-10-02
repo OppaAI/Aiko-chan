@@ -619,6 +619,14 @@ _LEARNED_KNOWLEDGE_HINT_RE = re.compile(
 )
 
 
+_PERSONAL_FACT_RE = re.compile(
+    r"\b(who am i|my name|what(?:'s| is) my|tell me .*my|"
+    r"my (favorite|favourite|birthday|age|location|email|name|hobby|hobbies|"
+    r"likes?|dislikes?|plans?|preferences?))\b",
+    re.IGNORECASE,
+)
+
+
 def _memory_cannot_answer(raw_input: str, memories: list[dict] | None) -> bool:
     """Memory-side of the on-demand knowledge gate.
 
@@ -2412,6 +2420,17 @@ class AikoThink:
                     volatile_system = f"{volatile_system}\n\n{metacognitive_block}"
                 if not memory_block:
                     volatile_system += "\n\n<memory_context>\nNo relevant memories found.\n</memory_context>"
+                    # Don't-know discipline: with zero evidence on a personal-
+                    # fact question, say so (or ask) instead of inventing —
+                    # confabulated "facts" get extracted into memory and then
+                    # recalled as truth by later turns.
+                    if _PERSONAL_FACT_RE.search(raw_input or ""):
+                        volatile_system += (
+                            "\n\n<answer_discipline>\nNo memories were found for this "
+                            "question. If it asks for a personal fact about the user, "
+                            "say you don't know it yet or ask them — never invent "
+                            "names, preferences, or past events.\n</answer_discipline>"
+                        )
                 # Learned knowledge is on-demand in chat: memory is always-on,
                 # knowledge only when memory is absent/weak or explicitly asked.
                 # The chained recall path (mem_kb_future is None) already gated

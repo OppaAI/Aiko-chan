@@ -1385,6 +1385,48 @@ class _MemoryBackend:
             [user_id] + filtered + [limit],
         ).fetchall()
 
+    def _identity_seed_pass(
+        self,
+        query: str,
+        user_id: str,
+        limit: int,
+        active_only: bool = True,
+    ) -> list[sqlite3.Row]:
+        """Kind-based identity seeding for true identity questions.
+
+        The static anchor boost can only rerank rows already in the pool —
+        "Who am I?" has almost no lexical/vector overlap with stored facts,
+        so nothing enters and there is nothing to boost. For queries matching
+        the identity pattern (NOT bare first-person — that would inject
+        birthday rows into "I need the weather"), also seed pinned and
+        identity/preference-kind rows as graph candidates. Caller must hold
+        self._db_lock.
+        """
+        try:
+            from cognition.memory.entity import (
+                MEMORY_STATIC_ANCHOR_ENABLED,
+                _IDENTITY_QUERY_RE,
+            )
+        except Exception:
+            return []
+        if not MEMORY_STATIC_ANCHOR_ENABLED:
+            return []
+        if not _IDENTITY_QUERY_RE.search(query or ""):
+            return []
+        status_sql = _active_sql(active_only, alias="mm")
+        try:
+            return self._conn.execute(
+                f"""SELECT mm.id AS id, 1 AS w FROM memories mm
+                    WHERE mm.user_id = ?
+                      AND (mm.pinned = 1 OR mm.kind IN ('identity', 'preference'))
+                      {status_sql}
+                    ORDER BY mm.pinned DESC, mm.created_at DESC
+                    LIMIT ?""",
+                [user_id, limit],
+            ).fetchall()
+        except Exception:
+            return []
+
     def _spreading_extra_ids(
         self,
         user_id: str,
@@ -2042,6 +2084,14 @@ class _MemoryBackend:
             rank_fts_q = {row["id"]: i + 1 for i, row in enumerate(quick_fts_rows)}
             quick_graph_rows = self._graph_pass(query_entities, user_id, QUICK_GRAPH_LIMIT, active_only=active_only)
             rank_graph_q = {row["id"]: i + 1 for i, row in enumerate(quick_graph_rows)}
+            # Identity seeding: kind-based candidates so identity questions
+            # have rows for the static anchor to boost (appended after
+            # entity-matched rows so they score lower but still enter).
+            with self._db_lock:
+                _seed_rows = self._identity_seed_pass(query, user_id, QUICK_GRAPH_LIMIT, active_only=active_only)
+            _base = len(rank_graph_q)
+            for _i, _row in enumerate(_seed_rows):
+                rank_graph_q.setdefault(str(_row["id"]), _base + _i + 1)
 
         # Fetch full rows for quick pass candidates (separate lock scope)
         quick_all_ids = set(rank_knn_q) | set(rank_fts_q) | set(rank_graph_q)
@@ -2079,6 +2129,12 @@ class _MemoryBackend:
                 rank_fts_w = {row["id"]: i + 1 for i, row in enumerate(wide_fts_rows)}
                 wide_graph_rows = self._graph_pass(query_entities, user_id, GRAPH_LIMIT, active_only=active_only)
                 rank_graph_w = {row["id"]: i + 1 for i, row in enumerate(wide_graph_rows)}
+
+            with self._db_lock:
+                _wseed_rows = self._identity_seed_pass(query, user_id, GRAPH_LIMIT, active_only=active_only)
+            _wbase = len(rank_graph_w)
+            for _i, _row in enumerate(_wseed_rows):
+                rank_graph_w.setdefault(str(_row["id"]), _wbase + _i + 1)
 
             wide_all_ids = set(rank_knn_w) | set(rank_fts_w) | set(rank_graph_w)
             with self._db_lock:
@@ -3378,6 +3434,7 @@ class AikoMemorize:
             "<memory_context>",
             "Facts about the person you are speaking with — not a separate person. Use silently. Never quote or reference this block directly. Use a fact only when it directly helps answer the current request; otherwise ignore it.",
             "Name mapping: 'Oppa' and 'OppaAI' in the lines below both mean the current user — address them as 'you'. 'Aiko' means yourself. Never talk about Oppa in the third person.",
+            "Grounding: when the current question is directly answered by a fact below, use that fact as the answer — do not substitute your own guess.",
             "IMPORTANT: dates and 'today'/'yesterday' inside these memories refer to when the event happened, never to the current date. The only authoritative 'now' is the <current_datetime> block. Never treat a date, month, or time inside a memory as today's date.",
             "",
         ]

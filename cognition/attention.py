@@ -1741,6 +1741,20 @@ class EdgeCognitiveState:
                     basis.append("affective_resonance")
             except (TypeError, ValueError):
                 pass
+            try:
+                # Semantic floor: a row the vector/graph search scored strongly
+                # carries evidence even with zero word overlap ("Who am I?"
+                # vs "Oppa's birthday is March 14"). Without this, lexical-only
+                # confidence marks every such row low and the downstream
+                # all-low drop discards semantically-grounded recall. 0.02
+                # matches MEMORY_RECENCY_RERANK_THRESHOLD: rows that cleared
+                # it were already judged relevant enough to reorder by recency.
+                sem = float(row.get("_recall_score") or 0.0)
+                if sem >= 0.02:
+                    score += 2.0
+                    basis.append("semantic_recall")
+            except (TypeError, ValueError):
+                pass
             if str(row.get("status") or "").casefold() == "superseded":
                 score -= 2.0
                 basis.append("superseded")
@@ -1778,7 +1792,7 @@ class EdgeCognitiveState:
                 "top_text_preview": (result[0].get("memory") or "")[:160] if result else None,
             },
             factors=[
-                "weights: query×2.0, context×0.7, goal×1.5, pinned+1.5, salient+0.8, recall_history≤+1.0, affective_resonance+0.35, superseded-2.0",
+                "weights: query×2.0, context×0.7, goal×1.5, pinned+1.5, salient+0.8, recall_history≤+1.0, affective_resonance+0.35, semantic_recall+2.0 (recall_score≥0.02), superseded-2.0",
                 f"confidence tiers: high ≥4.0 (with overlap), moderate ≥2.0, low otherwise",
             ],
         )

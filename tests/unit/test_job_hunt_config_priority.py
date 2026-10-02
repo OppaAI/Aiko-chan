@@ -13,7 +13,9 @@ import pytest
 def _user_env(tmp_path, monkeypatch):
     """Point USER_SPACE_ROOT at a temp dir with a per-user job_hunt config."""
     state_root = tmp_path / ".aiko"
-    user_dir = state_root / "github_205369547"
+    # user_state_dir() collapses the raw github_205369547 id to the canonical
+    # OppaAI directory (builtin owner alias), so the per-user config lives there.
+    user_dir = state_root / "OppaAI"
     cfg_dir = user_dir / "agentic" / "workflows" / "job_hunt"
     cfg_dir.mkdir(parents=True)
     (cfg_dir / "config.json").write_text(json.dumps({

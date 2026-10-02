@@ -6,13 +6,13 @@ cognition.think and agentic.agentic.
 
 Two fetch groups use this pool:
   1. Memory + KB (cognition.think._fetch_memory_and_knowledge) — fired from
-     route() BEFORE intent is known, since every path (localchat/webchat/
-     agentic) needs them regardless of which one gets chosen. Concurrent
-     with intent classification itself, not just with each other.
-  2. Wiki + agentic-policy + skill, plus optional experience when
-     AGENT_INCLUDE_EXPERIENCE_CONTEXT=1
-     (agentic.agentic._fetch_agentic_only_context) — fired only once intent
-     has resolved to "agentic", since these blocks are agentic-only.
+     route() only once intent has resolved to "agentic". Localchat/webchat
+     recall sequentially inside chat() (memory → entity-link knowledge hop
+     → conditional explicit knowledge search) and never touch this pool.
+  2. (retired) Wiki / agentic-policy / skill / experience are no longer
+     fetched at task start. The agentic loop pulls them explicitly with the
+     retrieve_context and load_skill tools when it needs them; only a similar
+     successful experience may be injected as ReAct guidance.
 
 All of these are independent reads against separate backing stores
 (memory.db, knowledge.db, wiki store, skills store, optional experience store,

@@ -1,4 +1,4 @@
-"""Go self-play (Jev vs KataGo-or-baseline). Engine + Jev mocked."""
+"""Go self-play (LLM vs KataGo-or-baseline). Engine + LLM mocked."""
 from __future__ import annotations
 
 import random
@@ -47,8 +47,8 @@ def _patch_learning(monkeypatch, tmp_path):
 def test_full_game_learns(monkeypatch, tmp_path):
     import interface.android_app.go.selfplay as sp
     import interface.android_app.go.games_go as gg
-    import agentic.toolkit.jev as jevmod
-    monkeypatch.setattr(jevmod, "choice",
+    import agentic.toolkit.llm_choice as llmmod
+    monkeypatch.setattr(llmmod, "choice",
                         lambda state, ins, crit: (sorted(crit)[0], {}, 0.9))
     monkeypatch.setattr(gg, "_ai_move",
                         lambda board, difficulty=None, **kw: ("pass", "random"))
@@ -64,8 +64,8 @@ def test_full_game_learns(monkeypatch, tmp_path):
 def test_engine_failure_voids_gracefully(monkeypatch, tmp_path):
     import interface.android_app.go.selfplay as sp
     import interface.android_app.go.games_go as gg
-    import agentic.toolkit.jev as jevmod
-    monkeypatch.setattr(jevmod, "choice",
+    import agentic.toolkit.llm_choice as llmmod
+    monkeypatch.setattr(llmmod, "choice",
                         lambda state, ins, crit: (sorted(crit)[0], {}, 0.9))
 
     def _boom(board, difficulty=None, **kw):
@@ -87,16 +87,16 @@ def test_book_position_key_stable():
     assert position_key(GoBoard(9)) != position_key(a)
 
 
-def test_jev_down_voids_go_game(monkeypatch, tmp_path):
+def test_llm_down_voids_go_game(monkeypatch, tmp_path):
     import interface.android_app.go.selfplay as sp
     import interface.android_app.learn as learnmod
-    import agentic.toolkit.jev as jevmod
-    monkeypatch.setattr(jevmod, "choice", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
-    monkeypatch.setattr(jevmod.time, "sleep", lambda s: None)
+    import agentic.toolkit.llm_choice as llmmod
+    monkeypatch.setattr(llmmod, "choice", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    monkeypatch.setattr(llmmod.time, "sleep", lambda s: None)
     monkeypatch.setattr(sp, "book_path", lambda uid: tmp_path / "g.json")
     appended = []
     monkeypatch.setattr(learnmod, "append_match",
                         lambda uid, game, rec: appended.append(rec))
     out = sp.play_game("u", size=9, rng=__import__("random").Random(0), max_moves=6)
-    assert out["winner"] == "void" and out["end"] == "jev-down"
+    assert out["winner"] == "void" and out["end"] == "llm-down"
     assert appended == []

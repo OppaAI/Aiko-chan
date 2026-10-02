@@ -81,6 +81,20 @@ class MockLLMClient:
         return mock_resp
 
 
+def _mocked_tool_map(**overrides):
+    """Rebuild the real graph tool map with the given tools replaced by mocks.
+
+    The graph executor resolves node tools through ``graph_engine._tool_map()``.
+    For registered tools the map entry is the handler captured by the ``@tool``
+    decorator at import time, so patching the toolkit module attribute does NOT
+    affect graph execution — the tool map itself is the seam.
+    """
+    schema._TOOL_MAP_CACHE = None  # force a rebuild from the real code
+    tool_map = dict(schema._tool_map())
+    tool_map.update(overrides)
+    return tool_map
+
+
 class TestGraphExecutorIntegration:
     """Integration tests for graph executor with real tool map."""
 
@@ -92,26 +106,21 @@ class TestGraphExecutorIntegration:
         """research_and_report playbook executes all nodes."""
         owner = MockOwner()
         owner._client = MockLLMClient("Research report synthesized")
-        owner._memorize._mem._embedder = FakeEmbedder()
 
-        with patch("agentic.agentic._owner_embedder", return_value=FakeEmbedder()):
-            with patch("agentic.agentic._fetch_agentic_only_context", return_value={}):
-                with patch("agentic.toolkit.research.deep_research") as mock_deep:
-                    mock_deep.return_value = "Deep research results with evidence"
-                    with patch("agentic.toolkit.synthesize.kb_search") as mock_kb:
-                        mock_kb.return_value = "KB context"
-                        with patch("agentic.toolkit.reports.write_report") as mock_write:
-                            mock_write.return_value = '{"ok": true, "path": "/tmp/report.md"}'
-                            with patch("agentic.toolkit.synthesize.learn_report") as mock_learn:
-                                mock_learn.return_value = "doc-123"
-
-                                result = schema.run_schema_agent(
-                                    "research quantum computing and write a report",
-                                    cap_ids=["research"],
-                                    embedder=FakeEmbedder(),
-                                    llm_client=owner._client,
-                                    llm_model=owner._llm_model,
-                                )
+        tool_map = _mocked_tool_map(
+            deep_research=MagicMock(return_value="Deep research results with evidence"),
+            kb_search=MagicMock(return_value="KB context"),
+            write_report=MagicMock(return_value='{"ok": true, "path": "/tmp/report.md"}'),
+            learn_report=MagicMock(return_value="doc-123"),
+        )
+        with patch.object(schema, "_TOOL_MAP_CACHE", tool_map):
+            result = schema.run_schema_agent(
+                "research quantum computing and write a report",
+                cap_ids=["research"],
+                embedder=FakeEmbedder(),
+                llm_client=owner._client,
+                llm_model=owner._llm_model,
+            )
 
         assert result is not None
         assert result.graph.id == "research_and_report"
@@ -122,26 +131,21 @@ class TestGraphExecutorIntegration:
         """search_kb_and_report playbook executes."""
         owner = MockOwner()
         owner._client = MockLLMClient("Search report synthesized")
-        owner._memorize._mem._embedder = FakeEmbedder()
 
-        with patch("agentic.agentic._owner_embedder", return_value=FakeEmbedder()):
-            with patch("agentic.agentic._fetch_agentic_only_context", return_value={}):
-                with patch("agentic.toolkit.research.adaptive_search") as mock_search:
-                    mock_search.return_value = "Search results from adaptive_search"
-                    with patch("agentic.toolkit.synthesize.kb_search") as mock_kb:
-                        mock_kb.return_value = "KB context"
-                        with patch("agentic.toolkit.reports.write_report") as mock_write:
-                            mock_write.return_value = '{"ok": true}'
-                            with patch("agentic.toolkit.synthesize.learn_report") as mock_learn:
-                                mock_learn.return_value = "doc-123"
-
-                                result = schema.run_schema_agent(
-                                    "search for quantum computing basics",
-                                    cap_ids=["research"],
-                                    embedder=FakeEmbedder(),
-                                    llm_client=owner._client,
-                                    llm_model=owner._llm_model,
-                                )
+        tool_map = _mocked_tool_map(
+            adaptive_search=MagicMock(return_value="Search results from adaptive_search"),
+            kb_search=MagicMock(return_value="KB context"),
+            write_report=MagicMock(return_value='{"ok": true}'),
+            learn_report=MagicMock(return_value="doc-123"),
+        )
+        with patch.object(schema, "_TOOL_MAP_CACHE", tool_map):
+            result = schema.run_schema_agent(
+                "search for quantum computing basics",
+                cap_ids=["research"],
+                embedder=FakeEmbedder(),
+                llm_client=owner._client,
+                llm_model=owner._llm_model,
+            )
 
         assert result is not None
         assert result.graph.id == "search_kb_and_report"
@@ -150,26 +154,22 @@ class TestGraphExecutorIntegration:
         """compare_and_report fans out to two parallel deep_research calls."""
         owner = MockOwner()
         owner._client = MockLLMClient("Comparison report")
-        owner._memorize._mem._embedder = FakeEmbedder()
 
-        with patch("agentic.agentic._owner_embedder", return_value=FakeEmbedder()):
-            with patch("agentic.agentic._fetch_agentic_only_context", return_value={}):
-                with patch("agentic.toolkit.research.deep_research") as mock_deep:
-                    mock_deep.side_effect = ["Research A results", "Research B results"]
-                    with patch("agentic.toolkit.synthesize.kb_search") as mock_kb:
-                        mock_kb.return_value = "KB context"
-                        with patch("agentic.toolkit.reports.write_report") as mock_write:
-                            mock_write.return_value = '{"ok": true}'
-                            with patch("agentic.toolkit.synthesize.learn_report") as mock_learn:
-                                mock_learn.return_value = "doc-123"
-
-                                result = schema.run_schema_agent(
-                                    "compare JAX vs PyTorch for deep learning",
-                                    cap_ids=["research"],
-                                    embedder=FakeEmbedder(),
-                                    llm_client=owner._client,
-                                    llm_model=owner._llm_model,
-                                )
+        mock_deep = MagicMock(side_effect=["Research A results", "Research B results"])
+        tool_map = _mocked_tool_map(
+            deep_research=mock_deep,
+            kb_search=MagicMock(return_value="KB context"),
+            write_report=MagicMock(return_value='{"ok": true}'),
+            learn_report=MagicMock(return_value="doc-123"),
+        )
+        with patch.object(schema, "_TOOL_MAP_CACHE", tool_map):
+            result = schema.run_schema_agent(
+                "compare JAX vs PyTorch for deep learning",
+                cap_ids=["research"],
+                embedder=FakeEmbedder(),
+                llm_client=owner._client,
+                llm_model=owner._llm_model,
+            )
 
         assert result is not None
         assert result.graph.id == "compare_and_report"
@@ -178,13 +178,13 @@ class TestGraphExecutorIntegration:
 
     def test_checklist_playbook(self):
         """checklist_and_save creates checklist and saves note."""
-        with patch("agentic.agentic._owner_embedder", return_value=FakeEmbedder()):
-            with patch("agentic.agentic._fetch_agentic_only_context", return_value={}):
-                result = schema.run_schema_agent(
-                    "make a checklist for testing and save it",
-                                    cap_ids=[],
-                                    embedder=FakeEmbedder(),
-                )
+        tool_map = _mocked_tool_map()
+        with patch.object(schema, "_TOOL_MAP_CACHE", tool_map):
+            result = schema.run_schema_agent(
+                "make a checklist for testing and save it",
+                cap_ids=[],
+                embedder=FakeEmbedder(),
+            )
 
         assert result is not None
         assert result.graph.id == "checklist_and_save"
@@ -195,13 +195,13 @@ class TestGraphExecutorIntegration:
 
     def test_simple_save_playbook(self):
         """simple_save_note saves the prompt as a note."""
-        with patch("agentic.agentic._owner_embedder", return_value=FakeEmbedder()):
-            with patch("agentic.agentic._fetch_agentic_only_context", return_value={}):
-                result = schema.run_schema_agent(
-                    "save this note: remember to buy milk",
-                    cap_ids=[],
-                    embedder=FakeEmbedder(),
-                )
+        tool_map = _mocked_tool_map()
+        with patch.object(schema, "_TOOL_MAP_CACHE", tool_map):
+            result = schema.run_schema_agent(
+                "save this note: remember to buy milk",
+                cap_ids=[],
+                embedder=FakeEmbedder(),
+            )
 
         assert result is not None
         assert result.graph.id == "simple_save_note"

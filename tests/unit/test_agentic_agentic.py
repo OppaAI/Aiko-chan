@@ -494,7 +494,7 @@ class TestGraphExecutorIntegration:
             owner._llm_model = "test-model"
 
             # Need to mock more to avoid full ReAct loop
-            with patch("agentic.agentic._fetch_agentic_only_context", return_value={}):
+            with patch("agentic.agentic._similar_successful_experience", return_value=""):
                 with patch("agentic.agentic.tool_schemas", return_value=[]):
                     try:
                         run_agentic_chat("test prompt", owner, embedder=FakeEmbedder())
@@ -542,7 +542,7 @@ class TestRunAgenticChatSmoke:
                 owner._client = MockLLMClient("ReAct answer")
 
                 with patch("agentic.agentic._owner_embedder", return_value=FakeEmbedder()):
-                    with patch("agentic.agentic._fetch_agentic_only_context", return_value={}):
+                    with patch("agentic.agentic._similar_successful_experience", return_value=""):
                         with patch("agentic.agentic.tool_schemas", return_value=[]):
                             # ReAct loop would run but we can't fully test without more mocks
                             pass
@@ -762,9 +762,9 @@ def test_agentic_interrupt_skips_run_learning(monkeypatch, interrupted, expected
     monkeypatch.setattr(agentic_module, "filtered_tool_schemas", lambda *_args: [])
     monkeypatch.setattr(agentic_module, "_agent_context", lambda *_args, **_kwargs: SimpleNamespace(user_id=None))
     monkeypatch.setattr(agentic_module, "_append_step_trace", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(agentic_module, "_fetch_agentic_only_context", lambda *_args, **_kwargs: dict(empty_context))
+    monkeypatch.setattr(agentic_module, "_similar_successful_experience", lambda *_args, **_kwargs: "")
     monkeypatch.setattr(agentic_module.reason, "batch_block_relevance_scores", lambda *_args, **_kwargs: [0.0])
-    monkeypatch.setattr(agentic_module, "_enforce_agentic_context_budget", lambda *_args, **_kwargs: ("", "", "", "", "", ""))
+    monkeypatch.setattr(agentic_module, "_enforce_agentic_context_budget", lambda *_args, **_kwargs: ("", "", ""))
     monkeypatch.setattr(agentic_module.bioclock, "current_datetime_block", lambda: "")
     monkeypatch.setattr(agentic_module, "_recent_history_messages", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(agentic_module, "default_pre_tool_guardrails", lambda _budget: None)

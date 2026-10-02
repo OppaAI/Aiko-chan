@@ -349,13 +349,13 @@ def wiki_agentic_contexts_for(
     """Return BOTH the operational wiki page block and the wiki knowledge
     block from a SINGLE search_wiki call (same corpus, same query).
 
-    Previously _fetch_agentic_only_context fired wiki_context_for
+    Previously the task-start fetcher fired wiki_context_for
     (kind="wiki") and wiki_knowledge_context_for (all kinds) as two
     separate search_wiki calls against the same store with the same
     query — so the query was embedded twice per agentic turn (plus
     each block's own excerpt pass). One unified search + partition
     avoids the duplicate embedding while keeping the two distinct
-    blocks (wiki_context / wiki_knowledge_context) the prompt expects.
+    blocks the caller expects.
     """
     selected = search_wiki(query, limit=wiki_limit + knowledge_limit, embedder=embedder)
     wiki_items = [it for it in selected if it.kind == "wiki"]

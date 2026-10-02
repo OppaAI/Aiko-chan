@@ -152,7 +152,7 @@ class FakeEmbedder:
     def embed_batch(self, texts: list[str]) -> np.ndarray:
         return self.embed(texts)
 
-    def embed_query(self, text: str) -> np.ndarray:
+    def embed_query(self, text: str, instruct: str = "") -> np.ndarray:
         return self._vec(text)
 
     def embed_queries(self, texts: list[str]) -> np.ndarray:
@@ -224,19 +224,13 @@ def _bare_memo(backend, user_id: str = "u1"):
 
 class TestRankAndScore:
     def test_flymb_uses_enclosing_user_identity(self, backend, monkeypatch):
+        """The mushroom-body bias hook must receive the *resolved* recalling
+        user identity -- not the stored row's user_id. The hook lives in
+        AikoMemorize.search(), which passes its resolved_user_id."""
         import importlib
 
         memorize_mod = importlib.import_module("cognition.memory.memorize")
 
-        mem_id = "identity-scoped-rank"
-        _insert_row(
-            backend._conn,
-            mem_id,
-            "stored-row-user",
-            "A sufficiently distinctive memory for ranking",
-            datetime.now(timezone.utc).isoformat(),
-        )
-        backend._conn.commit()
         seen_user_ids = []
         monkeypatch.setattr(memorize_mod, "_flymb_mode", lambda: "shadow")
         monkeypatch.setattr(
@@ -245,7 +239,17 @@ class TestRankAndScore:
             lambda _text, *, user_id=None: seen_user_ids.append(user_id) or 0.25,
         )
 
-        backend._rank_and_score({mem_id: 1}, {}, user_id="resolved-user")
+        memo = _bare_memo(backend, user_id="resolved-user")
+        # Bypass the real retrieval pipeline: the unit under test is the
+        # hook wiring in search(), not ranking. The stubbed row belongs to
+        # a *different* user to prove the hook gets the enclosing identity.
+        monkeypatch.setattr(
+            memo,
+            "_search_top",
+            lambda *a, **kw: [{"memory": "a recalled fact", "user_id": "stored-row-user"}],
+        )
+
+        memo.search("any query", user_id="resolved-user")
 
         assert seen_user_ids
         assert set(seen_user_ids) == {"resolved-user"}
@@ -584,8 +588,10 @@ def test_vacuum_memory_db_opens_user_store_and_runs_maintenance(monkeypatch, tmp
         calls.append(("initialize", str(path), user_id, vector))
         return FakeConn()
 
-    monkeypatch.setattr("cognition.memory.memorize.resolve_user_db_path", lambda path, user_id=None: tmp_path / user_id / "memory.db")
-    monkeypatch.setattr("cognition.memory.memorize.initialize_store_db", fake_initialize)
+    # vacuum_memory_db lives in cognition.memory.schema (re-exported through
+    # memorize); its module-global lookups resolve there, not in memorize.
+    monkeypatch.setattr("cognition.memory.schema.resolve_user_db_path", lambda path, user_id=None: tmp_path / user_id / "memory.db")
+    monkeypatch.setattr("cognition.memory.schema.initialize_store_db", fake_initialize)
 
     vacuum_memory_db("alice")
 
@@ -1255,6 +1261,68 @@ class TestCrossStoreUserScoping:
         hits2 = search_experience("user1 task", limit=5, embedder=fe, user_id="user2")
         assert hits2 == []
 
+    def test_search_experience_reuses_cached_query_embedding(self, tmp_path, monkeypatch):
+        """A repeated identical experience search must not re-embed the query.
+
+        Regression test for the _knn() swap onto reason.cached_embed_query():
+        the second identical search reuses the cached query vector instead of
+        paying another embedding call.
+        """
+        from agentic.experience import _connect as exp_connect, search_experience
+        import agentic.experience as exp_mod
+        import numpy as np
+        import hashlib
+        import uuid
+        from cognition import reason
+
+        monkeypatch.setattr(exp_mod, "EXPERIENCE_DB_PATH", str(tmp_path / "exp_cache_test.db"))
+        reason._embed_query_cache.clear()
+
+        class CountingFE:
+            def __init__(self):
+                self.calls = 0
+
+            def embed_query(self, t, instruct=""):
+                self.calls += 1
+                h = hashlib.sha256(t.encode()).digest()
+                raw = (h * (640 // len(h) + 1))[:2560]
+                arr = np.frombuffer(raw, dtype=np.uint8).astype(np.float32)[:640] / 255.0 * 2 - 1
+                n = np.linalg.norm(arr)
+                return arr / n if n else arr
+
+        fe = CountingFE()
+        exp_id = str(uuid.uuid4())
+        vec = fe.embed_query("cache probe task")
+        import sqlite_vec
+
+        conn1 = exp_connect("user1")
+        conn1.execute(
+            "INSERT INTO experiences(id,user_id,goal,record_text,steps_json,outcome,score,answer_excerpt,entities,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (exp_id, "user1", "cache probe task", "cache probe task", '[]', "done", 1.0, "excerpt", '[]', "2024-01-01T00:00:00")
+        )
+        conn1.execute(
+            "INSERT INTO experiences_vec(id,embedding) VALUES(?,?)",
+            (exp_id, sqlite_vec.serialize_float32(vec.tolist()))
+        )
+        conn1.commit()
+        conn1.close()
+
+        try:
+            fe.calls = 0
+            hits1 = search_experience("cache probe task", limit=5, embedder=fe, user_id="user1")
+            assert any(hit["id"] == exp_id for hit in hits1)
+            calls_after_first = fe.calls
+            assert calls_after_first >= 1
+
+            hits2 = search_experience("cache probe task", limit=5, embedder=fe, user_id="user1")
+            assert [hit["id"] for hit in hits2] == [hit["id"] for hit in hits1]
+            assert fe.calls == calls_after_first, (
+                "second identical search must reuse the cached query embedding"
+            )
+        finally:
+            reason._embed_query_cache.clear()
+
 
 def test_rebalance_pins_unpins_old_ordinary_rows_but_protects_identity(backend):
     memo = _bare_memo(backend)
@@ -1264,14 +1332,21 @@ def test_rebalance_pins_unpins_old_ordinary_rows_but_protects_identity(backend):
     backend._conn.commit()
 
     result = memo.rebalance_pins("u1", max_age_days=45)
-    rows = {row["id"]: row for row in backend.get_all(user_id="u1")}
+    # get_all() returns a narrow projection without lifecycle columns; read
+    # the persisted pin flags back directly.
+    rows = {
+        r["id"]: dict(r)
+        for r in backend._conn.execute(
+            "SELECT id, pinned FROM memories WHERE user_id = ?", ("u1",)
+        ).fetchall()
+    }
 
     assert result["unpinned"] == 1
     assert rows["old_note"]["pinned"] == 0
     assert rows["identity"]["pinned"] == 1
 
 
-def test_queue_write_and_switch_user_concurrency():
+def test_queue_write_and_switch_user_concurrency(monkeypatch):
     """Test that queue_write captures user identity atomically with switch_user.
 
     Ensures that when queue_write and switch_user run concurrently, the queued
@@ -1281,11 +1356,21 @@ def test_queue_write_and_switch_user_concurrency():
     import tempfile
     from pathlib import Path
 
+    # Constructing the real OpenAI client builds an httpx SSL context, which
+    # segfaults flakily in this sandbox when created on the switch_user
+    # worker thread (faulthandler pointed at ssl.create_default_context).
+    # This test is about user-identity atomicity, not LLM integration, and
+    # the write path only needs "no facts extracted" -- which the existing
+    # _CapturingClient fake already provides.
+    monkeypatch.setattr(
+        "cognition.memory.memorize.OpenAI", lambda *a, **k: _CapturingClient()
+    )
+
     # Create two temporary user DBs
     tmpdir = Path(tempfile.mkdtemp())
 
     class FakeEmbedder:
-        def embed_query(self, text):
+        def embed_query(self, text, instruct=""):
             return np.zeros(640, dtype=np.float32)
 
     # Initialize AikoMemorize with user alice

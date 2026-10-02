@@ -2811,13 +2811,20 @@ class AikoMemorize:
                 except Exception:
                     pass
             finally:
-                self._write_queue.task_done()
-                # Periodic WAL checkpoint to prevent unbounded WAL growth
+                # NOTE: the WAL checkpoint MUST run before task_done().
+                # wait_for_writes()/switch_user() drain via the queue's
+                # unfinished-tasks accounting, which only covers work up to
+                # task_done(). Touching self._conn after it lets the drain
+                # complete while the worker still has DB work in flight --
+                # then switch_user() closes/reopens the connection under it,
+                # corrupting the sqlite heap (flaky segfaults) or
+                # checkpointing the wrong user's DB.
                 try:
                     if self._conn:
                         self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 except Exception:
                     pass
+                self._write_queue.task_done()
 
     def _wait_for_write_window(self, is_active_turn, idle_since) -> None:
         """Wait until the caller reports idle before running an extraction
@@ -4231,7 +4238,23 @@ class AikoMemorize:
             re.IGNORECASE,
         )
         candidates: list[dict] = []
-        for row in self.get_all(user_id=uid):
+        # NOTE: get_all()/iter_all() return a narrow projection (id, memory,
+        # created_at, status, ...) tuned for the recall/dream hot paths -- it
+        # no longer carries pinned/access_count/last_accessed_at, which this
+        # maintenance pass needs. Query those lifecycle columns directly so
+        # rebalance can actually find candidates again.
+        with self._mem._db_lock:
+            lifecycle_rows = self._conn.execute(
+                """
+                SELECT id, memory, pinned, status, access_count,
+                       last_accessed_at, created_at
+                FROM memories
+                WHERE user_id = ?
+                """,
+                (uid,),
+            ).fetchall()
+        for _r in lifecycle_rows:
+            row = dict(_r)
             if not int(row.get("pinned") or 0):
                 continue
             text = str(row.get("memory") or "")

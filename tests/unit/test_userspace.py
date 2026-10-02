@@ -98,10 +98,26 @@ class TestCurrentDisplayName:
         monkeypatch.setenv("AIKO_USER_ID", "some_user")
         assert current_display_name() == "some_user"
 
-    def test_env_display_name_does_not_override_user_id_fallback(self, monkeypatch):
+    @pytest.mark.parametrize("session_user_id", [None, "", "guest"])
+    def test_headless_env_display_name_overrides_env_user_id(self, monkeypatch, session_user_id):
         monkeypatch.setenv("AIKO_USER_ID", "some_user")
         monkeypatch.setenv("CURRENT_DISPLAY_NAME", "Oppa")
-        assert current_display_name() == "some_user"
+        token = set_current_user_id(session_user_id)
+        try:
+            assert current_display_name() == "Oppa"
+        finally:
+            reset_current_user_id(token)
+
+    @pytest.mark.parametrize("env_display_name", [None, "", "stale_name"])
+    def test_session_user_id_takes_priority_over_env(self, monkeypatch, env_display_name):
+        monkeypatch.setenv("AIKO_USER_ID", "env_user")
+        if env_display_name is not None:
+            monkeypatch.setenv("CURRENT_DISPLAY_NAME", env_display_name)
+        token = set_current_user_id("session_user")
+        try:
+            assert current_display_name() == "session_user"
+        finally:
+            reset_current_user_id(token)
 
     def test_contextvar_takes_priority_over_env(self, monkeypatch):
         monkeypatch.setenv("AIKO_USER_ID", "some_user")
@@ -111,7 +127,7 @@ class TestCurrentDisplayName:
             assert current_display_name() == "ctx_name"
         finally:
             reset_current_display_name(token)
-        assert current_display_name() == "some_user"
+        assert current_display_name() == "env_name"
 
     def test_reset_does_not_leak_into_next_call(self):
         """Regression guard for the exact bug class implied by 'Aiko doesn't

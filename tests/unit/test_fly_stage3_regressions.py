@@ -40,16 +40,24 @@ def test_dn_prosody_requires_live_mode_and_preserves_zero_controls(monkeypatch):
         "applied": False,
         "rate": 1.0,
         "volume": 1.0,
+        "cancelled": False,
     }
     assert calls == []
 
     monkeypatch.setenv("MEMORY_FLYDN_MODE", "live")
+    # Persona gains are orthogonal to this test: pin to shadow so the
+    # identity (1.0) gains apply and the expectation stays deterministic.
+    monkeypatch.setenv("AIKO_FLY_PERSONA_MODE", "shadow")
     assert apply_dn_prosody(speaker, user_id="user-1") == {
         "applied": True,
-        "rate": 0.92,
-        "volume": 0.9,
+        "rate": 1.0,
+        "volume": 1.0,
+        "cancelled": False,
     }
-    assert calls == ["user-1"]
+    # Five read-only peeks, none of which may create state: the TTS cancel
+    # check, body_drive's cancel check, _drive's influence-record read,
+    # _drive's cancel check, and dn_body's vigor read.
+    assert calls == ["user-1"] * 5
 
 
 def test_antiloop_preserves_an_explicit_zero_score(monkeypatch):

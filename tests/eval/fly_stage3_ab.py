@@ -15,23 +15,40 @@ import uuid
 def main() -> int:
     # Hermetic: redirect user state to a temp dir with a fresh uid so eval
     # runs never pollute the live ~/.aiko store (learned avoids would
-    # otherwise leak into real recall ranking).
+    # otherwise leak into real recall ranking). Every global mutated here
+    # is restored in the finally block — main() is also called from unit
+    # tests, where leaking os.environ or a patched userspace.user_state_dir
+    # would break unrelated test files running later in the session.
     tmp = tempfile.mkdtemp(prefix="fly-stage3-ab-")
-    for key in ("USER_STATE_ROOT", "AIKO_USER_STATE_ROOT", "USER_SPACE_ROOT"):
+    saved_env = {
+        key: os.environ.get(key)
+        for key in ("USER_STATE_ROOT", "AIKO_USER_STATE_ROOT", "USER_SPACE_ROOT")
+    }
+    for key in saved_env:
         os.environ[key] = tmp
+    from system import userspace
+
+    saved_user_state_dir = userspace.user_state_dir
+
+    def _tmp_state(user_id=None):
+        import pathlib
+        p = pathlib.Path(tmp) / (str(user_id or "default"))
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    userspace.user_state_dir = _tmp_state  # type: ignore[attr-defined]
     try:
-        from system import userspace
+        return _run(tmp)
+    finally:
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        userspace.user_state_dir = saved_user_state_dir
 
-        def _tmp_state(user_id=None):
-            import pathlib
-            p = pathlib.Path(tmp) / (str(user_id or "default"))
-            p.mkdir(parents=True, exist_ok=True)
-            return str(p)
 
-        userspace.user_state_dir = _tmp_state  # type: ignore[attr-defined]
-    except Exception:
-        pass
-
+def _run(tmp: str) -> int:
     from cognition.flymemory.teach_api import teach_preference
     from cognition.memory.fly_rank import adjust_recall_score
     from cognition.memory.preference_store import preference_delta, record_preference

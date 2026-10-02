@@ -7,16 +7,16 @@ history, and memory queue ownership stay in cognition/think.py.
 
 Context fetch shape:
   Memory + knowledge-base (KB) are intent-agnostic — cognition.think.route()
-  fetches both concurrently BEFORE intent is even resolved, since every
-  path needs them. run_agentic_chat receives that fetch as `mem_kb_future`
-  (or fetches directly if called standalone, e.g. a scheduled job with no
-  prior route() call).
+  fetches both before dispatching to agentic (or run_agentic_chat fetches
+  them directly when called standalone, e.g. a scheduled job with no prior
+  route() call). The task-start future is bounded by AGENT_MEMKB_TIMEOUT.
 
-  Wiki, agentic-policy, skill, and experience context are agentic-only —
-  they're only useful once intent has actually resolved to "agentic" — so
-  they're fetched here, concurrently with each other, via
-  _fetch_agentic_only_context(), on the same shared pool
-  (cognition.CONTEXT_POOL).
+  Wiki, skill, policy, and experience blocks are NEVER injected upfront.
+  Discovery follows a ladder: (1) a matching validated DAG via
+  run_schema_agent, (2) a similar successful experience via
+  _similar_successful_experience, (3) otherwise plain ReAct. The loop pulls
+  wiki/skills/experience explicitly with the retrieve_context and load_skill
+  tools when it needs them.
 """
 
 from __future__ import annotations
@@ -42,8 +42,7 @@ from system import bioclock
 from system.userspace import current_user_id, user_state_dir, user_workspace_root
 from cognition import reason
 from cognition import CONTEXT_POOL
-from agentic.skills import list_skillsets, load_skillset, load_skills, search_skillsets_json, skill_context_for
-from agentic.wiki import wiki_agentic_contexts_for
+from agentic.skills import search_skillsets_json
 from agentic.capability import match_capabilities, filtered_tool_schemas, resolve_handoff
 from agentic.guardrails import DEFAULT_POST_ANSWER_GUARDRAILS, default_pre_tool_guardrails
 from cognition.knowledge import knowledge_context_for, ingest_text as ingest_knowledge_text, ingest_file as ingest_knowledge_file
@@ -108,8 +107,11 @@ AGENT_VERIFY_LLM_MODE = os.getenv("AGENT_VERIFY_LLM_MODE", "auto")  # "always" |
 AGENT_MAX_FINAL_REPAIRS = int(os.getenv("AGENT_MAX_FINAL_REPAIRS", 2))
 AGENT_VERIFY_MIN_SCORE = float(os.getenv("AGENT_VERIFY_MIN_SCORE", "0.70"))
 AGENT_TOOL_RETRY_BACKOFF = float(os.getenv("AGENT_TOOL_RETRY_BACKOFF", 0.4))
+# Bound on the task-start memory+KB future: route() may hand us a future
+# that is still fetching (slow embedder/DB). The turn must never hang on it
+# — on timeout we continue with empty memory/KB blocks and log it.
+AGENT_MEMKB_TIMEOUT = float(os.getenv("AGENT_MEMKB_TIMEOUT", "20"))
 AGENT_EXECUTOR_MODE = os.getenv("AGENT_EXECUTOR_MODE", "hybrid").strip().lower()  # react | graph | hybrid
-AGENT_INCLUDE_EXPERIENCE_CONTEXT = os.getenv("AGENT_INCLUDE_EXPERIENCE_CONTEXT", "0").lower() in {"1", "true", "yes", "on"}
 # Tool-RAG upfront floor (cosine block relevance, same scale as
 # batch_block_relevance_scores): knowledge/experience blocks scoring below
 # this are omitted upfront — the loop pulls specifics via retrieve_context
@@ -193,10 +195,12 @@ TASK_MODE_GUIDANCE = (
     "recent human-approved draft. Do NOT run the job-search/draft graph "
     "(gen_job_post) or re-draft when the user wants to post an already-"
     "approved draft."
-    "Use <skill_context>, <knowledge_context>, and <experience_context> when "
-    "they match the task. For repeatable workflows, prefer predefined skill "
-    "workflow, learned knowledge, wiki operating cards, and successful similar "
-    "past experience over inventing a new process. When a recalled <past_task> "
+    "Wiki operating cards, skill workflows, and past task experience are NOT "
+    "injected into your context automatically. For repeatable workflows, call "
+    "retrieve_context with stores=wiki,skill,experience to check for a matching "
+    "card, skill, or successful past run before inventing a new process; call "
+    "load_skill(name) to read a skill's full instructions when its summary "
+    "matches. When a recalled <past_task> "
     "has outcome=\"failed\" or outcome=\"partial\", or a low verifier_score, "
     "treat its steps as a cautionary trace of what went wrong, not a template "
     "to follow — do not repeat the same tool/argument choices that led to "
@@ -236,75 +240,6 @@ def _blank_empty_context(block: str) -> str:
     return block
 
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-_AGENTIC_POLICY_PATHS = (
-    _REPO_ROOT / "agentic" / "SKILLS.md",
-    _REPO_ROOT / "agentic" / "SCHEDULE.md",
-)
-
-# Agentic policy context is now RAG-selected against the user's request,
-# not injected whole. It's still bounded by _AGENTIC_POLICY_MAX_CHARS and
-# is also a droppable block in _enforce_agentic_context_budget below, so a
-# growing SKILLS.md/SCHEDULE.md can no longer silently blow the fixed
-# "immovable" portion of the context budget.
-_AGENTIC_POLICY_CHUNK_CHARS = int(os.getenv("AGENTIC_POLICY_CHUNK_CHARS", "600"))
-_AGENTIC_POLICY_CHUNKS_PER_FILE = int(os.getenv("AGENTIC_POLICY_CHUNKS_PER_FILE", "4"))
-_AGENTIC_POLICY_CHUNK_MIN_SCORE = float(os.getenv("AGENTIC_POLICY_CHUNK_MIN_SCORE", "0.25"))
-_AGENTIC_POLICY_MAX_CHARS = int(os.getenv("AGENTIC_POLICY_MAX_CHARS", "3000"))
-_AGENTIC_POLICY_INSTRUCT = "Which policy guidance applies to this task?"
-
-# Per-file mtime-keyed cache so SKILLS.md/SCHEDULE.md are not re-read from
-# disk on every agentic turn.  File unchanged → same mtime → cache hit.
-# File edited → mtime changes → cache miss → re-read.
-_policy_file_cache: dict[str, dict] = {}  # path -> {"content": str, "mtime": float}
-
-
-def _cached_read_policy(path: Path) -> str:
-    """Read a policy file, cached by mtime.  One stat() call on cache check,
-    zero I/O on hit."""
-    path_str = str(path)
-    try:
-        mtime = path.stat().st_mtime
-    except OSError:
-        return ""
-    cached = _policy_file_cache.get(path_str)
-    if cached is not None and cached["mtime"] == mtime:
-        return cached["content"]
-    content = path.read_text(encoding="utf-8") if path.exists() else ""
-    _policy_file_cache[path_str] = {"content": content, "mtime": mtime}
-    return content
-
-
-def _agentic_policy_context(user_input: str, embedder=None) -> str:
-    """Load only the task policy excerpts relevant to this request, instead
-    of the entire SKILLS.md/SCHEDULE.md files on every task-mode turn."""
-    blocks: list[str] = []
-    remaining = _AGENTIC_POLICY_MAX_CHARS
-    for path in _AGENTIC_POLICY_PATHS:
-        if remaining <= 0:
-            break
-        text = _cached_read_policy(path).strip()
-        if not text:
-            continue
-        pieces = reason.chunk_text(text, _AGENTIC_POLICY_CHUNK_CHARS)
-        if not pieces:
-            continue
-        relevant = reason.select_relevant_chunks(
-            user_input, pieces, embedder, top_k=_AGENTIC_POLICY_CHUNKS_PER_FILE,
-            min_score=_AGENTIC_POLICY_CHUNK_MIN_SCORE, instruct=_AGENTIC_POLICY_INSTRUCT,
-        )
-        excerpt = "\n...\n".join(c for _score, c in relevant) if relevant else pieces[0]
-        excerpt = excerpt[:remaining]
-        if not excerpt:
-            continue
-        rel = path.relative_to(_REPO_ROOT)
-        blocks.append(f'<agentic_policy path="{rel}">\n{excerpt}\n</agentic_policy>')
-        remaining -= len(excerpt)
-    if not blocks:
-        return "<agentic_policy_context>\nNo matching task policy found for this request.\n</agentic_policy_context>"
-    return "<agentic_policy_context>\n" + "\n\n".join(blocks) + "\n</agentic_policy_context>"
-
-
 _ERROR_PREFIX_RE = re.compile(r"^\[(?P<label>[^:\]]+)(?::\s*(?P<detail>.*))?\]$", re.DOTALL)
 # Tools that can genuinely post to a real public account. When one of these
 # ran and succeeded this turn, an answer describing a real "posted" action
@@ -339,64 +274,56 @@ def _owner_embedder(owner):
     return getattr(getattr(getattr(owner, "_memorize", None), "_mem", None), "_embedder", None)
 
 
-def _fetch_agentic_only_context(user_input: str, embedder, query_vector: np.ndarray | None = None) -> dict:
-    """Fetch agentic-specific context blocks concurrently: agentic policy
-    (SKILLS.md/SCHEDULE.md excerpts), wiki (architecture cards + wiki's own
-    knowledge RAG), predefined skill workflows, and past-task experience.
+# How the agentic loop gets its bearings (the discovery ladder):
+#   1. Validated DAG — run_schema_agent tries a matching playbook first.
+#   2. Similar successful experience — _similar_successful_experience below
+#      searches the experience store for a past task like this one and, on a
+#      strong match, injects its tool order as guidance into the ReAct prompt.
+#   3. Otherwise plain ReAct.
+# DAGs and experiences stay separate record types (playbooks in graph_engine,
+# experiences in the experience store); only the discovery order is shared.
+# Wiki, skill, and policy blocks are NEVER injected upfront — the loop pulls
+# them explicitly via retrieve_context / load_skill when it needs them.
+_DISCOVERY_MIN_EXPERIENCE_SCORE = float(os.getenv("DISCOVERY_MIN_EXPERIENCE_SCORE", "0.65"))
 
-    These only matter once intent has resolved to "agentic" — unlike
-    memory + KB, which cognition.think.route() fetches for every path up front,
-    before intent is even known. All four reads here are independent
-    (separate stores, no shared output), so they run concurrently on the
-    same pool and are joined afterward; order of completion is irrelevant.
 
-    Per-key try/except means one failed lookup surfaces a fallback block
-    instead of sinking the other three.
+def _similar_successful_experience(user_input: str, embedder) -> str:
+    """Search the experience store for a similar *successful* past task.
 
-    query_vector — pre-computed _QUERY_INSTRUCT embedding; avoids redundant
-    embedding in batch_block_relevance_scores.
+    Returns a compact guidance block for the ReAct system prompt, or "" when
+    nothing strong enough matches. Only outcome="ok" records with a verifier
+    score >= 0.7 are eligible — failed/partial traces are cautionary data,
+    not templates.
     """
-    futures = {
-        "agentic_policy": CONTEXT_POOL.submit(_agentic_policy_context, user_input, embedder=embedder),
-        "wiki": CONTEXT_POOL.submit(wiki_agentic_contexts_for, user_input, embedder=embedder),
-        "skill": CONTEXT_POOL.submit(skill_context_for, user_input, limit=2, max_chars=3000, embedder=embedder),
-        "experience": CONTEXT_POOL.submit(experience.experience_context_for, user_input, limit=3, embedder=embedder) if AGENT_INCLUDE_EXPERIENCE_CONTEXT else None,
-    }
-    # "wiki" returns a (wiki_block, knowledge_block) tuple; both come
-    # from a SINGLE search_wiki call (see wiki_agentic_contexts_for) instead
-    # of the old two-call path that embedded the same query twice.
-    fallbacks = {
-        "agentic_policy": "<agentic_policy_context>\nLookup failed.\n</agentic_policy_context>",
-        "wiki": ("<wiki_context>\nLookup failed.\n</wiki_context>",
-                "<wiki_knowledge_context>\nLookup failed.\n</wiki_knowledge_context>"),
-        "skill": "<skill_context>\nLookup failed.\n</skill_context>",
-        "experience": "<experience_context>\nLookup failed.\n</experience_context>",
-    }
-    results = {}
-    for key, future in futures.items():
-        try:
-            results[key] = future.result() if future is not None else ""
-        except Exception as e:
-            log.error("[agentic] context fetch '%s' failed: %s", key, e)
-            results[key] = fallbacks[key]
-    wiki_block, knowledge_block = results.pop("wiki")
-    results["wiki"] = wiki_block
-    results["wiki_knowledge"] = knowledge_block
-    # wiki_knowledge is folded into knowledge_context downstream in
-    # run_agentic_chat and scored there (combined with knowledge_block) —
-    # scoring it here too is a wasted embedding call whose result
-    # _enforce_agentic_context_budget never reads (it only consumes the 5
-    # budget-block keys: wiki, knowledge, experience, agentic_policy, skill).
-    score_keys = [k for k in results if k != "wiki_knowledge"]
-    if not AGENT_INCLUDE_EXPERIENCE_CONTEXT:
-        score_keys = [k for k in score_keys if k != "experience"]
-    score_texts = [results[k] for k in score_keys]
-    score_values = reason.batch_block_relevance_scores(embedder, user_input, score_texts, query_vector=query_vector)
-    scores = dict(zip(score_keys, score_values))
-    if not AGENT_INCLUDE_EXPERIENCE_CONTEXT:
-        scores["experience"] = 0.0
-    results["_scores"] = scores
-    return results
+    try:
+        from agentic.experience import search_experience
+    except Exception as exc:
+        log.debug("[discovery] experience search unavailable: %s", exc)
+        return ""
+    try:
+        hits = search_experience(user_input, limit=3, embedder=embedder) or []
+    except Exception as exc:
+        log.warning("[discovery] experience search failed: %s", exc)
+        return ""
+    eligible = [
+        h for h in hits
+        if (h.get("outcome") or "") == "ok"
+        and float(h.get("score", 0.0) or 0.0) >= 0.7
+        and float(h.get("recall_score", 0.0) or 0.0) >= _DISCOVERY_MIN_EXPERIENCE_SCORE
+    ]
+    if not eligible:
+        return ""
+    best = eligible[0]
+    steps = best.get("record_text", "") or ""
+    return (
+        "<similar_experience>\n"
+        f"A past task like this one succeeded (score {float(best.get('score', 0.0)):.2f}).\n"
+        f"Goal: {(best.get('goal') or '')[:200]}\n"
+        f"{steps[:1200]}\n"
+        "You may reuse its tool order as a starting template, adapting arguments "
+        "to this task. If it does not fit, ignore it and work from first principles.\n"
+        "</similar_experience>"
+    )
 
 
 AGENT_HISTORY_CANDIDATE_MULTIPLIER = int(os.getenv("AGENT_HISTORY_CANDIDATE_MULTIPLIER", 3))
@@ -436,7 +363,7 @@ def _history_relevance_scores(embedder, user_input: str, history_texts: list[str
         q_vec = np.asarray(query_vector, dtype=np.float32)
     else:
         try:
-            q_vec = np.asarray(embedder.embed_query(user_input), dtype=np.float32)
+            q_vec = reason.cached_embed_query(embedder, user_input)
         except Exception:
             return [0.0] * len(history_texts)
     scores = reason.batch_cosine_scores(q_vec, b_vecs)
@@ -1556,12 +1483,18 @@ def _estimate_tokens(text: str) -> int:
 
 
 def _enforce_agentic_context_budget(
-    persona, agentic_policy_context, memory_context, user_input,
-    wiki_context, skill_context, knowledge_context, experience_context,
+    persona, memory_context, user_input,
+    knowledge_context, experience_guidance,
     task_mode_context: str = "",
     tool_schemas: list | None = None,
     scores: dict[str, float] | None = None,
-) -> tuple[str, str, str, str, str, str]:
+) -> tuple[str, str, str]:
+    """Shed droppable blocks when the agentic system prompt exceeds budget.
+
+    Only three blocks are droppable now: learned knowledge, the similar-
+    experience guidance, and the verbose task-mode guidance. Memory, the
+    static TASK_MODE_CORE policy, and the tool schemas are fixed budget.
+    """
     budget = int(LLM_CTX_SIZE * AGENT_CONTEXT_BUDGET_RATIO)
     fixed = persona + memory_context + user_input
     # Estimate from the ACTUAL filtered tool schemas sent to the LLM this
@@ -1571,18 +1504,18 @@ def _enforce_agentic_context_budget(
     fixed_tokens = _estimate_tokens(fixed) + tool_tokens
 
     blocks = {
-        "wiki": wiki_context, "knowledge": knowledge_context,
-        "experience": experience_context, "agentic_policy": agentic_policy_context,
-        "skill": skill_context, "task_mode": task_mode_context,
+        "knowledge": knowledge_context,
+        "experience": experience_guidance,
+        "task_mode": task_mode_context,
     }
     scores = scores or {}
     # task_mode guidance has no task-specific relevance score; treat it as
     # neutral so it sheds after clearly-irrelevant blocks (low score) but
     # before valuable task-specific data (high score).
     scores.setdefault("task_mode", 0.0)
-    # fallback tie-break preserves your original weakest-first order when
+    # fallback tie-break preserves the original weakest-first order when
     # scores are missing or tied
-    fallback_rank = {"experience": 0, "wiki": 1, "knowledge": 2, "agentic_policy": 3, "skill": 4, "task_mode": 5}
+    fallback_rank = {"experience": 0, "knowledge": 1, "task_mode": 2}
     remaining = set(blocks)
 
     while remaining:
@@ -1597,7 +1530,7 @@ def _enforce_agentic_context_budget(
         blocks[victim] = f"<{victim}_context>\nOmitted this turn — context budget exceeded.\n</{victim}_context>"
         remaining.discard(victim)
 
-    return blocks["wiki"], blocks["skill"], blocks["knowledge"], blocks["agentic_policy"], blocks["experience"], blocks["task_mode"]
+    return blocks["knowledge"], blocks["experience"], blocks["task_mode"]
 
 
 def _needle_prompt(messages: list[dict]) -> str:
@@ -2105,7 +2038,11 @@ def run_agentic_chat(owner, user_input: str, token_callback=None, mem_kb_future=
 
     if mem_kb_future is not None:
         try:
-            memories, knowledge_block = mem_kb_future.result()
+            memories, knowledge_block = mem_kb_future.result(timeout=AGENT_MEMKB_TIMEOUT)
+        except concurrent.futures.TimeoutError:
+            log.warning("[agentic] memory/KB future timed out after %.1fs — continuing without it",
+                        AGENT_MEMKB_TIMEOUT)
+            memories, knowledge_block = [], "<knowledge_context>\nLookup timed out.\n</knowledge_context>"
         except Exception as e:
             log.error("Memory/KB fetch failed: %s", e)
             memories, knowledge_block = [], "<knowledge_context>\nLookup failed.\n</knowledge_context>"
@@ -2118,31 +2055,18 @@ def run_agentic_chat(owner, user_input: str, token_callback=None, mem_kb_future=
     memory_context = memory_block or "<memory_context>\nNo relevant memories found.\n</memory_context>"
     memory_context = _blank_empty_context(memory_context)
 
-    # Wiki/policy/skill/experience are agentic-only — fetched now,
-    # concurrently with each other, since intent has already resolved to
-    # "agentic" by the time run_agentic_chat runs.
-    agentic_ctx = _fetch_agentic_only_context(user_input, embedder=_embedder, query_vector=_query_vec)
-    scores = agentic_ctx.pop("_scores", {})
-    # Blank empty "No ... found." placeholders (P4-class fix generalized
-    # from experience_context to every agentic block). The budget logic
-    # below then drops these zero-information blocks instead of injecting
-    # their XML wrappers on every turn.
-    agentic_policy_context = _blank_empty_context(agentic_ctx["agentic_policy"])
-    wiki_context = _blank_empty_context(agentic_ctx["wiki"])
-    skill_context = _blank_empty_context(agentic_ctx["skill"])
-    experience_context = _blank_empty_context(agentic_ctx["experience"])
-    wiki_knowledge_block = _blank_empty_context(agentic_ctx["wiki_knowledge"])
+    # Discovery ladder step 2: no validated DAG matched (graph returned None
+    # above), so look for a similar *successful* past task to guide ReAct.
+    # Wiki / skill / policy blocks are never injected upfront — the loop
+    # pulls them explicitly via retrieve_context / load_skill when needed.
+    experience_guidance = _similar_successful_experience(user_input, _embedder)
     knowledge_block = _blank_empty_context(knowledge_block)
-    knowledge_context = f"{wiki_knowledge_block}\n\n{knowledge_block}" if wiki_knowledge_block else knowledge_block
-    # Safety net: any experience block lacking a real <past_task> element
-    # (e.g. a future placeholder not covered by _EMPTY_CONTEXT_MARKERS)
-    # is dropped rather than injected.
-    if "<past_task" not in experience_context:
-        experience_context = ""
+    knowledge_context = knowledge_block
+    scores = {}
     scores["knowledge"] = reason.batch_block_relevance_scores(_embedder, user_input, [knowledge_context], query_vector=_query_vec)[0]
 
-    # Tool-RAG: omit low-relevance knowledge/experience upfront; the loop
-    # retrieves specifics with retrieve_context instead of reading noise.
+    # Tool-RAG: omit low-relevance knowledge upfront; the loop retrieves
+    # specifics with retrieve_context instead of reading noise.
     # Memory is fixed-budget (never gated here).
     if AGENT_UPFRONT_MIN_SCORE > 0:
         if knowledge_context and scores.get("knowledge", 0.0) < AGENT_UPFRONT_MIN_SCORE:
@@ -2150,15 +2074,10 @@ def run_agentic_chat(owner, user_input: str, token_callback=None, mem_kb_future=
                      scores.get("knowledge", 0.0), AGENT_UPFRONT_MIN_SCORE)
             knowledge_context = ("<knowledge_context>\nOmitted this turn (low relevance) — "
                                  "use the retrieve_context tool to pull specifics on demand.\n</knowledge_context>")
-        if experience_context and scores.get("experience", 0.0) < AGENT_UPFRONT_MIN_SCORE:
-            log.info("[agentic] experience upfront score %.3f < %.2f — omitted, retrieve_context on demand",
-                     scores.get("experience", 0.0), AGENT_UPFRONT_MIN_SCORE)
-            experience_context = ("<experience_context>\nOmitted this turn (low relevance) — "
-                                  "use the retrieve_context tool to pull specifics on demand.\n</experience_context>")
 
-    wiki_context, skill_context, knowledge_context, agentic_policy_context, experience_context, task_mode_guidance = _enforce_agentic_context_budget(
-        owner._persona, agentic_policy_context, memory_context, user_input,
-        wiki_context, skill_context, knowledge_context, experience_context,
+    knowledge_context, experience_guidance, task_mode_guidance = _enforce_agentic_context_budget(
+        owner._persona, memory_context, user_input,
+        knowledge_context, experience_guidance,
         task_mode_context=TASK_MODE_GUIDANCE,
         tool_schemas=tools,
         scores=scores,
@@ -2173,16 +2092,13 @@ def run_agentic_chat(owner, user_input: str, token_callback=None, mem_kb_future=
     # Full prompt was exceeding the llama-server ctx (11k > 10k) even after
     # every droppable block shed — the fixed cost itself was the overflow.
     agent_system = (
-        f"{owner._persona_core()}\n\n"
-        f"{bioclock.current_datetime_block()}\n\n"        
-        f"{agentic_policy_context}\n\n"
-        f"{wiki_context}\n\n"
+        f"{owner._current_system_prompt()}\n\n"
+        f"{bioclock.current_datetime_block()}\n\n"
         f"{TASK_MODE_CORE}\n\n"
         f"{handoff_profile.system_overlay}\n\n"
         f"{memory_context}\n\n"
-        f"{skill_context}\n\n"
         f"{knowledge_context}\n\n"
-        f"{experience_context}\n\n"
+        f"{experience_guidance}\n\n"
         f"{task_mode_guidance}\n\n"
     )
     messages = [
@@ -2196,11 +2112,8 @@ def run_agentic_chat(owner, user_input: str, token_callback=None, mem_kb_future=
         "memory_prompt": memory_context,
         "web_prompt": "",
         "agentic_prompts": [
-            {"label": "agentic_policy", "content": agentic_policy_context},
-            {"label": "wiki_context", "content": wiki_context},
-            {"label": "skill_context", "content": skill_context},
             {"label": "knowledge_context", "content": knowledge_context},
-            {"label": "experience_context", "content": experience_context},
+            {"label": "similar_experience", "content": experience_guidance},
             {"label": "task_mode_core", "content": TASK_MODE_CORE},
             {"label": "task_mode_guidance", "content": task_mode_guidance},
         ],

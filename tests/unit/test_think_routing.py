@@ -106,6 +106,8 @@ def test_refusal_route_flushes_before_reply(monkeypatch):
 
 
 def test_non_greeting_route_starts_memory_after_intent(monkeypatch):
+    # Chained recall: localchat runs recall sequentially inside chat(), so
+    # route() must NOT start the shared memory+KB future for it.
     think = _bare_think()
     events: list[str] = []
 
@@ -122,10 +124,40 @@ def test_non_greeting_route_starts_memory_after_intent(monkeypatch):
             return Future()
 
     monkeypatch.setattr(think_module, "CONTEXT_POOL", ImmediatePool())
-    monkeypatch.setattr(think, "_fetch_memory_and_knowledge", lambda *a, **kw: ([], "<knowledge_context />"))
-    monkeypatch.setattr(think, "chat", lambda *a, **kw: "ok")
+    monkeypatch.setattr(think, "chat", lambda *a, **kw: events.append("chat") or "ok")
 
     assert think.route("tell me about routers") == "ok"
+    assert events == ["intent", "chat"]
+    assert "submit_mem_kb" not in events
+
+
+def test_agentic_route_starts_shared_mem_kb_future(monkeypatch):
+    # Agentic keeps the shared future until piece 2 reworks it.
+    think = _bare_think()
+    events: list[str] = []
+
+    monkeypatch.setattr(think, "_route_intent", lambda user_input: events.append("intent") or ("agentic", None))
+
+    class ImmediatePool:
+        def submit(self, fn, *args):
+            events.append("submit_mem_kb")
+
+            class Future:
+                def result(self_inner):
+                    return ([], "<knowledge_context />")
+
+            return Future()
+
+    monkeypatch.setattr(think_module, "CONTEXT_POOL", ImmediatePool())
+    monkeypatch.setattr(think, "_fetch_memory_and_knowledge", lambda *a, **kw: ([], "<knowledge_context />"))
+
+    def fake_agentic(user_input, **kwargs):
+        assert kwargs.get("mem_kb_future") is not None
+        return "agentic ok"
+
+    monkeypatch.setattr(think, "agentic_chat", fake_agentic)
+
+    assert think.route("research quantum error correction for me") == "agentic ok"
     assert events == ["intent", "submit_mem_kb"]
 
 
@@ -277,3 +309,152 @@ def test_fetch_memory_uses_enriched_query(monkeypatch):
     memories, kb = think._fetch_memory_and_knowledge("We went there yesterday. Did you enjoy?")
     assert (memories, kb) == ([], "")
     assert "PNE? Playland." in captured["query"]
+
+
+class CountingCompletions:
+    """Fake completions endpoint that counts create() calls and can fail once."""
+
+    def __init__(self, label: str = "webchat", fail_first: bool = False, labels: list | None = None):
+        self.label = label
+        self.fail_first = fail_first
+        self.labels = list(labels) if labels else []
+        self.calls = 0
+
+    def create(self, **kwargs):
+        self.calls += 1
+        if self.fail_first:
+            self.fail_first = False
+            raise RuntimeError("transient LLM outage")
+        label = self.labels.pop(0) if self.labels else self.label
+        message = SimpleNamespace(content=label)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
+class CountingClient:
+    def __init__(self, label: str = "webchat", fail_first: bool = False, labels: list | None = None):
+        self.chat = SimpleNamespace(completions=CountingCompletions(label, fail_first, labels))
+
+    @property
+    def calls(self) -> int:
+        return self.chat.completions.calls
+
+
+def _clear_intent_cache() -> None:
+    think_module._intent_llm_cache.clear()
+
+
+def test_intent_llm_cache_skips_repeat_call():
+    _clear_intent_cache()
+    try:
+        think = _bare_think()
+        think._client = CountingClient("webchat")
+        think._router_model = "router"
+
+        assert think._classify_quaternary_intent_llm("will it rain on tuesday") == "webchat"
+        assert think._classify_quaternary_intent_llm("will it rain on tuesday") == "webchat"
+        assert think._client.calls == 1
+    finally:
+        _clear_intent_cache()
+
+
+def test_intent_llm_cache_separates_flags_and_models():
+    _clear_intent_cache()
+    try:
+        think = _bare_think()
+        think._client = CountingClient("webchat")
+        think._router_model = "router"
+
+        # Same input, different classifier flags -> distinct cache entries.
+        assert think._classify_quaternary_intent_llm("cache probe alpha") == "webchat"
+        assert think._classify_ternary_intent_llm("cache probe alpha") == "webchat"
+        assert think._client.calls == 2
+        # Repeats hit both entries.
+        assert think._classify_quaternary_intent_llm("cache probe alpha") == "webchat"
+        assert think._classify_ternary_intent_llm("cache probe alpha") == "webchat"
+        assert think._client.calls == 2
+        # Same input, different router model -> cache miss.
+        think._router_model = "router2"
+        assert think._classify_quaternary_intent_llm("cache probe alpha") == "webchat"
+        assert think._client.calls == 3
+    finally:
+        _clear_intent_cache()
+
+
+def test_intent_llm_cache_never_stores_failures():
+    _clear_intent_cache()
+    try:
+        think = _bare_think()
+        think._client = CountingClient("webchat", fail_first=True)
+        think._router_model = "router"
+
+        # Exception fallback must not be cached: the retry goes to the LLM.
+        assert think._classify_quaternary_intent_llm("cache probe beta") == "localchat"
+        assert think._client.calls == 1
+        assert think._classify_quaternary_intent_llm("cache probe beta") == "webchat"
+        assert think._client.calls == 2
+        # The successful classification is cached from here on.
+        assert think._classify_quaternary_intent_llm("cache probe beta") == "webchat"
+        assert think._client.calls == 2
+    finally:
+        _clear_intent_cache()
+
+
+def test_intent_llm_cache_retries_after_empty_response():
+    _clear_intent_cache()
+    try:
+        think = _bare_think()
+        think._client = CountingClient(labels=["", "webchat"])
+        think._router_model = "router"
+
+        # Empty LLM content -> localchat, but NOT cached.
+        assert think._classify_quaternary_intent_llm("cache probe gamma") == "localchat"
+        assert think._client.calls == 1
+        # The retry re-asks the LLM instead of replaying the cached fallback.
+        assert think._classify_quaternary_intent_llm("cache probe gamma") == "webchat"
+        assert think._client.calls == 2
+        # The valid label is cached from here on.
+        assert think._classify_quaternary_intent_llm("cache probe gamma") == "webchat"
+        assert think._client.calls == 2
+    finally:
+        _clear_intent_cache()
+
+
+def test_intent_llm_cache_retries_after_invalid_label():
+    _clear_intent_cache()
+    try:
+        think = _bare_think()
+        think._client = CountingClient(labels=["???", "webchat"])
+        think._router_model = "router"
+
+        # Unparseable label -> localchat, but NOT cached.
+        assert think._classify_quaternary_intent_llm("cache probe delta") == "localchat"
+        assert think._client.calls == 1
+        # The retry re-asks the LLM instead of replaying the cached fallback.
+        assert think._classify_quaternary_intent_llm("cache probe delta") == "webchat"
+        assert think._client.calls == 2
+        # The valid label is cached from here on.
+        assert think._classify_quaternary_intent_llm("cache probe delta") == "webchat"
+        assert think._client.calls == 2
+    finally:
+        _clear_intent_cache()
+
+
+def test_intent_llm_cache_key_is_stable_and_scoped():
+    key1 = think_module._intent_llm_cache_key(
+        "hello", model="router", allow_agentic=True, include_greeting=True
+    )
+    key2 = think_module._intent_llm_cache_key(
+        "hello", model="router", allow_agentic=True, include_greeting=True
+    )
+    assert key1 == key2
+    assert len(key1) == 64  # sha256 hex
+    other_flag = think_module._intent_llm_cache_key(
+        "hello", model="router", allow_agentic=True, include_greeting=False
+    )
+    other_model = think_module._intent_llm_cache_key(
+        "hello", model="other", allow_agentic=True, include_greeting=True
+    )
+    other_input = think_module._intent_llm_cache_key(
+        "hello!", model="router", allow_agentic=True, include_greeting=True
+    )
+    assert len({key1, other_flag, other_model, other_input}) == 4

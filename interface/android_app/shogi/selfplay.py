@@ -1,11 +1,12 @@
-"""Aiko self-play: Aiko (Jev decisions) vs YaneuraOu (USI engine).
+"""Aiko self-play: Aiko (LLM decisions) vs YaneuraOu (USI engine).
 
 How Aiko plays:
   1. Opening book first (learned from her own won games, epsilon-greedy).
-  2. Otherwise Jev `choice` over capped candidate moves (captures/checks/
+  2. Otherwise the chat LLM picks over capped candidate moves (captures/checks/
      promotions first, deterministic order), with recent loss lines in the
      rubric so she stops repeating losing openings.
-  3. Random legal fallback if Jev is unreachable (game continues; logged).
+  3. No random fallback: if the LLM is unreachable the game voids (logged) —
+     a guessed move would teach fiction.
 
 How she learns (every finished game):
   - Opening book records w/d/l per (position, move).
@@ -21,10 +22,10 @@ Config (env):
   SELFPLAY_MOVETIME_MS  engine think time per move (default 800).
   SELFPLAY_MAX_MOVES    adjudicate draw past this ply count (default 256).
   SELFPLAY_BOOK_MIN_VISITS  book needs this many visits to play (default 3).
-  SELFPLAY_JEV_CANDIDATES   max moves offered to Jev per turn (default 10).
+  SELFPLAY_LLM_CANDIDATES   max moves offered to the LLM per turn (default 10).
   SELFPLAY_EXPLORATION  epsilon for book exploration (default 0.05).
-  JEV_API_KEY           via .env.age (see ./util/edit_dotenv.sh).
-  JEV_MODEL             override (default jev-latest).
+  LLM_BASE_URL          chat LLM endpoint (default http://localhost:8080/v1).
+  LLM_MODEL             chat model (default ministral).
 
 Needs python-shogi (already in pyproject deps) for rules/legality.
 """
@@ -155,14 +156,14 @@ def candidate_moves(board, cap: int) -> list:
 
 def aiko_choose_move(uid: str, board, *, book: dict, rng: random.Random,
                      loss_lines: list[str]) -> tuple[str, str]:
-    """Return (usi, source): book | jev | forced.
+    """Return (usi, source): book | llm | forced.
 
-    No random fallback: if Jev is unreachable after retries this raises
-    JevUnavailable and the game voids — a guessed move would teach fiction.
+    No random fallback: if the LLM is unreachable after retries this raises
+    LLMUnavailable and the game voids — a guessed move would teach fiction.
     """
-    from agentic.toolkit import jev as _jev
+    from agentic.toolkit import llm_choice as _llm
 
-    cap = _env_int("SELFPLAY_JEV_CANDIDATES", 10)
+    cap = _env_int("SELFPLAY_LLM_CANDIDATES", 10)
     cands = candidate_moves(board, cap)
     if not cands:
         raise RuntimeError("no legal moves (position should have ended)")
@@ -203,17 +204,17 @@ def aiko_choose_move(uid: str, board, *, book: dict, rng: random.Random,
     }
 
     def _ask():
-        pick, _probs, _conf = _jev.choice(
+        pick, _probs, _conf = _llm.choice(
             state,
             "Choose Aiko's shogi move. Prefer captures, checks, and promotions"
             " that improve her position." + avoid,
             criteria,
         )
         if pick not in criteria:
-            raise _jev.JevError(f"unknown move pick {pick!r}")
+            raise _llm.LLMError(f"unknown move pick {pick!r}")
         return pick
 
-    return _jev.decide(_ask, label="shogi-move"), "jev"
+    return _llm.decide(_ask, label="shogi-move"), "llm"
 
 
 def _is_sente_to_move(board) -> bool:
@@ -331,10 +332,10 @@ def play_game(uid: str, *, aiko_sente: bool | None = None,
                     usi, src = aiko_choose_move(uid, board, book=book, rng=rng,
                                                 loss_lines=loss_lines)
                 except Exception as exc:
-                    # Jev down (or undecidable): void the game rather than
+                    # LLM down (or undecidable): void the game rather than
                     # guessing — random moves would poison book + fly teaching.
-                    from agentic.toolkit.jev import JevUnavailable
-                    end = "jev-down" if isinstance(exc, JevUnavailable) else f"error: {type(exc).__name__}"
+                    from agentic.toolkit.llm_choice import LLMUnavailable
+                    end = "llm-down" if isinstance(exc, LLMUnavailable) else f"error: {type(exc).__name__}"
                     log.warning("selfplay: Aiko cannot move (%s), voiding game", end)
                     result.update(winner="void", end=end)
                     break
@@ -446,7 +447,7 @@ def _learn_from_game(uid: str, *, moves: list[str], aiko_color: str,
         log.debug("selfplay match record skipped: %s", exc)
 
     # 3. Full game experience (searchable later). Each move tagged with
-    # how it was decided (book/jev/random-fallback/forced) for observability.
+    # how it was decided (book/llm/random-fallback/forced) for observability.
     try:
         from agentic.experience.acquire import record_experience
         score = 1.0 if winner == "aiko" else (0.5 if winner == "draw" else 0.0)

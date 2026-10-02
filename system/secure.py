@@ -76,12 +76,13 @@ def connect_sqlite(path: str | os.PathLike[str], *, user_id: str) -> Any:
         conn.row_factory = sqlite3.Row
         return conn
 
+    raw_key = derive_user_sqlite_key(user_id)
+
     try:
         from pysqlcipher3 import dbapi2 as sqlcipher  # type: ignore
     except ImportError as exc:
         raise RuntimeError("pysqlcipher3 is required when SQLITE_ENCRYPTION=1") from exc
 
-    raw_key = derive_user_sqlite_key(user_id)
     conn = sqlcipher.connect(str(path), check_same_thread=False, timeout=10.0)
     _apply_sqlite_pragmas(conn)
     conn.execute(f"PRAGMA key = \"x'{raw_key}'\"")

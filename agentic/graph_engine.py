@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import copy
 import hashlib
 import inspect
 import json
@@ -1075,7 +1076,51 @@ def _default_playbook_definitions() -> list[dict[str, Any]]:
     return defaults
 
 
+# Process-wide cache for load_playbooks(). The uncached load costs ~400ms
+# (registered-graph merge + disk read + JSON parse) and runs on every
+# agentic invocation via plan_from_master(). The cache key covers the
+# resolved playbook file path (per-user), its mtime, and the registered
+# graph ids — so file edits and late graph registrations are picked up
+# without a restart, while unchanged calls do zero registry/disk work.
+# Hits return a deep copy: callers historically received fresh objects
+# every call, and a shared mutable result would let one caller corrupt
+# the cache for everyone else.
+_playbooks_cache: tuple[tuple, list[dict[str, Any]]] | None = None
+_playbooks_cache_lock = threading.Lock()
+
+
+def _playbooks_cache_key() -> tuple:
+    path = _playbook_file()
+    try:
+        mtime = path.stat().st_mtime if path.exists() else None
+    except OSError:
+        mtime = None
+    try:
+        from agentic.workflows.common.graphs import list_graphs
+        graphs = tuple(sorted(list_graphs()))
+    except Exception:
+        graphs = ()
+    return (str(path), mtime, graphs)
+
+
 def load_playbooks() -> list[dict[str, Any]]:
+    """Load all available playbooks from defaults and registered graphs."""
+    global _playbooks_cache
+    key = _playbooks_cache_key()
+    with _playbooks_cache_lock:
+        cached = _playbooks_cache
+        if cached is None or cached[0] != key:
+            # Serialized under the lock: concurrent agentic invocations that
+            # miss together run the ~400ms uncached load exactly once instead
+            # of stampeding it.
+            cached = (key, _load_playbooks_uncached())
+            _playbooks_cache = cached
+    # The cache must never hand out its own objects: callers historically
+    # received fresh objects every call, so always return a copy.
+    return copy.deepcopy(cached[1])
+
+
+def _load_playbooks_uncached() -> list[dict[str, Any]]:
     """Load all available playbooks from defaults and registered graphs."""
     by_id: dict[str, dict[str, Any]] = {}
     for p in _default_playbooks():
@@ -1178,7 +1223,7 @@ def _score_plan(plan: dict[str, Any], prompt: str, cap_ids: list[str] | None = N
             import numpy as np
             if prompt_vec is None:
                 from cognition import reason
-                prompt_vec = reason.normalize_vec(np.asarray(embedder.embed_query(prompt), dtype=np.float32))
+                prompt_vec = reason.normalize_vec(reason.cached_embed_query(embedder, prompt))
             matrix = _semantic_trigger_matrix(embedder, sem_triggers)
             if matrix is not None:
                 best = float(np.max(matrix @ prompt_vec))

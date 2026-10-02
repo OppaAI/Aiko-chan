@@ -68,6 +68,9 @@ def test_first_rejection_latches_and_retries(monkeypatch):
         return iter([_chunk("recovered")])
 
     monkeypatch.setattr(think_mod, "_SYSTEM_ROLE_REJECTED", False)
+    # Hermetic: the repo config sets LLM_NO_SYSTEM=1, which would merge
+    # upfront and bypass the latch path this test exercises.
+    monkeypatch.setattr(think_mod, "_LLM_NO_SYSTEM_ENV", False)
     think = _think_with_client(create)
     text = think._stream_response(
         [{"role": "user", "content": "hi"}],
@@ -113,6 +116,9 @@ def test_agentic_message_uses_latch_without_think_import(monkeypatch):
         _messages_without_system=AikoThink._messages_without_system,
     )
     monkeypatch.setattr(think_mod, "_SYSTEM_ROLE_REJECTED", False)
+    # Hermetic: the repo config sets LLM_NO_SYSTEM=1, which would merge
+    # upfront and bypass the latch path this test exercises.
+    monkeypatch.setattr(think_mod, "_LLM_NO_SYSTEM_ENV", False)
     msg, _usage = _stream_agent_message(owner, messages, tools=[], token_callback=None)
     assert msg.content == "agent ok"
     assert len(calls) == 2

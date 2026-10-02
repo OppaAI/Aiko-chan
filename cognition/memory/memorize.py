@@ -741,29 +741,45 @@ class _MemoryBackend:
             log.debug("entity_relations upsert skipped: %s", e)
 
     def _exact_dup_hashes(self, user_id: str, texts: list[str]) -> set[str]:
-        """Hashes of `texts` already stored as active rows for this user.
+        """Hashes of `texts` already stored as active, vectored rows for this user.
 
         The exact-duplicate short-circuit: one indexed lookup replaces an
         embedding call + KNN search per fact. Only active rows match, so a
         text whose row was superseded still flows through the normal
         dedup/supersede path. Rows written before the text_hash migration
         (NULL hash) never match; they dedup via KNN as before.
-        Purely additive — never changes the write verdict, only skips work.
+
+        The lookup requires a memories_vec row: a hash match on a vectorless
+        row (written during an embedder outage) must NOT short-circuit, or
+        the row would stay invisible to KNN after the embedder recovers.
+        Falling through reproduces the pre-change behavior exactly (fresh
+        insert + vector backfill repairs the old row).
+
+        Takes _db_lock and reopens the connection first: the same sqlite
+        connection observes its own uncommitted writes, so an unlocked read
+        could see a concurrent write's not-yet-committed row and wrongly
+        discard a valid fact. Purely additive — never changes the write
+        verdict, only skips work.
         """
         if not texts or not _hash_dedup_enabled():
             return set()
-        cols = existing_columns(self._conn)
-        if "text_hash" not in cols:
-            return set()
-        hashes = {_exact_text_hash(t) for t in texts}
-        placeholders = ", ".join("?" * len(hashes))
-        status_sql = " AND (status = 'active' OR status IS NULL)" if "status" in cols else ""
-        rows = self._conn.execute(
-            f"SELECT text_hash FROM memories WHERE user_id = ? "
-            f"AND text_hash IN ({placeholders}){status_sql}",
-            [user_id, *hashes],
-        ).fetchall()
-        return {str(r["text_hash"]) for r in rows if r["text_hash"]}
+        with self._db_lock:
+            self._ensure_open()
+            cols = existing_columns(self._conn)
+            if "text_hash" not in cols:
+                return set()
+            hashes = {_exact_text_hash(t) for t in texts}
+            placeholders = ", ".join("?" * len(hashes))
+            status_sql = (
+                " AND (m.status = 'active' OR m.status IS NULL)" if "status" in cols else ""
+            )
+            rows = self._conn.execute(
+                "SELECT m.text_hash FROM memories m "
+                "JOIN memories_vec v ON v.id = m.id "
+                f"WHERE m.user_id = ? AND m.text_hash IN ({placeholders}){status_sql}",
+                [user_id, *hashes],
+            ).fetchall()
+            return {str(r["text_hash"]) for r in rows if r["text_hash"]}
 
     def _maybe_supersede_neighbor(
         self, user_id: str, vector: list[float], text: str

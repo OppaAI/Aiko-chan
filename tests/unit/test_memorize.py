@@ -485,6 +485,76 @@ class TestExactHashShortCircuit:
         assert b.calls["embed_batch"] == 1  # second add embedded nothing
         assert self._row_count(b) == 2
 
+    def test_vectorless_match_does_not_short_circuit(self, counting_backend):
+        """A hash match on a row written during an embedder outage must fall
+        through: the fresh write embeds, inserts, and the post-write backfill
+        repairs the old row's missing vector."""
+        b = counting_backend
+
+        class _Down:
+            def embed(self, texts):
+                raise RuntimeError("embedder down")
+
+            def embed_batch(self, texts):
+                raise RuntimeError("embedder down")
+
+        real = b._embedder
+        b._embedder = _Down()
+        try:
+            outage_id = b.add_raw("Oppa's birthday is June 3", user_id="u1")
+        finally:
+            b._embedder = real
+        assert outage_id is not None
+        assert (
+            b._conn.execute(
+                "SELECT COUNT(*) c FROM memories_vec WHERE id = ?", (outage_id,)
+            ).fetchone()["c"]
+            == 0
+        )
+
+        again_id = b.add_raw("Oppa's birthday is June 3", user_id="u1")
+        assert again_id is not None and again_id != outage_id
+        # The outage row recovered its vector via backfill.
+        assert (
+            b._conn.execute(
+                "SELECT COUNT(*) c FROM memories_vec WHERE id = ?", (outage_id,)
+            ).fetchone()["c"]
+            == 1
+        )
+
+    def test_lookup_reopens_connection(self, counting_backend, monkeypatch):
+        b = counting_backend
+        calls = []
+        real = b._ensure_open
+
+        def _counting():
+            calls.append(1)
+            return real()
+
+        monkeypatch.setattr(b, "_ensure_open", _counting)
+        b._exact_dup_hashes("u1", ["some text"])
+        assert calls, "_exact_dup_hashes must reopen the connection before reading"
+
+    def test_lookup_serializes_with_db_lock(self, counting_backend):
+        import threading
+
+        b = counting_backend
+        b._db_lock.acquire()
+        done = threading.Event()
+
+        def _worker():
+            b._exact_dup_hashes("u1", ["x"])
+            done.set()
+
+        t = threading.Thread(target=_worker)
+        t.start()
+        try:
+            assert not done.wait(0.5), "lookup must wait for _db_lock"
+        finally:
+            b._db_lock.release()
+        assert done.wait(5), "lookup must proceed after lock release"
+        t.join()
+
 
 class TestSearchIntegration:
     def test_search_returns_seeded_fact(self, backend):

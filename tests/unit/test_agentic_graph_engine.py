@@ -1063,5 +1063,91 @@ class TestBatchLoopAccumulation:
         assert result.final_state["summary"][0]["total"] == 55.0
 
 
+class TestGraphMemo:
+    """Tests for content-hash memoization of side-effect-free graph nodes."""
+
+    def _run(self, tool, args, monkeypatch, calls, fail_first=False):
+        def fake_fn(**kwargs):
+            calls.append(kwargs.get("url", kwargs.get("query", "")))
+            if fail_first and len(calls) == 1:
+                raise RuntimeError("transient")
+            return f"result-for-{kwargs.get('url', kwargs.get('query', ''))}"
+
+        monkeypatch.setattr(schema, "_tool_map", lambda: {tool: fake_fn})
+        node = PlanNode(id="n1", tool=tool, args=dict(args))
+        return schema._run_node(node, "prompt", {})
+
+    def _clear_memo(self):
+        from agentic import graph_memo
+
+        graph_memo._memo.clear()
+
+    def test_memo_hit_skips_second_call(self, monkeypatch):
+        self._clear_memo()
+        try:
+            calls = []
+            r1 = self._run("fetch_from_url", {"url": "http://example.com/x"}, monkeypatch, calls)
+            r2 = self._run("fetch_from_url", {"url": "http://example.com/x"}, monkeypatch, calls)
+            assert r1.ok and r2.ok
+            assert r1.content == r2.content == "result-for-http://example.com/x"
+            assert len(calls) == 1
+        finally:
+            self._clear_memo()
+
+    def test_different_args_miss(self, monkeypatch):
+        self._clear_memo()
+        try:
+            calls = []
+            self._run("fetch_from_url", {"url": "http://example.com/a"}, monkeypatch, calls)
+            self._run("fetch_from_url", {"url": "http://example.com/b"}, monkeypatch, calls)
+            assert len(calls) == 2
+        finally:
+            self._clear_memo()
+
+    def test_side_effecting_tool_never_memoized(self, monkeypatch):
+        self._clear_memo()
+        try:
+            calls = []
+            self._run("write_report", {"title": "t", "content": "c"}, monkeypatch, calls)
+            self._run("write_report", {"title": "t", "content": "c"}, monkeypatch, calls)
+            assert len(calls) == 2
+        finally:
+            self._clear_memo()
+
+    def test_failures_are_not_cached(self, monkeypatch):
+        self._clear_memo()
+        try:
+            calls = []
+            r1 = self._run("fetch_from_url", {"url": "http://example.com/f"}, monkeypatch, calls, fail_first=True)
+            assert not r1.ok
+            r2 = self._run("fetch_from_url", {"url": "http://example.com/f"}, monkeypatch, calls, fail_first=True)
+            assert r2.ok
+            r3 = self._run("fetch_from_url", {"url": "http://example.com/f"}, monkeypatch, calls, fail_first=True)
+            assert r3.ok and r3.content == r2.content
+            # first raised, second succeeded + cached, third hit the cache
+            assert len(calls) == 2
+        finally:
+            self._clear_memo()
+
+    def test_deep_research_requires_tool_mode(self):
+        from agentic import graph_memo
+
+        assert graph_memo._memo_key("deep_research", {"query": "q"}, None) is None
+        assert graph_memo._memo_key("deep_research", {"query": "q", "tool_mode": True}, None) is not None
+
+    def test_expired_entry_misses(self, monkeypatch):
+        from agentic import graph_memo
+
+        monkeypatch.setattr(graph_memo, "_memo", {})
+        key = graph_memo._memo_key("fetch_from_url", {"url": "http://example.com/e"}, None)
+        assert key is not None
+        graph_memo._memo_put(key, "fetch_from_url", "old")
+        assert graph_memo._memo_get(key) == "old"
+        # Age the entry past its TTL.
+        expires, content = graph_memo._memo[key]
+        graph_memo._memo[key] = (expires - 7200, content)
+        assert graph_memo._memo_get(key) is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

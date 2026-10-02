@@ -155,8 +155,9 @@ _LLM_CACHE_PROMPT = os.getenv("LLM_CACHE_PROMPT", "1").strip().lower() not in {"
 # yields the same label — caching it skips a whole LLM round-trip on the
 # per-turn routing path. Keyed by sha256 over those four components.
 # No TTL: the mapping is content-addressed, not time-sensitive.
-# Only successful LLM responses are stored; the exception fallback
-# ("localchat") is never cached, so a transient outage can't poison it.
+# Only successful, valid classifications are stored; the exception fallback
+# ("localchat") is never cached, and neither are empty or unparseable LLM
+# responses, so a transient glitch can't suppress a later retry.
 # AIKO_INTENT_CACHE_MAX=0 disables the cache (debugging).
 _INTENT_CACHE_MAX = int(os.getenv("AIKO_INTENT_CACHE_MAX", "2048"))
 _intent_llm_cache: dict[str, str] = {}
@@ -1991,20 +1992,22 @@ class AikoThink:
                 # burn the 6-token budget before emitting the label.
                 extra_body={**THINK_OFF_EXTRA_BODY, "cache_prompt": _LLM_CACHE_PROMPT},
             )
-            label = (resp.choices[0].message.content or "chat").strip().lower()
+            label = (resp.choices[0].message.content or "").strip().lower()
             label = re.sub(r"[^a-z_].*$", "", label)
-            if label not in valid:
-                label = "localchat"
-            elif label == "chat":
-                label = "localchat"
+            if not label or label not in valid:
+                # Empty or unparseable response: likely transient, so don't
+                # cache it — a later retry with the same input must be able
+                # to classify again instead of being stuck on localchat.
+                return "localchat"
+            route = "localchat" if label == "chat" else label
             if cache_key is not None:
                 with _intent_llm_cache_lock:
                     if len(_intent_llm_cache) >= _INTENT_CACHE_MAX:
                         # FIFO evict the oldest entry; insertion order is
                         # preserved by dicts.
                         _intent_llm_cache.pop(next(iter(_intent_llm_cache)))
-                    _intent_llm_cache[cache_key] = label
-            return label
+                    _intent_llm_cache[cache_key] = route
+            return route
         except Exception as e:
             log.warning("%s LLM routing failed: %s", log_name, e)
             return "localchat"

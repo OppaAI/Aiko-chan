@@ -314,9 +314,10 @@ def test_fetch_memory_uses_enriched_query(monkeypatch):
 class CountingCompletions:
     """Fake completions endpoint that counts create() calls and can fail once."""
 
-    def __init__(self, label: str = "webchat", fail_first: bool = False):
+    def __init__(self, label: str = "webchat", fail_first: bool = False, labels: list | None = None):
         self.label = label
         self.fail_first = fail_first
+        self.labels = list(labels) if labels else []
         self.calls = 0
 
     def create(self, **kwargs):
@@ -324,13 +325,14 @@ class CountingCompletions:
         if self.fail_first:
             self.fail_first = False
             raise RuntimeError("transient LLM outage")
-        message = SimpleNamespace(content=self.label)
+        label = self.labels.pop(0) if self.labels else self.label
+        message = SimpleNamespace(content=label)
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
 class CountingClient:
-    def __init__(self, label: str = "webchat", fail_first: bool = False):
-        self.chat = SimpleNamespace(completions=CountingCompletions(label, fail_first))
+    def __init__(self, label: str = "webchat", fail_first: bool = False, labels: list | None = None):
+        self.chat = SimpleNamespace(completions=CountingCompletions(label, fail_first, labels))
 
     @property
     def calls(self) -> int:
@@ -392,6 +394,46 @@ def test_intent_llm_cache_never_stores_failures():
         assert think._client.calls == 2
         # The successful classification is cached from here on.
         assert think._classify_quaternary_intent_llm("cache probe beta") == "webchat"
+        assert think._client.calls == 2
+    finally:
+        _clear_intent_cache()
+
+
+def test_intent_llm_cache_retries_after_empty_response():
+    _clear_intent_cache()
+    try:
+        think = _bare_think()
+        think._client = CountingClient(labels=["", "webchat"])
+        think._router_model = "router"
+
+        # Empty LLM content -> localchat, but NOT cached.
+        assert think._classify_quaternary_intent_llm("cache probe gamma") == "localchat"
+        assert think._client.calls == 1
+        # The retry re-asks the LLM instead of replaying the cached fallback.
+        assert think._classify_quaternary_intent_llm("cache probe gamma") == "webchat"
+        assert think._client.calls == 2
+        # The valid label is cached from here on.
+        assert think._classify_quaternary_intent_llm("cache probe gamma") == "webchat"
+        assert think._client.calls == 2
+    finally:
+        _clear_intent_cache()
+
+
+def test_intent_llm_cache_retries_after_invalid_label():
+    _clear_intent_cache()
+    try:
+        think = _bare_think()
+        think._client = CountingClient(labels=["???", "webchat"])
+        think._router_model = "router"
+
+        # Unparseable label -> localchat, but NOT cached.
+        assert think._classify_quaternary_intent_llm("cache probe delta") == "localchat"
+        assert think._client.calls == 1
+        # The retry re-asks the LLM instead of replaying the cached fallback.
+        assert think._classify_quaternary_intent_llm("cache probe delta") == "webchat"
+        assert think._client.calls == 2
+        # The valid label is cached from here on.
+        assert think._classify_quaternary_intent_llm("cache probe delta") == "webchat"
         assert think._client.calls == 2
     finally:
         _clear_intent_cache()

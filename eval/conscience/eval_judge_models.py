@@ -194,7 +194,7 @@ def summarize(name: str, cases: list[Case], results: list[CaseResult]) -> dict:
     summary = {
         "model": name,
         "n_cases": len(results),
-        "parse_rate": mean1([c["parse_ok"] for c in checks.get("parse_ok", [])]),
+        "parse_rate": mean1(checks.get("parse_ok", [])),
         "v_in_range": mean1(checks.get("v_in_range", [])),
         "h_in_range": mean1(checks.get("h_in_range", [])),
         "cite_recall": mean1(checks.get("cite_recall", [])),

@@ -61,6 +61,7 @@ os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 from datetime import datetime
 from openai import OpenAI
 from pathlib import Path
+import hashlib
 import re
 import contextvars
 import threading
@@ -146,6 +147,31 @@ LLM_STOP_SEQUENCES = [s.strip() for s in os.getenv("LLM_STOP_SEQUENCES", "</s>,<
 # ignore the field. Disable with LLM_CACHE_PROMPT=0 if a non-llama proxy
 # rejects unknown body params.
 _LLM_CACHE_PROMPT = os.getenv("LLM_CACHE_PROMPT", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+# Process-wide cache for deterministic LLM intent classifications
+# (_classify_intent_llm). The classifier runs at temperature=0.0 with
+# max_tokens=6 on a prompt that is fully determined by (model,
+# allow_agentic, include_greeting, user_input), so a repeat input always
+# yields the same label — caching it skips a whole LLM round-trip on the
+# per-turn routing path. Keyed by sha256 over those four components.
+# No TTL: the mapping is content-addressed, not time-sensitive.
+# Only successful LLM responses are stored; the exception fallback
+# ("localchat") is never cached, so a transient outage can't poison it.
+# AIKO_INTENT_CACHE_MAX=0 disables the cache (debugging).
+_INTENT_CACHE_MAX = int(os.getenv("AIKO_INTENT_CACHE_MAX", "2048"))
+_intent_llm_cache: dict[str, str] = {}
+_intent_llm_cache_lock = threading.Lock()
+
+
+def _intent_llm_cache_key(
+    user_input: str, *, model: str, allow_agentic: bool, include_greeting: bool
+) -> str:
+    h = hashlib.sha256()
+    h.update(model.encode("utf-8"))
+    h.update(b"\x001" if allow_agentic else b"\x000")
+    h.update(b"\x001" if include_greeting else b"\x000")
+    h.update(user_input.encode("utf-8"))
+    return h.hexdigest()
 
 # No-think mode for hybrid-reasoning templates (MiniCPM5 `enable_thinking`,
 # Qwen3-style `enable_thinking`, MiniCPM4.1 `/no_think` suffix). When set,
@@ -1938,6 +1964,18 @@ class AikoThink:
             allow_agentic=allow_agentic,
             include_greeting=include_greeting,
         )
+        cache_key = None
+        if _INTENT_CACHE_MAX > 0:
+            cache_key = _intent_llm_cache_key(
+                user_input,
+                model=self._router_model,
+                allow_agentic=allow_agentic,
+                include_greeting=include_greeting,
+            )
+            with _intent_llm_cache_lock:
+                hit = _intent_llm_cache.get(cache_key)
+            if hit is not None:
+                return hit
         try:
             resp = self._client.chat.completions.create(
                 model=self._router_model,
@@ -1956,8 +1994,17 @@ class AikoThink:
             label = (resp.choices[0].message.content or "chat").strip().lower()
             label = re.sub(r"[^a-z_].*$", "", label)
             if label not in valid:
-                return "localchat"
-            return "localchat" if label == "chat" else label
+                label = "localchat"
+            elif label == "chat":
+                label = "localchat"
+            if cache_key is not None:
+                with _intent_llm_cache_lock:
+                    if len(_intent_llm_cache) >= _INTENT_CACHE_MAX:
+                        # FIFO evict the oldest entry; insertion order is
+                        # preserved by dicts.
+                        _intent_llm_cache.pop(next(iter(_intent_llm_cache)))
+                    _intent_llm_cache[cache_key] = label
+            return label
         except Exception as e:
             log.warning("%s LLM routing failed: %s", log_name, e)
             return "localchat"

@@ -1178,7 +1178,7 @@ def _score_plan(plan: dict[str, Any], prompt: str, cap_ids: list[str] | None = N
             import numpy as np
             if prompt_vec is None:
                 from cognition import reason
-                prompt_vec = reason.normalize_vec(np.asarray(embedder.embed_query(prompt), dtype=np.float32))
+                prompt_vec = reason.normalize_vec(reason.cached_embed_query(embedder, prompt))
             matrix = _semantic_trigger_matrix(embedder, sem_triggers)
             if matrix is not None:
                 best = float(np.max(matrix @ prompt_vec))

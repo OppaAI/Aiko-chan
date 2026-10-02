@@ -1261,6 +1261,68 @@ class TestCrossStoreUserScoping:
         hits2 = search_experience("user1 task", limit=5, embedder=fe, user_id="user2")
         assert hits2 == []
 
+    def test_search_experience_reuses_cached_query_embedding(self, tmp_path, monkeypatch):
+        """A repeated identical experience search must not re-embed the query.
+
+        Regression test for the _knn() swap onto reason.cached_embed_query():
+        the second identical search reuses the cached query vector instead of
+        paying another embedding call.
+        """
+        from agentic.experience import _connect as exp_connect, search_experience
+        import agentic.experience as exp_mod
+        import numpy as np
+        import hashlib
+        import uuid
+        from cognition import reason
+
+        monkeypatch.setattr(exp_mod, "EXPERIENCE_DB_PATH", str(tmp_path / "exp_cache_test.db"))
+        reason._embed_query_cache.clear()
+
+        class CountingFE:
+            def __init__(self):
+                self.calls = 0
+
+            def embed_query(self, t, instruct=""):
+                self.calls += 1
+                h = hashlib.sha256(t.encode()).digest()
+                raw = (h * (640 // len(h) + 1))[:2560]
+                arr = np.frombuffer(raw, dtype=np.uint8).astype(np.float32)[:640] / 255.0 * 2 - 1
+                n = np.linalg.norm(arr)
+                return arr / n if n else arr
+
+        fe = CountingFE()
+        exp_id = str(uuid.uuid4())
+        vec = fe.embed_query("cache probe task")
+        import sqlite_vec
+
+        conn1 = exp_connect("user1")
+        conn1.execute(
+            "INSERT INTO experiences(id,user_id,goal,record_text,steps_json,outcome,score,answer_excerpt,entities,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (exp_id, "user1", "cache probe task", "cache probe task", '[]', "done", 1.0, "excerpt", '[]', "2024-01-01T00:00:00")
+        )
+        conn1.execute(
+            "INSERT INTO experiences_vec(id,embedding) VALUES(?,?)",
+            (exp_id, sqlite_vec.serialize_float32(vec.tolist()))
+        )
+        conn1.commit()
+        conn1.close()
+
+        try:
+            fe.calls = 0
+            hits1 = search_experience("cache probe task", limit=5, embedder=fe, user_id="user1")
+            assert any(hit["id"] == exp_id for hit in hits1)
+            calls_after_first = fe.calls
+            assert calls_after_first >= 1
+
+            hits2 = search_experience("cache probe task", limit=5, embedder=fe, user_id="user1")
+            assert [hit["id"] for hit in hits2] == [hit["id"] for hit in hits1]
+            assert fe.calls == calls_after_first, (
+                "second identical search must reuse the cached query embedding"
+            )
+        finally:
+            reason._embed_query_cache.clear()
+
 
 def test_rebalance_pins_unpins_old_ordinary_rows_but_protects_identity(backend):
     memo = _bare_memo(backend)

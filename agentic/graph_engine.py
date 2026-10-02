@@ -55,6 +55,7 @@ from agentic.checkpoint import (
     save_node_result, load_checkpoint, clear_checkpoint,
     delete_node_checkpoint, save_graph_state, load_graph_state,
 )
+from agentic import graph_memo
 
 log = get_logger(__name__)
 
@@ -1754,6 +1755,17 @@ def _run_node(node: PlanNode, prompt: str, results: dict[str, NodeResult],
     if node.tool == "save_note":
         args["content"] = str(args.get("content", ""))[:AGENT_NOTE_MAX_CHARS]
 
+    # Content-hash memoization for verified side-effect-free tools (see
+    # agentic/graph_memo.py). The key covers the resolved JSON-serializable
+    # args — never call_args, which holds injected client/embedder/state
+    # objects. Only successful results are cached; failures retry normally.
+    memo_key = graph_memo._memo_key(node.tool, args, llm_model)
+    if memo_key is not None:
+        hit = graph_memo._memo_get(memo_key)
+        if hit is not None:
+            log.debug("graph memo hit for node %s (%s)", node.id, node.tool)
+            return NodeResult(node.id, node.tool, True, hit, args=args)
+
     # Build the actual call kwargs separately from `args` — injected
     # objects (client/embedder/state) are NOT JSON-serializable and must
     # never end up in NodeResult.args, which gets written into
@@ -1782,7 +1794,12 @@ def _run_node(node: PlanNode, prompt: str, results: dict[str, NodeResult],
                 time.sleep(wait)
             out = fn(**call_args)
             usage = state.data.pop("_usage", None) if state else None
-            return NodeResult(node.id, node.tool, True, _trim_node_content(out), args=args, usage=usage)
+            content = _trim_node_content(out)
+            if memo_key is not None:
+                # Cache hit path skips the call, so no _usage is recorded —
+                # usage stays None, which is honest (no tokens were spent).
+                graph_memo._memo_put(memo_key, node.tool, content)
+            return NodeResult(node.id, node.tool, True, content, args=args, usage=usage)
         except Exception as e:
             last_exc = e
             log.warning("Node %s retry %d/%d raised: %s", node.id, attempt + 1, node.max_retries + 1, str(e))

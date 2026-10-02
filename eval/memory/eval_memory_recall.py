@@ -100,7 +100,7 @@ def _seed_store(backend, user_id: str) -> dict:
         )
         backend._conn.execute(
             "INSERT INTO memories_vec(id, embedding) VALUES (?, ?)",
-            (mem_id, sqlite_vec.serialize_float32(vector.tolist())),
+            (mem_id, sqlite_vec.serialize_float32(list(vector))),
         )
         if text in TARGET_FACTS:
             fact_ids[text] = mem_id

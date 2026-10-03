@@ -1286,6 +1286,15 @@ class EdgeCognitiveState:
             mood = "positive" if self._affect > 0.2 else "negative" if self._affect < -0.2 else "neutral"
             return {"mood": mood, "affect": round(self._affect, 3), "energy": round(self._energy, 3), "uncertainty": round(self._uncertainty, 3), "attention": self._attention, "open_loops": list(self._open_loops), "goals": [g.text for g in self._goals if g.progress == "active"], "lessons": list(self._lessons), "tool_outcomes": list(self._tool_outcomes), "perceptions": list(self._perceptions), "activity": self._activity, "response_reviews": list(self._response_reviews), "contradictions": list(self._contradictions), "durable_lessons": list(self._durable_lessons), "lesson_evidence": dict(self._lesson_counts), "preferences": dict(self._preferences), "identity_questions": list(self._identity_questions), "intuitions": list(self._intuitions), "self_preferences": dict(self._self_preferences), "self_decisions": list(self._self_decisions), "self_notes": list(self._self_notes), "self_preference_evidence": dict(self._self_preference_counts)}
 
+    def record_activity(self, activity: str) -> None:
+        """Record what the user is currently doing (AIKO_ACTIVITY env).
+
+        Called every turn from think._current_system_prompt_parts(). The
+        value rides in snapshots and surfaces via grounded_context().
+        """
+        with self._lock:
+            self._activity = str(activity or "")
+
     def continuous_tick(self) -> dict:
         """Apply bounded low-cost decay between conversational turns. Passive dormancy."""
         now = time.monotonic()

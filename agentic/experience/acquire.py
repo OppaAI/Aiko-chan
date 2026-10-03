@@ -20,6 +20,7 @@ from .schema import (
     EXPERIENCE_SUPERSEDE_ON_NEAR_DUP,
     EXPERIENCE_SUPERSEDE_THRESHOLD,
     connect,
+    ensure_experience_schema_migrated,
     now,
     sanitize,
 )
@@ -207,6 +208,39 @@ def record_practice_experience(goal: str, steps: list[dict], final_answer: str =
     while testing tiny routing/execution models such as Needle.
     """
     return record_experience(None, goal, steps, final_answer, verified_ok, score, embedder=embedder)
+
+
+def record_experience_use(exp_id: str, user_id: str | None = None) -> int | None:
+    """Increment an experience's reuse counter.
+
+    Called when a workflow derived from an experience (e.g. a playbook
+    promoted from it) executes successfully. The counter feeds
+    ``maybe_autopromote_experiences()``: workflows used often enough earn
+    promotion into playbook DAGs. Returns the new count, or None when the
+    experience is unknown / the write fails (non-fatal).
+    """
+    uid = user_id or current_user_id()
+    conn = connect(uid)
+    try:
+        ensure_experience_schema_migrated(conn)
+        cur = conn.execute(
+            "UPDATE experiences SET use_count = use_count + 1, last_used_at = ? "
+            "WHERE id = ? AND user_id = ?",
+            (now(), exp_id, uid),
+        )
+        conn.commit()
+        if cur.rowcount < 1:
+            return None
+        row = conn.execute(
+            "SELECT use_count FROM experiences WHERE id = ? AND user_id = ?", (exp_id, uid)
+        ).fetchone()
+        return int(row["use_count"]) if row else None
+    except Exception as exc:
+        conn.rollback()
+        log.warning("record_experience_use failed (non-fatal): %s", exc)
+        return None
+    finally:
+        conn.close()
 
 
 def _prune(conn: sqlite3.Connection, uid: str) -> None:

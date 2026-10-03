@@ -54,8 +54,9 @@ def main() -> int:
     print(f"recorded_experience={exp_id}")
 
     if args.promote:
-        path = schema.append_playbook_from_experience(args.task, steps, name=args.name)
-        print(f"promoted_playbook={path}")
+        path, plan_id = schema.append_playbook_from_experience(
+            args.task, steps, name=args.name, source_experience_id=exp_id)
+        print(f"promoted_playbook={path} plan_id={plan_id}")
     return 0
 
 

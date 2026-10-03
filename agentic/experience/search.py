@@ -172,8 +172,13 @@ def experience_context_for(query: str, limit: int = 3, embedder=None) -> str:
     for hit in hits:
         if remaining <= 0:
             break
-        steps = json.loads(hit["steps_json"] or "[]")
-        step_line = ", ".join(f"{s['tool']}[{'ok' if s['ok'] else s.get('error_type') or 'fail'}]" for s in steps)
+        try:
+            steps = json.loads(hit["steps_json"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            steps = []
+        step_line = ", ".join(
+            f"{s.get('tool', '?')}[{'ok' if s.get('ok') else s.get('error_type') or 'fail'}]"
+            for s in steps if isinstance(s, dict))
         body = f"goal: {hit['goal']}\nsteps: {step_line}\nresult: {hit['answer_excerpt']}"[:remaining]
         blocks.append(f'<past_task outcome="{_attr(hit["outcome"])}" verifier_score="{float(hit["score"]):.2f}" recall_score="{hit["recall_score"]:.4f}">\n{body}\n</past_task>')
         remaining -= len(body)

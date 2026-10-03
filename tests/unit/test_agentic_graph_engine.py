@@ -1022,6 +1022,58 @@ class TestFallbackStandIn:
         assert calls == ["primary", "downstream"]
         assert {r.node_id for r in result.results} == {"fetch", "use"}
 
+    def test_fallback_needs_approval_not_executed(self, monkeypatch):
+        """A fallback node gated by needs_approval must not execute."""
+        from agentic.graph_engine import execute_graph, PlanGraph, PlanNode
+
+        calls = []
+
+        def fail(**kwargs):
+            raise RuntimeError("primary down")
+
+        def gated(**kwargs):
+            calls.append("gated")
+            return "should never run"
+
+        graph = PlanGraph(
+            id="fb-approval",
+            name="fallback approval",
+            goal="gated fallback",
+            nodes=(
+                PlanNode("fetch", "fetch", {}, fallback_to="mirror"),
+                PlanNode("mirror", "mirror", {}, needs_approval=True),
+            ),
+        )
+        monkeypatch.setattr(
+            schema, "_TOOL_MAP_CACHE",
+            {"fetch": fail, "mirror": gated},
+        )
+        result = execute_graph(graph)
+        by_id = {r.node_id: r for r in result.results}
+        assert calls == []  # gated tool never ran
+        assert by_id["mirror"].ok is False
+        assert by_id["mirror"].error_type == "needs_approval"
+
+
+def test_run_playbook_json_serializes_slots_noderesults(monkeypatch):
+    """run_playbook_json must serialize NodeResult (slots dataclass, no __dict__)."""
+    from agentic.graph_engine import (
+        GraphRunResult, NodeResult, PlanGraph, run_playbook_json,
+    )
+
+    graph = PlanGraph(id="g", name="G", goal="goal", nodes=())
+    fake_result = GraphRunResult(
+        graph=graph,
+        results=(NodeResult("n1", "kb_search", True, "ok content", args={"q": "x"}),),
+        final_answer="done",
+    )
+    monkeypatch.setattr(schema, "run_schema_agent", lambda *a, **k: fake_result)
+    out = json.loads(run_playbook_json("do a thing"))
+    assert out["ok"] is True
+    assert out["graph_id"] == "g"
+    assert out["results"][0]["node_id"] == "n1"
+    assert out["results"][0]["tool"] == "kb_search"
+
 
 class TestBatchLoopAccumulation:
     """split_in_batches must accumulate every pass for the terminal aggregate."""

@@ -42,7 +42,7 @@ import time
 import uuid
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -1803,9 +1803,9 @@ def _run_node(node: PlanNode, prompt: str, results: dict[str, NodeResult],
         except Exception as e:
             last_exc = e
             log.warning("Node %s retry %d/%d raised: %s", node.id, attempt + 1, node.max_retries + 1, str(e))
-            if attempt < node.max_retries:
-                wait = node.retry_backoff_seconds * (2 ** attempt)
-                time.sleep(wait)
+            # NOTE: no sleep here — the pre-attempt backoff at the top of the
+            # loop already waits before the next try. Sleeping here too would
+            # double the intended delay.
 
     if last_exc is not None:
         log.error("Node %s failed after %d attempts: %s", node.id, node.max_retries + 1, str(last_exc))
@@ -2088,48 +2088,70 @@ def _execute_graph_inner(graph: PlanGraph, embedder=None, llm_client=None,
                             if fallback_fn:
                                 # Build arguments using the same logic as normal execution
                                 fallback_args = _substitute(fallback_node.args, graph.goal, results, extras)
-                                
-                                # Build call kwargs with injected dependencies
-                                call_args = dict(fallback_args)
-                                params = _tool_params(fallback_fn)
-                                if "embedder" in params and "embedder" not in call_args:
-                                    call_args["embedder"] = embedder
-                                if "client" in params and "client" not in call_args:
-                                    call_args["client"] = llm_client
-                                if "llm_model" in params and "llm_model" not in call_args:
-                                    call_args["llm_model"] = llm_model
-                                if "model" in params and "model" not in call_args:
-                                    call_args["model"] = llm_model
-                                if "state" in params and "state" not in call_args:
-                                    call_args["state"] = state
-                                
+
+                                # Approval gate (mirrors _run_node): a fallback
+                                # must not bypass human approval for gated tools.
                                 try:
-                                    fallback_out = fallback_fn(**call_args)
-                                    fallback_usage = state.data.pop("_usage", None) if state else None
-                                    fallback_result = NodeResult(fallback_node.id, fallback_node.tool, True, _trim_node_content(fallback_out),
-                                                              args=fallback_args, usage=fallback_usage)
-                                    results[fallback_node.id] = fallback_result
-                                    ordered.append(fallback_result)
+                                    from agentic.registry import registry as _fb_registry
+                                    _fb_spec = _fb_registry.get(fallback_node.tool)
+                                except Exception:
+                                    _fb_spec = None
+                                if fallback_node.needs_approval or (
+                                        _fb_spec is not None and getattr(_fb_spec, "needs_approval", False)):
+                                    _fb_content = json.dumps(
+                                        {"status": "waiting_for_approval", "run_id": run_id,
+                                         "node_id": fallback_node.id, "tool": fallback_node.tool},
+                                        ensure_ascii=False)
+                                    _fb_result = NodeResult(
+                                        fallback_node.id, fallback_node.tool, False,
+                                        _fb_content, args=fallback_args, error_type="needs_approval")
+                                    results[fallback_node.id] = _fb_result
+                                    ordered.append(_fb_result)
                                     pending.pop(fallback_node.id, None)
-                                    if run_id:
-                                        save_node_result(run_id, seq, fallback_result, state_json=_state_json(state)); seq += 1
-                                        save_graph_state(run_id, _safe_state_dict(state))
-                                    if _yield:
-                                        _yield(fallback_result)
-                                    log.info("Fallback node %s succeeded", fallback_node.id)
-                                    # The fallback stands in for the failed node so its
-                                    # dependants can proceed instead of being marked
-                                    # dependency_failed. The run history (ordered) keeps
-                                    # both the failed primary and the successful
-                                    # fallback for an honest run panel.
-                                    results[node.id] = NodeResult(
-                                        node.id, node.tool, True,
-                                        fallback_result.content,
-                                        args=dict(result.args),
-                                        usage=fallback_result.usage,
-                                    )
-                                except Exception as exc:
-                                    log.exception("Fallback node %s failed", fallback_node.id)
+                                    log.info("Fallback node %s needs approval; not executed",
+                                             fallback_node.id)
+                                else:
+                                    # Build call kwargs with injected dependencies
+                                    call_args = dict(fallback_args)
+                                    params = _tool_params(fallback_fn)
+                                    if "embedder" in params and "embedder" not in call_args:
+                                        call_args["embedder"] = embedder
+                                    if "client" in params and "client" not in call_args:
+                                        call_args["client"] = llm_client
+                                    if "llm_model" in params and "llm_model" not in call_args:
+                                        call_args["llm_model"] = llm_model
+                                    if "model" in params and "model" not in call_args:
+                                        call_args["model"] = llm_model
+                                    if "state" in params and "state" not in call_args:
+                                        call_args["state"] = state
+                                
+                                    try:
+                                        fallback_out = fallback_fn(**call_args)
+                                        fallback_usage = state.data.pop("_usage", None) if state else None
+                                        fallback_result = NodeResult(fallback_node.id, fallback_node.tool, True, _trim_node_content(fallback_out),
+                                                                  args=fallback_args, usage=fallback_usage)
+                                        results[fallback_node.id] = fallback_result
+                                        ordered.append(fallback_result)
+                                        pending.pop(fallback_node.id, None)
+                                        if run_id:
+                                            save_node_result(run_id, seq, fallback_result, state_json=_state_json(state)); seq += 1
+                                            save_graph_state(run_id, _safe_state_dict(state))
+                                        if _yield:
+                                            _yield(fallback_result)
+                                        log.info("Fallback node %s succeeded", fallback_node.id)
+                                        # The fallback stands in for the failed node so its
+                                        # dependants can proceed instead of being marked
+                                        # dependency_failed. The run history (ordered) keeps
+                                        # both the failed primary and the successful
+                                        # fallback for an honest run panel.
+                                        results[node.id] = NodeResult(
+                                            node.id, node.tool, True,
+                                            fallback_result.content,
+                                            args=dict(result.args),
+                                            usage=fallback_result.usage,
+                                        )
+                                    except Exception as exc:
+                                        log.exception("Fallback node %s failed", fallback_node.id)
                             else:
                                 log.warning("Fallback node %s tool %s not found", fallback_node.id, fallback_node.tool)
                         else:
@@ -2138,10 +2160,12 @@ def _execute_graph_inner(graph: PlanGraph, embedder=None, llm_client=None,
                         log.debug("Fallback target node %s not found", node.fallback_to)
 
                 # Interrupt: stop and return partial results.
+                # NOTE: the checkpoint is intentionally KEPT here (unlike the
+                # normal-completion path below which clears it) so
+                # resume_graph(run_id) can continue from the saved node
+                # results instead of re-executing side-effecting nodes.
                 if node.interrupt and result.ok:
                     final_answer = _synthesize_without_llm(graph, tuple(ordered))
-                    if run_id:
-                        clear_checkpoint(run_id)
                     return GraphRunResult(
                         graph=graph, results=tuple(ordered), final_answer=final_answer,
                         final_state=dict(state.data), interrupted=True,
@@ -2440,7 +2464,7 @@ def run_playbook_json(task: str, cap_ids: list[str] | None = None, embedder=None
         "ok": not any(not r.ok for r in result.results),
         "graph_id": result.graph.id,
         "graph_name": result.graph.name,
-        "results": [r.__dict__ for r in result.results],
+        "results": [asdict(r) for r in result.results],
         "final_answer": result.final_answer,
     }, ensure_ascii=False, indent=2)
 

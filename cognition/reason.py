@@ -90,14 +90,17 @@ def cached_embed_query(embedder, text: str, instruct: str = "") -> np.ndarray:
         cached = _embed_query_cache.get(key)
         if cached is not None:
             _embed_query_cache.move_to_end(key)
-            return cached
+            # Defensive copy: callers mutate the returned array in place
+            # (e.g. normalization); sharing the cached object would poison
+            # every later lookup of this key.
+            return cached.copy()
     vec = np.asarray(embedder.embed_query(text, instruct=instruct), dtype=np.float32)
     with _embed_query_cache_lock:
         _embed_query_cache[key] = vec
         _embed_query_cache.move_to_end(key)
         while len(_embed_query_cache) > _EMBED_QUERY_CACHE_MAX:
             _embed_query_cache.popitem(last=False)
-    return vec
+    return vec.copy()
 
 
 def cosine_similarity(vec_a, vec_b) -> float:

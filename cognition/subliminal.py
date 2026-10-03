@@ -454,21 +454,6 @@ class SubliminalLayer:
         """Public read: (emotion_label, intensity 0..1)."""
         return self._emotion, float(self._emotion_intensity)
 
-    def affect_snapshot(self) -> dict[str, float]:
-        """Snapshot for diagnostics / persistence."""
-        a = self._affect
-        return {
-            "valence": round(a.valence, 3),
-            "arousal": round(a.arousal, 3),
-            "dominance": round(a.dominance, 3),
-            "curiosity": round(a.curiosity, 3),
-            "care": round(a.care, 3),
-            "caution": round(a.caution, 3),
-            "agency": round(a.agency, 3),
-            "comfort": round(a.comfort, 3),
-            "emotion": self._emotion,
-            "emotion_intensity": round(self._emotion_intensity, 3),
-        }
 
     def impulse(self) -> str:
         """L4: a one-line internal impulse text (used in prompt, not in VRM)."""

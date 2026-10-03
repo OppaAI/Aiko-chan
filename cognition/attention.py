@@ -18,7 +18,6 @@ import importlib
 import json
 import logging
 import re
-import sqlite3
 import threading
 import time
 from collections import OrderedDict, deque
@@ -1286,15 +1285,6 @@ class EdgeCognitiveState:
             mood = "positive" if self._affect > 0.2 else "negative" if self._affect < -0.2 else "neutral"
             return {"mood": mood, "affect": round(self._affect, 3), "energy": round(self._energy, 3), "uncertainty": round(self._uncertainty, 3), "attention": self._attention, "open_loops": list(self._open_loops), "goals": [g.text for g in self._goals if g.progress == "active"], "lessons": list(self._lessons), "tool_outcomes": list(self._tool_outcomes), "perceptions": list(self._perceptions), "activity": self._activity, "response_reviews": list(self._response_reviews), "contradictions": list(self._contradictions), "durable_lessons": list(self._durable_lessons), "lesson_evidence": dict(self._lesson_counts), "preferences": dict(self._preferences), "identity_questions": list(self._identity_questions), "intuitions": list(self._intuitions), "self_preferences": dict(self._self_preferences), "self_decisions": list(self._self_decisions), "self_notes": list(self._self_notes), "self_preference_evidence": dict(self._self_preference_counts)}
 
-    def record_activity(self, activity: str) -> None:
-        """Record what the user is currently doing (AIKO_ACTIVITY env).
-
-        Called every turn from think._current_system_prompt_parts(). The
-        value rides in snapshots and surfaces via grounded_context().
-        """
-        with self._lock:
-            self._activity = str(activity or "")
-
     def continuous_tick(self) -> dict:
         """Apply bounded low-cost decay between conversational turns. Passive dormancy."""
         now = time.monotonic()
@@ -1412,9 +1402,6 @@ class EdgeCognitiveState:
                 lines.append(f"Recent self-decision ({kinds}): {summary}")
         return "<self_model>\n" + "\n".join("- " + line for line in lines) + "\n</self_model>"
 
-    def capability_for(self, domain: str = "") -> dict:
-        """Synthesize recent tool outcomes into a coarse domain confidence. Capability assessment."""
-        return capability_from_outcomes(list(self.snapshot().get("tool_outcomes") or []), domain)
 
     def is_critical_task(self, user_input: str) -> bool:
         """Check if input is a critical/urgent request. Gate classification."""
@@ -1691,8 +1678,10 @@ class EdgeCognitiveState:
             conn.execute("INSERT INTO cognitive_state(user_id, state_json) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET state_json=excluded.state_json, updated_at=CURRENT_TIMESTAMP", (self._identity, json.dumps(data, ensure_ascii=False, separators=(",", ":"))))
             conn.commit()
             conn.close()
-        except Exception:
-            return
+        except Exception as exc:
+            # Was a bare silent return: a failed SQLite write lost cognitive
+            # state with zero signal. Log it; the next persist retry rebuilds.
+            log.warning("cognitive persist failed for %s: %s", self._identity, exc)
 
     def record_perception(self, source: str, duration_s: float | None = None, latency_s: float | None = None, prosody: dict | None = None) -> None:
         """Store bounded aggregate perception cues; never retain raw audio. Perception engram."""
@@ -1750,20 +1739,6 @@ class EdgeCognitiveState:
                     basis.append("affective_resonance")
             except (TypeError, ValueError):
                 pass
-            try:
-                # Semantic floor: a row the vector/graph search scored strongly
-                # carries evidence even with zero word overlap ("Who am I?"
-                # vs "Oppa's birthday is March 14"). Without this, lexical-only
-                # confidence marks every such row low and the downstream
-                # all-low drop discards semantically-grounded recall. 0.02
-                # matches MEMORY_RECENCY_RERANK_THRESHOLD: rows that cleared
-                # it were already judged relevant enough to reorder by recency.
-                sem = float(row.get("_recall_score") or 0.0)
-                if sem >= 0.02:
-                    score += 2.0
-                    basis.append("semantic_recall")
-            except (TypeError, ValueError):
-                pass
             if str(row.get("status") or "").casefold() == "superseded":
                 score -= 2.0
                 basis.append("superseded")
@@ -1801,7 +1776,7 @@ class EdgeCognitiveState:
                 "top_text_preview": (result[0].get("memory") or "")[:160] if result else None,
             },
             factors=[
-                "weights: query×2.0, context×0.7, goal×1.5, pinned+1.5, salient+0.8, recall_history≤+1.0, affective_resonance+0.35, semantic_recall+2.0 (recall_score≥0.02), superseded-2.0",
+                "weights: query×2.0, context×0.7, goal×1.5, pinned+1.5, salient+0.8, recall_history≤+1.0, affective_resonance+0.35, superseded-2.0",
                 f"confidence tiers: high ≥4.0 (with overlap), moderate ≥2.0, low otherwise",
             ],
         )
@@ -2147,21 +2122,8 @@ class EdgeCognitiveState:
                 f"any 'superseded' status in hits: {'superseded' in statuses}",
             ],
         )
-        # NOTE: the inner-voice block is NOT appended here. It rides on every
-        # turn via EdgeCognitiveState.inner_voice_turn_block(), injected
-        # unconditionally in think._current_system_prompt_parts(). Keeping
-        # this method a pure confidence checkpoint avoids double-injection
-        # on deliberation turns.
-        return block
-
-    def inner_voice_turn_block(self) -> str:
-        """Inner-voice block for prompt injection on every turn.
-
-        The rolling first-person thought thread plus one unprompted aside
-        if one is due (cooldown enforced by InnerVoice). Cheap (no LLM,
-        no DB, bounded deque) — safe on the hot path. Returns "" when the
-        inner voice is unavailable.
-        """
+        # Conscious stream: the ongoing first-person train of thought rides
+        # along so the reply continues it instead of restarting the persona.
         try:
             inner = self.inner_voice_block()
         except Exception:
@@ -2176,7 +2138,7 @@ class EdgeCognitiveState:
                 inner = inner.replace(closing, f"- {aside}\n{closing}", 1)
             else:
                 inner += f"\n- {aside}"
-        return inner
+        return block + ("\n\n" + inner if inner else "")
 
     def context(self, query: str = "") -> str:
         """Render bounded recent state for injection into active cognition. Context rendering."""

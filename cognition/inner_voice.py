@@ -31,6 +31,7 @@ Design constraints (Jetson Orin Nano, 8 GB unified RAM)
 from __future__ import annotations
 
 import time
+import re
 from collections import deque
 from typing import Any
 
@@ -199,18 +200,32 @@ _FAREWELL_RE = ("goodbye", "good night", "bye aiko", "see you", "oyasumi",
                 "goodnight")
 
 
+def _cue_re(phrases: tuple[str, ...]) -> "re.Pattern[str]":
+    # Word-start anchored: "hello" must not fire inside "othello", "thank"
+    # must not fire inside "thanksgiving". A following letter disqualifies;
+    # punctuation/space/end is fine (so "thanks!" and "hello," still hit).
+    return re.compile(r"\b(?:" + "|".join(re.escape(p) for p in phrases) + r")(?![a-z])")
+
+
+_THANKS_CUE_RE = _cue_re(_THANKS_RE)
+_PRAISE_CUE_RE = _cue_re(_PRAISE_RE)
+_APOLOGY_CUE_RE = _cue_re(_APOLOGY_RE)
+_GREETING_CUE_RE = _cue_re(_GREETING_RE)
+_FAREWELL_CUE_RE = _cue_re(_FAREWELL_RE)
+
+
 def _detect_social_cues(text: str) -> list[str]:
     low = (text or "").lower()
     cues: list[str] = []
-    if any(w in low for w in _THANKS_RE):
+    if _THANKS_CUE_RE.search(low):
         cues.append("thanks")
-    if any(w in low for w in _PRAISE_RE):
+    if _PRAISE_CUE_RE.search(low):
         cues.append("praise")
-    if any(w in low for w in _APOLOGY_RE):
+    if _APOLOGY_CUE_RE.search(low):
         cues.append("apology")
-    if any(w in low for w in _GREETING_RE):
+    if _GREETING_CUE_RE.search(low):
         cues.append("greeting")
-    if any(w in low for w in _FAREWELL_RE):
+    if _FAREWELL_CUE_RE.search(low):
         cues.append("farewell")
     return cues
 
@@ -250,13 +265,16 @@ class InnerVoice:
         lines: list[str] = []
 
         # 1. Social cues first — they dominate human attention.
-        for cue in _detect_social_cues(user_text):
+        # (Computed once: _detect_social_cues is 6 substring scans; the old
+        # code called it twice per turn on this hot path.)
+        social_cues = _detect_social_cues(user_text)
+        for cue in social_cues:
             bank = _CUE_THOUGHTS.get(cue)
             if bank:
                 lines.append(self._next(f"cue:{cue}", bank))
         if cues.get("urgency"):
             lines.append(self._next("cue:urgency", _CUE_THOUGHTS["urgency"]))
-        elif cues.get("question") and "question" not in [c for c in _detect_social_cues(user_text)]:
+        elif cues.get("question") and "question" not in social_cues:
             lines.append(self._next("cue:question", _CUE_THOUGHTS["question"]))
         if cues.get("action"):
             lines.append(self._next("cue:action", _CUE_THOUGHTS["action"]))

@@ -215,7 +215,9 @@ def idle_learner_loop(owner, check_interval: float = IDLE_LEARNER_CHECK_INTERVAL
                 continue
 
             topic = candidates[-1]  # simplistic: look at last user query
-            learned_tag = f"[self-learned:{topic}]"
+            # Tag is only a dedup marker — truncate so a multi-KB pasted
+            # message doesn't become a multi-KB tag.
+            learned_tag = f"[self-learned:{topic[:60]}]"
             if any(learned_tag in (m.get("content") or "") for m in owner._history):
                 log.info("[learner] skipped: topic already tagged as learned this session: %r", topic)
                 continue
@@ -846,11 +848,6 @@ class _DeepStudySessionManager:
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop_event: threading.Event | None = None
-
-    def is_running(self) -> bool:
-        """Check if a deep study session is currently active."""
-        with self._lock:
-            return self._thread is not None and self._thread.is_alive()
 
     def start(self, memorize, client=None, model=None, topic: str | None = None, user_id: str | None = None) -> None:
         """Start a deep study session on a topic in a background thread."""

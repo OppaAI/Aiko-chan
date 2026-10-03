@@ -65,7 +65,7 @@ def build_payload(case: dict, canon, options: dict, args) -> dict:
                  for x in opts]
         else:  # TypeSafe SDK style: key -> description (or null)
             o = {x["key"]: (None if args.no_desc else x["description"]) for x in opts}
-        questions[axis] = {"type": "choice", "instructions": AXES[axis]["question"], "options": o}
+        questions[axis] = {"type": "choice", "instructions": AXES[axis]["question"], "criteria": o}
     payload = {"state": T.build_state(case, canon), "questions": questions}
     if args.model:
         payload["model"] = args.model

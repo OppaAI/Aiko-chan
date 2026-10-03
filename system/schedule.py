@@ -825,6 +825,7 @@ def schedule_job_record(
     skill: str | None = None,
     requires_idle: bool = False,
     idle_seconds: int | str | None = None,
+    failure_note_dir: str | None = None,
     user_id: str | None = None,
     dedupe: bool = True,
 ) -> dict:
@@ -899,6 +900,7 @@ def schedule_job_record(
         "skill": normalized_skill,
         "requires_idle": requires_idle,
         "idle_seconds": normalized_idle_seconds,
+        "failure_note_dir": failure_note_dir,
     }
     # Serialize the read-check-append-write across processes sharing this
     # user's schedule (same pattern as delete_schedule_record and
@@ -1739,6 +1741,7 @@ class DueJob:
     skill: str | None = None
     requires_idle: bool = False
     idle_seconds: int | None = None
+    failure_note_dir: str | None = None
 
 
 # ── system job timing ─────────────────────────────────────────────────────────
@@ -2600,6 +2603,7 @@ class ScheduleRunner:
                             skill=job.get("skill"),
                             requires_idle=bool(job.get("requires_idle", False)),
                             idle_seconds=job.get("idle_seconds"),
+                            failure_note_dir=job.get("failure_note_dir"),
                         ),
                         tz_name,
                     ))

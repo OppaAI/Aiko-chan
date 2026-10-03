@@ -709,6 +709,13 @@ class ToolResult:
 
     def observation(self) -> str:
         """Render a compact machine-readable observation for the next LLM step."""
+        content = self.content or ""
+        if len(content) > AGENT_TOOL_RESULT_MAX_CHARS:
+            content = (
+                content[:AGENT_TOOL_RESULT_MAX_CHARS]
+                + f"\n[... truncated: {len(content) - AGENT_TOOL_RESULT_MAX_CHARS} more chars; "
+                + "re-run with narrower scope if you need the rest]"
+            )
         payload = {
             "ok": self.ok,
             "tool": self.tool,
@@ -716,7 +723,7 @@ class ToolResult:
             "retryable": self.retryable,
             "error_type": self.error_type,
             "args": self.args,
-            "content": self.content[:AGENT_TOOL_RESULT_MAX_CHARS],
+            "content": content,
         }
         if self.metadata:
             payload["metadata"] = self.metadata

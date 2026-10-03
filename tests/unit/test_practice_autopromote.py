@@ -126,3 +126,78 @@ def test_autopromote_kill_switch(exp_db, playbook_file, monkeypatch):
     record_experience_use(exp_id)
     assert schema.maybe_autopromote_experiences() == []
     assert json.loads(playbook_file.read_text(encoding="utf-8")) == []
+
+
+def _row_count():
+    conn = connect("test-user")
+    n = conn.execute("SELECT COUNT(*) AS n FROM experiences WHERE user_id=?", ("test-user",)).fetchone()["n"]
+    conn.close()
+    return n
+
+
+def _use_count(exp_id):
+    conn = connect("test-user")
+    row = conn.execute("SELECT use_count FROM experiences WHERE id=?", (exp_id,)).fetchone()
+    conn.close()
+    return row["use_count"]
+
+
+def test_rehearse_ok_experience_bumps_use_count_no_new_row(exp_db):
+    """The circular-promotion fix: rehearsing an ok experience reinforces it."""
+    exp_id = _seed_ok_experience()
+    assert _row_count() == 1
+    steps = [{"tool": "kb_search", "ok": True, "args": {}}]
+    returned = record_practice_experience(
+        "rehearse", steps, "still works", verified_ok=True,
+        source_experience_id=exp_id)
+    assert returned == exp_id
+    assert _use_count(exp_id) == 1
+    assert _row_count() == 1  # no duplicate row
+
+
+def test_rehearse_failed_run_records_fresh_row(exp_db):
+    exp_id = _seed_ok_experience()
+    steps = [{"tool": "kb_search", "ok": False, "args": {}}]
+    new_id = record_practice_experience(
+        "rehearse", steps, "broke", verified_ok=False,
+        source_experience_id=exp_id)
+    assert new_id != exp_id
+    assert _use_count(exp_id) == 0  # failed reuse is not reinforcement
+    assert _row_count() == 2
+
+
+def test_retry_of_failed_experience_records_fresh_row(exp_db):
+    """A successful retry of a failed workflow is a new (corrected) workflow."""
+    failed_id = record_practice_experience(
+        "broken task", [{"tool": "x", "ok": False, "args": {}}],
+        "failed", verified_ok=False, score=0.2)
+    assert failed_id
+    new_id = record_practice_experience(
+        "retry", [{"tool": "x", "ok": True, "args": {}}], "fixed",
+        verified_ok=True, source_experience_id=failed_id)
+    assert new_id != failed_id
+    assert _use_count(failed_id) == 0
+    assert _row_count() == 2
+
+
+def test_rehearse_unknown_source_falls_through(exp_db):
+    new_id = record_practice_experience(
+        "rehearse", [{"tool": "x", "ok": True, "args": {}}], "ok",
+        verified_ok=True, source_experience_id="no-such-id")
+    assert new_id and new_id != "no-such-id"
+    assert _row_count() == 1
+
+
+def test_three_rehearses_trigger_autopromote(exp_db, playbook_file, monkeypatch):
+    """End-to-end: rehearse x3 -> use_count=3 -> autopromote fires."""
+    monkeypatch.setenv("AIKO_PRACTICE_AUTOPROMOTE_USES", "3")
+    exp_id = _seed_ok_experience()
+    steps = [{"tool": "kb_search", "ok": True, "args": {}}]
+    for _ in range(3):
+        assert record_practice_experience(
+            "rehearse", steps, "ok", verified_ok=True,
+            source_experience_id=exp_id) == exp_id
+    assert _use_count(exp_id) == 3
+    promoted = schema.maybe_autopromote_experiences(user_id="test-user")
+    assert len(promoted) == 1
+    assert promoted[0]["experience_id"] == exp_id

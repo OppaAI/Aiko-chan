@@ -54,8 +54,9 @@ class ExperienceWriter:
         verified_ok: bool = True,
         score: float = 1.0,
         embedder=None,
+        source_experience_id: str | None = None,
     ) -> str | None:
-        return record_practice_experience(goal, steps, final_answer, verified_ok, score, embedder=embedder)
+        return record_practice_experience(goal, steps, final_answer, verified_ok, score, embedder=embedder, source_experience_id=source_experience_id)
 
 
 def record_experience(owner, goal: str, steps: list[dict], final_answer: str, verified_ok: bool, score: float, embedder=None) -> str | None:
@@ -201,13 +202,45 @@ def record_experience(owner, goal: str, steps: list[dict], final_answer: str, ve
         conn.close()
 
 
-def record_practice_experience(goal: str, steps: list[dict], final_answer: str = "practice workflow", verified_ok: bool = True, score: float = 1.0, embedder=None) -> str | None:
+def record_practice_experience(goal: str, steps: list[dict], final_answer: str = "practice workflow", verified_ok: bool = True, score: float = 1.0, embedder=None, source_experience_id: str | None = None) -> str | None:
     """Record an operator-provided practice workflow without booting chat.
 
     This is used by ``practice.py`` to seed experience/playbook promotion
     while testing tiny routing/execution models such as Needle.
+
+    When ``source_experience_id`` names the already-ok experience this run
+    was rehearsing and the run succeeded, the source's ``use_count`` is
+    bumped instead of writing a duplicate row — that reuse signal is what
+    lets ``maybe_autopromote_experiences()`` promote frequently-used
+    workflows. (Without this, unpromoted experiences could never reach the
+    promotion threshold: uses were only ever recorded for already-promoted
+    playbooks.) Anything else — failed runs, successful retries of failed
+    workflows, unknown source ids — records a fresh row as before.
     """
+    if source_experience_id and verified_ok and _experience_outcome_ok(source_experience_id):
+        new_count = record_experience_use(source_experience_id)
+        if new_count is not None:
+            log.info("practice reinforced experience %s (use_count=%d)",
+                     source_experience_id, new_count)
+            return source_experience_id
+        # Unknown source id — fall through and record fresh (non-fatal).
     return record_experience(None, goal, steps, final_answer, verified_ok, score, embedder=embedder)
+
+
+def _experience_outcome_ok(exp_id: str, user_id: str | None = None) -> bool:
+    """True when the named experience exists and its outcome is 'ok'."""
+    uid = user_id or current_user_id()
+    conn = connect(uid)
+    try:
+        row = conn.execute(
+            "SELECT outcome FROM experiences WHERE id = ? AND user_id = ?",
+            (exp_id, uid),
+        ).fetchone()
+        return bool(row and row["outcome"] == "ok")
+    except Exception:
+        return False
+    finally:
+        conn.close()
 
 
 def record_experience_use(exp_id: str, user_id: str | None = None) -> int | None:

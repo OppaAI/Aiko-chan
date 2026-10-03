@@ -2842,7 +2842,7 @@ class AikoThink:
             + (f"\n\nScheduled skill instructions:\n{job.skill}" if job.skill else "")
         )
         try:
-            self.agentic_chat(prompt)
+            self.agentic_chat(prompt, include_history=False)
         except Exception as e:
             log.error("Scheduled agentic job failed: %s", e)
             # Leave a visible trace for jobs that opt in (e.g. the Playground

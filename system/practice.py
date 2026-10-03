@@ -68,7 +68,9 @@ RULES
 4. NEVER during practice: send email/messages, post, purchase, delete files,
    modify code or config, or run anything with irreversible side effects.
    Notes and summaries are fine.
-5. Call record_practice_result ONCE with what you did and whether it worked.
+5. Call record_practice_result ONCE with what you did and whether it worked,
+   passing the experience_id from suggest_practice_task unchanged when the
+   task came from an existing workflow.
 6. Call practice_sweep ONCE at the end (promotes frequently-used workflows).
 7. ONE task per tick, at most {max_minutes} minutes. Then stop. Report what
    you practiced and the outcome in one short paragraph.

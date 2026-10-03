@@ -42,7 +42,7 @@ import time
 import uuid
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -55,7 +55,6 @@ from agentic.checkpoint import (
     save_node_result, load_checkpoint, clear_checkpoint,
     delete_node_checkpoint, save_graph_state, load_graph_state,
 )
-from agentic import graph_memo
 
 log = get_logger(__name__)
 
@@ -1510,7 +1509,8 @@ def plan_from_master(user_input: str, cap_ids: list[str] | None = None, embedder
         goal=user_input,
         nodes=tuple(nodes),
         reducers=dict(plan.get("reducers") or {}),
-        _extras={**extras, "max_workers": plan.get("max_workers") or 2},
+        _extras={**extras, "max_workers": plan.get("max_workers") or 2,
+                 "source_experience_id": plan.get("source_experience_id")},
     )
     return graph
 
@@ -1755,17 +1755,6 @@ def _run_node(node: PlanNode, prompt: str, results: dict[str, NodeResult],
     if node.tool == "save_note":
         args["content"] = str(args.get("content", ""))[:AGENT_NOTE_MAX_CHARS]
 
-    # Content-hash memoization for verified side-effect-free tools (see
-    # agentic/graph_memo.py). The key covers the resolved JSON-serializable
-    # args — never call_args, which holds injected client/embedder/state
-    # objects. Only successful results are cached; failures retry normally.
-    memo_key = graph_memo._memo_key(node.tool, args, llm_model)
-    if memo_key is not None:
-        hit = graph_memo._memo_get(memo_key)
-        if hit is not None:
-            log.debug("graph memo hit for node %s (%s)", node.id, node.tool)
-            return NodeResult(node.id, node.tool, True, hit, args=args)
-
     # Build the actual call kwargs separately from `args` — injected
     # objects (client/embedder/state) are NOT JSON-serializable and must
     # never end up in NodeResult.args, which gets written into
@@ -1794,18 +1783,13 @@ def _run_node(node: PlanNode, prompt: str, results: dict[str, NodeResult],
                 time.sleep(wait)
             out = fn(**call_args)
             usage = state.data.pop("_usage", None) if state else None
-            content = _trim_node_content(out)
-            if memo_key is not None:
-                # Cache hit path skips the call, so no _usage is recorded —
-                # usage stays None, which is honest (no tokens were spent).
-                graph_memo._memo_put(memo_key, node.tool, content)
-            return NodeResult(node.id, node.tool, True, content, args=args, usage=usage)
+            return NodeResult(node.id, node.tool, True, _trim_node_content(out), args=args, usage=usage)
         except Exception as e:
             last_exc = e
             log.warning("Node %s retry %d/%d raised: %s", node.id, attempt + 1, node.max_retries + 1, str(e))
-            if attempt < node.max_retries:
-                wait = node.retry_backoff_seconds * (2 ** attempt)
-                time.sleep(wait)
+            # NOTE: no sleep here — the pre-attempt backoff at the top of the
+            # loop already waits before the next try. Sleeping here too would
+            # double the intended delay.
 
     if last_exc is not None:
         log.error("Node %s failed after %d attempts: %s", node.id, node.max_retries + 1, str(last_exc))
@@ -2088,48 +2072,70 @@ def _execute_graph_inner(graph: PlanGraph, embedder=None, llm_client=None,
                             if fallback_fn:
                                 # Build arguments using the same logic as normal execution
                                 fallback_args = _substitute(fallback_node.args, graph.goal, results, extras)
-                                
-                                # Build call kwargs with injected dependencies
-                                call_args = dict(fallback_args)
-                                params = _tool_params(fallback_fn)
-                                if "embedder" in params and "embedder" not in call_args:
-                                    call_args["embedder"] = embedder
-                                if "client" in params and "client" not in call_args:
-                                    call_args["client"] = llm_client
-                                if "llm_model" in params and "llm_model" not in call_args:
-                                    call_args["llm_model"] = llm_model
-                                if "model" in params and "model" not in call_args:
-                                    call_args["model"] = llm_model
-                                if "state" in params and "state" not in call_args:
-                                    call_args["state"] = state
-                                
+
+                                # Approval gate (mirrors _run_node): a fallback
+                                # must not bypass human approval for gated tools.
                                 try:
-                                    fallback_out = fallback_fn(**call_args)
-                                    fallback_usage = state.data.pop("_usage", None) if state else None
-                                    fallback_result = NodeResult(fallback_node.id, fallback_node.tool, True, _trim_node_content(fallback_out),
-                                                              args=fallback_args, usage=fallback_usage)
-                                    results[fallback_node.id] = fallback_result
-                                    ordered.append(fallback_result)
+                                    from agentic.registry import registry as _fb_registry
+                                    _fb_spec = _fb_registry.get(fallback_node.tool)
+                                except Exception:
+                                    _fb_spec = None
+                                if fallback_node.needs_approval or (
+                                        _fb_spec is not None and getattr(_fb_spec, "needs_approval", False)):
+                                    _fb_content = json.dumps(
+                                        {"status": "waiting_for_approval", "run_id": run_id,
+                                         "node_id": fallback_node.id, "tool": fallback_node.tool},
+                                        ensure_ascii=False)
+                                    _fb_result = NodeResult(
+                                        fallback_node.id, fallback_node.tool, False,
+                                        _fb_content, args=fallback_args, error_type="needs_approval")
+                                    results[fallback_node.id] = _fb_result
+                                    ordered.append(_fb_result)
                                     pending.pop(fallback_node.id, None)
-                                    if run_id:
-                                        save_node_result(run_id, seq, fallback_result, state_json=_state_json(state)); seq += 1
-                                        save_graph_state(run_id, _safe_state_dict(state))
-                                    if _yield:
-                                        _yield(fallback_result)
-                                    log.info("Fallback node %s succeeded", fallback_node.id)
-                                    # The fallback stands in for the failed node so its
-                                    # dependants can proceed instead of being marked
-                                    # dependency_failed. The run history (ordered) keeps
-                                    # both the failed primary and the successful
-                                    # fallback for an honest run panel.
-                                    results[node.id] = NodeResult(
-                                        node.id, node.tool, True,
-                                        fallback_result.content,
-                                        args=dict(result.args),
-                                        usage=fallback_result.usage,
-                                    )
-                                except Exception as exc:
-                                    log.exception("Fallback node %s failed", fallback_node.id)
+                                    log.info("Fallback node %s needs approval; not executed",
+                                             fallback_node.id)
+                                else:
+                                    # Build call kwargs with injected dependencies
+                                    call_args = dict(fallback_args)
+                                    params = _tool_params(fallback_fn)
+                                    if "embedder" in params and "embedder" not in call_args:
+                                        call_args["embedder"] = embedder
+                                    if "client" in params and "client" not in call_args:
+                                        call_args["client"] = llm_client
+                                    if "llm_model" in params and "llm_model" not in call_args:
+                                        call_args["llm_model"] = llm_model
+                                    if "model" in params and "model" not in call_args:
+                                        call_args["model"] = llm_model
+                                    if "state" in params and "state" not in call_args:
+                                        call_args["state"] = state
+                                
+                                    try:
+                                        fallback_out = fallback_fn(**call_args)
+                                        fallback_usage = state.data.pop("_usage", None) if state else None
+                                        fallback_result = NodeResult(fallback_node.id, fallback_node.tool, True, _trim_node_content(fallback_out),
+                                                                  args=fallback_args, usage=fallback_usage)
+                                        results[fallback_node.id] = fallback_result
+                                        ordered.append(fallback_result)
+                                        pending.pop(fallback_node.id, None)
+                                        if run_id:
+                                            save_node_result(run_id, seq, fallback_result, state_json=_state_json(state)); seq += 1
+                                            save_graph_state(run_id, _safe_state_dict(state))
+                                        if _yield:
+                                            _yield(fallback_result)
+                                        log.info("Fallback node %s succeeded", fallback_node.id)
+                                        # The fallback stands in for the failed node so its
+                                        # dependants can proceed instead of being marked
+                                        # dependency_failed. The run history (ordered) keeps
+                                        # both the failed primary and the successful
+                                        # fallback for an honest run panel.
+                                        results[node.id] = NodeResult(
+                                            node.id, node.tool, True,
+                                            fallback_result.content,
+                                            args=dict(result.args),
+                                            usage=fallback_result.usage,
+                                        )
+                                    except Exception as exc:
+                                        log.exception("Fallback node %s failed", fallback_node.id)
                             else:
                                 log.warning("Fallback node %s tool %s not found", fallback_node.id, fallback_node.tool)
                         else:
@@ -2138,10 +2144,12 @@ def _execute_graph_inner(graph: PlanGraph, embedder=None, llm_client=None,
                         log.debug("Fallback target node %s not found", node.fallback_to)
 
                 # Interrupt: stop and return partial results.
+                # NOTE: the checkpoint is intentionally KEPT here (unlike the
+                # normal-completion path below which clears it) so
+                # resume_graph(run_id) can continue from the saved node
+                # results instead of re-executing side-effecting nodes.
                 if node.interrupt and result.ok:
                     final_answer = _synthesize_without_llm(graph, tuple(ordered))
-                    if run_id:
-                        clear_checkpoint(run_id)
                     return GraphRunResult(
                         graph=graph, results=tuple(ordered), final_answer=final_answer,
                         final_state=dict(state.data), interrupted=True,
@@ -2389,6 +2397,17 @@ def run_schema_agent(user_input: str, cap_ids: list[str] | None = None, embedder
         run_id = hashlib.sha256(f"{graph.id}|{user_input}".encode()).hexdigest()[:16]
     result = execute_graph(graph, embedder=embedder, llm_client=llm_client,
                             llm_model=llm_model, run_id=run_id)
+    if result is not None and all(r.ok for r in result.results):
+        # Practice loop: a successful playbook run counts as a "use" of the
+        # experience it was promoted from. Frequently used workflows earn
+        # auto-promotion into playbook DAGs (maybe_autopromote_experiences).
+        src_exp = (graph._extras or {}).get("source_experience_id")
+        if src_exp:
+            try:
+                from agentic import experience as _exp
+                _exp.record_experience_use(str(src_exp))
+            except Exception:
+                log.debug("experience use-count increment skipped", exc_info=True)
     if result.goal_score is not None:
         _record_goal_engram(graph.goal, result.goal_score, result.goal_reasons,
                             graph.name, result.steps)
@@ -2440,7 +2459,7 @@ def run_playbook_json(task: str, cap_ids: list[str] | None = None, embedder=None
         "ok": not any(not r.ok for r in result.results),
         "graph_id": result.graph.id,
         "graph_name": result.graph.name,
-        "results": [r.__dict__ for r in result.results],
+        "results": [asdict(r) for r in result.results],
         "final_answer": result.final_answer,
     }, ensure_ascii=False, indent=2)
 
@@ -2473,12 +2492,19 @@ def _promotion_args_for_step(tool: str, step: dict[str, Any]) -> dict[str, Any]:
     return {str(k): "$prompt" for k in arg_keys}
 
 
-def append_playbook_from_experience(goal: str, steps: list[dict[str, Any]], *, name: str | None = None) -> Path:
+def append_playbook_from_experience(goal: str, steps: list[dict[str, Any]], *, name: str | None = None,
+                                   source_experience_id: str | None = None) -> tuple[Path, str]:
     """Promote a practiced or ReAct-discovered tool sequence into user playbooks.
 
     Args are stored as sanitized previews by the experience layer, so promoted
     templates intentionally use ``$prompt``/``$title`` placeholders unless the
     operator edits the JSON by hand.
+
+    When ``source_experience_id`` is given it is stored on the playbook; each
+    successful execution of the playbook then increments that experience's
+    ``use_count`` (see ``run_schema_agent``), feeding auto-promotion.
+
+    Returns (playbook_file, new_plan_id).
     """
     nodes = []
     for idx, step in enumerate(steps, start=1):
@@ -2493,13 +2519,16 @@ def append_playbook_from_experience(goal: str, steps: list[dict[str, Any]], *, n
         raise ValueError("no promotable tool steps found")
     path = _playbook_file()
     path.parent.mkdir(parents=True, exist_ok=True)
+    plan_id = f"practiced_{uuid.uuid4().hex[:10]}"
     new_plan = {
-        "id": f"practiced_{uuid.uuid4().hex[:10]}",
+        "id": plan_id,
         "name": name or _title(goal),
         "triggers": _heuristic_items(goal)[:4],
         "requires_any": [],
         "nodes": nodes,
     }
+    if source_experience_id:
+        new_plan["source_experience_id"] = source_experience_id
     with _playbook_write_guard(path):
         existing = []
         if path.exists():
@@ -2513,7 +2542,69 @@ def append_playbook_from_experience(goal: str, steps: list[dict[str, Any]], *, n
         tmp_path = path.with_suffix(".tmp")
         tmp_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp_path.replace(path)
-        return path
+        return path, plan_id
+
+
+def maybe_autopromote_experiences(user_id: str | None = None) -> list[dict[str, str]]:
+    """Promote frequently-used experiences into playbook DAGs.
+
+    Finds experiences with ``use_count`` at or above
+    ``AIKO_PRACTICE_AUTOPROMOTE_USES`` (default 3) that succeeded
+    (``outcome='ok'``), are still active, and have no playbook yet — then
+    promotes each into the user playbook file and stamps
+    ``promoted_playbook_id`` so it never promotes twice.
+
+    Returns [{experience_id, playbook_id, playbook_file}]. Env-gated by
+    ``AIKO_PRACTICE_AUTOPROMOTE_ENABLED`` (default "1"); set "0" to disable.
+    """
+    if os.getenv("AIKO_PRACTICE_AUTOPROMOTE_ENABLED", "1").strip() != "1":
+        return []
+    try:
+        threshold = max(1, int(os.getenv("AIKO_PRACTICE_AUTOPROMOTE_USES", "3").strip() or "3"))
+    except ValueError:
+        threshold = 3
+    from system.userspace import current_user_id
+    from agentic.experience.schema import connect, ensure_experience_schema_migrated, now
+    uid = user_id or current_user_id()
+    conn = connect(uid)
+    promoted: list[dict[str, str]] = []
+    try:
+        ensure_experience_schema_migrated(conn)
+        rows = conn.execute(
+            "SELECT id, goal, steps_json FROM experiences "
+            "WHERE user_id = ? AND status = 'active' AND outcome = 'ok' "
+            "AND use_count >= ? AND promoted_playbook_id IS NULL "
+            "ORDER BY use_count DESC, last_used_at DESC LIMIT 25",
+            (uid, threshold),
+        ).fetchall()
+        for row in rows:
+            exp_id = row["id"]
+            try:
+                steps = json.loads(row["steps_json"] or "[]")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(steps, list) or not steps:
+                continue
+            try:
+                path, plan_id = append_playbook_from_experience(
+                    row["goal"] or "practiced workflow", steps,
+                    source_experience_id=exp_id)
+            except Exception as exc:
+                log.warning("autopromote %s failed (non-fatal): %s", exp_id, exc)
+                continue
+            conn.execute(
+                "UPDATE experiences SET promoted_playbook_id = ? WHERE id = ? AND user_id = ?",
+                (plan_id, exp_id, uid),
+            )
+            conn.commit()
+            promoted.append({"experience_id": exp_id, "playbook_id": plan_id,
+                             "playbook_file": str(path)})
+            log.info("autopromoted experience %s -> playbook %s", exp_id, plan_id)
+    except Exception as exc:
+        log.warning("maybe_autopromote_experiences failed (non-fatal): %s", exc)
+    finally:
+        conn.close()
+    return promoted
 
 
 from agentic.registry import TOOLS, register_tool_schema, tool
@@ -2544,24 +2635,31 @@ def suggest_practice_task() -> str:
     description=(
         "Record the outcome of a practice task as experience. Call once per "
         "practice session after attempting the task, with the tools used and "
-        "whether it succeeded."
+        "whether it succeeded. Pass the experience_id returned by "
+        "suggest_practice_task unchanged — a successful rehearse then "
+        "reinforces that existing workflow (bumping its reuse count toward "
+        "auto-promotion) instead of writing a duplicate row."
     ),
     props={
         "goal": {"type": "string", "description": "The practice task goal that was attempted."},
         "tools": {"type": "array", "items": {"type": "string"}, "description": "Tool names used, in order."},
         "ok": {"type": "boolean", "description": "Whether the practice run succeeded."},
         "notes": {"type": "string", "description": "One-line outcome note."},
+        "experience_id": {"type": "string", "description": "The experience_id from suggest_practice_task, if the task came from an existing workflow (retry/rehearse). Omit for curriculum tasks."},
     },
     required=["goal", "tools", "ok"],
 )
-def record_practice_result(goal: str, tools: list, ok: bool, notes: str = "") -> str:
+def record_practice_result(goal: str, tools: list, ok: bool, notes: str = "", experience_id: str | None = None) -> str:
     """Record a practice run as experience for future reuse and promotion."""
     from agentic import experience as _exp
     steps = [{"tool": str(t), "ok": bool(ok), "args": {}} for t in (tools or [])]
     exp_id = _exp.record_practice_experience(
         f"practice: {goal}", steps, notes or ("practice run ok" if ok else "practice run failed"),
-        verified_ok=bool(ok), score=1.0 if ok else 0.2)
-    return json.dumps({"ok": True, "experience_id": exp_id}, ensure_ascii=False)
+        verified_ok=bool(ok), score=1.0 if ok else 0.2,
+        source_experience_id=experience_id or None)
+    return json.dumps({"ok": True, "experience_id": exp_id,
+                       "reinforced": bool(experience_id and exp_id == experience_id)},
+                      ensure_ascii=False)
 
 
 @tool(

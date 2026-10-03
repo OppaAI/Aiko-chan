@@ -2845,6 +2845,22 @@ class AikoThink:
             self.agentic_chat(prompt)
         except Exception as e:
             log.error("Scheduled agentic job failed: %s", e)
+            # Leave a visible trace for jobs that opt in (e.g. the Playground
+            # loop): without this a dead tick is silent and the next tick
+            # blindly retries the same doomed session.
+            note_dir = getattr(job, "failure_note_dir", None)
+            if note_dir:
+                try:
+                    from pathlib import Path
+                    from datetime import datetime, timezone
+                    p = Path(note_dir) / "loop" / "FAILURE_LOG.md"
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                    with open(p, "a", encoding="utf-8") as f:
+                        f.write(f"\n## {ts} — {job.title} failed\n\n"
+                                f"Error: {str(e)[:500]}\n")
+                except Exception as note_exc:
+                    log.warning("failure-note write failed: %s", note_exc)
 
     # ── internal ──────────────────────────────────────────────────────────────
 

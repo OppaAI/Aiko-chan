@@ -873,7 +873,7 @@ class AikoThink:
         # The proactive idle check-in state machine lives in main.py's
         # ProactiveIdleRunner. That runner sets this flag via
         # set_proactive_resting() so learn.idle_learner_loop can see when
-        # Aiko is "resting" and pause autonomous study. The flag is cleared
+        # Aiko is "resting" and it is safe to study. The flag is cleared
         # by _note_user_activity() on every normal turn.
         self._proactive_lock = threading.Lock()
         self._proactive_resting = False
@@ -1657,8 +1657,8 @@ class AikoThink:
             self._proactive_resting = False
 
     def is_proactive_resting(self) -> bool:
-        """True when Aiko is resting and should not start autonomous study.
-        Set by set_proactive_resting() (called from main.py's
+        """True when Aiko is resting and the idle learner may study.
+        Set by set_proactive_resting() (called from system/orchestrate.py's
         ProactiveIdleRunner) and cleared by _note_user_activity() on
         every normal turn. Polled by learn.idle_learner_loop."""
         return self._proactive_resting

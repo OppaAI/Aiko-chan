@@ -982,6 +982,13 @@ class AikoThink:
             volatile_parts.append(state_obj.identity_guidance())
             volatile_parts.append(state_obj.self_model_context())
             volatile_parts.append(state_obj.subconscious_guidance())
+            # Inner voice on EVERY turn (not just deliberation turns): the
+            # rolling first-person thought thread + one unprompted aside if
+            # due. Cheap (no LLM/DB) — this is what keeps her feeling like
+            # the same person across short casual messages.
+            inner_turn = state_obj.inner_voice_turn_block()
+            if inner_turn:
+                volatile_parts.append(inner_turn)
             # Structured reasoning instruction (Anthropic-style CoT with explicit tags)
             reasoning_guide = (
                 "When facing complex questions, use explicit structured reasoning:\n"

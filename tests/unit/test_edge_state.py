@@ -72,15 +72,26 @@ def test_attention_state_has_no_context_before_first_turn():
     assert EdgeCognitiveState().context("hello") == ""
 
 
-def test_metacognitive_context_surfaces_one_queued_aside():
+def test_inner_voice_turn_block_surfaces_one_queued_aside():
     state = EdgeCognitiveState()
     state._inner_voice.queue_aside("A spontaneous thought")
 
-    first = state.metacognitive_context()
-    second = state.metacognitive_context()
+    first = state.inner_voice_turn_block()
+    second = state.inner_voice_turn_block()
 
     assert "- A spontaneous thought\n</inner_voice>" in first
     assert "A spontaneous thought" not in second
+
+
+def test_metacognitive_context_carries_no_inner_voice():
+    # Inner voice rides on every turn via inner_voice_turn_block(); the
+    # metacognitive checkpoint must stay pure so deliberation turns don't
+    # get the block twice.
+    state = EdgeCognitiveState()
+    state._inner_voice.queue_aside("A spontaneous thought")
+    block = state.metacognitive_context("hello", [{"memory": "x"}])
+    assert "<inner_voice>" not in block
+    assert "A spontaneous thought" not in block
 
 
 def test_detects_recent_contradiction():

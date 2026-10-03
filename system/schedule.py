@@ -1117,7 +1117,7 @@ DEEP_STUDY_WINDOW_JOB_TITLES: dict[str, tuple[str, list[str], str]] = {
 
 
 WORKSPACE_KNOWLEDGE_JOB_TITLE = "workspace_knowledge_scan"
-WORKSPACE_KNOWLEDGE_SCAN_INTERVAL_SECONDS = int(os.getenv("WORKSPACE_KNOWLEDGE_SCAN_INTERVAL_SECONDS", "60"))
+WORKSPACE_KNOWLEDGE_SCAN_INTERVAL_SECONDS = env_int("WORKSPACE_KNOWLEDGE_SCAN_INTERVAL_SECONDS", 60)
 
 
 def ensure_workspace_knowledge_job(timezone: str | None = None, user_id: str | None = None) -> None:
@@ -1165,16 +1165,16 @@ WEEKLY_SOCIAL_JOB_TITLE = "weekly_social_post"
 # early/late fire here is harmless.
 WEEKLY_SOCIAL_TIME_OF_DAY = os.getenv("WEEKLY_SOCIAL_TIME_OF_DAY", "18:00")
 WEEKLY_SOCIAL_RETRY_JOB_TITLE = "weekly_social_retry_check"
-WEEKLY_SOCIAL_RETRY_INTERVAL_SECONDS = int(os.getenv("WEEKLY_SOCIAL_RETRY_INTERVAL_SECONDS", str(30 * 60)))
+WEEKLY_SOCIAL_RETRY_INTERVAL_SECONDS = env_int("WEEKLY_SOCIAL_RETRY_INTERVAL_SECONDS", 30 * 60)
 
 PHOTO_SOCIAL_JOB_TITLE = "photo_social_scan"
-PHOTO_SOCIAL_SCAN_INTERVAL_SECONDS = int(os.getenv("PHOTO_SOCIAL_SCAN_INTERVAL_SECONDS", str(6 * 60 * 60)))  # 6h default
+PHOTO_SOCIAL_SCAN_INTERVAL_SECONDS = env_int("PHOTO_SOCIAL_SCAN_INTERVAL_SECONDS", 6 * 60 * 60)  # 6h default
 
 VIDEO_SOCIAL_JOB_TITLE = "video_social_scan"
-VIDEO_SOCIAL_SCAN_INTERVAL_SECONDS = int(os.getenv("VIDEO_SOCIAL_SCAN_INTERVAL_SECONDS", str(6 * 60 * 60)))  # 6h default
+VIDEO_SOCIAL_SCAN_INTERVAL_SECONDS = env_int("VIDEO_SOCIAL_SCAN_INTERVAL_SECONDS", 6 * 60 * 60)  # 6h default
 
 THREADS_REPLY_MONITOR_JOB_TITLE = "threads_reply_monitor"
-THREADS_REPLY_MONITOR_INTERVAL_SECONDS = int(os.getenv("THREADS_REPLY_MONITOR_INTERVAL_SECONDS", "180"))
+THREADS_REPLY_MONITOR_INTERVAL_SECONDS = env_int("THREADS_REPLY_MONITOR_INTERVAL_SECONDS", 180)
 
 JOB_POST_SOCIAL_JOB_TITLE = "daily_job_post_social"
 JOB_POST_SOCIAL_DEFAULT_TIME = "23:00"
@@ -1600,7 +1600,6 @@ def bootstrap_non_system_jobs(
             # fresh record on every boot, producing N duplicate "Check email for
             # job alerts" jobs that all fired at once and read the whole mailbox.
             try:
-                from system.schedule import _read_all, schedule_job_record
                 existing_titles = {job.get("title") for job in _read_all(user_id=user_id)}
                 if "Check email for job alerts" not in existing_titles:
                     schedule_job_record(
@@ -1698,10 +1697,6 @@ def register_scheduler(scheduler: ScheduleRunner) -> None:
     _scheduler_instance = scheduler
 
 
-def get_scheduler() -> "ScheduleRunner | None":
-    """Return the registered scheduler instance, if one has been started."""
-    return _scheduler_instance
-
 
 def notify_scheduler_new_job() -> None:
     """Notify the scheduler that a new job was added, so it wakes early to pick it up."""
@@ -1745,8 +1740,6 @@ class DueJob:
     requires_idle: bool = False
     idle_seconds: int | None = None
 
-
-DueReminder = DueJob
 
 # ── system job timing ─────────────────────────────────────────────────────────
 
@@ -2179,21 +2172,36 @@ class ScheduleRunner:
                     release_busy()
 
             # ── sleep until soonest next target across all users ──────────────
+            def _safe_next_due(raw):
+                # A single corrupt next_due must never kill this daemon
+                # thread: skip unparseable values instead of raising.
+                if not isinstance(raw, str) or not raw:
+                    return None
+                try:
+                    dt = datetime.fromisoformat(raw)
+                except (ValueError, TypeError):
+                    log.warning("Scheduler: ignoring malformed next_due %r", raw[:60])
+                    return None
+                if dt.tzinfo is None:
+                    # Naive datetimes would crash min() against aware
+                    # ones; assume local time rather than dropping the job.
+                    dt = dt.replace(tzinfo=bioclock.local_now().tzinfo)
+                return dt
             candidates = [self._next_daily, self._next_monthly]
             if self._owner_promoted.is_set():
                 candidates.append(self._next_ledger_prune)
                 candidates.append(self._next_fly_replay)
             for uid in all_user_ids():
-                candidates.extend(
-                    datetime.fromisoformat(j["next_due"])
-                    for j in _read_all(user_id=uid)
-                    if j.get("enabled", True) and j.get("next_due")
-                )
-                candidates.extend(
-                    datetime.fromisoformat(g["next_due"])
-                    for g in _read_schedule_graphs(user_id=uid)
-                    if g.get("enabled", True) and g.get("next_due")
-                )
+                for j in _read_all(user_id=uid):
+                    if j.get("enabled", True) and j.get("next_due"):
+                        dt = _safe_next_due(j["next_due"])
+                        if dt is not None:
+                            candidates.append(dt)
+                for g in _read_schedule_graphs(user_id=uid):
+                    if g.get("enabled", True) and g.get("next_due"):
+                        dt = _safe_next_due(g["next_due"])
+                        if dt is not None:
+                            candidates.append(dt)
             next_target = min(candidates)
 
             delta = (next_target - bioclock.local_now()).total_seconds()
@@ -2881,4 +2889,3 @@ def start_scheduler(
     return scheduler
 
 
-ReminderScheduler = ScheduleRunner

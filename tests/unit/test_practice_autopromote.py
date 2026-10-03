@@ -201,3 +201,55 @@ def test_three_rehearses_trigger_autopromote(exp_db, playbook_file, monkeypatch)
     promoted = schema.maybe_autopromote_experiences(user_id="test-user")
     assert len(promoted) == 1
     assert promoted[0]["experience_id"] == exp_id
+
+def test_plan_from_master_threads_source_experience_id(exp_db, playbook_file):
+    """Regression: #225's merge dropped the _extras threading; plan must carry it."""
+    exp_id = _seed_ok_experience()
+    _, plan_id = schema.append_playbook_from_experience(
+        "practice task",
+        [{"tool": "kb_search", "ok": True, "args": {}}],
+        source_experience_id=exp_id,
+    )
+    graph = schema.plan_from_master("practice task")
+    assert graph is not None
+    assert (graph._extras or {}).get("source_experience_id") == exp_id
+
+
+def test_successful_playbook_run_bumps_source_use_count(exp_db, playbook_file, monkeypatch):
+    """Regression: #225's merge dropped the run-success use bump."""
+    from types import SimpleNamespace
+
+    exp_id = _seed_ok_experience()
+    schema.append_playbook_from_experience(
+        "practice task",
+        [{"tool": "kb_search", "ok": True, "args": {}}],
+        source_experience_id=exp_id,
+    )
+    fake_result = SimpleNamespace(
+        results=[SimpleNamespace(ok=True)],
+        goal_score=None,
+        final_answer="done",
+    )
+    monkeypatch.setattr(schema, "execute_graph", lambda *a, **k: fake_result)
+    out = schema.run_schema_agent("practice task")
+    assert out is fake_result
+    assert _use_count(exp_id) == 1
+
+
+def test_failed_playbook_run_does_not_bump_use_count(exp_db, playbook_file, monkeypatch):
+    from types import SimpleNamespace
+
+    exp_id = _seed_ok_experience()
+    schema.append_playbook_from_experience(
+        "practice task",
+        [{"tool": "kb_search", "ok": True, "args": {}}],
+        source_experience_id=exp_id,
+    )
+    fake_result = SimpleNamespace(
+        results=[SimpleNamespace(ok=False)],
+        goal_score=None,
+        final_answer="failed",
+    )
+    monkeypatch.setattr(schema, "execute_graph", lambda *a, **k: fake_result)
+    schema.run_schema_agent("practice task")
+    assert _use_count(exp_id) == 0

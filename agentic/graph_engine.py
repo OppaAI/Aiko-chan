@@ -1510,7 +1510,8 @@ def plan_from_master(user_input: str, cap_ids: list[str] | None = None, embedder
         goal=user_input,
         nodes=tuple(nodes),
         reducers=dict(plan.get("reducers") or {}),
-        _extras={**extras, "max_workers": plan.get("max_workers") or 2},
+        _extras={**extras, "max_workers": plan.get("max_workers") or 2,
+                 "source_experience_id": plan.get("source_experience_id")},
     )
     return graph
 
@@ -2413,6 +2414,17 @@ def run_schema_agent(user_input: str, cap_ids: list[str] | None = None, embedder
         run_id = hashlib.sha256(f"{graph.id}|{user_input}".encode()).hexdigest()[:16]
     result = execute_graph(graph, embedder=embedder, llm_client=llm_client,
                             llm_model=llm_model, run_id=run_id)
+    if result is not None and all(r.ok for r in result.results):
+        # Practice loop: a successful playbook run counts as a "use" of the
+        # experience it was promoted from. Frequently used workflows earn
+        # auto-promotion into playbook DAGs (maybe_autopromote_experiences).
+        src_exp = (graph._extras or {}).get("source_experience_id")
+        if src_exp:
+            try:
+                from agentic import experience as _exp
+                _exp.record_experience_use(str(src_exp))
+            except Exception:
+                log.debug("experience use-count increment skipped", exc_info=True)
     if result.goal_score is not None:
         _record_goal_engram(graph.goal, result.goal_score, result.goal_reasons,
                             graph.name, result.steps)

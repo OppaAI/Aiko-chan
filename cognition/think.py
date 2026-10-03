@@ -2049,6 +2049,7 @@ class AikoThink:
         token_callback=None,
         mem_kb_future=None,
         query_vec: np.ndarray | None = None,
+        include_history: bool = True,
     ) -> str:
         """Handle defer / clarify / degrade_chat without starting agentic tools.
 
@@ -2071,6 +2072,7 @@ class AikoThink:
             mem_kb_future=mem_kb_future,
             query_vec=query_vec,
             store_turn=True,
+            include_history=include_history,
         )
 
     def agentic_chat(self, user_input: str, token_callback=None, mem_kb_future=None, query_vec: np.ndarray | None = None, _from_route: bool = False, system_note: str | None = None, gate_result: tuple[bool, str, str] | None = None, include_history: bool = True) -> str:
@@ -2102,6 +2104,7 @@ class AikoThink:
                 return self._soft_gate_reply(
                     user_input, gate_action, gate_reason, token_callback=token_callback,
                     mem_kb_future=mem_kb_future, query_vec=query_vec,
+                    include_history=include_history,
                 )
 
             memorize = self._get_memorize()
@@ -2260,6 +2263,7 @@ class AikoThink:
         system_note: str | None = None,
         deep_think: bool = False,
         return_deep_think_summary: bool = False,
+        include_history: bool = True,
     ) -> str | tuple[str, str | None]:
         """Standard chat: persona plus optional memory/KB context.
 
@@ -2430,9 +2434,11 @@ class AikoThink:
                     if _PERSONAL_FACT_RE.search(raw_input or ""):
                         volatile_system += (
                             "\n\n<answer_discipline>\nNo memories were found for this "
-                            "question. If it asks for a personal fact about the user, "
-                            "say you don't know it yet or ask them — never invent "
-                            "names, preferences, or past events.\n</answer_discipline>"
+                            "question. Check the <persona> profile facts above first — "
+                            "if one answers it, use it. Otherwise, if it asks for a "
+                            "personal fact about the user, say you don't know it yet "
+                            "or ask them — never invent names, preferences, or past "
+                            "events.\n</answer_discipline>"
                         )
                 # Learned knowledge is on-demand in chat: memory is always-on,
                 # knowledge only when memory is absent/weak or explicitly asked.
@@ -2590,7 +2596,10 @@ class AikoThink:
                 self._history.append({"role": "user", "content": raw_input})
                 if len(self._history) > CONTEXT_WINDOW_TURNS * 10:
                     self._history = self._history[-(CONTEXT_WINDOW_TURNS * 10):]
-                trimmed = self._history[-(CONTEXT_WINDOW_TURNS * 2):]
+                # include_history=False (scheduled jobs): the turn is still
+                # stored, but prior history is not sent — ticks resume from
+                # checkpoint files, not chat.
+                trimmed = self._history[-(CONTEXT_WINDOW_TURNS * 2):] if include_history else []
 
             trimmed = self._sanitize_history(trimmed)
             if trimmed and trimmed[-1]["role"] == "user" and llm_prompt != user_input:

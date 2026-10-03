@@ -2138,8 +2138,21 @@ class EdgeCognitiveState:
                 f"any 'superseded' status in hits: {'superseded' in statuses}",
             ],
         )
-        # Conscious stream: the ongoing first-person train of thought rides
-        # along so the reply continues it instead of restarting the persona.
+        # NOTE: the inner-voice block is NOT appended here. It rides on every
+        # turn via EdgeCognitiveState.inner_voice_turn_block(), injected
+        # unconditionally in think._current_system_prompt_parts(). Keeping
+        # this method a pure confidence checkpoint avoids double-injection
+        # on deliberation turns.
+        return block
+
+    def inner_voice_turn_block(self) -> str:
+        """Inner-voice block for prompt injection on every turn.
+
+        The rolling first-person thought thread plus one unprompted aside
+        if one is due (cooldown enforced by InnerVoice). Cheap (no LLM,
+        no DB, bounded deque) — safe on the hot path. Returns "" when the
+        inner voice is unavailable.
+        """
         try:
             inner = self.inner_voice_block()
         except Exception:
@@ -2154,7 +2167,7 @@ class EdgeCognitiveState:
                 inner = inner.replace(closing, f"- {aside}\n{closing}", 1)
             else:
                 inner += f"\n- {aside}"
-        return block + ("\n\n" + inner if inner else "")
+        return inner
 
     def context(self, query: str = "") -> str:
         """Render bounded recent state for injection into active cognition. Context rendering."""

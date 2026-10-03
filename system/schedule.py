@@ -1647,6 +1647,15 @@ def bootstrap_non_system_jobs(
     except Exception:
         log.exception("Failed to seed Aiko-Playground idle-build schedule job.")
 
+    # Aiko practice sessions: autonomous trial runs that build experience.
+    # One idempotent interval job, requires_idle - same ordinary-record
+    # pattern as the Playground loop.
+    try:
+        from system.practice import ensure_practice_job
+        ensure_practice_job(timezone=timezone, user_id=user_id)
+    except Exception:
+        log.exception("Failed to seed Aiko practice schedule job.")
+
 
 def ensure_deep_study_window_jobs(timezone: str | None = None, user_id: str | None = None) -> None:
     """Idempotently seed the four recurring jobs that bound Aiko's

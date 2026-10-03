@@ -1510,7 +1510,8 @@ def plan_from_master(user_input: str, cap_ids: list[str] | None = None, embedder
         goal=user_input,
         nodes=tuple(nodes),
         reducers=dict(plan.get("reducers") or {}),
-        _extras={**extras, "max_workers": plan.get("max_workers") or 2},
+        _extras={**extras, "max_workers": plan.get("max_workers") or 2,
+                 "source_experience_id": plan.get("source_experience_id")},
     )
     return graph
 
@@ -2389,6 +2390,17 @@ def run_schema_agent(user_input: str, cap_ids: list[str] | None = None, embedder
         run_id = hashlib.sha256(f"{graph.id}|{user_input}".encode()).hexdigest()[:16]
     result = execute_graph(graph, embedder=embedder, llm_client=llm_client,
                             llm_model=llm_model, run_id=run_id)
+    if result is not None and all(r.ok for r in result.results):
+        # Practice loop: a successful playbook run counts as a "use" of the
+        # experience it was promoted from. Frequently used workflows earn
+        # auto-promotion into playbook DAGs (maybe_autopromote_experiences).
+        src_exp = (graph._extras or {}).get("source_experience_id")
+        if src_exp:
+            try:
+                from agentic import experience as _exp
+                _exp.record_experience_use(str(src_exp))
+            except Exception:
+                log.debug("experience use-count increment skipped", exc_info=True)
     if result.goal_score is not None:
         _record_goal_engram(graph.goal, result.goal_score, result.goal_reasons,
                             graph.name, result.steps)
@@ -2473,12 +2485,19 @@ def _promotion_args_for_step(tool: str, step: dict[str, Any]) -> dict[str, Any]:
     return {str(k): "$prompt" for k in arg_keys}
 
 
-def append_playbook_from_experience(goal: str, steps: list[dict[str, Any]], *, name: str | None = None) -> Path:
+def append_playbook_from_experience(goal: str, steps: list[dict[str, Any]], *, name: str | None = None,
+                                   source_experience_id: str | None = None) -> tuple[Path, str]:
     """Promote a practiced or ReAct-discovered tool sequence into user playbooks.
 
     Args are stored as sanitized previews by the experience layer, so promoted
     templates intentionally use ``$prompt``/``$title`` placeholders unless the
     operator edits the JSON by hand.
+
+    When ``source_experience_id`` is given it is stored on the playbook; each
+    successful execution of the playbook then increments that experience's
+    ``use_count`` (see ``run_schema_agent``), feeding auto-promotion.
+
+    Returns (playbook_file, new_plan_id).
     """
     nodes = []
     for idx, step in enumerate(steps, start=1):
@@ -2493,13 +2512,16 @@ def append_playbook_from_experience(goal: str, steps: list[dict[str, Any]], *, n
         raise ValueError("no promotable tool steps found")
     path = _playbook_file()
     path.parent.mkdir(parents=True, exist_ok=True)
+    plan_id = f"practiced_{uuid.uuid4().hex[:10]}"
     new_plan = {
-        "id": f"practiced_{uuid.uuid4().hex[:10]}",
+        "id": plan_id,
         "name": name or _title(goal),
         "triggers": _heuristic_items(goal)[:4],
         "requires_any": [],
         "nodes": nodes,
     }
+    if source_experience_id:
+        new_plan["source_experience_id"] = source_experience_id
     with _playbook_write_guard(path):
         existing = []
         if path.exists():
@@ -2513,7 +2535,69 @@ def append_playbook_from_experience(goal: str, steps: list[dict[str, Any]], *, n
         tmp_path = path.with_suffix(".tmp")
         tmp_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp_path.replace(path)
-        return path
+        return path, plan_id
+
+
+def maybe_autopromote_experiences(user_id: str | None = None) -> list[dict[str, str]]:
+    """Promote frequently-used experiences into playbook DAGs.
+
+    Finds experiences with ``use_count`` at or above
+    ``AIKO_PRACTICE_AUTOPROMOTE_USES`` (default 3) that succeeded
+    (``outcome='ok'``), are still active, and have no playbook yet — then
+    promotes each into the user playbook file and stamps
+    ``promoted_playbook_id`` so it never promotes twice.
+
+    Returns [{experience_id, playbook_id, playbook_file}]. Env-gated by
+    ``AIKO_PRACTICE_AUTOPROMOTE_ENABLED`` (default "1"); set "0" to disable.
+    """
+    if os.getenv("AIKO_PRACTICE_AUTOPROMOTE_ENABLED", "1").strip() != "1":
+        return []
+    try:
+        threshold = max(1, int(os.getenv("AIKO_PRACTICE_AUTOPROMOTE_USES", "3").strip() or "3"))
+    except ValueError:
+        threshold = 3
+    from system.userspace import current_user_id
+    from agentic.experience.schema import connect, ensure_experience_schema_migrated, now
+    uid = user_id or current_user_id()
+    conn = connect(uid)
+    promoted: list[dict[str, str]] = []
+    try:
+        ensure_experience_schema_migrated(conn)
+        rows = conn.execute(
+            "SELECT id, goal, steps_json FROM experiences "
+            "WHERE user_id = ? AND status = 'active' AND outcome = 'ok' "
+            "AND use_count >= ? AND promoted_playbook_id IS NULL "
+            "ORDER BY use_count DESC, last_used_at DESC LIMIT 25",
+            (uid, threshold),
+        ).fetchall()
+        for row in rows:
+            exp_id = row["id"]
+            try:
+                steps = json.loads(row["steps_json"] or "[]")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(steps, list) or not steps:
+                continue
+            try:
+                path, plan_id = append_playbook_from_experience(
+                    row["goal"] or "practiced workflow", steps,
+                    source_experience_id=exp_id)
+            except Exception as exc:
+                log.warning("autopromote %s failed (non-fatal): %s", exp_id, exc)
+                continue
+            conn.execute(
+                "UPDATE experiences SET promoted_playbook_id = ? WHERE id = ? AND user_id = ?",
+                (plan_id, exp_id, uid),
+            )
+            conn.commit()
+            promoted.append({"experience_id": exp_id, "playbook_id": plan_id,
+                             "playbook_file": str(path)})
+            log.info("autopromoted experience %s -> playbook %s", exp_id, plan_id)
+    except Exception as exc:
+        log.warning("maybe_autopromote_experiences failed (non-fatal): %s", exc)
+    finally:
+        conn.close()
+    return promoted
 
 
 from agentic.registry import TOOLS, register_tool_schema, tool

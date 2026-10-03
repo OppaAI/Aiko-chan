@@ -64,6 +64,7 @@ from .acquire import (
     ExperienceWriter,
     _prune,
     record_experience,
+    record_experience_use,
     record_practice_experience,
 )
 
@@ -140,6 +141,7 @@ __all__ = [
     "now",
     "record_engram_relation",
     "record_experience",
+    "record_experience_use",
     "record_practice_experience",
     "sanitize",
     "search_experience",

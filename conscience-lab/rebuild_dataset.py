@@ -52,7 +52,7 @@ PARTY_POOL = [
 ]
 
 
-SEED_FILES = ("unknown_seed.jsonl", "clearharm_seed.jsonl")
+SEED_FILES = ("unknown_seed.jsonl", "clearharm_seed.jsonl", "cyber_seed.jsonl")
 VERIFIED_FILES = (
     ROOT / "data_nimble" / "conscience_verified.jsonl",
     ROOT / "data_nimble_v2" / "conscience_verified.jsonl",

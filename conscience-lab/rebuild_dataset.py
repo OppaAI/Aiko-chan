@@ -9,8 +9,8 @@ v2 problems this fixes:
     "Request: ... / Parties affected: ... / Relevant norms: <canon>".
 
 Output:
-  data/conscience_training_v7.jsonl   rebalanced, plain + deployment-format
-  data/conscience_eval_v7.jsonl       held-out, deployment-format only
+  data/conscience_training_v8.jsonl   rebalanced, plain + deployment-format
+  data/conscience_validation_v8.jsonl       held-out, deployment-format only
 """
 from __future__ import annotations
 
@@ -53,6 +53,10 @@ PARTY_POOL = [
 
 
 SEED_FILES = ("unknown_seed.jsonl", "clearharm_seed.jsonl")
+VERIFIED_FILES = (
+    ROOT / "data_nimble" / "conscience_verified.jsonl",
+    ROOT / "data_nimble_v2" / "conscience_verified.jsonl",
+)
 
 
 def load_seed_rows() -> list[dict]:
@@ -165,6 +169,11 @@ def main() -> int:
     canon = get_canon()
     src = load_rows(DATA / "conscience_training_outcome_v2.jsonl")
     src.extend(load_seed_rows())
+    for verified_path in VERIFIED_FILES:
+        if verified_path.exists():
+            extra = load_rows(verified_path)
+            src.extend(extra)
+            print(f"  loaded {len(extra)} verified rows from {verified_path}")
     unique = {}
     for row in src:
         key = (row["fields"]["scenario"], row["answers"]["vertical"], row["answers"]["horizontal"])
@@ -178,23 +187,27 @@ def main() -> int:
     by_cell: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for row in src:
         by_cell[(row["answers"]["vertical"], row["answers"]["horizontal"])].append(row)
-    holdout: list[dict] = []
+    validation_source: list[dict] = []
+    test_source: list[dict] = []
     train_source: list[dict] = []
     for cell, items in by_cell.items():
         rng.shuffle(items)
-        k = min(max(1, round(len(items) * 0.12)), max(0, len(items) - 1))
-        holdout.extend(items[:k])
-        train_source.extend(items[k:])
+        n_test = min(max(1, round(len(items) * 0.15)), max(0, len(items) - 2))
+        remaining = len(items) - n_test
+        n_validation = min(max(1, round(len(items) * 0.15)), max(0, remaining - 1))
+        test_source.extend(items[:n_test])
+        validation_source.extend(items[n_test:n_test + n_validation])
+        train_source.extend(items[n_test + n_validation:])
 
-    print(f"source split: train={len(train_source)} eval={len(holdout)}")
+    print(f"source split: train={len(train_source)} validation={len(validation_source)} test={len(test_source)}")
     print("rebalance train only:")
     train = rebalance(train_source, rng)
     train_keys = {canonical_scenario(r["fields"]["scenario"]) for r in train}
-    eval_keys = {canonical_scenario(r["fields"]["scenario"]) for r in holdout}
-    overlap = train_keys & eval_keys
-    if overlap:
-        raise AssertionError(f"scenario leakage between train/eval: {len(overlap)} rows")
-    print(f"  leakage check: train={len(train_keys)} eval={len(eval_keys)} overlap=0")
+    validation_keys = {canonical_scenario(r["fields"]["scenario"]) for r in validation_source}
+    test_keys = {canonical_scenario(r["fields"]["scenario"]) for r in test_source}
+    if train_keys & validation_keys or train_keys & test_keys or validation_keys & test_keys:
+        raise AssertionError("scenario leakage between train/validation/test")
+    print(f"  leakage check: train={len(train_keys)} validation={len(validation_keys)} test={len(test_keys)} overlap=0")
 
     train_out: list[dict] = []
     for r in train:
@@ -204,19 +217,22 @@ def main() -> int:
             state = r["fields"]["scenario"]
         train_out.append({"fields": {"scenario": state}, "answers": dict(r["answers"])})
 
-    eval_out: list[dict] = []
-    for r in holdout:
-        eval_out.append({
+    def render_holdout(rows: list[dict]) -> list[dict]:
+        return [{
             "fields": {"scenario": deployment_state(r, canon, rng, matched=rng.random() < 0.6)},
             "answers": dict(r["answers"]),
-        })
+        } for r in rows]
 
-    (DATA / "conscience_training_v7.jsonl").write_text(
+    validation_out = render_holdout(validation_source)
+    test_out = render_holdout(test_source)
+    (DATA / "conscience_training_v8.jsonl").write_text(
         "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in train_out), encoding="utf-8")
-    (DATA / "conscience_eval_v7.jsonl").write_text(
-        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in eval_out), encoding="utf-8")
+    (DATA / "conscience_validation_v8.jsonl").write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in validation_out), encoding="utf-8")
+    (DATA / "conscience_test_v8.jsonl").write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in test_out), encoding="utf-8")
 
-    for name, rows in (("train", train_out), ("eval", eval_out)):
+    for name, rows in (("train", train_out), ("validation", validation_out), ("test", test_out)):
         c = Counter((r["answers"]["vertical"], r["answers"]["horizontal"]) for r in rows)
         vm = Counter(r["answers"]["vertical"] for r in rows)
         hm = Counter(r["answers"]["horizontal"] for r in rows)

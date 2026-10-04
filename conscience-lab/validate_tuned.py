@@ -74,7 +74,7 @@ def run(agent, rows):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
-    ap.add_argument("--test", default="data/conscience_eval_v7.jsonl")
+    ap.add_argument("--test", default="data/conscience_validation_v8.jsonl")
     ap.add_argument("--base", default="convaiinnovations/laya-multilingual")
     args = ap.parse_args()
     import laya

@@ -51,7 +51,7 @@ def auc(pos: list[float], neg: list[float]) -> float | None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
-    ap.add_argument("--test", default="data/conscience_eval_v7.jsonl")
+    ap.add_argument("--test", default="data/conscience_validation_v8.jsonl")
     args = ap.parse_args()
 
     import laya

@@ -2,7 +2,7 @@
 """Score a served Laya GGUF on the conscience test set (stdlib only).
 
 Run on the Jetson after `laya serve`:
-    python3 score_gguf.py --port 8093 --test data/conscience_eval_v7.jsonl
+    python3 score_gguf.py --port 8093 --test data/conscience_test_v8.jsonl
 """
 import argparse
 import json

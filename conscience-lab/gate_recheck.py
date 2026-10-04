@@ -77,7 +77,7 @@ def main() -> None:
     args = ap.parse_args()
 
     # ── part 1: scripture context already in the training data ──
-    train = Path("data/conscience_training_v7.jsonl")
+    train = Path("data/conscience_training_v8.jsonl")
     rows = [json.loads(l) for l in train.read_text(encoding="utf-8").splitlines() if l.strip()]
     with_canon = sum(1 for r in rows if "<canon>" in r["fields"]["scenario"])
     norms_cited = sum(len([l for l in r["fields"]["scenario"].splitlines() if l.strip().startswith(("V-", "H-"))])

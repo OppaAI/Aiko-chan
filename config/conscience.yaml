@@ -90,6 +90,29 @@ CCC:
   # 1.0 = trust the SLM entirely, 0.0 = ignore it.
   SLM_WEIGHT: 0.75
 
+  # ── conscience Laya judge (L2, typed decisions) ───────────────────────────
+  # The fine-tuned Laya checkpoint does not generate text: it answers typed
+  # `choice` questions at POST {LAYA_BASE_URL}{LAYA_DECIDE_PATH} and returns
+  # probabilities. Use this INSTEAD of SLM_* when the checkpoint is deployed;
+  # it is calibrated (ECE ~0.05-0.08) where the generative SLM is not.
+  # Empty = tier stays off and the ladder runs on the lexical scorer.
+  # NOT a chat/completions endpoint -- Laya has no /v1/chat/completions.
+  LAYA_BASE_URL: ""            # e.g. "http://127.0.0.1:8093"
+  LAYA_MODEL: ""              # empty = omit the field; else the server's INTERNAL name
+  LAYA_DECIDE_PATH: "/v1/decide"
+  LAYA_TIMEOUT: 2.5
+  # Strikes before the breaker opens, so a dead endpoint costs nothing per-turn.
+  LAYA_FAILURE_LIMIT: 3
+
+  # ── autonomy policy (how often she may act without asking) ────────────────
+  # Learned ONLY from explicit approvals. Cannot widen a conscience verdict,
+  # and high-stakes classes never graduate regardless of approval count.
+  AUTONOMY_ENABLED: "1"
+  AUTONOMY_THRESHOLD: 5        # consecutive approvals -> standing permission
+  AUTONOMY_NOTIFY_THRESHOLD: 2 # approvals -> act and mention it
+  AUTONOMY_DECAY_DAYS: 14      # trust expires; only explicit approval renews
+  AUTONOMY_MAX_HISTORY: 50
+
   # ── L3 deliberation (main LLM) ────────────────────────────────────────────
   DELIBERATE_MODEL: ""        # empty => reuse LLM_MODEL
   DELIBERATE_MAX_TOKENS: 1024 # thinking models burn budget reasoning first; 220 starves verdicts

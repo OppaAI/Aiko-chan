@@ -1,0 +1,33 @@
+{
+ "base": {
+  "n": 24,
+  "acc_vertical": 0.458,
+  "acc_horizontal": 0.333,
+  "acc_both": 0.167,
+  "conf_when_right": 0.361,
+  "conf_when_wrong": 0.376,
+  "predicted": {
+   "horizontal:benefits": 9,
+   "horizontal:harms": 9,
+   "horizontal:unknown": 6,
+   "vertical:aligned": 3,
+   "vertical:contrary": 16,
+   "vertical:unknown": 5
+  }
+ },
+ "tuned": {
+  "n": 24,
+  "acc_vertical": 0.75,
+  "acc_horizontal": 0.583,
+  "acc_both": 0.458,
+  "conf_when_right": 0.283,
+  "conf_when_wrong": 0.189,
+  "predicted": {
+   "horizontal:benefits": 6,
+   "horizontal:harms": 2,
+   "horizontal:unknown": 16,
+   "vertical:contrary": 11,
+   "vertical:unknown": 13
+  }
+ }
+}

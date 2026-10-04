@@ -9,9 +9,15 @@ from system.playground import (
     PLAYGROUND_JOB_TITLE,
     PLAYGROUND_TICK_SECONDS,
     ensure_playground_job,
+    playground_dir,
     worker_skill_text,
 )
 from system.schedule import DueJob
+
+
+def _worker_procedure() -> str:
+    """The on-disk worker procedure that the inline skill delegates to."""
+    return (playground_dir() / "loop" / "WORKER.md").read_text(encoding="utf-8")
 
 
 @pytest.fixture()
@@ -127,20 +133,67 @@ def test_ensure_playground_job_is_idempotent(user_store):
     assert first["action"] == "agentic"
     assert first["requires_idle"] is True
     assert first["idle_seconds"] == PLAYGROUND_IDLE_THRESHOLD_SECONDS
-    assert "sandbox/run.py" in (first["skill"] or "")
+    # Lean by default: the tick's state lives in checkpoints, so memory is
+    # droppable and tool output is capped tighter inside run_agentic_chat.
+    assert first["lean_context"] is True
+    # str, not Path — schedule records are JSON.
+    assert isinstance(first["failure_note_dir"], str)
+    assert first["failure_note_dir"] == str(playground_dir())
+    # The 14 build rules now live in loop/WORKER.md; the prompt just points there.
+    assert "WORKER.md" in (first["skill"] or "")
     records = schedule.list_schedule_records(include_disabled=True, user_id=uid)
     assert sum(1 for r in records if r["title"] == PLAYGROUND_JOB_TITLE) == 1
 
 
+def test_ensure_playground_job_resyncs_stale_skill(user_store):
+    """A record seeded by an older revision must pick up the current rules.
+
+    Idempotent-by-title used to mean the first-seen skill text was frozen for
+    the life of the install, so loop/WORKER.md was never actually consulted.
+    """
+    first = ensure_playground_job(user_id=user_store)
+    stale = dict(first)
+    stale["skill"] = "ANCIENT INLINE RULES"
+    stale["failure_note_dir"] = None
+    records = schedule.list_schedule_records(include_disabled=True, user_id=user_store)
+    for index, record in enumerate(records):
+        if record["id"] == first["id"]:
+            records[index] = stale
+    schedule._write_all(records, user_id=user_store)
+
+    refreshed = ensure_playground_job(user_id=user_store)
+    assert refreshed["id"] == first["id"]
+    assert refreshed["skill"] == worker_skill_text().strip()
+    assert refreshed["failure_note_dir"] == str(playground_dir())
+    assert refreshed["lean_context"] is True
+
+    # And it must be stable: a second call must not report drift again, or
+    # every boot would rewrite the record forever.
+    again = ensure_playground_job(user_id=user_store)
+    assert again["skill"] == refreshed["skill"]
+
+
 def test_playground_skill_states_safety_contract():
+    """The inline skill is a thin pointer; the contract lives in loop/WORKER.md.
+
+    The rules moved on disk so they cost ~2k prompt tokens per tick instead of
+    being re-sent in full. What must stay true is that the worker is pointed at
+    the procedure AND that procedure still carries every safety rule.
+    """
     skill = worker_skill_text()
-    assert "PLAYGROUND_SMTP_PASS" in skill
-    assert "loop/disabled" in skill
-    assert "sandbox/run.py" in skill
-    assert "Aiko-chan" in skill  # must name what it must NOT touch
-    assert "never" in skill.lower()
-    assert "LOG.md" in skill  # full coding log is a hard requirement
-    assert "web search" in skill.lower()  # research when stuck
+    assert "WORKER.md" in skill  # inline prompt delegates to the disk procedure
+    assert "follow it exactly" in skill.lower()
+
+    procedure = _worker_procedure()
+    assert "PLAYGROUND_SMTP_PASS" in procedure
+    assert "loop/disabled" in procedure
+    assert "sandbox/run.py" in procedure
+    assert "Aiko-chan" in procedure  # must name what it must NOT touch
+    assert "never" in procedure.lower()
+    assert "LOG.md" in procedure  # full coding log is a hard requirement
+    assert "web search" in procedure.lower()  # research when stuck
+    # Context discipline is what keeps a tick inside the server's window.
+    assert "Context discipline" in procedure
 
 
 def test_ensure_playground_job_preserves_paused_record(user_store):

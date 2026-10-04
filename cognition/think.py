@@ -2075,7 +2075,13 @@ class AikoThink:
             include_history=include_history,
         )
 
-    def agentic_chat(self, user_input: str, token_callback=None, mem_kb_future=None, query_vec: np.ndarray | None = None, _from_route: bool = False, system_note: str | None = None, gate_result: tuple[bool, str, str] | None = None, include_history: bool = True) -> str:
+    def agentic_chat(
+        self, user_input: str, token_callback=None, mem_kb_future=None,
+        query_vec: np.ndarray | None = None, _from_route: bool = False,
+        system_note: str | None = None,
+        gate_result: tuple[bool, str, str] | None = None,
+        include_history: bool = True, lean_context: bool = False,
+    ) -> str:
         """Delegate task-mode execution to agentic.agentic.
 
         Runs a bounded self-assessment gate first (attention.should_attempt).
@@ -2083,6 +2089,10 @@ class AikoThink:
         chat, defer, or ask for clarification instead of starting the tool loop.
         Direct entry (scheduled jobs) still gates here; normal turns are gated
         earlier in route() with mode=route.
+
+        lean_context — scheduled autonomous jobs set this: memory becomes droppable
+        and tool output is capped tighter, because those sessions keep their state
+        in on-disk checkpoints rather than in the prompt.
         """
         user_id = current_user_id()
         with self._active_users_lock:
@@ -2122,7 +2132,11 @@ class AikoThink:
                 # notices as marked situational context so drained notes are
                 # never silently dropped on tool turns.
                 user_input = f"{user_input}\n\n[{_format_system_notices(system_note)}]"
-            response = run_agentic_chat(self, user_input, token_callback=token_callback, mem_kb_future=mem_kb_future, query_vec=query_vec, cap_vec=cap_vec, include_history=include_history)
+            response = run_agentic_chat(
+                self, user_input, token_callback=token_callback,
+                mem_kb_future=mem_kb_future, query_vec=query_vec, cap_vec=cap_vec,
+                include_history=include_history, lean_context=lean_context,
+            )
             return response
         finally:
             # Only record latency if called directly (not from route, which already records)
@@ -2868,11 +2882,17 @@ class AikoThink:
             log.error("Scheduled tool job %s failed: %s", job.id, e)
 
     def _run_scheduled_agentic_job(self, job: DueJob) -> None:
-        """Run a scheduled autonomous task through Aiko's agent loop.
+        """Run one scheduled autonomous task through Aiko's agent loop.
 
         Fresh history: each tick appends its skill prompt + result transcript
         to owner._history, so including it would bloat every later session
         past the server ctx. Ticks resume from checkpoint files, not chat.
+
+        Lean context: a tick's state lives in its own checkpoint files, so
+        Aiko's recalled memories buy nothing while costing the headroom that
+        keeps the ReAct loop inside the server's context window. Jobs that
+        want the full prompt budget can opt back in with
+        ``lean_context: false`` on the record.
         """
         prompt = (
             "Scheduled job due. Use only local available tools. If external action "
@@ -2880,8 +2900,11 @@ class AikoThink:
             f"Title: {job.title}\nTask: {job.task}"
             + (f"\n\nScheduled skill instructions:\n{job.skill}" if job.skill else "")
         )
+        lean = getattr(job, "lean_context", None)
+        if lean is None:
+            lean = True
         try:
-            self.agentic_chat(prompt, include_history=False)
+            self.agentic_chat(prompt, include_history=False, lean_context=bool(lean))
         except Exception as e:
             log.error("Scheduled agentic job failed: %s", e)
             # Leave a visible trace for jobs that opt in (e.g. the Playground

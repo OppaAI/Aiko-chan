@@ -94,15 +94,51 @@ def worker_skill_text() -> str:
 def ensure_playground_job(timezone: str | None = None, user_id: str | None = None) -> dict[str, Any]:
     """Seed the Playground idle-build schedule record (idempotent by title).
 
-    Returns the existing record when one is already present, so every
-    boot seeds at most one tick job. The record is an ordinary schedule entry:
-    it appears in Calendar Studio and disabling it there pauses the loop.
+    Returns the existing record when one is already present, so every boot
+    seeds at most one tick job. The record is an ordinary schedule entry: it
+    appears in Calendar Studio and disabling it there pauses the loop.
+
+    Idempotent by title, but NOT frozen. Every boot re-syncs the fields this
+    module owns (skill text, failure-note dir, lean profile) so a record seeded
+    by an older revision cannot keep serving stale instructions. Records whose
+    owned fields already match are left completely untouched, so a user's own
+    edits (enabled, cadence, title) always survive.
     """
-    from system.schedule import _read_all, notify_scheduler_new_job, schedule_job_record
+    from system.schedule import (
+        _read_all,
+        notify_scheduler_new_job,
+        schedule_job_record,
+        update_schedule_record,
+    )
+
+    desired_skill = worker_skill_text().strip()
+    # str(), not Path: schedule records are JSON, and a PosixPath made
+    # _write_all raise TypeError — so creating this job failed outright on any
+    # fresh install, and no failure note was ever recorded.
+    desired_note_dir = str(playground_dir())
 
     for job in _read_all(user_id=user_id):
-        if job.get("title") == PLAYGROUND_JOB_TITLE:
+        if job.get("title") != PLAYGROUND_JOB_TITLE:
+            continue
+        drift: dict[str, Any] = {}
+        # Compare stripped: schedule records store skill stripped, so comparing
+        # against the raw template (which ends in a newline) would report drift
+        # on every single boot and rewrite the record forever.
+        if (job.get("skill") or "").strip() != desired_skill:
+            drift["skill"] = desired_skill
+        if job.get("failure_note_dir") != desired_note_dir:
+            drift["failure_note_dir"] = desired_note_dir
+        if job.get("lean_context") is not True:
+            drift["lean_context"] = True
+        if not drift:
             return job
+        updated = update_schedule_record(job["id"], drift, user_id=user_id)
+        log.info(
+            "Playground: re-synced job %s (%s).",
+            job.get("id"), ", ".join(sorted(drift)),
+        )
+        return updated or job
+
     record = schedule_job_record(
         title=PLAYGROUND_JOB_TITLE,
         task=(
@@ -116,8 +152,9 @@ def ensure_playground_job(timezone: str | None = None, user_id: str | None = Non
         action="agentic",
         requires_idle=True,
         idle_seconds=PLAYGROUND_IDLE_THRESHOLD_SECONDS,
-        skill=worker_skill_text(),
-        failure_note_dir=playground_dir(),
+        skill=desired_skill,
+        failure_note_dir=desired_note_dir,
+        lean_context=True,
         user_id=user_id,
     )
     log.info("Playground: seeded idle-build job %s (every %ds, requires %ds idle).",

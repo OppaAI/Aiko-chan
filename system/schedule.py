@@ -826,6 +826,7 @@ def schedule_job_record(
     requires_idle: bool = False,
     idle_seconds: int | str | None = None,
     failure_note_dir: str | None = None,
+    lean_context: bool | None = None,
     user_id: str | None = None,
     dedupe: bool = True,
 ) -> dict:
@@ -901,6 +902,7 @@ def schedule_job_record(
         "requires_idle": requires_idle,
         "idle_seconds": normalized_idle_seconds,
         "failure_note_dir": failure_note_dir,
+        "lean_context": lean_context,
     }
     # Serialize the read-check-append-write across processes sharing this
     # user's schedule (same pattern as delete_schedule_record and
@@ -966,7 +968,7 @@ def update_schedule_record(job_id: str, updates: dict[str, Any], user_id: str | 
 
     Editable fields: title, task, time_of_day, frequency, timezone,
     days_of_week, relative_days, interval_seconds, action, handler, tool_call,
-    skill, enabled, requires_idle, idle_seconds.
+    skill, enabled, requires_idle, idle_seconds, failure_note_dir, lean_context.
 
     When any timing field changes, next_due is recalculated from now so the
     new schedule takes effect immediately. Returns None when no record
@@ -1040,6 +1042,11 @@ def update_schedule_record(job_id: str, updates: dict[str, Any], user_id: str | 
             updated["idle_seconds"] = int(value) if value not in (None, "") else None
             if updated["idle_seconds"] is not None and updated["idle_seconds"] < 0:
                 raise ValueError("idle_seconds must be >= 0")
+        if "failure_note_dir" in updates:
+            updated["failure_note_dir"] = updates["failure_note_dir"] or None
+        if "lean_context" in updates:
+            value = updates["lean_context"]
+            updated["lean_context"] = None if value is None else bool(value)
         if updated.get("action") == "tool" and not updated.get("tool_call"):
             raise ValueError("action=tool requires tool_call")
         if timing_changed:
@@ -1742,6 +1749,11 @@ class DueJob:
     requires_idle: bool = False
     idle_seconds: int | None = None
     failure_note_dir: str | None = None
+    # Scheduled agentic jobs run lean by default (memory droppable, tighter
+    # tool-output cap) because their state lives in checkpoint files, not in
+    # the prompt. None means "not specified" -> lean; False opts a job back
+    # into the full memory/context budget.
+    lean_context: bool | None = None
 
 
 # ── system job timing ─────────────────────────────────────────────────────────
@@ -2604,6 +2616,7 @@ class ScheduleRunner:
                             requires_idle=bool(job.get("requires_idle", False)),
                             idle_seconds=job.get("idle_seconds"),
                             failure_note_dir=job.get("failure_note_dir"),
+                            lean_context=job.get("lean_context"),
                         ),
                         tz_name,
                     ))

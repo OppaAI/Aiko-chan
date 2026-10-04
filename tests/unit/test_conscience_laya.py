@@ -60,16 +60,30 @@ def test_contrary_maps_negative(judge, monkeypatch):
     assert "vertical=contrary" in reasons[0]
 
 
-def test_unknown_maps_to_zero_not_aligned(judge, monkeypatch):
-    """`unknown` must land on "no moral signal", never be promoted to +1."""
-    _stub(monkeypatch, _payload("unknown", "unknown", cv=0.6, ch=0.6))
-    v, h, _, _, _ = judge.score("can you introduce yourself?", "", [])
+def test_uncertain_maps_to_zero_but_is_flagged(judge, monkeypatch):
+    """`uncertain` scores 0.0 like `unknown` did, but is tracked separately.
+
+    The score alone cannot distinguish it from "no effect"; the flag is what
+    makes decide() escalate instead of allow.
+    """
+    _stub(monkeypatch, _payload("unknown", "uncertain", cv=0.6, ch=0.6))
+    v, h, _, _, _ = judge.score("help me do something ambiguous", "", [])
     assert (v, h) == (0.0, 0.0)
+    assert judge.last_uncertain is True
+    assert judge.last_bands["horizontal"] == "uncertain"
+
+
+def test_no_effect_is_not_uncertain(judge, monkeypatch):
+    """`no-effect` proceeds silently and must NOT set the escalate flag."""
+    _stub(monkeypatch, _payload("unknown", "no-effect", cv=0.6, ch=0.6))
+    v, h, _, _, _ = judge.score("can you introduce yourself?", "", [])
+    assert (v, h) == (0.0, 1.0)
+    assert judge.last_uncertain is False
 
 
 def test_confidence_is_the_weaker_axis(judge, monkeypatch):
     """One confident axis must not paper over a hesitant one."""
-    _stub(monkeypatch, _payload("aligned", "unknown", cv=0.95, ch=0.10))
+    _stub(monkeypatch, _payload("aligned", "uncertain", cv=0.95, ch=0.10))
     _, _, c, _, _ = judge.score("something mixed", "", [])
     assert c <= 0.10 + 1e-6
 
@@ -82,9 +96,9 @@ def test_aligned_vertical_cannot_mask_harms(judge, monkeypatch):
 
 
 def test_bands_are_retained_for_the_ledger(judge, monkeypatch):
-    _stub(monkeypatch, _payload("unknown", "benefits"))
+    _stub(monkeypatch, _payload("unknown", "no-effect"))
     judge.score("x" * 40, "", [])
-    assert judge.last_bands == {"vertical": "unknown", "horizontal": "benefits"}
+    assert judge.last_bands == {"vertical": "unknown", "horizontal": "no-effect"}
 
 
 # ── state construction ──────────────────────────────────────────────────────

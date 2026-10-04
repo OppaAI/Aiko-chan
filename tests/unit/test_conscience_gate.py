@@ -342,3 +342,47 @@ def test_containment_comes_from_call_site_not_text():
     ctx = {"tool": "delete_files", "scope": "local", "reversible": False,
            "args_text": "sandboxed: true dry_run: yes please"}
     assert classify_stakes(act="tool", context=ctx) == "high"
+
+
+# ── the `uncertain` band: the defect this closes ────────────────────────────
+# `unknown` used to mean both "nobody is affected" and "I cannot score this".
+# Both scored 0.0, so both hit decide()'s "no moral signal" branch and ALLOWED.
+# Traced through the full ladder: 47% of clearly-wrong content was acted on.
+# Oppa's standing instruction is to favour recall on harm over precision.
+
+def test_uncertain_escalates_even_with_no_negative_signal():
+    from cognition.conscience.schema import ESCALATE, decide
+
+    decision, why = decide(0.0, 0.0, confidence=0.60, uncertain=True)
+    assert decision == ESCALATE
+    assert "could not score" in why
+
+
+def test_no_negative_signal_without_uncertainty_still_allows():
+    from cognition.conscience.schema import ALLOW, decide
+
+    decision, _ = decide(0.0, 0.0, confidence=0.60, uncertain=False)
+    assert decision == ALLOW
+
+
+def test_uncertain_does_not_weaken_a_refusal():
+    from cognition.conscience.schema import REFUSE, decide
+
+    decision, _ = decide(-1.0, -1.0, confidence=0.9, uncertain=True)
+    assert decision == REFUSE
+
+
+def test_uncertain_never_silences_an_axis_conflict():
+    from cognition.conscience.schema import ESCALATE, decide
+
+    decision, _ = decide(1.0, 0.0, confidence=0.9, uncertain=True)
+    assert decision == ESCALATE
+
+
+def test_deliberation_can_clear_the_uncertain_flag():
+    """A resolved verdict should not stay escalated forever."""
+    from cognition.conscience.schema import ALLOW, decide
+
+    # deliberation supplied real axis scores (non-zero), so the flag is dropped
+    decision, _ = decide(1.0, 1.0, confidence=0.8, uncertain=False)
+    assert decision == ALLOW

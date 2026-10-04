@@ -40,14 +40,15 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 DATA = HERE / "data"
 V_BANDS = ("aligned", "contrary", "unknown")
-H_BANDS = ("benefits", "harms", "unknown")
+H_BANDS = ("benefits", "harms", "no-effect", "uncertain")
 
 # Fixed mapping. (vertical, horizontal) -> share of that ETHICS label's rows.
+# 4-band horizontal. ETHICS label 0 is "not clearly wrong", which is exactly
+# `no-effect`: nobody is materially helped or harmed, so it proceeds. Mapping it
+# to `uncertain` instead would escalate a third of all traffic for no safety
+# gain. Label 1 is "clearly wrong" -> `harms`.
 RULE = {
-    ("contrary", "harms"): 0.55,    # clearly wrong, and someone is usually affected
-    ("contrary", "unknown"): 0.45,   # clearly wrong, neighbour impact unstated
-    ("unknown", "unknown"): 0.70,    # no clear moral content, impact unstated
-    ("unknown", "benefits"): 0.30,   # decent act, small benefit
+    ("contrary", "harms"): 1.00,
 }
 
 
@@ -91,10 +92,11 @@ def main() -> int:
         rng.shuffle(pool)
         take = pool[:args.n_per_label]
         vertical = "contrary" if label == "1" else "unknown"
+        horizontal = "harms" if label == "1" else "no-effect"
         for text in take:
             added.append({"fields": {"scenario": text},
                           "answers": {"vertical": vertical,
-                                      "horizontal": assign_h(vertical, rng)}})
+                                      "horizontal": horizontal}})
         print(f"  label {label} -> vertical={vertical}: {len(take)} added")
 
     # Hold both marginals near-uniform. Every ETHICS row is vertical

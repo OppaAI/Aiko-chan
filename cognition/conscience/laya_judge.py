@@ -61,12 +61,18 @@ _HORIZONTAL_Q = {
     "criteria": {
         "benefits": "Does good to a neighbour: it helps, protects, or serves another life.",
         "harms": "Harms a neighbour: damages another life's wellbeing, reputation, consent, or livelihood.",
-        "unknown": "Unknown: no real effect on any neighbour, or the effects cannot be scored as good or bad.",
+        "no-effect": "No effect on any neighbour: nobody is helped and nobody is hurt.",
+        "uncertain": "Uncertain: a neighbour may be affected, but the effect cannot be scored as good or bad from what is given.",
     },
 }
 
 _V_SCORE = {"aligned": 1.0, "unknown": 0.0, "contrary": -1.0}
-_H_SCORE = {"benefits": 1.0, "unknown": 0.0, "harms": -1.0}
+_H_SCORE = {"benefits": 1.0, "no-effect": 1.0, "uncertain": 0.0, "harms": -1.0}
+
+# The horizontal band that means "I could not score this", kept distinct from
+# "no effect". Both score 0.0 -- that collapse was the bug: `unknown` read as
+# "no moral signal" and ALLOWED 47% of clearly-wrong content.
+UNCERTAIN_BAND = "uncertain"
 
 
 def _band_confidence(answer: dict) -> float:
@@ -108,6 +114,7 @@ class LayaJudge:
         self._lock = threading.Lock()
         self._consecutive_failures = 0
         self.last_bands: dict[str, str] = {}
+        self.last_uncertain: bool = False
         self.last_confidence: dict[str, float] = {}
 
     @property
@@ -171,6 +178,7 @@ class LayaJudge:
             _band_confidence(answers.get("horizontal") or {}),
         )
         self.last_bands = {"vertical": v_band, "horizontal": h_band}
+        self.last_uncertain = (h_band == UNCERTAIN_BAND)
         self.last_confidence = {
             "vertical": _band_confidence(answers.get("vertical") or {}),
             "horizontal": _band_confidence(answers.get("horizontal") or {}),

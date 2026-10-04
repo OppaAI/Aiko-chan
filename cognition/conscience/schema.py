@@ -308,16 +308,35 @@ def fuse(base: Verdict, other: Verdict) -> Verdict:
     return winner
 
 
-def decide(vertical: float, horizontal: float, confidence: float) -> tuple[str, str]:
+def decide(
+    vertical: float,
+    horizontal: float,
+    confidence: float,
+    *,
+    uncertain: bool = False,
+) -> tuple[str, str]:
     """Map two axis scores + confidence onto a decision. Returns (decision, why).
 
     Order of checks is the policy:
       1. either axis clearly negative      -> refuse
       2. the axes disagree sharply         -> escalate  (the "good for you,
                                               bad for them" case)
-      3. no negative signal at all         -> allow     (doubt needs an object)
-      4. mildly negative but unconfident   -> escalate  (Rom 14:23)
-      5. mildly negative and confident     -> caution
+      3. the judge could not score it      -> escalate  (`uncertain` band)
+      4. no negative signal at all         -> allow     (doubt needs an object)
+      5. mildly negative but unconfident   -> escalate  (Rom 14:23)
+      6. mildly negative and confident     -> caution
+
+    `uncertain` is the 4th horizontal band, kept separate from "no effect". It
+    exists because those two were collapsed into one `unknown` band, which made
+    "I can't tell if this is harmful" indistinguishable from "nobody is
+    affected" -- and both scored 0.0, so both ALLOWED. Measured through the full
+    ladder: 47% of clearly-wrong content was acted on, because a 322M judge
+    answering `unknown` was read as "nothing wrong here". Oppa's standing
+    instruction is to optimise for recall on harm and accept asking about things
+    that were fine, so `uncertain` routes to a human.
+
+    Scoring cannot express this: any value low enough to escape the ALLOW branch
+    lands on CAUTION (notify, not ask) or REFUSE (too strong). Hence the flag.
     """
     worst = min(vertical, horizontal)
     gap = abs(vertical - horizontal)
@@ -329,6 +348,8 @@ def decide(vertical: float, horizontal: float, confidence: float) -> tuple[str, 
         return ESCALATE, f"severe reading at {worst:.2f} but confidence only {confidence:.2f}"
     if gap >= AXIS_CONFLICT_GAP:
         return ESCALATE, f"axes disagree by {gap:.2f} (vertical={vertical:.2f}, horizontal={horizontal:.2f})"
+    if uncertain:
+        return ESCALATE, "conscience could not score the neighbour impact; asking"
     if worst > CAUTION_AT:
         # No moral signal on either axis. Low confidence HERE is epistemic
         # noise, not doubt: Rom 14:23 is about doubting the rightness of an

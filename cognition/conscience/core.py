@@ -226,8 +226,14 @@ class ConscienceCircuitCore:
         # ── L2 judge ──────────────────────────────────────────────────────
         lexical = judge_mod.LexicalJudge.score(retrieved, parties)
         slm_result = None
+        tier2_uncertain = False
         if tier2 is not None:
             slm_result = tier2.score(self._situation(act, text, ctx), canon_block, parties)
+            # `uncertain` ("a neighbour may be affected but I cannot score it")
+            # must reach decide(). Blending collapses it to 0.0, which reads as
+            # "no moral signal" and ALLOWS -- the single defect that let 47% of
+            # clearly-wrong content through.
+            tier2_uncertain = bool(getattr(tier2, "last_uncertain", False))
 
         vertical, horizontal, confidence, reasons, cited = judge_mod.blend(slm_result, lexical)
         evidence = judge_mod.LexicalJudge.evidence_weight(retrieved)
@@ -236,7 +242,7 @@ class ConscienceCircuitCore:
         gate = GATE_JUDGE
 
         # ── L3 deliberation ───────────────────────────────────────────────
-        decision, why = decide(vertical, horizontal, confidence)
+        decision, why = decide(vertical, horizontal, confidence, uncertain=tier2_uncertain)
         needs_more = confidence < DELIBERATE_THRESHOLD or decision == ESCALATE
         if needs_more and ceiling >= 3 and llm_client is not None:
             deliberated = judge_mod.deliberate(
@@ -244,8 +250,12 @@ class ConscienceCircuitCore:
             )
             if deliberated is not None:
                 d_v, d_h, d_c, d_reasons, d_cited = deliberated
+                # Deliberation may resolve an `uncertain` band by scoring the
+                # act properly, so it clears the flag; a verdict that is still
+                # unscored stays escalated.
                 d_decision, _d_why = decide(
-                    d_v, d_h, judge_mod.calibrate(d_c, evidence)
+                    d_v, d_h, judge_mod.calibrate(d_c, evidence),
+                    uncertain=tier2_uncertain and not d_v and not d_h,
                 )
                 if _SEVERITY[d_decision] <= _SEVERITY[decision]:
                     # Deliberation replaces rather than averages: it saw the

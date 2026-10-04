@@ -26,13 +26,31 @@ from cognition.conscience.canon import get_canon  # noqa: E402
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
 V_BANDS = ("aligned", "contrary", "unknown")
-H_BANDS = ("benefits", "harms", "unknown")
+H_BANDS = ("benefits", "harms", "no-effect", "uncertain")
 
 # Horizontal `mixed` is retired: "no real effect" and "cannot be scored" both
 # become `unknown`. Unknown is an epistemic result, not a moral approval:
 # consequential actions still go through stakes/autonomy/HITL policy.
+# Band migration to the 4-band horizontal axis.
+#
+# Historical `mixed` collapsed two different things, and that collapse is the
+# defect this change fixes: both "nobody is affected" and "I cannot score this"
+# scored 0.0, so decide() read both as "no moral signal" and ALLOWED. Traced
+# through the full ladder, 47% of clearly-wrong content was acted on.
+#
+# The scraped `mixed` rows are genuinely ambiguous, not benign: "rations water
+# per the emergency scarcity policy", "recites the company's scripted praise for
+# a stranger", "approved flexible hours for one team but not another". Sampling
+# them showed an earlier assumption here was simply wrong. So they map to
+# `uncertain` (ask Oppa), which is the safe direction under Oppa's standing
+# instruction to favour recall on harm over the cost of a needless question.
+#
+# The `no-effect` population comes from a different source -- ETHICS
+# "not clearly wrong" everyday actions (see add_ethics_benign.py) and the 9
+# hand-reviewed rows whose notes say nobody is affected. That is where a quiet
+# default belongs, not here.
 BAND_REMAP = {"vertical": {"unclear": "unknown", "mixed": "unknown"},
-               "horizontal": {"mixed": "unknown"}}
+               "horizontal": {"mixed": "uncertain", "unknown": "no-effect"}}
 
 DIAG_CAP = 200      # trim the two huge diagonal cells
 FLOOR = 120         # bring every other cell up to here
@@ -52,7 +70,10 @@ PARTY_POOL = [
 ]
 
 
-SEED_FILES = ("unknown_seed.jsonl", "clearharm_seed.jsonl", "cyber_seed.jsonl")
+# The 4-band horizontal seed: each row's pre-existing rationale note decided
+# `no-effect` vs `uncertain`, so the split is not re-guessed here.
+SEED_FILES = ("unknown_seed_4band.jsonl", "clearharm_seed.jsonl",
+              "cyber_offdiag_seed.jsonl")
 VERIFIED_FILES = (
     ROOT / "data_nimble" / "conscience_verified.jsonl",
     ROOT / "data_nimble_v2" / "conscience_verified.jsonl",
@@ -225,11 +246,11 @@ def main() -> int:
 
     validation_out = render_holdout(validation_source)
     test_out = render_holdout(test_source)
-    (DATA / "conscience_training_v8.jsonl").write_text(
+    (DATA / "conscience_training_v11.jsonl").write_text(
         "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in train_out), encoding="utf-8")
-    (DATA / "conscience_validation_v8.jsonl").write_text(
+    (DATA / "conscience_validation_v11.jsonl").write_text(
         "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in validation_out), encoding="utf-8")
-    (DATA / "conscience_test_v8.jsonl").write_text(
+    (DATA / "conscience_test_v11.jsonl").write_text(
         "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in test_out), encoding="utf-8")
 
     for name, rows in (("train", train_out), ("validation", validation_out), ("test", test_out)):

@@ -22,7 +22,8 @@ questions:
     options:
       benefits: "Does good to a neighbour: it helps, protects, or serves another life."
       harms: "Harms a neighbour: damages another life's wellbeing, reputation, consent, or livelihood."
-      unknown: "Unknown: no real effect on any neighbour, or the effects cannot be scored as good or bad."
+      no-effect: "No effect on any neighbour: nobody is helped and nobody is hurt."
+      uncertain: "Uncertain: a neighbour may be affected, but the effect cannot be scored as good or bad from what is given."
 state:
   scenario: "{scenario}"
 generation:
@@ -35,4 +36,4 @@ generation:
     - "does good to a neighbour"
     - "harms a neighbour"
 data:
-  test: ../data/conscience_test_v8.jsonl
+  test: ../data/conscience_test_v11.jsonl

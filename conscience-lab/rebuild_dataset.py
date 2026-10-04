@@ -9,13 +9,14 @@ v2 problems this fixes:
     "Request: ... / Parties affected: ... / Relevant norms: <canon>".
 
 Output:
-  data/conscience_training_v6.jsonl   rebalanced, plain + deployment-format
-  data/conscience_eval_v6.jsonl       held-out, deployment-format only
+  data/conscience_training_v7.jsonl   rebalanced, plain + deployment-format
+  data/conscience_eval_v7.jsonl       held-out, deployment-format only
 """
 from __future__ import annotations
 
 import json
 import random
+import re
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -38,6 +39,62 @@ FLOOR = 120         # bring every other cell up to here
 MAX_OVERSAMPLE = 1.5  # keep repetition low: repeats teach lexical shortcuts
 DEP_FRACTION = 0.55  # share of rows emitted in deployment format
 SEED = 20261003
+HOLDOUT_FRAC = 0.12  # stratified holdout fraction, split BEFORE oversampling
+
+
+def core_scenario_key(row: dict) -> str:
+    """Canonical identity of a row: the underlying scenario, not its rendering.
+
+    Rows are emitted in plain and deployment formats; dedupe and splitting
+    must key on the scenario itself, or duplicates leak across the split.
+    """
+    text = row["fields"]["scenario"]
+    m = re.match(r"Request: The user asks: (.*?)\nParties affected:", text, re.S)
+    core = m.group(1).strip() if m else text.strip()
+    return " ".join(core.lower().split())
+
+
+def dedupe_rows(rows: list[dict]) -> list[dict]:
+    """Drop repeat scenarios, keeping the first occurrence."""
+    seen: set[str] = set()
+    out = []
+    for r in rows:
+        k = core_scenario_key(r)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(r)
+    dropped = len(rows) - len(out)
+    if dropped:
+        print(f"  deduped {dropped} repeat scenarios")
+    return out
+
+
+def stratified_split(rows: list[dict], rng: random.Random,
+                     frac: float = HOLDOUT_FRAC) -> tuple[list[dict], list[dict]]:
+    """Split into (train_pool, holdout_pool) by core scenario, stratified.
+
+    MUST run before any oversampling: oversampling with replacement creates
+    duplicates, and splitting after lets the same scenario land on both
+    sides, inflating eval scores (v5/v6 leaked ~45% this way).
+    """
+    by_cell: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for r in rows:
+        by_cell[(r["answers"]["vertical"], r["answers"]["horizontal"])].append(r)
+    train_pool: list[dict] = []
+    holdout_pool: list[dict] = []
+    for cell, items in sorted(by_cell.items()):
+        rng.shuffle(items)
+        k = max(2, round(len(items) * frac))
+        holdout_pool.extend(items[:k])
+        train_pool.extend(items[k:])
+    rng.shuffle(train_pool)
+    rng.shuffle(holdout_pool)
+    # hard guarantee: no scenario on both sides
+    overlap = {core_scenario_key(r) for r in train_pool} & {core_scenario_key(r) for r in holdout_pool}
+    assert not overlap, f"train/eval scenario overlap: {len(overlap)}"
+    print(f"  split: {len(train_pool)} train / {len(holdout_pool)} holdout, overlap: {len(overlap)}")
+    return train_pool, holdout_pool
 
 PARTY_POOL = [
     ("user", "requester", 0.5, "asked for this"),
@@ -153,20 +210,11 @@ def main() -> int:
     src.extend(load_seed_rows())
 
     print(f"source rows: {len(src)}")
-    print("joint grid before -> after:")
-    rebalanced = rebalance(src, rng)
-
-    # hold out a slice for evaluation, stratified over the 3x3 grid
-    holdout: list[dict] = []
-    train: list[dict] = []
-    by_cell: dict[tuple[str, str], list[dict]] = defaultdict(list)
-    for r in rebalanced:
-        by_cell[(r["answers"]["vertical"], r["answers"]["horizontal"])].append(r)
-    for cell, items in by_cell.items():
-        k = max(2, round(len(items) * 0.12))
-        rng.shuffle(items)
-        holdout.extend(items[:k])
-        train.extend(items[k:])
+    src = dedupe_rows(src)
+    print("split before oversampling (leak fix):")
+    train_pool, holdout = stratified_split(src, rng)
+    print("joint grid before -> after (train pool only):")
+    train = rebalance(train_pool, rng)
 
     train_out: list[dict] = []
     for r in train:
@@ -183,9 +231,9 @@ def main() -> int:
             "answers": dict(r["answers"]),
         })
 
-    (DATA / "conscience_training_v6.jsonl").write_text(
+    (DATA / "conscience_training_v7.jsonl").write_text(
         "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in train_out), encoding="utf-8")
-    (DATA / "conscience_eval_v6.jsonl").write_text(
+    (DATA / "conscience_eval_v7.jsonl").write_text(
         "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in eval_out), encoding="utf-8")
 
     for name, rows in (("train", train_out), ("eval", eval_out)):

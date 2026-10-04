@@ -355,6 +355,25 @@ def get_slm() -> SLMJudge:
         return _slm_singleton
 
 
+def get_tier2():
+    """The best available tier-2 judge: Laya if configured, else the SLM.
+
+    Both expose `available` and `score() -> (v, h, confidence, reasons, cited)`,
+    so `blend()` and everything downstream are unchanged by which one is live.
+    Laya wins when configured because it is calibrated (ECE ~0.05-0.08) and
+    answers typed questions rather than parsed free text; the generative SLM
+    stays as the fallback for deployments that have not shipped the checkpoint.
+
+    Deliberately not cached here: `get_laya` and `get_slm` already hold the
+    singletons, and a third cache layer would be invisible to callers (and to
+    tests) that monkeypatch the provider they expect to be used.
+    """
+    from .laya_judge import get_laya
+
+    laya = get_laya()
+    return laya if laya.available else get_slm()
+
+
 # ── L3: deliberation with the main model ──────────────────────────────────────
 
 _DELIBERATE_SYSTEM = (

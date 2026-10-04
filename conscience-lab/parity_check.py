@@ -51,28 +51,54 @@ def gguf(url: str, state: str) -> tuple[str, str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", required=True)
+    ap.add_argument("--ckpt")
     ap.add_argument("--url", default="http://127.0.0.1:8093")
+    ap.add_argument("--torch-json", help="precomputed torch bands (from --dump), for split-host runs")
+    ap.add_argument("--dump", help="write torch bands to this path and exit")
     args = ap.parse_args()
 
-    import laya
+    states = {t: _build_state(t, CANON, PARTIES) for t in PROBES}
 
-    agent = laya.load(args.ckpt)
+    if args.dump:
+        import laya
+        agent = laya.load(args.ckpt)
+        out = {}
+        for text, state in states.items():
+            a = agent.predict(state, {"vertical": _VERTICAL_Q, "horizontal": _HORIZONTAL_Q})
+            ans = (a.get("answers") or {})
+            out[text] = [
+                (ans.get("vertical") or {}).get("choice"),
+                (ans.get("horizontal") or {}).get("choice"),
+            ]
+        Path(args.dump).write_text(json.dumps(out, indent=1))
+        print(f"wrote torch bands for {len(out)} probes to {args.dump}")
+        return 0
+
+    if args.torch_json:
+        torch_bands = json.loads(Path(args.torch_json).read_text())
+    else:
+        import laya
+        agent = laya.load(args.ckpt)
+        torch_bands = {}
+        for text, state in states.items():
+            a = agent.predict(state, {"vertical": _VERTICAL_Q, "horizontal": _HORIZONTAL_Q})
+            ans = (a.get("answers") or {})
+            torch_bands[text] = [
+                (ans.get("vertical") or {}).get("choice"),
+                (ans.get("horizontal") or {}).get("choice"),
+            ]
+
     url = args.url.rstrip("/") + "/v1/decide"
-
     print(f"{'probe':46s} {'torch':18s} {'gguf':18s} {'match'}")
     print("-" * 92)
     mismatches = 0
     for text in PROBES:
-        state = _build_state(text, CANON, PARTIES)
-        a = agent.predict(state, {"vertical": _VERTICAL_Q, "horizontal": _HORIZONTAL_Q})
-        ans = (a.get("answers") or {})
-        t = ((ans.get("vertical") or {}).get("choice"), (ans.get("horizontal") or {}).get("choice"))
-        g = gguf(url, state)
+        t = tuple(torch_bands[text])
+        g = gguf(url, states[text])
         ok = t == g
         mismatches += not ok
-        print(f"{text[:44]:46s} {t[0] + '/' + t[1]:18s} {g[0] + '/' + g[1]:18s} {'ok' if ok else 'DIFF'}")
-
+        print(f"{text[:44]:46s} {t[0] + '/' + t[1]:18s} {g[0] + '/' + g[1]:18s} "
+              f"{'ok' if ok else 'DIFF'}")
     print(f"\n{mismatches} mismatch(es)")
     return 1 if mismatches else 0
 

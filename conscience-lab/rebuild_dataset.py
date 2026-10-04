@@ -9,8 +9,8 @@ v2 problems this fixes:
     "Request: ... / Parties affected: ... / Relevant norms: <canon>".
 
 Output:
-  data/conscience_training_v5.jsonl   rebalanced, plain + deployment-format
-  data/conscience_eval_v5.jsonl       held-out, deployment-format only
+  data/conscience_training_v6.jsonl   rebalanced, plain + deployment-format
+  data/conscience_eval_v6.jsonl       held-out, deployment-format only
 """
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ PARTY_POOL = [
 ]
 
 
-SEED_FILES = ("unknown_seed.jsonl",)
+SEED_FILES = ("unknown_seed.jsonl", "clearharm_seed.jsonl")
 
 
 def load_seed_rows() -> list[dict]:
@@ -67,7 +67,8 @@ def load_seed_rows() -> list[dict]:
                 continue
             r = json.loads(line)
             r.pop("note", None)
-            out.append({"fields": r["fields"], "answers": dict(r["answers"])})
+            out.append({"fields": r["fields"], "answers": dict(r["answers"]),
+                        "_seed": True})
         print(f"  loaded {len(out)} rows from {name}")
     return out
 
@@ -103,9 +104,14 @@ def rebalance(rows: list[dict], rng: random.Random) -> list[dict]:
             if target > len(pool):
                 picked = [rng.choice(pool) for _ in range(int(target))]
             else:
-                picked = list(pool)
-                rng.shuffle(picked)
-                picked = picked[:target]
+                # Curated rows first. The cap exists to stop the scraped bulk
+                # from dominating a cell, not to discard hand-reviewed rows --
+                # and the seeded rows are the ones we specifically added.
+                seeded = [r for r in pool if r.get("_seed")]
+                rest = [r for r in pool if not r.get("_seed")]
+                rng.shuffle(seeded)
+                rng.shuffle(rest)
+                picked = (seeded + rest)[:target]
             rng.shuffle(picked)
             out.extend(picked)
             print(f"  {v:9s}/{h:8s} {len(pool):4d} -> {len(picked):4d}")
@@ -177,9 +183,9 @@ def main() -> int:
             "answers": dict(r["answers"]),
         })
 
-    (DATA / "conscience_training_v5.jsonl").write_text(
+    (DATA / "conscience_training_v6.jsonl").write_text(
         "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in train_out), encoding="utf-8")
-    (DATA / "conscience_eval_v5.jsonl").write_text(
+    (DATA / "conscience_eval_v6.jsonl").write_text(
         "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in eval_out), encoding="utf-8")
 
     for name, rows in (("train", train_out), ("eval", eval_out)):

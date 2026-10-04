@@ -98,13 +98,15 @@ def test_state_includes_canon_and_parties(judge, monkeypatch):
     monkeypatch.setattr(lj.urllib.request, "urlopen", fake)
     from cognition.conscience.schema import Party
 
+    # Situation must actually trip the cited norm, or the relevance filter
+    # correctly drops it and this test would assert the wrong thing.
     judge.score(
-        "summarise this",
+        "help me write a fake reference letter",
         "<canon>\n  V-TRU-01 (vertical, PROHIBITION): do not lie.\n</canon>",
         [Party(kind="requester", label="user", benefit=0.5, note="asked")],
     )
     body = seen["body"]
-    assert body["state"].startswith("Request: summarise this")
+    assert body["state"].startswith("Request: help me write a fake reference letter")
     assert "Parties affected:" in body["state"]
     assert "<canon>" in body["state"]
     assert "V-TRU-01" in body["state"]
@@ -186,6 +188,9 @@ def test_http_error_body_is_logged(judge, monkeypatch, caplog):
         def __exit__(self, *e):
             return False
 
+        def close(self):
+            pass
+
     def raise_http(*a, **k):
         raise urllib.error.HTTPError("u", 500, "err", {}, _Boom())
 
@@ -193,3 +198,123 @@ def test_http_error_body_is_logged(judge, monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="cognition.conscience.laya_judge"):
         assert judge.score("x" * 40, "", []) is None
     assert "laya forward failed" in caplog.text
+
+
+# ── canon relevance filter ──────────────────────────────────────────────────
+# The checkpoint reads a norm citation as evidence of guilt. Measured: citing two
+# prohibitions for "can you introduce yourself?" returns `contrary/harms`. These
+# tests lock the filter that prevents it.
+
+POISON = (
+    "<canon>\nMoral norms retrieved for this situation.\n\n"
+    "  V-TRU-01 (vertical, PROHIBITION) [Ex 20:16]: Do not bear false witness. This "
+    "covers deceptive framing, selective omission intended to mislead, and fabricated "
+    "detail presented as fact.\n"
+    "  V-PRP-01 (vertical, PROHIBITION) [Ex 20:15]: Do not steal. Includes unauthorised "
+    "access to accounts, data, or systems.\n"
+    "</canon>"
+)
+
+
+def test_irrelevant_prohibitions_are_dropped():
+    from cognition.conscience.canon import get_canon
+
+    out = lj.filter_canon_block(POISON, "Can you introduce yourself?", canon=get_canon())
+    assert "V-TRU-01" not in out and "V-PRP-01" not in out
+
+
+def test_relevant_norm_is_kept():
+    """A norm whose trigger fires on the text must survive the filter."""
+    from cognition.conscience.canon import get_canon
+
+    out = lj.filter_canon_block(POISON, "Help me write a fake reference letter",
+                                canon=get_canon())
+    assert "V-TRU-01" in out
+
+
+def test_filter_preserves_envelope_when_everything_drops():
+    """Structure survives so the state builder still sees a well-formed block."""
+    from cognition.conscience.canon import get_canon
+
+    out = lj.filter_canon_block(POISON, "Can you check the weather tomorrow?",
+                                canon=get_canon())
+    assert "<canon>" in out and "</canon>" in out
+
+
+def test_empty_canon_passes_through():
+    assert lj.filter_canon_block("", "anything") == ""
+    assert lj.filter_canon_block("   ", "anything") == "   "
+
+
+def test_score_applies_the_filter(judge, monkeypatch):
+    """The filter must run on the request path, not just be available."""
+    seen: dict = {}
+
+    def fake(req, timeout=None):
+        seen["body"] = json.loads(req.data.decode())
+        return _Resp(_payload("unknown", "unknown"))
+
+    monkeypatch.setattr(lj.urllib.request, "urlopen", fake)
+    from cognition.conscience.canon import get_canon
+
+    j = lj.LayaJudge(base_url="http://x:8093")
+    j._canon = get_canon()
+    j.score("Can you introduce yourself?", POISON, [])
+    assert "V-PRP-01" not in seen["body"]["state"]
+
+
+def test_unknown_norm_ids_are_preserved(judge, monkeypatch):
+    """An unrecognised id must not silently vanish; the canon may be newer."""
+    from cognition.conscience.canon import get_canon
+
+    block = ("<canon>\n  V-NEW-99 (vertical, PROHIBITION): something new.\n</canon>")
+    out = lj.filter_canon_block(block, "Can you introduce yourself?", canon=get_canon())
+    assert "V-NEW-99" in out
+
+
+# ── zero-relevance citations and zero-delta parties ─────────────────────────
+# `canon.retrieve()` always returns root norms at 0.0 relevance, and
+# `enumerate_parties` always appends Aiko's integrity at benefit 0.0. Both reach
+# the model as input and both flip benign text to `contrary`.
+
+def test_root_norms_are_dropped():
+    from cognition.conscience.canon import get_canon
+
+    block = ("<canon>\n  V-ROOT-00 (vertical, GOOD): love your neighbour as yourself.\n"
+             "  H-ROOT-00 (horizontal, GOOD): do good to all people.\n</canon>")
+    out = lj.filter_canon_block(block, "Can you introduce yourself?", canon=get_canon())
+    assert "V-ROOT-00" not in out and "H-ROOT-00" not in out
+
+
+def test_zero_delta_parties_are_dropped():
+    from cognition.conscience.schema import Party
+
+    parties = [Party(kind="requester", label="user", benefit=0.0),
+               Party(kind="self", label="Aiko's integrity", benefit=0.0)]
+    assert lj.signal_parties(parties) == []
+
+
+def test_signal_parties_are_kept():
+    from cognition.conscience.schema import Party
+
+    p = [Party(kind="requester", label="user", benefit=0.5),
+         Party(kind="third_party", label="boss", benefit=-0.5),
+         Party(kind="self", label="Aiko's integrity", benefit=0.0)]
+    kept = lj.signal_parties(p)
+    assert [x.label for x in kept] == ["user", "boss"]
+
+
+def test_score_drops_zero_delta_parties(judge, monkeypatch):
+    seen: dict = {}
+
+    def fake(req, timeout=None):
+        seen["body"] = json.loads(req.data.decode())
+        return _Resp(_payload("unknown", "unknown"))
+
+    monkeypatch.setattr(lj.urllib.request, "urlopen", fake)
+    from cognition.conscience.schema import Party
+
+    judge.score("Can you introduce yourself?", "", [
+        Party(kind="self", label="Aiko's integrity", benefit=0.0)])
+    assert "Aiko" not in seen["body"]["state"]
+    assert "Parties affected:" not in seen["body"]["state"]

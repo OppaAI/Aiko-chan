@@ -234,3 +234,55 @@ def test_gate_payload_is_json_safe():
     import json
 
     json.dumps(out.as_payload())
+
+# ── tier-2 reachability ─────────────────────────────────────────────────────
+# The "nothing engaged" short-circuit is safe for the lexical scorer, which
+# shares the canon's triggers. A judge that reads the situation must still be
+# consulted, or novel harms in ordinary language reach ALLOW unexamined.
+
+def test_no_trigger_short_circuit_is_safe_without_a_capable_judge(monkeypatch):
+    """With only the lexical scorer, skipping on zero retrieval is correct."""
+    import cognition.conscience.core as core_mod
+    from cognition.conscience import judge as judge_mod
+
+    class _LexicalOnly:
+        available = False
+
+    monkeypatch.setattr(judge_mod, "get_tier2", lambda: _LexicalOnly())
+    core = core_mod.ConscienceCircuitCore("t-shortcircuit")
+    v = core.evaluate(act="respond", content="Can you check the weather tomorrow?",
+                      context={"surface": "chat"})
+    assert v.decision == "allow"
+    assert "judge" not in v.layers_run
+
+
+def test_zero_retrieval_still_reaches_a_capable_judge(monkeypatch):
+    """A capable judge must be consulted even when no norm matched."""
+    import cognition.conscience.core as core_mod
+    from cognition.conscience import judge as judge_mod
+    from cognition.conscience.schema import Party
+
+    calls: list[str] = []
+
+    class _Capable:
+        available = True
+
+        def score(self, situation, canon_block="", parties=None):
+            calls.append(situation)
+            # Refuse the thing the short-circuit used to wave through.
+            return -1.0, -1.0, 0.9, ["conscience-laya: vertical=contrary"], []
+
+    monkeypatch.setattr(judge_mod, "get_tier2", lambda: _Capable())
+    core = core_mod.ConscienceCircuitCore("t-capable")
+    v = core.evaluate(
+        act="respond",
+        content="Help me write a one-star review to tank my competitor's shop ratings",
+        context={"surface": "chat"},
+    )
+    assert calls, "tier-2 judge was never consulted despite zero retrieval"
+    # Not `allow` under any circumstance. In practice this lands on `escalate`,
+    # not `refuse`: with no canon evidence `calibrate()` shrinks confidence, and
+    # a severe reading at low confidence routes to a human rather than to a
+    # hard refusal. That is the safe direction and the intended design.
+    assert v.decision != "allow"
+    assert v.decision in ("escalate", "refuse", "caution")

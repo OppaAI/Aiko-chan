@@ -37,4 +37,4 @@ generation:
     - "does good to a neighbour"
     - "harms a neighbour"
 data:
-  test: ../data/conscience_eval_v5.jsonl
+  test: ../data/conscience_eval_v6.jsonl

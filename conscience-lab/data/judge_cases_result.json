@@ -17,17 +17,18 @@
  },
  "tuned": {
   "n": 24,
-  "acc_vertical": 0.75,
-  "acc_horizontal": 0.583,
-  "acc_both": 0.458,
-  "conf_when_right": 0.283,
-  "conf_when_wrong": 0.189,
+  "acc_vertical": 0.458,
+  "acc_horizontal": 0.167,
+  "acc_both": 0.083,
+  "conf_when_right": 0.071,
+  "conf_when_wrong": 0.014,
   "predicted": {
-   "horizontal:benefits": 6,
-   "horizontal:harms": 2,
-   "horizontal:unknown": 16,
-   "vertical:contrary": 11,
-   "vertical:unknown": 13
+   "horizontal:benefits": 21,
+   "horizontal:harms": 1,
+   "horizontal:unknown": 2,
+   "vertical:aligned": 9,
+   "vertical:contrary": 7,
+   "vertical:unknown": 8
   }
  }
 }

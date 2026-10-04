@@ -36,7 +36,7 @@ QUESTIONS = {
 def run(agent, rows):
     hits = {"vertical": 0, "horizontal": 0}
     tot = 0
-    ece_n = ece_d = 0.0
+    bins = [[0, 0, 0.0] for _ in range(10)]  # count, correct, confidence sum
     for r in rows:
         state = r["fields"]["scenario"]
         try:
@@ -50,23 +50,31 @@ def run(agent, rows):
             a = (res.get(ax) or {})
             want = r["answers"][ax]
             got = a.get("choice")
-            conf = float(a.get("confidence", 0) or 0)
-            if got == want:
+            conf = max(0.0, min(1.0, float(a.get("confidence", 0) or 0)))
+            correct = got == want
+            if correct:
                 hits[ax] += 1
-            ece_n += abs(conf - (1.0 if got == want else 0.0))
-            ece_d += 1
+            index = min(9, int(conf * 10))
+            bins[index][0] += 1
+            bins[index][1] += int(correct)
+            bins[index][2] += conf
+    total_predictions = sum(b[0] for b in bins)
+    ece = 0.0
+    for count, correct, confidence_sum in bins:
+        if count:
+            ece += (count / total_predictions) * abs(correct / count - confidence_sum / count)
     return {
         "n": tot,
         "vertical": hits["vertical"] / tot if tot else 0,
         "horizontal": hits["horizontal"] / tot if tot else 0,
-        "ece": ece_n / ece_d if ece_d else 0,
+        "ece_10bin": ece,
     }
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
-    ap.add_argument("--test", default="data/conscience_eval_v6.jsonl")
+    ap.add_argument("--test", default="data/conscience_eval_v7.jsonl")
     ap.add_argument("--base", default="convaiinnovations/laya-multilingual")
     args = ap.parse_args()
     import laya

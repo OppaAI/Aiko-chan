@@ -31,7 +31,7 @@ def binom_two_sided(b, c):
 cases = [json.loads(l) for l in Path(T.CASES_DEFAULT).read_text().splitlines() if l.strip()]
 canon = T.load_canon()
 import laya
-agents = {"v5": laya.load("runs/conscience-laya-v5"), "v8": laya.load("runs/conscience-laya-v8")}
+agents = {"v5": laya.load("runs/conscience-laya-v5"), "v8": laya.load("runs/conscience-laya-v9")}
 
 def general(c):
     return not any(w in c["situation"].lower() for w in CYBER)
@@ -39,7 +39,7 @@ def general(c):
 sub = [c for c in cases if general(c)]
 print(f"general cases: {len(sub)}\n")
 for ax, want_key in (("vertical", "vertical"), ("horizontal", "horizontal")):
-    b = c_ = 0   # v5-only-correct, v8-only-correct
+    b = c_ = 0   # v5-only-correct, v9-only-correct
     for case in sub:
         state = T.build_state(case, canon)
         want = {BAND.get(x, x) for x in T.expected_bands(case, want_key)}
@@ -55,5 +55,5 @@ for ax, want_key in (("vertical", "vertical"), ("horizontal", "horizontal")):
     verdict = ("REAL regression" if p < 0.05 else
                "suggestive, not significant" if p < 0.20 else
                "indistinguishable from noise")
-    print(f"{ax:11s} v5-only-correct={b}  v8-only-correct={c_}  "
+    print(f"{ax:11s} v5-only-correct={b}  v9-only-correct={c_}  "
           f"discordant={b+c_}  p={p:.3f}  -> {verdict}")

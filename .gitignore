@@ -255,3 +255,13 @@ interface/webui/static/ort-wasm-simd-threaded.jsep.wasm
 interface/webui/static/ort-wasm-simd-threaded.jsep.mjs
 interface/webui/static/silero_vad.onnx
 interface/webui/static/silero_vad_op18_ifless.onnx
+# ── conscience lab (AIVA) ───────────────────────────────────────────────────
+# Trained weights and compiled GGUFs are multi-GB binaries; never commit them.
+conscience-lab/runs/
+# Local HF snapshot of the base checkpoint (already on the Hub).
+conscience-lab/.model-cache/
+# The datasets, task definitions and analysis scripts ARE tracked: the dataset
+# is the doctrine, and it is the only reproducibility record for a checkpoint.
+*.gguf
+*.safetensors
+conscience-lab/**/__pycache__/

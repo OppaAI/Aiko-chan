@@ -257,15 +257,17 @@ def filter_canon_block(
     situation: str,
     *,
     canon=None,
-    min_overlap: int = 1,
+    min_overlap: int = 2,
 ) -> str:
     """Drop cited norms with no lexical connection to `situation`.
 
     A norm is kept only when the situation trips one of its curated triggers,
-    or when its statement shares at least `min_overlap` *distinctive* content
-    tokens with the situation. Root norms ("V-ROOT-00" and friends) are always
-    retrieved at zero relevance and always share generic vocabulary, so they are
-    dropped: a citation nobody matched is not evidence.
+    or when its statement shares at least `min_overlap` content tokens with the
+    situation. Root norms ("V-ROOT-00" and friends) are always retrieved at zero
+    relevance and always share generic vocabulary, so they are dropped.
+
+    `min_overlap` defaults to 2, not 1: a single shared word is not evidence of
+    relevance, and allowing it let zero-relevance norms through to the judge.
 
     Returns "" when nothing survives. That is the common case for ordinary text
     and it is the correct one -- no canon block is better than a misleading one,

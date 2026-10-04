@@ -174,6 +174,49 @@ _RULES: tuple[tuple[str, str, str, str, str, tuple[str, ...]], ...] = (
      "circumventing an access control",
      ("OWASP-LLM", "GOOGLE-AIP", "NIST-RMF")),
 
+    # Guessing someone ELSE's credentials. SG-ACCESS-01 only fires on
+    # crack/brute-force/bypass wording, so "guess my coworker's password"
+    # passed every layer. Three lookaheads keep precision high: a credential
+    # noun, a guessing verb, and a third party must all be present, so
+    # "guess my own wifi password" is not caught.
+    ("SG-ACCESS-02", "unauthorised_access", SEV_BLOCK,
+     # Defensive-intent guard first: "someone is guessing MY password, please
+     # lock my account" is a victim asking for help, not an attacker. Owning the
+     # credential is the signal. Deliberately imperfect -- a determined phraser
+     # can walk around a regex -- which is exactly why this is a guardrail and
+     # not the conscience.
+     r"(?![^.\n]{0,60}\bmy\s+(?:own\s+)?(?:password|account|email|pin)\b)"
+     r"(?=[^.\n]{0,80}\b(?:password|passcode|passphrase|pin|otp|"
+     r"one[-\s]?time\s+(?:code|password)|security\s+answer)\b)"
+     r"(?=[^.\n]{0,80}\b(?:guess|crack|brute[- ]?force|deduce|"
+     r"figure\s+out|work\s+out)\b)"
+     r"[^.\n]{0,140}\b(?:someone|somebody|anyone|another\s+person|stranger|"
+     r"ex|former\s+\w+|co-?worker|colleague|employee|employer|partner|friend|"
+     r"wife|husband|neighbou?r|his|her|their)\b",
+     "guessing or brute-forcing another person's credentials",
+     ("OWASP-LLM", "NIST-RMF", "ISO-42001")),
+
+    # Social engineering someone into handing over a credential or one-time code.
+    ("SG-ACCESS-03", "unauthorised_access", SEV_BLOCK,
+     r"\b(?:tricks?|phish(?:es|ing)?|scams?|deceives?|fools?|manipulates?|dupes?)\b[^.\n]{0,60}"
+     r"\b(?:into\s+(?:giving|revealing|sharing|sending|handing|entering)|"
+     r"to\s+(?:give|reveal|share|send|hand))\b[^.\n]{0,50}"
+     r"\b(?:code|password|passcode|pin|otp|one[-\s]?time|credential|token|2fa)\b",
+     "social engineering a credential or one-time code out of someone",
+     ("OWASP-LLM", "NIST-RMF")),
+
+    # Probing or scanning infrastructure that is not the requester's own.
+    # Requires the unauthorised marker in the same sentence, so the benign twin
+    # ("scan my own home network") is untouched.
+    ("SG-ACCESS-04", "unauthorised_access", SEV_BLOCK,
+     r"\b(?:scan|port[- ]?scan|nmap|probe|reconna?issance)\b[^.\n]{0,70}"
+     r"\b(?:without\s+(?:permission|authorisation|authorization|consent)|"
+     r"unauthori[sz]ed|no\s+permission|not\s+mine|someone\s+else|"
+     r"stranger|ex's|ex\u2019s|former\s+(?:co-?worker|colleague|employee|employer|"
+     r"friend|partner|landlord|tenant))\b",
+     "scanning or probing infrastructure without authorisation",
+     ("OWASP-LLM", "GOOGLE-AIP", "NIST-RMF")),
+
     # ── high-stakes advice presented as authoritative ─────────────────────
     ("SG-ADVICE-01", "high_stakes_advice", SEV_NOTE,
      r"\b(?:what dose|how much|should i (?:stop|take)|is it safe to (?:take|combine|mix))\b"
@@ -206,6 +249,45 @@ _IRREVERSIBLE_HINTS = (
     "purchase", "pay", "transfer", "deploy", "email", "tweet", "reply",
 )
 
+# Tools that change durable state but are individually reversible. Reversibility
+# alone is not enough to call these low stakes: a pip install or a config edit
+# can be undone, but the machine is different afterwards and the user did not
+# ask for a question before every one.
+#
+# Two directions matter. Names that are too broad ("set_", "add_") catch benign
+# work like setting a reminder, so they are absent. Generic primitives
+# ("run_command") are included even though the name says nothing about
+# persistence, because a shell can do anything and must not be assumed benign.
+_STATE_CHANGE_HINTS = (
+    "install", "uninstall", "pip", "npm", "apt", "uv", "write", "write_file",
+    "edit", "config", "chmod", "chown", "mkdir", "move", "rename",
+    "migrate", "update", "upgrade",
+    "run_command", "shell", "bash", "exec", "spawn", "subprocess", "system",
+)
+
+# Callers may assert that an action is confined (sandbox, dry-run, read-only
+# mount). This is a property of the CALL SITE, never of user text, so a user
+# cannot lower their own stakes by asking nicely.
+_CONTAINED_KEYS = ("contained", "sandboxed", "dry_run")
+
+
+def is_state_changing(tool_name: str, context: dict | None = None) -> bool:
+    """True when a tool alters durable state, even if it is reversible."""
+    ctx = context or {}
+    if any(bool(ctx.get(k)) for k in _CONTAINED_KEYS):
+        return False
+    if "reversible" in ctx:
+        # A caller that knows it is reversible has still declared intent; fall
+        # through to the name hints rather than trusting the flag alone.
+        pass
+    name = (tool_name or "").lower()
+    return any(hint in name for hint in _STATE_CHANGE_HINTS)
+
+
+def is_contained(context: dict | None = None) -> bool:
+    ctx = context or {}
+    return any(bool(ctx.get(k)) for k in _CONTAINED_KEYS)
+
 
 def is_egress(act: str, context: dict | None = None) -> bool:
     """True when the judged content is leaving Aiko for somewhere else."""
@@ -218,6 +300,22 @@ def is_egress(act: str, context: dict | None = None) -> bool:
     if scope in ("external", "public", "network"):
         return True
     return is_irreversible(str(ctx.get("tool") or ""), ctx)
+
+
+def scope_is_external(act: str, context: dict | None = None) -> bool:
+    """True only when content genuinely leaves Aiko. No irreversibility fallback.
+
+    `is_egress` deliberately folds irreversibility into egress so its callers
+    stay conservative. `gate.classify_stakes` needs the two axes separate --
+    otherwise a local `delete_files` reads as egress and the three-axis stakes
+    model collapses back into two.
+    """
+    if act in (ACT_POST, ACT_REMEMBER):
+        return True
+    if act != ACT_TOOL:
+        return False
+    scope = str((context or {}).get("scope") or "").lower()
+    return scope in ("external", "public", "network")
 
 
 def is_irreversible(tool_name: str, context: dict | None = None) -> bool:

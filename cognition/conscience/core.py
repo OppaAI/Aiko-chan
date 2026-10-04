@@ -194,7 +194,13 @@ class ConscienceCircuitCore:
         store = canon_mod.get_canon()
         retrieved = store.retrieve(text, embedder=embedder)
         scoring = [pair for pair in retrieved if pair[0] > 0.0]
-        canon_block = store.render_block(retrieved)
+        # Render ONLY norms that actually scored. `retrieve` always returns the
+        # root norms at 0.0 relevance, and those citations reach the judge as an
+        # accusation: measured, "find where the conscience gate is implemented"
+        # returned vertical=contrary at p=0.878 with the zero-relevance block
+        # attached, and nothing like it without. A norm that matched nothing is
+        # not evidence.
+        canon_block = store.render_block(scoring)
         parties = judge_mod.enumerate_parties(text, ctx)
 
         # A capable tier-2 judge must be consulted even when retrieval scored

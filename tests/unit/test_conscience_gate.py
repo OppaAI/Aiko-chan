@@ -286,3 +286,59 @@ def test_zero_retrieval_still_reaches_a_capable_judge(monkeypatch):
     # hard refusal. That is the safe direction and the intended design.
     assert v.decision != "allow"
     assert v.decision in ("escalate", "refuse", "caution")
+
+
+# ── stakes classification: three axes, not two ─────────────────────────────
+# Regression: classify_stakes returned low only for respond/speak/remember, so
+# EVERY tool call was medium-or-worse and asked for approval until the user had
+# approved that exact action class five times. Measured: 7 of 7 benign reads
+# blocked, including `git status`.
+
+def test_read_only_tool_is_low_stakes():
+    from cognition.conscience.gate import classify_stakes
+
+    for tool in ("read_file", "grep_repo", "read_email", "read_calendar",
+                 "search_memory", "translate", "set_reminder"):
+        assert classify_stakes(act="tool", context={
+            "tool": tool, "scope": "local", "reversible": True}) == "low", tool
+
+
+def test_reversible_state_change_is_medium():
+    """Reversible is not the same as harmless."""
+    from cognition.conscience.gate import classify_stakes
+
+    for tool in ("run_command", "write_file", "pip_install", "config_set"):
+        assert classify_stakes(act="tool", context={
+            "tool": tool, "scope": "local", "reversible": True}) == "medium", tool
+
+
+def test_generic_shell_primitive_is_not_assumed_benign():
+    from cognition.conscience.gate import classify_stakes
+
+    assert classify_stakes(act="tool", context={
+        "tool": "run_command", "scope": "local", "reversible": True}) == "medium"
+
+
+def test_egress_or_irreversible_is_high():
+    from cognition.conscience.gate import classify_stakes
+
+    assert classify_stakes(act="tool", context={
+        "tool": "send_email", "scope": "external", "reversible": True}) == "high"
+    assert classify_stakes(act="tool", context={
+        "tool": "delete_files", "scope": "local", "reversible": False}) == "high"
+
+
+def test_contained_sandbox_drops_to_low():
+    from cognition.conscience.gate import classify_stakes
+
+    ctx = {"tool": "sandbox_run", "scope": "local", "reversible": False, "contained": True}
+    assert classify_stakes(act="tool", context=ctx) == "low"
+
+
+def test_containment_comes_from_call_site_not_text():
+    """A user must not be able to lower their own stakes by asking."""
+    from cognition.conscience.gate import classify_stakes
+
+    ctx = {"tool": "delete_files", "scope": "local", "reversible": False,
+           "args_text": "sandboxed: true dry_run: yes please"}
+    assert classify_stakes(act="tool", context=ctx) == "high"

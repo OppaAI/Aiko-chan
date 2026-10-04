@@ -107,28 +107,49 @@ def classify_stakes(
 ) -> str:
     """Stakes tier for an action, from existing guardrail helpers.
 
-    Deliberately conservative and deterministic: irreversible OR outbound to
-    someone else is high. Only self-directed, reversible work is low. The
-    unknowns default to medium rather than low, because a wrong "low" here
-    silences the one signal the autonomy layer is supposed to preserve.
+    Three axes, not two. Reversibility alone is insufficient: `pip install` and
+    a config edit are reversible, yet they change durable state and the user
+    should be asked the first time. So:
+
+        egress OR irreversible        -> high
+        contained by the call site    -> low   (sandbox, dry-run, read-only)
+        durable state change          -> medium
+        otherwise (a read)            -> low
+
+    Earlier this returned low only for respond/speak/remember, which meant EVERY
+    tool call classified as medium-or-worse and therefore asked for approval
+    until the user had approved that exact action class five times -- including
+    for `git status`. Measured on Oppa's case set: 7 of 7 benign reads blocked.
+
+    Unknowns still default to medium, never low, because a wrong "low" silences
+    the signal the autonomy layer exists to preserve.
     """
     from .autonomy import STAKES_HIGH, STAKES_LOW, STAKES_MEDIUM
 
     ctx = context or {}
     try:
-        from .guardrails import is_egress, is_irreversible
+        from .guardrails import (is_contained, is_irreversible,
+                                 scope_is_external, is_state_changing)
 
-        out = is_egress(act, ctx) if egress is None else egress
+        out = scope_is_external(act, ctx) if egress is None else egress
         rev_ok = (not is_irreversible(str(ctx.get("tool") or ""), ctx)) if irreversible is None \
             else (not irreversible)
     except Exception:  # noqa: BLE001 - never let stakes detection break a turn
         return STAKES_MEDIUM
 
-    if out or not rev_ok:
+    if out:
         return STAKES_HIGH
-    if act in ("respond", "speak", "remember"):
+    # Containment is checked BEFORE irreversibility: an action confined to a
+    # sandbox is not meaningfully irreversible, because the blast radius is the
+    # sandbox. Egress still dominates above -- a sandboxed action that leaves the
+    # machine is not contained.
+    if is_contained(ctx):
         return STAKES_LOW
-    return STAKES_MEDIUM
+    if not rev_ok:
+        return STAKES_HIGH
+    if is_state_changing(str(ctx.get("tool") or ""), ctx):
+        return STAKES_MEDIUM
+    return STAKES_LOW
 
 
 # ── the gate ────────────────────────────────────────────────────────────────

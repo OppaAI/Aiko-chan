@@ -8,7 +8,7 @@ benign probes that used to be poisoned by irrelevant citations:
   raw     whatever L1 retrieved (the regression)
   filter  only norms connected to the text (the proposal)
 
-    ../.venv/bin/python filter_eval.py --ckpt runs/conscience-laya-v5
+    ../.venv/bin/python filter_eval.py --ckpt runs/conscience-laya-v7
 """
 from __future__ import annotations
 

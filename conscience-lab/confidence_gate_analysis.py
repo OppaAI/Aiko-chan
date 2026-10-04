@@ -10,7 +10,7 @@ If confidence separates right from wrong, a low-confidence gate beats a third
 category. If it doesn't, the gate escalates correct answers as often as wrong
 ones and just adds latency.
 
-    ../.venv/bin/python confidence_gate_analysis.py --ckpt runs/conscience-laya-v4
+    ../.venv/bin/python confidence_gate_analysis.py --ckpt runs/conscience-laya-v7
 """
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ def auc(pos: list[float], neg: list[float]) -> float | None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
-    ap.add_argument("--test", default="data/conscience_eval_v4.jsonl")
+    ap.add_argument("--test", default="data/conscience_eval_v7.jsonl")
     args = ap.parse_args()
 
     import laya

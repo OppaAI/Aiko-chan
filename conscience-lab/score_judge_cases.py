@@ -5,7 +5,7 @@ Uses the eval harness's own band logic (expected_bands) and canon rendering, so
 the numbers are comparable with eval_laya_judge.py -- but runs on AIVA through
 the HF `laya` package, avoiding the Orin's RAM ceiling.
 
-    ../.venv/bin/python score_judge_cases.py --ckpt runs/conscience-laya-v3
+    ../.venv/bin/python score_judge_cases.py --ckpt runs/conscience-laya-v7
 """
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare gate policies on identical v5 predictions.
+"""Compare gate policies on identical v7 predictions.
 
 Policies under test:
   A  tri-state + unknown-escalate   (what v5 was built for)
@@ -11,7 +11,7 @@ Policies under test:
 Reports what each policy costs the user (ask-rate on benign requests) and what
 each risks (clear-cut harms allowed through).
 
-    ../.venv/bin/python gate_policy_compare.py --ckpt runs/conscience-laya-v5
+    ../.venv/bin/python gate_policy_compare.py --ckpt runs/conscience-laya-v7
 """
 from __future__ import annotations
 

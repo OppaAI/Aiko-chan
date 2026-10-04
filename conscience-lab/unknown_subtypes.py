@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Do v5's remaining `unknown` errors split along Google's three Unknown types?
+"""Do v7's remaining `unknown` errors split along Google's three Unknown types?
 
 Google's advice separates Unknown into Principle Conflict / Context Deficit /
 Low Precedent. If those really are different failure modes, v5 should miss them
 unevenly -- and we would learn which subtype is worth building out.
 
-    ../.venv/bin/python unknown_subtypes.py --ckpt runs/conscience-laya-v5
+    ../.venv/bin/python unknown_subtypes.py --ckpt runs/conscience-laya-v7
 """
 from __future__ import annotations
 

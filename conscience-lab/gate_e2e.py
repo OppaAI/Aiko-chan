@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""End-to-end acceptance: real v5 predictions through the real production gate.
+"""End-to-end acceptance: real v7 predictions through the real production gate.
 
 The unit tests stub the transport and hand-build verdicts. This drives the
 actual fine-tuned checkpoint, maps its bands the same way `LayaJudge` does,
 constructs a real `Verdict`, and runs `gate.evaluate_action` -- so what is
 measured is the shipped path, not a simulation of it.
 
-    ../.venv/bin/python gate_e2e.py --ckpt runs/conscience-laya-v5
+    ../.venv/bin/python gate_e2e.py --ckpt runs/conscience-laya-v7
 """
 from __future__ import annotations
 

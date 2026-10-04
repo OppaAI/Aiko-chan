@@ -9,7 +9,7 @@ The risk is the 66 `aligned/harms` rows in our own training data -- an honest
 act that hurts someone. If the model uses `aligned` as a loophole, those rows
 are teaching it to.
 
-    ../.venv/bin/python loophole_check.py --ckpt runs/conscience-laya-v5
+    ../.venv/bin/python loophole_check.py --ckpt runs/conscience-laya-v7
 """
 from __future__ import annotations
 

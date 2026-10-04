@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Draft clear-cut harm rows for v6.
 
-Measured gap in v5: on 7 unambiguous harms it answered `unknown` on the
+Measured gap in v7: on 7 unambiguous harms it answered `unknown` on the
 horizontal axis, so the gate escalated rather than refused. The model has only
 ever seen harm phrased in ways that trip a canon trigger, and the wrong reading
 is the safe direction -- but it means Oppa gets interrupted about things no

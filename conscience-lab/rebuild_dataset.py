@@ -172,20 +172,29 @@ def main() -> int:
     src = list(unique.values())
 
     print(f"source rows: {len(src)}")
-    print("joint grid before -> after:")
-    rebalanced = rebalance(src, rng)
 
-    # hold out a slice for evaluation, stratified over the 3x3 grid
-    holdout: list[dict] = []
-    train: list[dict] = []
+    # Split canonical source scenarios first. No augmentation or oversampling
+    # is allowed to influence which examples become evaluation data.
     by_cell: dict[tuple[str, str], list[dict]] = defaultdict(list)
-    for r in rebalanced:
-        by_cell[(r["answers"]["vertical"], r["answers"]["horizontal"])].append(r)
+    for row in src:
+        by_cell[(row["answers"]["vertical"], row["answers"]["horizontal"])].append(row)
+    holdout: list[dict] = []
+    train_source: list[dict] = []
     for cell, items in by_cell.items():
-        k = max(2, round(len(items) * 0.12))
         rng.shuffle(items)
+        k = min(max(1, round(len(items) * 0.12)), max(0, len(items) - 1))
         holdout.extend(items[:k])
-        train.extend(items[k:])
+        train_source.extend(items[k:])
+
+    print(f"source split: train={len(train_source)} eval={len(holdout)}")
+    print("rebalance train only:")
+    train = rebalance(train_source, rng)
+    train_keys = {canonical_scenario(r["fields"]["scenario"]) for r in train}
+    eval_keys = {canonical_scenario(r["fields"]["scenario"]) for r in holdout}
+    overlap = train_keys & eval_keys
+    if overlap:
+        raise AssertionError(f"scenario leakage between train/eval: {len(overlap)} rows")
+    print(f"  leakage check: train={len(train_keys)} eval={len(eval_keys)} overlap=0")
 
     train_out: list[dict] = []
     for r in train:
@@ -202,9 +211,9 @@ def main() -> int:
             "answers": dict(r["answers"]),
         })
 
-    (DATA / "conscience_training_v6.jsonl").write_text(
+    (DATA / "conscience_training_v7.jsonl").write_text(
         "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in train_out), encoding="utf-8")
-    (DATA / "conscience_eval_v6.jsonl").write_text(
+    (DATA / "conscience_eval_v7.jsonl").write_text(
         "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in eval_out), encoding="utf-8")
 
     for name, rows in (("train", train_out), ("eval", eval_out)):

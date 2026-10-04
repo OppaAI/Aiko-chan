@@ -33,7 +33,7 @@ STATE = os.environ.get(
 )
 
 for name, path in (("base", "convaiinnovations/laya-multilingual"),
-                   ("tuned", "runs/conscience-laya-v5")):
+                   ("tuned", "runs/conscience-laya-v7")):
     agent = laya.load(path)
     ans = agent.predict(STATE, QUESTIONS).get("answers", {})
     print(f"== {name} ==")

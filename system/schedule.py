@@ -79,6 +79,7 @@ resolved independently.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -772,6 +773,43 @@ def ensure_schedule_graphs(user_id: str | None = None) -> None:
     _ensure_job_post_config_marker(user_id=user_id)
 
 
+# Fields that define a job card's identity for deterministic deduplication.
+# Excluded: id (random per record), next_due/created_at/last_ran_at (timestamps),
+# enabled (state, not identity), kind (always "scheduled_job").
+_JOB_IDENTITY_FIELDS = (
+    "title", "task", "time_of_day", "frequency", "days_of_week",
+    "relative_days", "interval_seconds", "timezone", "action", "handler",
+    "tool_call", "skill", "requires_idle", "idle_seconds",
+)
+
+
+def _job_identity(job: dict) -> str:
+    """Deterministic identity hash for a job card.
+
+    Computed over the normalized what/when fields, so two calls that
+    describe the same job ("Daily" vs "daily", padded titles, equivalent
+    day lists) produce the same identity. Used by schedule_job_record's
+    dedupe to return the existing record instead of appending a duplicate.
+
+    Equivalent schedules canonicalize to the same identity: "9:00" and
+    "09:00" parse to the same time, and an omitted interval_seconds means
+    60s for interval-frequency jobs (matching calculate_next_due).
+    """
+    canonical = {k: job.get(k) for k in _JOB_IDENTITY_FIELDS}
+    raw_time = canonical.get("time_of_day")
+    if isinstance(raw_time, str):
+        try:
+            hour, minute = _parse_time_of_day(raw_time)
+            canonical["time_of_day"] = f"{hour:02d}:{minute:02d}"
+        except ValueError:
+            pass  # keep raw; stored records are validated at creation
+    if (canonical.get("frequency") or "daily").lower().strip() == "interval":
+        canonical["interval_seconds"] = int(canonical.get("interval_seconds") or 60)
+    return hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    ).hexdigest()
+
+
 def schedule_job_record(
     title: str,
     task: str,
@@ -787,7 +825,10 @@ def schedule_job_record(
     skill: str | None = None,
     requires_idle: bool = False,
     idle_seconds: int | str | None = None,
+    failure_note_dir: str | None = None,
+    lean_context: bool | None = None,
     user_id: str | None = None,
+    dedupe: bool = True,
 ) -> dict:
     """Create and persist a scheduled job record, returning the stored dict.
 
@@ -797,6 +838,11 @@ def schedule_job_record(
     on_due/chat with `task` (see _fire_due_user_jobs) — `title`/`task` are
     still stored for readability/logging but are otherwise unused for
     handler-based jobs.
+
+    `dedupe` (default True): when a stored record with the same deterministic
+    job identity already exists for the user (see _job_identity), return it
+    instead of appending a duplicate. Pass False to force a second record
+    with identical parameters.
     """
     action = (action or "agentic").lower().strip()
     if action not in {"announce", "agentic", "tool"}:
@@ -855,11 +901,31 @@ def schedule_job_record(
         "skill": normalized_skill,
         "requires_idle": requires_idle,
         "idle_seconds": normalized_idle_seconds,
+        "failure_note_dir": failure_note_dir,
+        "lean_context": lean_context,
     }
-    jobs = _read_all(user_id=user_id)
-    jobs.append(job)
-    _write_all(jobs, user_id=user_id)
-    return job
+    # Serialize the read-check-append-write across processes sharing this
+    # user's schedule (same pattern as delete_schedule_record and
+    # _fire_due_user_jobs): another process may have changed schedule.json
+    # while this one waited for the lock, so the in-process cache is
+    # discarded after acquiring it. Without this, a stale read could miss
+    # an identical job and append a duplicate — or overwrite a newer schedule.
+    user_id = user_id or current_user_id()
+    with _scheduler_run_lock(user_id, "jobs", blocking=True) as acquired:
+        if not acquired:
+            raise RuntimeError("Could not lock the schedule store")
+        _invalidate_cache(user_id)
+        jobs = _read_all(user_id=user_id)
+        if dedupe:
+            identity = _job_identity(job)
+            for existing in jobs:
+                if isinstance(existing, dict) and _job_identity(existing) == identity:
+                    log.debug("schedule_job_record: duplicate of %s, returning existing",
+                              existing.get("id"))
+                    return existing
+        jobs.append(job)
+        _write_all(jobs, user_id=user_id)
+        return job
 
 
 def list_schedule_records(include_disabled: bool = False, user_id: str | None = None) -> list[dict]:
@@ -902,7 +968,7 @@ def update_schedule_record(job_id: str, updates: dict[str, Any], user_id: str | 
 
     Editable fields: title, task, time_of_day, frequency, timezone,
     days_of_week, relative_days, interval_seconds, action, handler, tool_call,
-    skill, enabled, requires_idle, idle_seconds.
+    skill, enabled, requires_idle, idle_seconds, failure_note_dir, lean_context.
 
     When any timing field changes, next_due is recalculated from now so the
     new schedule takes effect immediately. Returns None when no record
@@ -976,6 +1042,11 @@ def update_schedule_record(job_id: str, updates: dict[str, Any], user_id: str | 
             updated["idle_seconds"] = int(value) if value not in (None, "") else None
             if updated["idle_seconds"] is not None and updated["idle_seconds"] < 0:
                 raise ValueError("idle_seconds must be >= 0")
+        if "failure_note_dir" in updates:
+            updated["failure_note_dir"] = updates["failure_note_dir"] or None
+        if "lean_context" in updates:
+            value = updates["lean_context"]
+            updated["lean_context"] = None if value is None else bool(value)
         if updated.get("action") == "tool" and not updated.get("tool_call"):
             raise ValueError("action=tool requires tool_call")
         if timing_changed:
@@ -1055,7 +1126,7 @@ DEEP_STUDY_WINDOW_JOB_TITLES: dict[str, tuple[str, list[str], str]] = {
 
 
 WORKSPACE_KNOWLEDGE_JOB_TITLE = "workspace_knowledge_scan"
-WORKSPACE_KNOWLEDGE_SCAN_INTERVAL_SECONDS = int(os.getenv("WORKSPACE_KNOWLEDGE_SCAN_INTERVAL_SECONDS", "60"))
+WORKSPACE_KNOWLEDGE_SCAN_INTERVAL_SECONDS = env_int("WORKSPACE_KNOWLEDGE_SCAN_INTERVAL_SECONDS", 60)
 
 
 def ensure_workspace_knowledge_job(timezone: str | None = None, user_id: str | None = None) -> None:
@@ -1103,16 +1174,16 @@ WEEKLY_SOCIAL_JOB_TITLE = "weekly_social_post"
 # early/late fire here is harmless.
 WEEKLY_SOCIAL_TIME_OF_DAY = os.getenv("WEEKLY_SOCIAL_TIME_OF_DAY", "18:00")
 WEEKLY_SOCIAL_RETRY_JOB_TITLE = "weekly_social_retry_check"
-WEEKLY_SOCIAL_RETRY_INTERVAL_SECONDS = int(os.getenv("WEEKLY_SOCIAL_RETRY_INTERVAL_SECONDS", str(30 * 60)))
+WEEKLY_SOCIAL_RETRY_INTERVAL_SECONDS = env_int("WEEKLY_SOCIAL_RETRY_INTERVAL_SECONDS", 30 * 60)
 
 PHOTO_SOCIAL_JOB_TITLE = "photo_social_scan"
-PHOTO_SOCIAL_SCAN_INTERVAL_SECONDS = int(os.getenv("PHOTO_SOCIAL_SCAN_INTERVAL_SECONDS", str(6 * 60 * 60)))  # 6h default
+PHOTO_SOCIAL_SCAN_INTERVAL_SECONDS = env_int("PHOTO_SOCIAL_SCAN_INTERVAL_SECONDS", 6 * 60 * 60)  # 6h default
 
 VIDEO_SOCIAL_JOB_TITLE = "video_social_scan"
-VIDEO_SOCIAL_SCAN_INTERVAL_SECONDS = int(os.getenv("VIDEO_SOCIAL_SCAN_INTERVAL_SECONDS", str(6 * 60 * 60)))  # 6h default
+VIDEO_SOCIAL_SCAN_INTERVAL_SECONDS = env_int("VIDEO_SOCIAL_SCAN_INTERVAL_SECONDS", 6 * 60 * 60)  # 6h default
 
 THREADS_REPLY_MONITOR_JOB_TITLE = "threads_reply_monitor"
-THREADS_REPLY_MONITOR_INTERVAL_SECONDS = int(os.getenv("THREADS_REPLY_MONITOR_INTERVAL_SECONDS", "180"))
+THREADS_REPLY_MONITOR_INTERVAL_SECONDS = env_int("THREADS_REPLY_MONITOR_INTERVAL_SECONDS", 180)
 
 JOB_POST_SOCIAL_JOB_TITLE = "daily_job_post_social"
 JOB_POST_SOCIAL_DEFAULT_TIME = "23:00"
@@ -1538,7 +1609,6 @@ def bootstrap_non_system_jobs(
             # fresh record on every boot, producing N duplicate "Check email for
             # job alerts" jobs that all fired at once and read the whole mailbox.
             try:
-                from system.schedule import _read_all, schedule_job_record
                 existing_titles = {job.get("title") for job in _read_all(user_id=user_id)}
                 if "Check email for job alerts" not in existing_titles:
                     schedule_job_record(
@@ -1585,6 +1655,15 @@ def bootstrap_non_system_jobs(
     except Exception:
         log.exception("Failed to seed Aiko-Playground idle-build schedule job.")
 
+    # Aiko practice sessions: autonomous trial runs that build experience.
+    # One idempotent interval job, requires_idle - same ordinary-record
+    # pattern as the Playground loop.
+    try:
+        from system.practice import ensure_practice_job
+        ensure_practice_job(timezone=timezone, user_id=user_id)
+    except Exception:
+        log.exception("Failed to seed Aiko practice schedule job.")
+
 
 def ensure_deep_study_window_jobs(timezone: str | None = None, user_id: str | None = None) -> None:
     """Idempotently seed the four recurring jobs that bound Aiko's
@@ -1626,10 +1705,6 @@ def register_scheduler(scheduler: ScheduleRunner) -> None:
     global _scheduler_instance
     _scheduler_instance = scheduler
 
-
-def get_scheduler() -> "ScheduleRunner | None":
-    """Return the registered scheduler instance, if one has been started."""
-    return _scheduler_instance
 
 
 def notify_scheduler_new_job() -> None:
@@ -1673,9 +1748,13 @@ class DueJob:
     skill: str | None = None
     requires_idle: bool = False
     idle_seconds: int | None = None
+    failure_note_dir: str | None = None
+    # Scheduled agentic jobs run lean by default (memory droppable, tighter
+    # tool-output cap) because their state lives in checkpoint files, not in
+    # the prompt. None means "not specified" -> lean; False opts a job back
+    # into the full memory/context budget.
+    lean_context: bool | None = None
 
-
-DueReminder = DueJob
 
 # ── system job timing ─────────────────────────────────────────────────────────
 
@@ -2108,21 +2187,36 @@ class ScheduleRunner:
                     release_busy()
 
             # ── sleep until soonest next target across all users ──────────────
+            def _safe_next_due(raw):
+                # A single corrupt next_due must never kill this daemon
+                # thread: skip unparseable values instead of raising.
+                if not isinstance(raw, str) or not raw:
+                    return None
+                try:
+                    dt = datetime.fromisoformat(raw)
+                except (ValueError, TypeError):
+                    log.warning("Scheduler: ignoring malformed next_due %r", raw[:60])
+                    return None
+                if dt.tzinfo is None:
+                    # Naive datetimes would crash min() against aware
+                    # ones; assume local time rather than dropping the job.
+                    dt = dt.replace(tzinfo=bioclock.local_now().tzinfo)
+                return dt
             candidates = [self._next_daily, self._next_monthly]
             if self._owner_promoted.is_set():
                 candidates.append(self._next_ledger_prune)
                 candidates.append(self._next_fly_replay)
             for uid in all_user_ids():
-                candidates.extend(
-                    datetime.fromisoformat(j["next_due"])
-                    for j in _read_all(user_id=uid)
-                    if j.get("enabled", True) and j.get("next_due")
-                )
-                candidates.extend(
-                    datetime.fromisoformat(g["next_due"])
-                    for g in _read_schedule_graphs(user_id=uid)
-                    if g.get("enabled", True) and g.get("next_due")
-                )
+                for j in _read_all(user_id=uid):
+                    if j.get("enabled", True) and j.get("next_due"):
+                        dt = _safe_next_due(j["next_due"])
+                        if dt is not None:
+                            candidates.append(dt)
+                for g in _read_schedule_graphs(user_id=uid):
+                    if g.get("enabled", True) and g.get("next_due"):
+                        dt = _safe_next_due(g["next_due"])
+                        if dt is not None:
+                            candidates.append(dt)
             next_target = min(candidates)
 
             delta = (next_target - bioclock.local_now()).total_seconds()
@@ -2521,6 +2615,8 @@ class ScheduleRunner:
                             skill=job.get("skill"),
                             requires_idle=bool(job.get("requires_idle", False)),
                             idle_seconds=job.get("idle_seconds"),
+                            failure_note_dir=job.get("failure_note_dir"),
+                            lean_context=job.get("lean_context"),
                         ),
                         tz_name,
                     ))
@@ -2810,4 +2906,3 @@ def start_scheduler(
     return scheduler
 
 
-ReminderScheduler = ScheduleRunner

@@ -140,6 +140,77 @@ IDLE_LEARN_SECONDS = int(os.getenv("IDLE_LEARN_SECONDS", 1800))
 IDLE_LEARNER_CHECK_INTERVAL = float(os.getenv("IDLE_LEARNER_CHECK_INTERVAL", 300))
 
 
+# ── idle-learner curriculum ───────────────────────────────────────────────
+# When conversation history offers no study topic, work through these in
+# order (Oppa's priority). Progress is tracked per user so each topic is
+# learned once; the knowledge.db title check below is the backstop dedup.
+
+_IDLE_CURRICULUM_TOPICS = [
+    "landscape photography",
+    "nature",
+    "wildlife",
+    "astro photography",
+]
+
+_CURRICULUM_PROGRESS_FILE = "idle_learner_curriculum.json"
+
+
+def _curriculum_progress(user_id: str) -> dict:
+    try:
+        path = user_state_path(_CURRICULUM_PROGRESS_FILE, user_id)
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {"completed": []}
+
+
+def _save_curriculum_progress(user_id: str, completed: list[str]) -> None:
+    try:
+        path = user_state_path(_CURRICULUM_PROGRESS_FILE, user_id)
+        path.write_text(json.dumps({"completed": completed}), encoding="utf-8")
+    except Exception as exc:
+        log.warning("[learner] couldn't save curriculum progress: %s", exc)
+
+
+def _next_curriculum_topic(user_id: str) -> str | None:
+    completed = set(_curriculum_progress(user_id).get("completed", []))
+    for topic in _IDLE_CURRICULUM_TOPICS:
+        if topic not in completed:
+            return topic
+    return None
+
+
+def _mark_curriculum_done(topic: str, user_id: str) -> None:
+    prog = _curriculum_progress(user_id)
+    completed = list(prog.get("completed", []))
+    if topic not in completed:
+        completed.append(topic)
+        _save_curriculum_progress(user_id, completed)
+
+
+def _knowledge_has_doc(title: str, user_id: str) -> bool:
+    """True when knowledge.db already holds this self-study doc."""
+    try:
+        from cognition.knowledge.schema import KnowledgeSchema
+        store = KnowledgeSchema()
+        conn = store.connect(user_id)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM learned_docs WHERE user_id = ? AND title = ? "
+                "AND kind = 'self_learned' LIMIT 1",
+                (user_id, title),
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
+
 def idle_learner_loop(owner, check_interval: float = IDLE_LEARNER_CHECK_INTERVAL) -> None:
     """Background autonomous learning loop.
 
@@ -201,31 +272,36 @@ def idle_learner_loop(owner, check_interval: float = IDLE_LEARNER_CHECK_INTERVAL
             continue
 
         log.info("[learner] Aiko is idle and resting. Starting autonomous learning...")
-        study_uid = owner._memorize.get_user_id()
 
         try:
+            study_uid = owner._memorize.get_user_id()
+
             with owner._history_lock:
                 candidates = [
                     m["content"] for m in owner._history
                     if m["role"] == "user" and len(m["content"].split()) > 3
                 ]
 
-            if not candidates:
-                log.info("[learner] skipped: no eligible candidate topics in current history.")
-                continue
+            topic: str | None = None
+            topic_title: str | None = None
+            from_curriculum = False
+            if candidates:
+                topic = candidates[-1]  # simplistic: look at last user query
+                topic_title = topic.strip()[:80]
+            else:
+                # No conversation topics: work through the curriculum in order.
+                topic = _next_curriculum_topic(study_uid)
+                if topic is None:
+                    log.info("[learner] skipped: curriculum complete and no candidate topics.")
+                    continue
+                topic_title = topic
+                from_curriculum = True
 
-            topic = candidates[-1]  # simplistic: look at last user query
-            learned_tag = f"[self-learned:{topic}]"
-            if any(learned_tag in (m.get("content") or "") for m in owner._history):
-                log.info("[learner] skipped: topic already tagged as learned this session: %r", topic)
-                continue
-            existing = owner._memorize.search(learned_tag, limit=1)
-            if existing:
-                log.info(
-                    "[learner] skipped: topic already found in memory (closest match: %r), topic=%r",
-                    (existing[0].get("memory") or existing[0].get("text") or "")[:120],
-                    topic,
-                )
+            doc_title = f"Self-study: {topic_title}"
+            if _knowledge_has_doc(doc_title, study_uid):
+                log.info("[learner] skipped: already in knowledge.db: %r", doc_title)
+                if from_curriculum:
+                    _mark_curriculum_done(topic, study_uid)
                 continue
 
             log.info("[learner] researching topic: %r", topic)
@@ -236,11 +312,26 @@ def idle_learner_loop(owner, check_interval: float = IDLE_LEARNER_CHECK_INTERVAL
                 embedder=owner._memorize._mem._embedder,
             )
 
-            owner._memorize.add([
-                {"role": "system", "content": learned_tag},
-                {"role": "assistant", "content": result[:800]},
-            ], user_id=study_uid)
-            log.info("[learner] learned about %r — summary: %s", topic, result[:300].replace("\n", " "))
+            # Durable knowledge goes to knowledge.db (learned_docs), not
+            # memory.db: memory.db is episodic/personal and subject to decay
+            # and dream pruning, while knowledge_context_for reads
+            # knowledge.db at recall time.
+            from cognition.knowledge.ingest import ingest_text
+            doc_id = ingest_text(
+                title=doc_title,
+                text=result,
+                source="idle_learner",
+                kind="self_learned",
+                embedder=owner._memorize._mem._embedder,
+                user_id=study_uid,
+            )
+            if doc_id is None:
+                log.warning("[learner] knowledge ingest failed for %r", doc_title)
+                continue
+            if from_curriculum:
+                _mark_curriculum_done(topic, study_uid)
+            log.info("[learner] learned about %r -> knowledge.db doc %s",
+                     topic, doc_id[:8])
         except Exception as e:
             log.error(f"[learner] Autonomous learning failed: {e}")
 
@@ -846,11 +937,6 @@ class _DeepStudySessionManager:
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop_event: threading.Event | None = None
-
-    def is_running(self) -> bool:
-        """Check if a deep study session is currently active."""
-        with self._lock:
-            return self._thread is not None and self._thread.is_alive()
 
     def start(self, memorize, client=None, model=None, topic: str | None = None, user_id: str | None = None) -> None:
         """Start a deep study session on a topic in a background thread."""

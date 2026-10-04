@@ -102,6 +102,7 @@ AGENT_VERIFY_LLM: "1"  # Use an LLM call for final verification; options: 1/0, t
 AGENT_VERIFY_LLM_MODE: "auto" # Skip LLM when deterministic checks are clean, escalate when they flag something; options "always", "auto", "off"
 AGENT_MAX_FINAL_REPAIRS: "1"  # Max attempts to repair a final answer that fails verification.
 AGENT_VERIFY_MIN_SCORE: "0.70"  # Minimum verifier score when LLM verification is enabled; range 0.0-1.0.
+AGENT_UPFRONT_MIN_SCORE: "0.10"  # Cosine floor for upfront knowledge/experience blocks; below this they're omitted and pulled via retrieve_context instead.
 AGENT_TOOL_RETRY_BACKOFF: "0.2"  # Seconds to wait before retrying a failed tool call.
 
 # -- Agent tool retry policy --
@@ -137,6 +138,8 @@ SEARXNG_TIMEOUT_SECONDS: "8"  # Seconds before SearXNG search calls time out.
 SEARXNG_MAX_RETRIES: "3"  # Max retry attempts for transient search failures.
 SEARXNG_RETRY_BASE_DELAY: "1.0"  # Base delay in seconds for search retry backoff (1s, 2s, 3s...).
 SEARXNG_RATE_LIMIT_DELAY: "2.0"  # Base delay in seconds for HTTP 429 rate-limit retries (2s, 4s, 6s...).
+TAVILY_TIMEOUT_SECONDS: "20"  # Seconds before Tavily Extract fallback calls time out.
+TAVILY_MIN_CHARS: "200"  # Trafilatura output shorter than this triggers the Tavily Extract fallback (longer source wins).
 
 # -- deep_research (multi-round adaptive research, accuracy-first) --
 ADAPTIVE_SEARCH_MAX_ROUNDS: "2"  # Unrolled subgraph rounds for adaptive_search. Each round = judge → (search → fetch on escalation). Default 2 — cheap enough for ReAct; quick_study overrides this via QUICK_STUDY_MAX_ROUNDS.

@@ -1022,6 +1022,58 @@ class TestFallbackStandIn:
         assert calls == ["primary", "downstream"]
         assert {r.node_id for r in result.results} == {"fetch", "use"}
 
+    def test_fallback_needs_approval_not_executed(self, monkeypatch):
+        """A fallback node gated by needs_approval must not execute."""
+        from agentic.graph_engine import execute_graph, PlanGraph, PlanNode
+
+        calls = []
+
+        def fail(**kwargs):
+            raise RuntimeError("primary down")
+
+        def gated(**kwargs):
+            calls.append("gated")
+            return "should never run"
+
+        graph = PlanGraph(
+            id="fb-approval",
+            name="fallback approval",
+            goal="gated fallback",
+            nodes=(
+                PlanNode("fetch", "fetch", {}, fallback_to="mirror"),
+                PlanNode("mirror", "mirror", {}, needs_approval=True),
+            ),
+        )
+        monkeypatch.setattr(
+            schema, "_TOOL_MAP_CACHE",
+            {"fetch": fail, "mirror": gated},
+        )
+        result = execute_graph(graph)
+        by_id = {r.node_id: r for r in result.results}
+        assert calls == []  # gated tool never ran
+        assert by_id["mirror"].ok is False
+        assert by_id["mirror"].error_type == "needs_approval"
+
+
+def test_run_playbook_json_serializes_slots_noderesults(monkeypatch):
+    """run_playbook_json must serialize NodeResult (slots dataclass, no __dict__)."""
+    from agentic.graph_engine import (
+        GraphRunResult, NodeResult, PlanGraph, run_playbook_json,
+    )
+
+    graph = PlanGraph(id="g", name="G", goal="goal", nodes=())
+    fake_result = GraphRunResult(
+        graph=graph,
+        results=(NodeResult("n1", "kb_search", True, "ok content", args={"q": "x"}),),
+        final_answer="done",
+    )
+    monkeypatch.setattr(schema, "run_schema_agent", lambda *a, **k: fake_result)
+    out = json.loads(run_playbook_json("do a thing"))
+    assert out["ok"] is True
+    assert out["graph_id"] == "g"
+    assert out["results"][0]["node_id"] == "n1"
+    assert out["results"][0]["tool"] == "kb_search"
+
 
 class TestBatchLoopAccumulation:
     """split_in_batches must accumulate every pass for the terminal aggregate."""
@@ -1061,6 +1113,122 @@ class TestBatchLoopAccumulation:
         result = execute_graph(graph)
         assert len(result.final_state.get("all_items", [])) == 5
         assert result.final_state["summary"][0]["total"] == 55.0
+
+
+class TestGraphMemo:
+    """Tests for content-hash memoization of side-effect-free graph nodes."""
+
+    def _run(self, tool, args, monkeypatch, calls, fail_first=False):
+        def fake_fn(**kwargs):
+            calls.append(kwargs.get("url", kwargs.get("query", "")))
+            if fail_first and len(calls) == 1:
+                raise RuntimeError("transient")
+            return f"result-for-{kwargs.get('url', kwargs.get('query', ''))}"
+
+        monkeypatch.setattr(schema, "_tool_map", lambda: {tool: fake_fn})
+        node = PlanNode(id="n1", tool=tool, args=dict(args))
+        return schema._run_node(node, "prompt", {})
+
+    def _clear_memo(self):
+        from agentic import graph_memo
+
+        graph_memo._memo.clear()
+
+    def test_memo_hit_skips_second_call(self, monkeypatch):
+        self._clear_memo()
+        try:
+            calls = []
+            r1 = self._run("fetch_from_url", {"url": "http://example.com/x"}, monkeypatch, calls)
+            r2 = self._run("fetch_from_url", {"url": "http://example.com/x"}, monkeypatch, calls)
+            assert r1.ok and r2.ok
+            assert r1.content == r2.content == "result-for-http://example.com/x"
+            assert len(calls) == 1
+        finally:
+            self._clear_memo()
+
+    def test_different_args_miss(self, monkeypatch):
+        self._clear_memo()
+        try:
+            calls = []
+            self._run("fetch_from_url", {"url": "http://example.com/a"}, monkeypatch, calls)
+            self._run("fetch_from_url", {"url": "http://example.com/b"}, monkeypatch, calls)
+            assert len(calls) == 2
+        finally:
+            self._clear_memo()
+
+    def test_side_effecting_tool_never_memoized(self, monkeypatch):
+        self._clear_memo()
+        try:
+            calls = []
+            self._run("write_report", {"title": "t", "content": "c"}, monkeypatch, calls)
+            self._run("write_report", {"title": "t", "content": "c"}, monkeypatch, calls)
+            assert len(calls) == 2
+        finally:
+            self._clear_memo()
+
+    def test_failures_are_not_cached(self, monkeypatch):
+        self._clear_memo()
+        try:
+            calls = []
+            r1 = self._run("fetch_from_url", {"url": "http://example.com/f"}, monkeypatch, calls, fail_first=True)
+            assert not r1.ok
+            r2 = self._run("fetch_from_url", {"url": "http://example.com/f"}, monkeypatch, calls, fail_first=True)
+            assert r2.ok
+            r3 = self._run("fetch_from_url", {"url": "http://example.com/f"}, monkeypatch, calls, fail_first=True)
+            assert r3.ok and r3.content == r2.content
+            # first raised, second succeeded + cached, third hit the cache
+            assert len(calls) == 2
+        finally:
+            self._clear_memo()
+
+    def test_deep_research_requires_tool_mode(self):
+        from agentic import graph_memo
+
+        assert graph_memo._memo_key("deep_research", {"query": "q"}, None) is None
+        assert graph_memo._memo_key("deep_research", {"query": "q", "tool_mode": True}, None) is not None
+
+    def test_expired_entry_misses(self, monkeypatch):
+        from agentic import graph_memo
+
+        monkeypatch.setattr(graph_memo, "_memo", {})
+        key = graph_memo._memo_key("fetch_from_url", {"url": "http://example.com/e"}, None)
+        assert key is not None
+        graph_memo._memo_put(key, "fetch_from_url", "old")
+        assert graph_memo._memo_get(key) == "old"
+        # Age the entry past its TTL.
+        expires, content = graph_memo._memo[key]
+        graph_memo._memo[key] = (expires - 7200, content)
+        assert graph_memo._memo_get(key) is None
+
+    def test_max_entries_clamped_to_at_least_one(self, monkeypatch):
+        import importlib
+
+        from agentic import graph_memo
+
+        monkeypatch.setenv("AIKO_GRAPH_MEMO_MAX", "0")
+        importlib.reload(graph_memo)
+        try:
+            assert graph_memo._MAX_ENTRIES == 1
+            graph_memo._memo.clear()
+            key = graph_memo._memo_key("fetch_from_url", {"url": "http://example.com/z"}, None)
+            assert key is not None
+            # Used to raise StopIteration evicting from an empty dict.
+            graph_memo._memo_put(key, "fetch_from_url", "x")
+            assert graph_memo._memo_get(key) == "x"
+        finally:
+            monkeypatch.undo()
+            importlib.reload(graph_memo)
+            graph_memo._memo.clear()
+
+    def test_identity_failure_disables_memo(self, monkeypatch):
+        from agentic import graph_memo
+
+        def _boom():
+            raise RuntimeError("identity unavailable")
+
+        monkeypatch.setattr(graph_memo, "current_user_id", _boom)
+        # Fail closed: no shared "None"-identity key may be minted.
+        assert graph_memo._memo_key("fetch_from_url", {"url": "http://example.com/i"}, None) is None
 
 
 if __name__ == "__main__":

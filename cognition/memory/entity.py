@@ -1214,9 +1214,6 @@ __all__ = [
     "NEURAL_LEAK",
     "NEURAL_SPREAD_DEPTH",
 ]
-import json as _json
-
-
 def neural_activate(
     memorize_or_backend: Any,
 ) -> dict[str, float]:

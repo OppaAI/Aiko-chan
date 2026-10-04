@@ -609,6 +609,19 @@ class ProactiveIdleRunner:
             resting = self._resting
 
         if not enabled:
+            # No check-ins will ever compete for idle time: report resting
+            # once truly idle so the idle learner's gate can open. Without
+            # this the learner never fires when proactive is off.
+            with self._lock:
+                should_rest = (
+                    PROACTIVE_REST_AFTER_SECONDS > 0
+                    and idle_for >= PROACTIVE_REST_AFTER_SECONDS
+                    and not self._resting
+                )
+                if should_rest:
+                    self._resting = True
+            if should_rest and self._on_rest_change:
+                self._on_rest_change(True)
             return None
         if resting:
             return None
@@ -625,6 +638,8 @@ class ProactiveIdleRunner:
                 return ("rest_text", _personalize_proactive_text(PROACTIVE_REST_MESSAGE))
             with self._lock:
                 self._resting = True
+            if self._on_rest_change:
+                self._on_rest_change(True)
             return None
         if idle_for < next_checkin_after:
             return None

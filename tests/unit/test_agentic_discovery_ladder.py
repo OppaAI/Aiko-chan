@@ -194,10 +194,34 @@ def test_context_budget_new_signature_sheds_weakest():
         "k" * 10, "e" * 10, "task-mode-guidance",
         tool_schemas=[],
         scores={"knowledge": 0.9, "experience": 0.1},
-    )
+    )[:3]
     # With a tiny budget pressure the weakest block sheds first; here the
     # budget is large enough that nothing sheds — assert shape instead.
     assert isinstance(kb, str) and isinstance(exp, str) and isinstance(tm, str)
+
+
+def test_context_budget_returns_memory_unchanged_by_default():
+    """Interactive chat keeps its memories: memory is fixed budget."""
+    mem, kb, exp, tm = AG._enforce_agentic_context_budget(
+        "persona", "MY-MEMORY", "user", "kb", "exp", "guidance",
+        tool_schemas=[],
+    )
+    assert mem == "MY-MEMORY"
+    assert (kb, exp, tm) == ("kb", "exp", "guidance")
+
+
+def test_context_budget_lean_makes_memory_droppable(monkeypatch):
+    """A lean tick sheds memory before knowledge/experience under pressure."""
+    monkeypatch.setattr(AG, "AGENT_CONTEXT_BUDGET_RATIO", 0.0001)
+    mem, kb, _exp, _tm = AG._enforce_agentic_context_budget(
+        "persona", "X" * 4000, "user", "kb", "exp", "guidance",
+        tool_schemas=[],
+        scores={"knowledge": 0.9, "experience": 0.9},
+        lean=True,
+    )
+    assert "context budget exceeded" in mem
+    # Memory sheds first because it carries the lowest score in lean mode.
+    assert mem != "X" * 4000
 
 
 def test_memkb_timeout_is_positive_bound():

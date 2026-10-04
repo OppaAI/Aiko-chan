@@ -764,7 +764,7 @@ def test_agentic_interrupt_skips_run_learning(monkeypatch, interrupted, expected
     monkeypatch.setattr(agentic_module, "_append_step_trace", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(agentic_module, "_similar_successful_experience", lambda *_args, **_kwargs: "")
     monkeypatch.setattr(agentic_module.reason, "batch_block_relevance_scores", lambda *_args, **_kwargs: [0.0])
-    monkeypatch.setattr(agentic_module, "_enforce_agentic_context_budget", lambda *_args, **_kwargs: ("", "", ""))
+    monkeypatch.setattr(agentic_module, "_enforce_agentic_context_budget", lambda *_args, **_kwargs: ("", "", "", ""))
     monkeypatch.setattr(agentic_module.bioclock, "current_datetime_block", lambda: "")
     monkeypatch.setattr(agentic_module, "_recent_history_messages", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(agentic_module, "default_pre_tool_guardrails", lambda _budget: None)

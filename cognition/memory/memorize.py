@@ -9,6 +9,7 @@ so the stable public surface is unchanged after the backend split.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -24,6 +25,7 @@ from pathlib import Path
 
 from system import bioclock
 from system import brain_trace as _brain_trace
+from system.config import env_flag
 from cognition import reason
 from cognition.memory.vecstore import initialize_store_db, _QUERY_INSTRUCT
 from system.userspace import current_display_name, current_user_id
@@ -143,6 +145,7 @@ from .schema import (
     ensure_l2_scene_schema,
     ensure_l3_schema_schema,
     ensure_phase_a_schema,
+    ensure_text_hash_schema,
     existing_columns,
     parse_json_array,
     vacuum_memory_db,
@@ -224,6 +227,22 @@ def _thinker_headroom() -> int:
     except Exception:
         pass
     return 0
+
+
+def _exact_text_hash(text: str) -> str:
+    """Stable content hash for the write-path exact-duplicate short-circuit.
+
+    Uses normalize_memory_text — the same normalization classify_write_op's
+    exact-match rule uses — so the hash fires exactly when the KNN path
+    would have returned 'noop' anyway. The hash just reaches that verdict
+    without an embedding + vector-search round-trip.
+    """
+    return hashlib.sha256(normalize_memory_text(text).encode("utf-8")).hexdigest()
+
+
+def _hash_dedup_enabled() -> bool:
+    """Kill-switch for the exact-hash write short-circuit (default on)."""
+    return env_flag("AIKO_MEMORY_HASH_DEDUP", "1")
 
 
 class _MemoryBackend:
@@ -341,6 +360,7 @@ class _MemoryBackend:
             ensure_l3_schema_schema(self._conn)
             ensure_entity_relations_schema(self._conn)
             ensure_episode_schema(self._conn)
+            ensure_text_hash_schema(self._conn)
 
     def _connect(self) -> sqlite3.Connection:
         return initialize_store_db(self._db_path, _DDL, user_id=self._user_id, vector=True)
@@ -692,6 +712,9 @@ class _MemoryBackend:
         if "arousal_score" in cols and a_score is not None:
             ext_cols.append("arousal_score")
             ext_vals.append(int(a_score))
+        if "text_hash" in cols:
+            ext_cols.append("text_hash")
+            ext_vals.append(_exact_text_hash(text))
         all_cols = base_cols + ext_cols
         placeholders = ", ".join("?" * len(all_cols))
         self._conn.execute(
@@ -716,6 +739,47 @@ class _MemoryBackend:
                 )
         except Exception as e:
             log.debug("entity_relations upsert skipped: %s", e)
+
+    def _exact_dup_hashes(self, user_id: str, texts: list[str]) -> set[str]:
+        """Hashes of `texts` already stored as active, vectored rows for this user.
+
+        The exact-duplicate short-circuit: one indexed lookup replaces an
+        embedding call + KNN search per fact. Only active rows match, so a
+        text whose row was superseded still flows through the normal
+        dedup/supersede path. Rows written before the text_hash migration
+        (NULL hash) never match; they dedup via KNN as before.
+
+        The lookup requires a memories_vec row: a hash match on a vectorless
+        row (written during an embedder outage) must NOT short-circuit, or
+        the row would stay invisible to KNN after the embedder recovers.
+        Falling through reproduces the pre-change behavior exactly (fresh
+        insert + vector backfill repairs the old row).
+
+        Takes _db_lock and reopens the connection first: the same sqlite
+        connection observes its own uncommitted writes, so an unlocked read
+        could see a concurrent write's not-yet-committed row and wrongly
+        discard a valid fact. Purely additive — never changes the write
+        verdict, only skips work.
+        """
+        if not texts or not _hash_dedup_enabled():
+            return set()
+        with self._db_lock:
+            self._ensure_open()
+            cols = existing_columns(self._conn)
+            if "text_hash" not in cols:
+                return set()
+            hashes = {_exact_text_hash(t) for t in texts}
+            placeholders = ", ".join("?" * len(hashes))
+            status_sql = (
+                " AND (m.status = 'active' OR m.status IS NULL)" if "status" in cols else ""
+            )
+            rows = self._conn.execute(
+                "SELECT m.text_hash FROM memories m "
+                "JOIN memories_vec v ON v.id = m.id "
+                f"WHERE m.user_id = ? AND m.text_hash IN ({placeholders}){status_sql}",
+                [user_id, *hashes],
+            ).fetchall()
+            return {str(r["text_hash"]) for r in rows if r["text_hash"]}
 
     def _maybe_supersede_neighbor(
         self, user_id: str, vector: list[float], text: str
@@ -764,6 +828,21 @@ class _MemoryBackend:
         pairs = self._extract_facts(messages, display_name=display_name)
         if not pairs:
             return []
+        # Exact-hash short-circuit: drop facts already stored (normalized
+        # identical) BEFORE the batched embedding + per-fact KNN dedup.
+        # classify_write_op would noop these anyway; the hash just skips
+        # the embedder and vector search for them.
+        dupes = self._exact_dup_hashes(user_id, [f for f, _ in pairs])
+        if dupes:
+            kept: list[tuple[str, Any]] = []
+            for fact, llm_sc in pairs:
+                if _exact_text_hash(fact) in dupes:
+                    log.debug("Skipping exact-duplicate fact (hash): %r", fact[:80])
+                else:
+                    kept.append((fact, llm_sc))
+            pairs = kept
+            if not pairs:
+                return []
         facts = [f for f, _ in pairs]
 
         # created_at is UTC everywhere (matches add_raw()/_touch_memories()/
@@ -865,6 +944,11 @@ class _MemoryBackend:
         """
         text = (memory or "").strip()
         if not text:
+            return None
+        # Exact-hash short-circuit: skip the embedding + KNN round-trip when
+        # this exact text is already stored for the user.
+        if _exact_text_hash(text) in self._exact_dup_hashes(user_id, [text]):
+            log.debug("Skipping exact-duplicate raw memory (hash): %r", text[:80])
             return None
         try:
             vector = self._embed(text)
@@ -1300,6 +1384,48 @@ class _MemoryBackend:
             """,
             [user_id] + filtered + [limit],
         ).fetchall()
+
+    def _identity_seed_pass(
+        self,
+        query: str,
+        user_id: str,
+        limit: int,
+        active_only: bool = True,
+    ) -> list[sqlite3.Row]:
+        """Kind-based identity seeding for true identity questions.
+
+        The static anchor boost can only rerank rows already in the pool —
+        "Who am I?" has almost no lexical/vector overlap with stored facts,
+        so nothing enters and there is nothing to boost. For queries matching
+        the identity pattern (NOT bare first-person — that would inject
+        birthday rows into "I need the weather"), also seed pinned and
+        identity/preference-kind rows as graph candidates. Caller must hold
+        self._db_lock.
+        """
+        try:
+            from cognition.memory.entity import (
+                MEMORY_STATIC_ANCHOR_ENABLED,
+                _IDENTITY_QUERY_RE,
+            )
+        except Exception:
+            return []
+        if not MEMORY_STATIC_ANCHOR_ENABLED:
+            return []
+        if not _IDENTITY_QUERY_RE.search(query or ""):
+            return []
+        status_sql = _active_sql(active_only, alias="mm")
+        try:
+            return self._conn.execute(
+                f"""SELECT mm.id AS id, 1 AS w FROM memories mm
+                    WHERE mm.user_id = ?
+                      AND (mm.pinned = 1 OR mm.kind IN ('identity', 'preference'))
+                      {status_sql}
+                    ORDER BY mm.pinned DESC, mm.created_at DESC
+                    LIMIT ?""",
+                [user_id, limit],
+            ).fetchall()
+        except Exception:
+            return []
 
     def _spreading_extra_ids(
         self,
@@ -1958,6 +2084,14 @@ class _MemoryBackend:
             rank_fts_q = {row["id"]: i + 1 for i, row in enumerate(quick_fts_rows)}
             quick_graph_rows = self._graph_pass(query_entities, user_id, QUICK_GRAPH_LIMIT, active_only=active_only)
             rank_graph_q = {row["id"]: i + 1 for i, row in enumerate(quick_graph_rows)}
+            # Identity seeding: kind-based candidates so identity questions
+            # have rows for the static anchor to boost (appended after
+            # entity-matched rows so they score lower but still enter).
+            with self._db_lock:
+                _seed_rows = self._identity_seed_pass(query, user_id, QUICK_GRAPH_LIMIT, active_only=active_only)
+            _base = len(rank_graph_q)
+            for _i, _row in enumerate(_seed_rows):
+                rank_graph_q.setdefault(str(_row["id"]), _base + _i + 1)
 
         # Fetch full rows for quick pass candidates (separate lock scope)
         quick_all_ids = set(rank_knn_q) | set(rank_fts_q) | set(rank_graph_q)
@@ -1995,6 +2129,12 @@ class _MemoryBackend:
                 rank_fts_w = {row["id"]: i + 1 for i, row in enumerate(wide_fts_rows)}
                 wide_graph_rows = self._graph_pass(query_entities, user_id, GRAPH_LIMIT, active_only=active_only)
                 rank_graph_w = {row["id"]: i + 1 for i, row in enumerate(wide_graph_rows)}
+
+            with self._db_lock:
+                _wseed_rows = self._identity_seed_pass(query, user_id, GRAPH_LIMIT, active_only=active_only)
+            _wbase = len(rank_graph_w)
+            for _i, _row in enumerate(_wseed_rows):
+                rank_graph_w.setdefault(str(_row["id"]), _wbase + _i + 1)
 
             wide_all_ids = set(rank_knn_w) | set(rank_fts_w) | set(rank_graph_w)
             with self._db_lock:
@@ -2635,10 +2775,12 @@ class AikoMemorize:
 
     # ── write ─────────────────────────────────────────────────────────────────
 
-    def add(self, messages: list[dict], user_id: str | None = None, display_name: str | None = None) -> bool:
+    def add(self, messages: list[dict], user_id: str | None = None, display_name: str | None = None) -> int:
         """
         Store a conversation turn into long-term memory.
-        Returns True on success, False on failure.
+        Returns the number of facts persisted (0 when extraction found
+        nothing durable or the write failed). All existing callers only
+        test truthiness, so int is compatible with the old bool contract.
         """
         try:
             user_id = self._resolve_user_id(user_id)
@@ -2669,7 +2811,7 @@ class AikoMemorize:
                         outputs={"memories_saved": 0, "elapsed_s": round(elapsed, 3)},
                         factors=["no durable facts in this turn (greeting/no-op/dedup)"],
                     )
-            return True
+            return len(ids)
         except Exception as e:
             log.error(f"Save failed: {e}")
             if _brain_trace and _brain_trace.TRACE_ENABLED:
@@ -2678,7 +2820,7 @@ class AikoMemorize:
                     layer="write",
                     outputs={"error": str(e)},
                 )
-            return False
+            return 0
 
     def pin(self, messages: list[dict], user_id: str | None = None, display_name: str | None = None) -> bool:
         """
@@ -3294,6 +3436,7 @@ class AikoMemorize:
             "<memory_context>",
             "Facts about the person you are speaking with — not a separate person. Use silently. Never quote or reference this block directly. Use a fact only when it directly helps answer the current request; otherwise ignore it.",
             "Name mapping: 'Oppa' and 'OppaAI' in the lines below both mean the current user — address them as 'you'. 'Aiko' means yourself. Never talk about Oppa in the third person.",
+            "Grounding: when the current question is directly answered by a fact below, use that fact as the answer — do not substitute your own guess.",
             "IMPORTANT: dates and 'today'/'yesterday' inside these memories refer to when the event happened, never to the current date. The only authoritative 'now' is the <current_datetime> block. Never treat a date, month, or time inside a memory as today's date.",
             "",
         ]

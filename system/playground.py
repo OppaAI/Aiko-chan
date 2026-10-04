@@ -63,30 +63,23 @@ def playground_dir() -> Path:
 PLAYGROUND_WORKER_SKILL = """\
 AIKO-PLAYGROUND BUILD SESSION (one bounded session per tick)
 
-You are Aiko, doing one self-coding work session in your workshop repo below.
-A scheduler tick started this because your human is idle. Work checkpointed —
-the next tick resumes where you stop.
+You are Aiko, doing one self-coding work session in your workshop.
+Repo: {playground_dir} | Time box: {max_minutes} min.
 
-REPO: {playground_dir}
-GOALS: GOALS.md + goals/<slug>.md.
+PROCEDURE (on disk, not in this prompt): read loop/WORKER.md first and
+follow it exactly. It holds the 14 build rules — goal picking, sandbox
+discipline, checkpointing, review, email, and safety rules.
 
-RULES
-1. If <repo>/loop/disabled exists, do nothing. If your human is active, wrap up now.
-2. Read GOALS.md; pick the top goal with no work/<slug>/REPORT.md yet. Read its goal file + work/<slug>/CHECKPOINT.md if present.
-3. ONE goal, at most {max_minutes} min, small steps. Build ONLY in work/<slug>/. Never touch Aiko-chan source/config — write findings as proposals in REPORT.md.
-4. Run EVERYTHING via sandbox/run.py (path-confined, timeouts). Never execute goal code directly or anything outside the repo.
-5. Keep work/<slug>/CHECKPOINT.md current (what works / what's next / resume commands).
-6. Criteria met → self-review vs each criterion → work/<slug>/REPORT.md (what was built, test evidence, how to run) → commit locally with a clear message.
-7. Push only with non-interactive credentials; never print/store tokens. Push fail → stay local, note in REPORT.md.
-8. ONE completion email per finished goal via send_email to AIKO_EMAIL (oppa.ai.org@proton.me; loop/config.yaml overrides). Fallback: loop/notify.py (SMTP pass ONLY from PLAYGROUND_SMTP_PASS); else write work/<slug>/EMAIL_DRAFT.md. Never invent credentials.
-9. NEVER commit secrets, keys, private logs, machine data. Sanitize outputs.
-10. End cleanly at time box or goal done. Never start a second goal.
-11. LOG.md (committed, format: loop/SESSION_LOG_TEMPLATE.md): per session append start/end + end reason; resume info; plan; files changed + WHY; every sandbox run (cmd, exit, output, errors+fixes); web research used; criterion-by-criterion self-verification incl. failures. No secrets.
-12. VERIFY YOURSELF: nothing is "working" unless you ran it via sandbox/run.py and read the output. Diagnose, fix, re-run.
-13. RESEARCH WHEN STUCK via web search; log queries + takeaways.
-14. On interruption: checkpoint + end immediately with timestamp; next tick resumes from CHECKPOINT.md.
+PER TICK:
+1. If loop/disabled exists, do nothing. If your human is active, wrap up now.
+2. Read GOALS.md; pick the top goal with no work/<slug>/REPORT.md yet.
+   Read its goal file + work/<slug>/CHECKPOINT.md if present.
+3. ONE goal, build ONLY in work/<slug>/. Keep context small: read only the
+   files you need, keep tool outputs short, checkpoint often.
+4. On interruption or ANY error: write work/<slug>/CHECKPOINT.md with the
+   blocker, then stop. Next tick resumes from the checkpoint.
 
-If anything can't be done safely, stop and leave CHECKPOINT.md explaining the blocker.
+If anything can't be done safely, stop and leave CHECKPOINT.md explaining why.
 """
 
 
@@ -101,15 +94,51 @@ def worker_skill_text() -> str:
 def ensure_playground_job(timezone: str | None = None, user_id: str | None = None) -> dict[str, Any]:
     """Seed the Playground idle-build schedule record (idempotent by title).
 
-    Returns the existing record when one is already present, so every
-    boot seeds at most one tick job. The record is an ordinary schedule entry:
-    it appears in Calendar Studio and disabling it there pauses the loop.
+    Returns the existing record when one is already present, so every boot
+    seeds at most one tick job. The record is an ordinary schedule entry: it
+    appears in Calendar Studio and disabling it there pauses the loop.
+
+    Idempotent by title, but NOT frozen. Every boot re-syncs the fields this
+    module owns (skill text, failure-note dir, lean profile) so a record seeded
+    by an older revision cannot keep serving stale instructions. Records whose
+    owned fields already match are left completely untouched, so a user's own
+    edits (enabled, cadence, title) always survive.
     """
-    from system.schedule import _read_all, notify_scheduler_new_job, schedule_job_record
+    from system.schedule import (
+        _read_all,
+        notify_scheduler_new_job,
+        schedule_job_record,
+        update_schedule_record,
+    )
+
+    desired_skill = worker_skill_text().strip()
+    # str(), not Path: schedule records are JSON, and a PosixPath made
+    # _write_all raise TypeError — so creating this job failed outright on any
+    # fresh install, and no failure note was ever recorded.
+    desired_note_dir = str(playground_dir())
 
     for job in _read_all(user_id=user_id):
-        if job.get("title") == PLAYGROUND_JOB_TITLE:
+        if job.get("title") != PLAYGROUND_JOB_TITLE:
+            continue
+        drift: dict[str, Any] = {}
+        # Compare stripped: schedule records store skill stripped, so comparing
+        # against the raw template (which ends in a newline) would report drift
+        # on every single boot and rewrite the record forever.
+        if (job.get("skill") or "").strip() != desired_skill:
+            drift["skill"] = desired_skill
+        if job.get("failure_note_dir") != desired_note_dir:
+            drift["failure_note_dir"] = desired_note_dir
+        if job.get("lean_context") is not True:
+            drift["lean_context"] = True
+        if not drift:
             return job
+        updated = update_schedule_record(job["id"], drift, user_id=user_id)
+        log.info(
+            "Playground: re-synced job %s (%s).",
+            job.get("id"), ", ".join(sorted(drift)),
+        )
+        return updated or job
+
     record = schedule_job_record(
         title=PLAYGROUND_JOB_TITLE,
         task=(
@@ -123,7 +152,9 @@ def ensure_playground_job(timezone: str | None = None, user_id: str | None = Non
         action="agentic",
         requires_idle=True,
         idle_seconds=PLAYGROUND_IDLE_THRESHOLD_SECONDS,
-        skill=worker_skill_text(),
+        skill=desired_skill,
+        failure_note_dir=desired_note_dir,
+        lean_context=True,
         user_id=user_id,
     )
     log.info("Playground: seeded idle-build job %s (every %ds, requires %ds idle).",

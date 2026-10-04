@@ -619,6 +619,14 @@ _LEARNED_KNOWLEDGE_HINT_RE = re.compile(
 )
 
 
+_PERSONAL_FACT_RE = re.compile(
+    r"\b(who am i|my name|what(?:'s| is) my|tell me .*my|"
+    r"my (favorite|favourite|birthday|age|location|email|name|hobby|hobbies|"
+    r"likes?|dislikes?|plans?|preferences?))\b",
+    re.IGNORECASE,
+)
+
+
 def _memory_cannot_answer(raw_input: str, memories: list[dict] | None) -> bool:
     """Memory-side of the on-demand knowledge gate.
 
@@ -793,10 +801,6 @@ def _strip_style_directives(text: str) -> str:
     return _STYLE_DIRECTIVE_RE.sub("", text).strip()
 
 
-def _extract_search_results_block(system_prompt: str) -> str:
-    match = re.search(r"<search_results\b[^>]*>.*?</search_results>", system_prompt or "", re.DOTALL)
-    return match.group(0) if match else ""
-
 
 # ── proactive check-in config (config/proactive.yaml, via os.environ) ─────────
 # system.config.load_config() has already populated these into the process
@@ -869,7 +873,7 @@ class AikoThink:
         # The proactive idle check-in state machine lives in main.py's
         # ProactiveIdleRunner. That runner sets this flag via
         # set_proactive_resting() so learn.idle_learner_loop can see when
-        # Aiko is "resting" and pause autonomous study. The flag is cleared
+        # Aiko is "resting" and it is safe to study. The flag is cleared
         # by _note_user_activity() on every normal turn.
         self._proactive_lock = threading.Lock()
         self._proactive_resting = False
@@ -974,6 +978,13 @@ class AikoThink:
             volatile_parts.append(state_obj.identity_guidance())
             volatile_parts.append(state_obj.self_model_context())
             volatile_parts.append(state_obj.subconscious_guidance())
+            # Inner voice on EVERY turn (not just deliberation turns): the
+            # rolling first-person thought thread + one unprompted aside if
+            # due. Cheap (no LLM/DB) — this is what keeps her feeling like
+            # the same person across short casual messages.
+            inner_turn = state_obj.inner_voice_turn_block()
+            if inner_turn:
+                volatile_parts.append(inner_turn)
             # Structured reasoning instruction (Anthropic-style CoT with explicit tags)
             reasoning_guide = (
                 "When facing complex questions, use explicit structured reasoning:\n"
@@ -1646,8 +1657,8 @@ class AikoThink:
             self._proactive_resting = False
 
     def is_proactive_resting(self) -> bool:
-        """True when Aiko is resting and should not start autonomous study.
-        Set by set_proactive_resting() (called from main.py's
+        """True when Aiko is resting and the idle learner may study.
+        Set by set_proactive_resting() (called from system/orchestrate.py's
         ProactiveIdleRunner) and cleared by _note_user_activity() on
         every normal turn. Polled by learn.idle_learner_loop."""
         return self._proactive_resting
@@ -2038,6 +2049,7 @@ class AikoThink:
         token_callback=None,
         mem_kb_future=None,
         query_vec: np.ndarray | None = None,
+        include_history: bool = True,
     ) -> str:
         """Handle defer / clarify / degrade_chat without starting agentic tools.
 
@@ -2060,9 +2072,16 @@ class AikoThink:
             mem_kb_future=mem_kb_future,
             query_vec=query_vec,
             store_turn=True,
+            include_history=include_history,
         )
 
-    def agentic_chat(self, user_input: str, token_callback=None, mem_kb_future=None, query_vec: np.ndarray | None = None, _from_route: bool = False, system_note: str | None = None, gate_result: tuple[bool, str, str] | None = None, include_history: bool = True) -> str:
+    def agentic_chat(
+        self, user_input: str, token_callback=None, mem_kb_future=None,
+        query_vec: np.ndarray | None = None, _from_route: bool = False,
+        system_note: str | None = None,
+        gate_result: tuple[bool, str, str] | None = None,
+        include_history: bool = True, lean_context: bool = False,
+    ) -> str:
         """Delegate task-mode execution to agentic.agentic.
 
         Runs a bounded self-assessment gate first (attention.should_attempt).
@@ -2070,6 +2089,10 @@ class AikoThink:
         chat, defer, or ask for clarification instead of starting the tool loop.
         Direct entry (scheduled jobs) still gates here; normal turns are gated
         earlier in route() with mode=route.
+
+        lean_context — scheduled autonomous jobs set this: memory becomes droppable
+        and tool output is capped tighter, because those sessions keep their state
+        in on-disk checkpoints rather than in the prompt.
         """
         user_id = current_user_id()
         with self._active_users_lock:
@@ -2091,6 +2114,7 @@ class AikoThink:
                 return self._soft_gate_reply(
                     user_input, gate_action, gate_reason, token_callback=token_callback,
                     mem_kb_future=mem_kb_future, query_vec=query_vec,
+                    include_history=include_history,
                 )
 
             memorize = self._get_memorize()
@@ -2108,7 +2132,11 @@ class AikoThink:
                 # notices as marked situational context so drained notes are
                 # never silently dropped on tool turns.
                 user_input = f"{user_input}\n\n[{_format_system_notices(system_note)}]"
-            response = run_agentic_chat(self, user_input, token_callback=token_callback, mem_kb_future=mem_kb_future, query_vec=query_vec, cap_vec=cap_vec, include_history=include_history)
+            response = run_agentic_chat(
+                self, user_input, token_callback=token_callback,
+                mem_kb_future=mem_kb_future, query_vec=query_vec, cap_vec=cap_vec,
+                include_history=include_history, lean_context=lean_context,
+            )
             return response
         finally:
             # Only record latency if called directly (not from route, which already records)
@@ -2249,6 +2277,7 @@ class AikoThink:
         system_note: str | None = None,
         deep_think: bool = False,
         return_deep_think_summary: bool = False,
+        include_history: bool = True,
     ) -> str | tuple[str, str | None]:
         """Standard chat: persona plus optional memory/KB context.
 
@@ -2412,6 +2441,19 @@ class AikoThink:
                     volatile_system = f"{volatile_system}\n\n{metacognitive_block}"
                 if not memory_block:
                     volatile_system += "\n\n<memory_context>\nNo relevant memories found.\n</memory_context>"
+                    # Don't-know discipline: with zero evidence on a personal-
+                    # fact question, say so (or ask) instead of inventing —
+                    # confabulated "facts" get extracted into memory and then
+                    # recalled as truth by later turns.
+                    if _PERSONAL_FACT_RE.search(raw_input or ""):
+                        volatile_system += (
+                            "\n\n<answer_discipline>\nNo memories were found for this "
+                            "question. Check the <persona> profile facts above first — "
+                            "if one answers it, use it. Otherwise, if it asks for a "
+                            "personal fact about the user, say you don't know it yet "
+                            "or ask them — never invent names, preferences, or past "
+                            "events.\n</answer_discipline>"
+                        )
                 # Learned knowledge is on-demand in chat: memory is always-on,
                 # knowledge only when memory is absent/weak or explicitly asked.
                 # The chained recall path (mem_kb_future is None) already gated
@@ -2568,7 +2610,10 @@ class AikoThink:
                 self._history.append({"role": "user", "content": raw_input})
                 if len(self._history) > CONTEXT_WINDOW_TURNS * 10:
                     self._history = self._history[-(CONTEXT_WINDOW_TURNS * 10):]
-                trimmed = self._history[-(CONTEXT_WINDOW_TURNS * 2):]
+                # include_history=False (scheduled jobs): the turn is still
+                # stored, but prior history is not sent — ticks resume from
+                # checkpoint files, not chat.
+                trimmed = self._history[-(CONTEXT_WINDOW_TURNS * 2):] if include_history else []
 
             trimmed = self._sanitize_history(trimmed)
             if trimmed and trimmed[-1]["role"] == "user" and llm_prompt != user_input:
@@ -2620,13 +2665,12 @@ class AikoThink:
             if sink is not None:
                 # Sentence-stream mode: token_callback is driven by the
                 # speech-stream worker (karaoke-paced), not the LLM stream.
-                stream_kwargs["token_callback"] = None
                 stream_kwargs["sentence_sink"] = sink
             raw_response = self._stream_response(
                 trimmed,
                 system=core_system,
                 system_tail=volatile_system,
-                token_callback=token_callback,
+                token_callback=None if sink is not None else token_callback,
                 emit=False,
                 **stream_kwargs,
             )
@@ -2838,11 +2882,17 @@ class AikoThink:
             log.error("Scheduled tool job %s failed: %s", job.id, e)
 
     def _run_scheduled_agentic_job(self, job: DueJob) -> None:
-        """Run a scheduled autonomous task through Aiko's agent loop.
+        """Run one scheduled autonomous task through Aiko's agent loop.
 
         Fresh history: each tick appends its skill prompt + result transcript
         to owner._history, so including it would bloat every later session
         past the server ctx. Ticks resume from checkpoint files, not chat.
+
+        Lean context: a tick's state lives in its own checkpoint files, so
+        Aiko's recalled memories buy nothing while costing the headroom that
+        keeps the ReAct loop inside the server's context window. Jobs that
+        want the full prompt budget can opt back in with
+        ``lean_context: false`` on the record.
         """
         prompt = (
             "Scheduled job due. Use only local available tools. If external action "
@@ -2850,10 +2900,29 @@ class AikoThink:
             f"Title: {job.title}\nTask: {job.task}"
             + (f"\n\nScheduled skill instructions:\n{job.skill}" if job.skill else "")
         )
+        lean = getattr(job, "lean_context", None)
+        if lean is None:
+            lean = True
         try:
-            self.agentic_chat(prompt, include_history=False)
+            self.agentic_chat(prompt, include_history=False, lean_context=bool(lean))
         except Exception as e:
             log.error("Scheduled agentic job failed: %s", e)
+            # Leave a visible trace for jobs that opt in (e.g. the Playground
+            # loop): without this a dead tick is silent and the next tick
+            # blindly retries the same doomed session.
+            note_dir = getattr(job, "failure_note_dir", None)
+            if note_dir:
+                try:
+                    from pathlib import Path
+                    from datetime import datetime, timezone
+                    p = Path(note_dir) / "loop" / "FAILURE_LOG.md"
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                    with open(p, "a", encoding="utf-8") as f:
+                        f.write(f"\n## {ts} — {job.title} failed\n\n"
+                                f"Error: {str(e)[:500]}\n")
+                except Exception as note_exc:
+                    log.warning("failure-note write failed: %s", note_exc)
 
     # ── internal ──────────────────────────────────────────────────────────────
 

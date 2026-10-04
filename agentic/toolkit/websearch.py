@@ -6,7 +6,10 @@ module.
 
 Provides a two-step pipeline:
   1. **Search** — query a SearXNG instance, get structured results
-  2. **Fetch** — read one result URL via trafilatura (HTML article extraction)
+  2. **Fetch** — read one result URL via trafilatura (HTML article extraction),
+     with Tavily Extract as a credit-gated fallback when the thin fetch fails
+     or returns nothing usable (JS wall, bot block). Empty TAVILY_API_KEY
+     disables the fallback entirely.
 
 This is a *discovery-oriented* module — you have a question and need
 to find relevant pages, then read them. It does NOT handle non-HTML
@@ -53,6 +56,17 @@ SEARXNG_RATE_LIMIT_DELAY = float(os.getenv("SEARXNG_RATE_LIMIT_DELAY", 2.0))
 WEB_FETCH_MAX_DOWNLOAD_BYTES = int(os.getenv("WEB_FETCH_MAX_DOWNLOAD_BYTES", 5_000_000))
 WEB_FETCH_TIMEOUT_SECONDS = int(os.getenv("WEB_FETCH_TIMEOUT_SECONDS", 8))
 WEB_FETCH_MAX_CHARS = int(os.getenv("WEB_FETCH_MAX_CHARS", 4000))
+
+# ── Tavily Extract fallback (extraction layer only) ───────────────────────
+# SearXNG stays the search primary (free/unlimited/self-hosted). When the
+# thin trafilatura fetch fails or returns nothing usable (JS wall, bot
+# block), spend one Tavily credit for clean markdown — same URL in, same
+# truncated-text shape out, so no caller changes. Empty key = today's
+# behavior exactly (trafilatura only, never any vendor call).
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
+TAVILY_EXTRACT_URL = os.getenv("TAVILY_EXTRACT_URL", "https://api.tavily.com/extract")
+TAVILY_TIMEOUT_SECONDS = int(os.getenv("TAVILY_TIMEOUT_SECONDS", 20))
+TAVILY_MIN_CHARS = int(os.getenv("TAVILY_MIN_CHARS", 200))
 # ── Cache instance ──────────────────────────────────────────────────────
 # ── shared TTL cache instances ─────────────────────────────────────────────
 # Both search and fetch operations use the same TTL window but separate
@@ -153,6 +167,42 @@ def web_search(
     return results, None
 
 
+def _tavily_extract(url: str, max_chars: int) -> str | None:
+    """One-shot Tavily Extract for a URL trafilatura couldn't read.
+
+    Returns extracted text or None (never raises; every failure mode —
+    no key, no requests lib, HTTP error, empty content — is None so the
+    caller keeps its own error string). Basic depth keeps it at 1 credit.
+    Only ever called after the SSRF check passed, so no internal URL
+    is exfiltrated to the vendor.
+    """
+    if not TAVILY_API_KEY:
+        return None
+    if importlib.util.find_spec("requests") is None:
+        return None
+    requests = importlib.import_module("requests")
+    try:
+        resp = requests.post(
+            TAVILY_EXTRACT_URL,
+            json={"api_key": TAVILY_API_KEY, "urls": [url],
+                  "extract_depth": "basic", "format": "markdown"},
+            timeout=TAVILY_TIMEOUT_SECONDS,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.debug("tavily extract failed for %s: %s", url, e)
+        return None
+    try:
+        results = data.get("results") or []
+        texts = [(r.get("raw_content") or "").strip() for r in results
+                 if isinstance(r, dict)]
+        best = max(texts, key=len, default="")
+    except Exception:
+        return None
+    return best[:max_chars] if best else None
+
+
 def web_fetch(
     url: str,
     max_chars: int = WEB_FETCH_MAX_CHARS,
@@ -188,18 +238,41 @@ def web_fetch(
             return cached
  
     if importlib.util.find_spec("trafilatura") is None:
+        tavily = _tavily_extract(url, max_chars)
+        if tavily:
+            if use_cache:
+                _FETCH_CACHE.set(cache_key, tavily)
+            return tavily
         return "[fetch failed: trafilatura is not installed]"
     trafilatura = importlib.import_module("trafilatura")
- 
+
     downloaded, error = ingest_from_url(url, max_download_bytes)
     if error:
+        tavily = _tavily_extract(url, max_chars)
+        if tavily:
+            if use_cache:
+                _FETCH_CACHE.set(cache_key, tavily)
+            return tavily
         return error
- 
+
     try:
         text = trafilatura.extract(downloaded, include_links=False, include_tables=False) or ""
     except Exception as e:
+        tavily = _tavily_extract(url, max_chars)
+        if tavily:
+            if use_cache:
+                _FETCH_CACHE.set(cache_key, tavily)
+            return tavily
         return f"[fetch failed: {e}]"
- 
+
+    if not text or len(text) < TAVILY_MIN_CHARS:
+        # Thin/empty extraction (JS wall, bot block, boilerplate-only) —
+        # take whichever source yields more text, so a garbage page never
+        # wins over a good vendor extraction.
+        tavily = _tavily_extract(url, max_chars)
+        if tavily and len(tavily) > len(text):
+            text = tavily
+
     result = text[:max_chars] if text else "[fetch failed: no extractable text]"
     if use_cache and text:
         _FETCH_CACHE.set(cache_key, result)

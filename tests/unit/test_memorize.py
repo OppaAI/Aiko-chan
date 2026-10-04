@@ -376,6 +376,186 @@ class TestAddRawDedup:
         assert row["pinned"] == 1
 
 
+class TestExactHashShortCircuit:
+    """Write-path exact-hash short-circuit: normalized-identical text skips
+    the embedding + KNN round-trip via one indexed (user_id, text_hash) lookup.
+    """
+
+    @pytest.fixture
+    def counting_backend(self, backend):
+        calls = {"embed": 0, "embed_batch": 0}
+        inner = backend._embedder
+
+        class _Counting:
+            def embed(self, texts):
+                calls["embed"] += 1
+                return inner.embed(texts)
+
+            def embed_batch(self, texts):
+                calls["embed_batch"] += 1
+                return inner.embed_batch(texts)
+
+            def embed_query(self, text, instruct=""):
+                return inner.embed_query(text, instruct)
+
+            def embed_queries(self, texts):
+                return inner.embed_queries(texts)
+
+        backend._embedder = _Counting()
+        backend.calls = calls
+        return backend
+
+    def _row_count(self, backend, user_id="u1"):
+        return backend._conn.execute(
+            "SELECT COUNT(*) c FROM memories WHERE user_id = ?", (user_id,)
+        ).fetchone()["c"]
+
+    def test_text_hash_column_populated(self, counting_backend):
+        from cognition.memory.memorize import _exact_text_hash
+
+        mem_id = counting_backend.add_raw("Oppa's birthday is June 3", user_id="u1")
+        row = counting_backend._conn.execute(
+            "SELECT text_hash FROM memories WHERE id = ?", (mem_id,)
+        ).fetchone()
+        assert row["text_hash"] == _exact_text_hash("Oppa's birthday is June 3")
+
+    def test_exact_duplicate_skips_embedding(self, counting_backend):
+        b = counting_backend
+        first = b.add_raw("Oppa's birthday is June 3", user_id="u1")
+        assert first is not None
+        assert b.calls["embed"] == 1
+        second = b.add_raw("Oppa's birthday is June 3", user_id="u1")
+        assert second is None
+        assert b.calls["embed"] == 1  # no second embedding happened
+        assert self._row_count(b) == 1
+
+    def test_case_and_whitespace_variant_skips(self, counting_backend):
+        b = counting_backend
+        b.add_raw("Oppa's birthday is June 3", user_id="u1")
+        # normalize_memory_text lowercases + collapses whitespace, so this is
+        # an exact duplicate under the same rule classify_write_op uses.
+        assert b.add_raw("  oppa's   BIRTHDAY is  june 3 ", user_id="u1") is None
+        assert b.calls["embed"] == 1
+        assert self._row_count(b) == 1
+
+    def test_same_text_different_user_inserts(self, counting_backend):
+        b = counting_backend
+        b.add_raw("Oppa's birthday is June 3", user_id="u1")
+        other = b.add_raw("Oppa's birthday is June 3", user_id="u2")
+        assert other is not None  # hash is user-scoped; no cross-user dedup
+        assert self._row_count(b, "u1") == 1
+        assert self._row_count(b, "u2") == 1
+
+    def test_superseded_text_reinserts(self, counting_backend):
+        b = counting_backend
+        mem_id = b.add_raw("Oppa's birthday is June 3", user_id="u1")
+        b._conn.execute(
+            "UPDATE memories SET status = 'superseded' WHERE id = ?", (mem_id,)
+        )
+        b._conn.commit()
+        # Only active rows match the short-circuit; re-writing the text goes
+        # through the normal path instead of being silently dropped.
+        again = b.add_raw("Oppa's birthday is June 3", user_id="u1")
+        assert again is not None and again != mem_id
+
+    def test_kill_switch_falls_back_to_knn(self, counting_backend, monkeypatch):
+        b = counting_backend
+        monkeypatch.setenv("AIKO_MEMORY_HASH_DEDUP", "0")
+        first = b.add_raw("Oppa's birthday is June 3", user_id="u1")
+        second = b.add_raw("Oppa's birthday is June 3", user_id="u1")
+        assert first is not None
+        # Flag off: the KNN path still noops the exact duplicate (FakeEmbedder
+        # gives identical text an identical vector), but the embedding ran.
+        assert second is None
+        assert b.calls["embed"] == 2
+        assert self._row_count(b) == 1
+
+    def test_add_path_skips_batch_embedding(self, counting_backend, monkeypatch):
+        b = counting_backend
+        monkeypatch.setattr(
+            b,
+            "_extract_facts",
+            lambda messages, display_name=None: [("fact one", 1), ("fact two", 0)],
+        )
+        ids1 = b.add([{"role": "user", "content": "x"}], user_id="u1")
+        assert len(ids1) == 2
+        assert b.calls["embed_batch"] == 1
+        ids2 = b.add([{"role": "user", "content": "x"}], user_id="u1")
+        assert ids2 == []
+        assert b.calls["embed_batch"] == 1  # second add embedded nothing
+        assert self._row_count(b) == 2
+
+    def test_vectorless_match_does_not_short_circuit(self, counting_backend):
+        """A hash match on a row written during an embedder outage must fall
+        through: the fresh write embeds, inserts, and the post-write backfill
+        repairs the old row's missing vector."""
+        b = counting_backend
+
+        class _Down:
+            def embed(self, texts):
+                raise RuntimeError("embedder down")
+
+            def embed_batch(self, texts):
+                raise RuntimeError("embedder down")
+
+        real = b._embedder
+        b._embedder = _Down()
+        try:
+            outage_id = b.add_raw("Oppa's birthday is June 3", user_id="u1")
+        finally:
+            b._embedder = real
+        assert outage_id is not None
+        assert (
+            b._conn.execute(
+                "SELECT COUNT(*) c FROM memories_vec WHERE id = ?", (outage_id,)
+            ).fetchone()["c"]
+            == 0
+        )
+
+        again_id = b.add_raw("Oppa's birthday is June 3", user_id="u1")
+        assert again_id is not None and again_id != outage_id
+        # The outage row recovered its vector via backfill.
+        assert (
+            b._conn.execute(
+                "SELECT COUNT(*) c FROM memories_vec WHERE id = ?", (outage_id,)
+            ).fetchone()["c"]
+            == 1
+        )
+
+    def test_lookup_reopens_connection(self, counting_backend, monkeypatch):
+        b = counting_backend
+        calls = []
+        real = b._ensure_open
+
+        def _counting():
+            calls.append(1)
+            return real()
+
+        monkeypatch.setattr(b, "_ensure_open", _counting)
+        b._exact_dup_hashes("u1", ["some text"])
+        assert calls, "_exact_dup_hashes must reopen the connection before reading"
+
+    def test_lookup_serializes_with_db_lock(self, counting_backend):
+        import threading
+
+        b = counting_backend
+        b._db_lock.acquire()
+        done = threading.Event()
+
+        def _worker():
+            b._exact_dup_hashes("u1", ["x"])
+            done.set()
+
+        t = threading.Thread(target=_worker)
+        t.start()
+        try:
+            assert not done.wait(0.5), "lookup must wait for _db_lock"
+        finally:
+            b._db_lock.release()
+        assert done.wait(5), "lookup must proceed after lock release"
+        t.join()
+
+
 class TestSearchIntegration:
     def test_search_returns_seeded_fact(self, backend):
         backend.add_raw("Oppa is building a robot called Grace", user_id="u1")

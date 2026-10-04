@@ -22,6 +22,7 @@ Context fetch shape:
 from __future__ import annotations
 
 import concurrent.futures
+import contextvars
 import inspect
 from collections import OrderedDict
 import json
@@ -88,6 +89,11 @@ AGENT_MAX_TOKENS = int(os.getenv("AGENT_MAX_TOKENS", os.getenv("LLM_MAX_TOKENS",
 LLM_CTX_SIZE = int(os.getenv("LLM_CTX_SIZE", 10240))
 LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", 120))
 AGENT_CONTEXT_BUDGET_RATIO = float(os.getenv("AGENT_CONTEXT_BUDGET_RATIO", 0.65))
+# Share of the context window the *assembled request* may occupy, leaving room
+# for the completion and the server's own chat-template overhead. The system-prompt
+# budget above governs one block group; this governs the whole payload actually
+# sent, which is what actually 400s when the ReAct loop grows.
+AGENT_REQUEST_BUDGET_RATIO = float(os.getenv("AGENT_REQUEST_BUDGET_RATIO", 0.80))
 # AGENT_MEMORY_DRAIN_TIMEOUT and AGENT_MEMORY_RECALL_LIMIT removed:
 #   - Draining removed: the async write's own idle-grace window
 #     (MEMORY_WRITE_IDLE_GRACE in memorize.py) plus real agentic turn
@@ -101,6 +107,17 @@ AGENT_CONTEXT_BUDGET_RATIO = float(os.getenv("AGENT_CONTEXT_BUDGET_RATIO", 0.65)
 #     same data.
 AGENT_NOTE_MAX_CHARS = int(os.getenv("AGENT_NOTE_MAX_CHARS", 5000))
 AGENT_TOOL_RESULT_MAX_CHARS = int(os.getenv("AGENT_TOOL_RESULT_MAX_CHARS", 8000))
+# Scheduled ticks (self-coding loops and friends) resume from on-disk
+# checkpoints, so their conversation state does not need to survive in the
+# prompt. A tighter per-tool-result cap keeps a 6-iteration ReAct loop inside a
+# 10k window without touching n_ctx.
+AGENT_TICK_TOOL_RESULT_MAX_CHARS = int(os.getenv("AGENT_TICK_TOOL_RESULT_MAX_CHARS", "3000"))
+# Active per-run tool-result cap. A contextvar (not a module global) so
+# concurrent turns can't clobber each other's limit; set once by
+# run_agentic_chat and read by ToolResult.observation().
+_tool_result_max_chars: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "aiko_agent_tool_result_max_chars", default=None,
+)
 AGENT_VERIFY_FINAL = os.getenv("AGENT_VERIFY_FINAL", "1").lower() in {"1", "true", "yes", "on"}
 AGENT_VERIFY_LLM = os.getenv("AGENT_VERIFY_LLM", "1").lower() in {"1", "true", "yes", "on"}
 AGENT_VERIFY_LLM_MODE = os.getenv("AGENT_VERIFY_LLM_MODE", "auto")  # "always" | "auto" | "off"
@@ -127,7 +144,44 @@ NEEDLE_BASE_URL = os.getenv("NEEDLE_BASE_URL", "http://127.0.0.1:8082")
 NEEDLE_TIMEOUT = float(os.getenv("NEEDLE_TIMEOUT", "15"))
 NEEDLE_CONFIDENCE_THRESHOLD = float(os.getenv("NEEDLE_CONFIDENCE_THRESHOLD", "0.85"))
 NEEDLE_WORKERS = os.getenv("NEEDLE_WORKERS", "")
-NEEDLE_MAX_WORKERS = os.getenv("NEEDLE_MAX_WORKERS", "4")
+# Empty/whitespace env values are a config smell, not a valid int: int("")
+# raised ValueError on every ReAct turn and escalated straight past Needle.
+NEEDLE_MAX_WORKERS = (os.getenv("NEEDLE_MAX_WORKERS", "").strip() or "4")
+
+# Needle circuit breaker. A hung/unreachable Needle burns its full timeout on
+# every turn (x4 workers), which is pure latency when the server is known-dead.
+# After NEEDLE_CIRCUIT_FAILURES consecutive transport failures, skip Needle
+# entirely for NEEDLE_CIRCUIT_COOLDOWN seconds instead of re-paying the timeout.
+NEEDLE_CIRCUIT_FAILURES = int(os.getenv("NEEDLE_CIRCUIT_FAILURES", "3"))
+NEEDLE_CIRCUIT_COOLDOWN = float(os.getenv("NEEDLE_CIRCUIT_COOLDOWN", "300"))
+_needle_state = {"failures": 0, "open_until": 0.0}
+
+
+def _needle_circuit_open() -> bool:
+    """True while the Needle breaker is open (server presumed dead)."""
+    return time.monotonic() < _needle_state["open_until"]
+
+
+def _needle_circuit_record(ok: bool) -> None:
+    """Track consecutive Needle transport outcomes and trip/reset the breaker."""
+    if ok:
+        _needle_state["failures"] = 0
+        _needle_state["open_until"] = 0.0
+        return
+    _needle_state["failures"] += 1
+    if _needle_state["failures"] >= NEEDLE_CIRCUIT_FAILURES:
+        _needle_state["open_until"] = time.monotonic() + NEEDLE_CIRCUIT_COOLDOWN
+        log.warning(
+            "[agentic] Needle breaker open for %.0fs after %d consecutive failures — "
+            "skipping Needle and escalating directly.",
+            NEEDLE_CIRCUIT_COOLDOWN, _needle_state["failures"],
+        )
+
+
+def _needle_circuit_reset() -> None:
+    """Clear breaker state — used by tests and manual recovery."""
+    _needle_state["failures"] = 0
+    _needle_state["open_until"] = 0.0
 
 # Rolling STM window shared across all three chat paths. Mirrors
 # CONTEXT_WINDOW_TURNS in cognition.think (kept as a distinct name here rather
@@ -708,7 +762,20 @@ class ToolResult:
     metadata: dict = field(default_factory=dict)
 
     def observation(self) -> str:
-        """Render a compact machine-readable observation for the next LLM step."""
+        """Render a compact machine-readable observation for the next LLM step.
+
+        Honors the active per-run cap (``_tool_result_max_chars``) so a
+        scheduled tick can bound its tool output far tighter than interactive
+        chat without every call site having to thread a limit through.
+        """
+        content = self.content or ""
+        limit = _tool_result_max_chars.get() or AGENT_TOOL_RESULT_MAX_CHARS
+        if len(content) > limit:
+            content = (
+                content[:limit]
+                + f"\n[... truncated: {len(content) - limit} more chars; "
+                + "re-run with narrower scope if you need the rest]"
+            )
         payload = {
             "ok": self.ok,
             "tool": self.tool,
@@ -716,7 +783,7 @@ class ToolResult:
             "retryable": self.retryable,
             "error_type": self.error_type,
             "args": self.args,
-            "content": self.content[:AGENT_TOOL_RESULT_MAX_CHARS],
+            "content": content,
         }
         if self.metadata:
             payload["metadata"] = self.metadata
@@ -1488,19 +1555,29 @@ def _enforce_agentic_context_budget(
     task_mode_context: str = "",
     tool_schemas: list | None = None,
     scores: dict[str, float] | None = None,
-) -> tuple[str, str, str]:
+    lean: bool = False,
+) -> tuple[str, str, str, str]:
     """Shed droppable blocks when the agentic system prompt exceeds budget.
 
-    Only three blocks are droppable now: learned knowledge, the similar-
-    experience guidance, and the verbose task-mode guidance. Memory, the
-    static TASK_MODE_CORE policy, and the tool schemas are fixed budget.
+    Three blocks are always droppable: learned knowledge, the similar-experience
+    guidance, and the verbose task-mode guidance. Memory is fixed budget for
+    interactive chat — a conversational turn that loses its recalled memories
+    answers as a different person.
+
+    ``lean=True`` (scheduled self-coding ticks, which resume from on-disk
+    checkpoints rather than chat memory) promotes ``memory`` to droppable and
+    ranks it last. Nothing in a coding tick's prompt depends on Aiko's personal
+    recollection, and on a 10k window that memory block was the difference
+    between a session that ran and one that 400'd on every iteration.
+
+    Returns ``(memory, knowledge, experience, task_mode)``.
     """
     budget = int(LLM_CTX_SIZE * AGENT_CONTEXT_BUDGET_RATIO)
-    fixed = persona + memory_context + user_input
     # Estimate from the ACTUAL filtered tool schemas sent to the LLM this
     # turn (10-12 after capability match), not the full 25-tool corpus —
     # over-reserving for every schema starves task-specific context blocks.
     tool_tokens = _estimate_tokens(json.dumps(tool_schemas or []))
+    fixed = persona + user_input
     fixed_tokens = _estimate_tokens(fixed) + tool_tokens
 
     blocks = {
@@ -1508,14 +1585,21 @@ def _enforce_agentic_context_budget(
         "experience": experience_guidance,
         "task_mode": task_mode_context,
     }
+    if lean:
+        blocks["memory"] = memory_context
+
     scores = scores or {}
     # task_mode guidance has no task-specific relevance score; treat it as
     # neutral so it sheds after clearly-irrelevant blocks (low score) but
     # before valuable task-specific data (high score).
     scores.setdefault("task_mode", 0.0)
+    if lean:
+        # Shed memory first and only under real pressure: it is still the
+        # second-most useful block for a coding task after knowledge.
+        scores.setdefault("memory", 0.5)
     # fallback tie-break preserves the original weakest-first order when
     # scores are missing or tied
-    fallback_rank = {"experience": 0, "knowledge": 1, "task_mode": 2}
+    fallback_rank = {"experience": 0, "knowledge": 1, "task_mode": 2, "memory": 3}
     remaining = set(blocks)
 
     while remaining:
@@ -1530,7 +1614,125 @@ def _enforce_agentic_context_budget(
         blocks[victim] = f"<{victim}_context>\nOmitted this turn — context budget exceeded.\n</{victim}_context>"
         remaining.discard(victim)
 
-    return blocks["knowledge"], blocks["experience"], blocks["task_mode"]
+    return (
+        blocks.get("memory", memory_context),
+        blocks["knowledge"],
+        blocks["experience"],
+        blocks["task_mode"],
+    )
+
+
+def _estimate_messages_tokens(messages: list[dict], tool_schemas: list | None = None) -> int:
+    """Estimate the token cost of a fully assembled request.
+
+    Counts every message plus the per-message role/tool-call framing overhead
+    and the tool schemas. The system-prompt budget guard cannot see any of this:
+    it runs once, before the ReAct loop appends assistant tool-call messages and
+    tool observations. That blind spot is what let a 6-iteration loop ship an
+    11.5k-token request at a 10.2k server and kill every session.
+    """
+    total = _estimate_tokens(json.dumps(tool_schemas or []))
+    for message in messages:
+        total += _estimate_tokens(str(message.get("content") or ""))
+        if message.get("role") == "tool":
+            # name + tool_call_id + framing
+            total += 12
+        for call in message.get("tool_calls") or []:
+            function = call.get("function", {}) if isinstance(call, dict) else {}
+            total += 8 + _estimate_tokens(str(function.get("name") or ""))
+            total += _estimate_tokens(str(function.get("arguments") or ""))
+    return total
+
+
+def _fit_messages_to_context(
+    messages: list[dict],
+    tool_schemas: list | None = None,
+    reserve: int | None = None,
+) -> tuple[list[dict], bool]:
+    """Shrink an assembled request until it fits the server context window.
+
+    Escalating order, cheapest information loss first:
+
+    1. Halve every oversized tool observation.
+    2. Stub the OLDEST tool observations one at a time, newest kept whole —
+       the most recent result is what the next step reasons about.
+    3. Drop the oldest non-system turns (chat history).
+
+    Steps 2 and 3 stop as soon as the payload fits, so a mildly-over request
+    sheds nothing and a badly-over one still returns a usable session.
+
+    The system message and the final user task are never dropped — without them
+    the model has no goal. Returns ``(messages, trimmed)``; the input list is
+    not mutated.
+    """
+    budget = int(LLM_CTX_SIZE * AGENT_REQUEST_BUDGET_RATIO) if reserve is None else reserve
+    budget -= _effective_max_tokens_safe()
+    working = [dict(m) for m in messages]
+
+    if _estimate_messages_tokens(working, tool_schemas) <= budget:
+        return working, False
+
+    log.warning(
+        "[agentic] request over budget (%d > %d est. tokens) — trimming assembled payload",
+        _estimate_messages_tokens(working, tool_schemas), budget,
+    )
+
+    # 1. Halve every oversized tool observation.
+    limit = _tool_result_max_chars.get() or AGENT_TOOL_RESULT_MAX_CHARS
+    for message in working:
+        if message.get("role") != "tool":
+            continue
+        content = str(message.get("content") or "")
+        if len(content) > limit // 2:
+            message["content"] = (
+                content[: limit // 2]
+                + f"\n[... trimmed to fit context: {len(content) - limit // 2} more chars]"
+            )
+
+    # 2. Stub the oldest tool observations, one at a time, until it fits.
+    for message in working:
+        if _estimate_messages_tokens(working, tool_schemas) <= budget:
+            break
+        if message.get("role") != "tool":
+            continue
+        content = str(message.get("content") or "")
+        if len(content) > 400:
+            message["content"] = f"[older tool output omitted to fit context: {len(content)} chars]"
+
+    # 3. Drop the oldest non-system turns.
+    while _estimate_messages_tokens(working, tool_schemas) > budget:
+        candidates = [
+            i for i, m in enumerate(working)
+            if m.get("role") != "system" and i < len(working) - 1
+        ]
+        if not candidates:
+            break
+        del working[candidates[0]]
+
+    return working, True
+
+
+def _effective_max_tokens_safe() -> int:
+    """AGENT_MAX_TOKENS, or 0 when the thinking-aware helper is unavailable."""
+    try:
+        from cognition.think import _effective_max_tokens
+    except Exception:
+        return int(AGENT_MAX_TOKENS)
+    try:
+        return int(_effective_max_tokens(AGENT_MAX_TOKENS))
+    except Exception:
+        return int(AGENT_MAX_TOKENS)
+
+
+def _is_context_size_error(exc: Exception) -> bool:
+    """True for llama-server's ``exceed_context_size_error`` 400."""
+    text = str(exc).lower()
+    return (
+        "exceed_context_size" in text
+        or "exceeds the available context size" in text
+        or "context size" in text and "n_ctx" in text
+        or "maximum context length" in text
+    )
 
 
 def _needle_prompt(messages: list[dict]) -> str:
@@ -1655,6 +1857,18 @@ def _is_agent_system_role_error(owner, exc: Exception) -> bool:
         return False
 
 
+def _create_agent_stream(owner, send_messages, tools, agent_max_tokens):
+    """Single streaming completion attempt against the agentic backend."""
+    return owner._client.chat.completions.create(
+        model=owner._llm_model, messages=send_messages, tools=tools,
+        tool_choice="auto", stream=True, max_tokens=agent_max_tokens,
+        temperature=0.3,
+        # ReAct steps stay no-think (Agent A1): thinking would starve
+        # tool-calls within AGENT_MAX_TOKENS and stall the loop.
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+
+
 def _stream_agent_message(owner, messages, tools, token_callback):
     """Stream an agentic LLM call, feeding text tokens to token_callback.
     Returns (SimpleNamespace, usage) matching the non-streaming shape.
@@ -1662,35 +1876,54 @@ def _stream_agent_message(owner, messages, tools, token_callback):
     # Tool planning is where a thinking model earns its keep — give it
     # headroom instead of disabling thinking. Lazy import: cognition.think
     # imports this module, so a top-level import would be circular.
-    try:
-        from cognition.think import _effective_max_tokens
-    except Exception:
-        def _effective_max_tokens(base: int) -> int:  # type: ignore[no-redef]
-            return int(base)
-    agent_max_tokens = _effective_max_tokens(AGENT_MAX_TOKENS)
+    agent_max_tokens = _effective_max_tokens_safe()
     send_messages = _agent_messages_sendable(owner, messages)
     if AGENT_REACT_BACKEND in {"needle", "needle_multi"}:
-        try:
-            if AGENT_REACT_BACKEND == "needle_multi":
-                return _needle_multi_agent_message(messages, tools, token_callback)
-            return _needle_agent_message(messages, tools, token_callback)
-        except (NeedleLowConfidence, NeedleError) as exc:
-            # Needle is a bounded action worker. Unavailable or uncertain calls
-            # must not execute; the larger conversational model handles them.
-            log.info("[agentic] Needle escalation to OpenAI: %s", exc)
+        if _needle_circuit_open():
+            log.info(
+                "[agentic] Needle breaker open — skipping Needle for this turn "
+                "(%.0fs cooldown remaining).",
+                max(0.0, _needle_state["open_until"] - time.monotonic()),
+            )
+        else:
+            try:
+                needle_call = (
+                    _needle_multi_agent_message if AGENT_REACT_BACKEND == "needle_multi"
+                    else _needle_agent_message
+                )
+                result = needle_call(messages, tools, token_callback)
+                _needle_circuit_record(True)
+                return result
+            except NeedleLowConfidence as exc:
+                # A working-but-unsure server is not a dead server: it must not
+                # count against the breaker.
+                _needle_circuit_record(True)
+                log.info("[agentic] Needle escalation to OpenAI: %s", exc)
+            except NeedleError as exc:
+                _needle_circuit_record(False)
+                # Needle is a bounded action worker. Unavailable or uncertain calls
+                # must not execute; the larger conversational model handles them.
+                log.info("[agentic] Needle escalation to OpenAI: %s", exc)
     elif AGENT_REACT_BACKEND != "openai":
         log.warning("[agentic] unknown AGENT_REACT_BACKEND=%r; using openai", AGENT_REACT_BACKEND)
 
+    # Pre-flight: fit the assembled request to the server window before
+    # spending a round trip on a guaranteed 400.
+    send_messages, _trimmed = _fit_messages_to_context(send_messages, tools)
+
     try:
-        stream = owner._client.chat.completions.create(
-            model=owner._llm_model, messages=send_messages, tools=tools,
-            tool_choice="auto", stream=True, max_tokens=agent_max_tokens,
-            temperature=0.3,
-            # ReAct steps stay no-think (Agent A1): thinking would starve
-            # tool-calls within AGENT_MAX_TOKENS and stall the loop.
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-        )
+        stream = _create_agent_stream(owner, send_messages, tools, agent_max_tokens)
     except Exception as exc:
+        # Context overflow despite the pre-flight estimate: shed history and
+        # tool output hard, then retry once. Losing the session outright on a
+        # recoverable size error is what killed every scheduled tick.
+        if _is_context_size_error(exc):
+            aggressive, _ = _fit_messages_to_context(send_messages, tools, reserve=int(LLM_CTX_SIZE * 0.55))
+            log.warning(
+                "[agentic] context overflow (%s) — retrying once with a hard-trimmed payload.",
+                str(exc)[:200],
+            )
+            return _stream_after_retry(owner, aggressive, tools, token_callback, agent_max_tokens)
         # Same template rejection the chat path handles: retry once with the
         # system block merged into user turns, and latch it process-wide.
         merge = getattr(owner, "_messages_without_system", None)
@@ -1700,14 +1933,31 @@ def _stream_agent_message(owner, messages, tools, token_callback):
             note()
             log.warning("agentic: system role rejected; retrying step without system messages")
             send_messages = merge(list(send_messages))
-            stream = owner._client.chat.completions.create(
-                model=owner._llm_model, messages=send_messages, tools=tools,
-                tool_choice="auto", stream=True, max_tokens=agent_max_tokens,
-                temperature=0.3,
-                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-            )
+            stream = _create_agent_stream(owner, send_messages, tools, agent_max_tokens)
         else:
             raise
+    return _consume_agent_stream(stream, token_callback)
+
+
+def _stream_after_retry(owner, send_messages, tools, token_callback, agent_max_tokens):
+    """Second attempt after a context-size 400, with one system-role fallback."""
+    try:
+        stream = _create_agent_stream(owner, send_messages, tools, agent_max_tokens)
+    except Exception as exc:
+        merge = getattr(owner, "_messages_without_system", None)
+        note = getattr(owner, "_note_system_role_rejected", None)
+        if (callable(merge) and callable(note) and _is_agent_system_role_error(owner, exc)
+                and any(isinstance(m, dict) and m.get("role") == "system" for m in send_messages)):
+            note()
+            log.warning("agentic: system role rejected on retry; dropping system messages")
+            stream = _create_agent_stream(owner, merge(list(send_messages)), tools, agent_max_tokens)
+        else:
+            raise
+    return _consume_agent_stream(stream, token_callback)
+
+
+def _consume_agent_stream(stream, token_callback):
+    """Drain an agentic SSE stream into the (message, usage) shape callers expect."""
     content_parts = []
     tc_deltas = {}
     usage = None
@@ -1809,7 +2059,12 @@ def _finalize_agentic_answer(owner, user_input: str, draft: str, token_callback=
     owner._emit(draft, token_callback=token_callback)
     return draft
 
-def run_agentic_chat(owner, user_input: str, token_callback=None, mem_kb_future=None, query_vec: np.ndarray | None = None, cap_vec: np.ndarray | None = None, output_model: Any | None = None, include_history: bool = True) -> str:
+def run_agentic_chat(
+    owner, user_input: str, token_callback=None, mem_kb_future=None,
+    query_vec: np.ndarray | None = None, cap_vec: np.ndarray | None = None,
+    output_model: Any | None = None, include_history: bool = True,
+    lean_context: bool = False,
+) -> str:
     """Run task mode using the owning AikoThink instance for model/memory/output.
 
     mem_kb_future: a concurrent.futures.Future from
@@ -1829,7 +2084,34 @@ def run_agentic_chat(owner, user_input: str, token_callback=None, mem_kb_future=
     selection keeps pulling those back in until each session's first call
     exceeds the llama-server ctx on its own (observed 10.5k/10.2k death
     spiral). Ticks resume from CHECKPOINT.md, never from chat history.
+
+    lean_context — scheduled self-coding ticks run True: memory becomes
+    droppable and tool observations get a tighter cap. Those sessions carry
+    their state in on-disk checkpoints, so Aiko's personal recollection buys
+    nothing and costs the difference between running and 400ing every
+    iteration on a 10k window. Interactive chat never sets it.
     """
+    # Bound this run's tool observations for the whole ReAct loop.
+    _tool_token = _tool_result_max_chars.set(
+        AGENT_TICK_TOOL_RESULT_MAX_CHARS if lean_context else None
+    )
+    try:
+        return _run_agentic_chat_inner(
+            owner, user_input, token_callback=token_callback,
+            mem_kb_future=mem_kb_future, query_vec=query_vec, cap_vec=cap_vec,
+            output_model=output_model, include_history=include_history,
+            lean_context=lean_context,
+        )
+    finally:
+        _tool_result_max_chars.reset(_tool_token)
+
+
+def _run_agentic_chat_inner(
+    owner, user_input: str, token_callback=None, mem_kb_future=None,
+    query_vec: np.ndarray | None = None, cap_vec: np.ndarray | None = None,
+    output_model: Any | None = None, include_history: bool = True,
+    lean_context: bool = False,
+) -> str:
     # Reuse the same HarrierEmbedder instance already warm for memory search
     # and intent routing for every RAG-selection call below (agentic policy,
     # wiki, skill, experience, and now capability matching). Falls back to
@@ -2075,12 +2357,13 @@ def run_agentic_chat(owner, user_input: str, token_callback=None, mem_kb_future=
             knowledge_context = ("<knowledge_context>\nOmitted this turn (low relevance) — "
                                  "use the retrieve_context tool to pull specifics on demand.\n</knowledge_context>")
 
-    knowledge_context, experience_guidance, task_mode_guidance = _enforce_agentic_context_budget(
+    memory_context, knowledge_context, experience_guidance, task_mode_guidance = _enforce_agentic_context_budget(
         owner._persona, memory_context, user_input,
         knowledge_context, experience_guidance,
         task_mode_context=TASK_MODE_GUIDANCE,
         tool_schemas=tools,
         scores=scores,
+        lean=lean_context,
     )
 
     # Core task-mode rules are always kept (small, operationally essential);

@@ -202,6 +202,14 @@ def ensure_experience_schema_migrated(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE experiences ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
         if "supersedes_id" not in cols:
             conn.execute("ALTER TABLE experiences ADD COLUMN supersedes_id TEXT")
+        # Practice loop: track how often a workflow is reused so frequently
+        # used ones can auto-promote into playbook DAGs.
+        if "use_count" not in cols:
+            conn.execute("ALTER TABLE experiences ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0")
+        if "last_used_at" not in cols:
+            conn.execute("ALTER TABLE experiences ADD COLUMN last_used_at TEXT")
+        if "promoted_playbook_id" not in cols:
+            conn.execute("ALTER TABLE experiences ADD COLUMN promoted_playbook_id TEXT")
         conn.commit()
     except Exception as exc:
         log.debug("experience schema migrate skipped: %s", exc)

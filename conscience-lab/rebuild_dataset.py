@@ -9,8 +9,8 @@ v2 problems this fixes:
     "Request: ... / Parties affected: ... / Relevant norms: <canon>".
 
 Output:
-  data/conscience_training_v6.jsonl   rebalanced, plain + deployment-format
-  data/conscience_eval_v6.jsonl       held-out, deployment-format only
+  data/conscience_training_v7.jsonl   rebalanced, plain + deployment-format
+  data/conscience_eval_v7.jsonl       held-out, deployment-format only
 """
 from __future__ import annotations
 
@@ -29,7 +29,8 @@ V_BANDS = ("aligned", "contrary", "unknown")
 H_BANDS = ("benefits", "harms", "unknown")
 
 # Horizontal `mixed` is retired: "no real effect" and "cannot be scored" both
-# become `unknown`, which is the escalate-to-human band on either axis.
+# become `unknown`. Unknown is an epistemic result, not a moral approval:
+# consequential actions still go through stakes/autonomy/HITL policy.
 BAND_REMAP = {"vertical": {"unclear": "unknown", "mixed": "unknown"},
                "horizontal": {"mixed": "unknown"}}
 
@@ -67,22 +68,35 @@ def load_seed_rows() -> list[dict]:
                 continue
             r = json.loads(line)
             r.pop("note", None)
-            out.append({"fields": r["fields"], "answers": dict(r["answers"]),
+            out.append({"fields": {"scenario": canonical_scenario(r["fields"]["scenario"])}, "answers": dict(r["answers"]),
                         "_seed": True})
         print(f"  loaded {len(out)} rows from {name}")
     return out
 
 
+def canonical_scenario(value: str) -> str:
+    """Return the core scenario, independent of deployment rendering."""
+    text = (value or "").strip()
+    prefix = "Request: The user asks:"
+    if text.startswith(prefix):
+        text = text[len(prefix):].lstrip()
+        text = text.split("\nParties affected:", 1)[0].strip()
+    return text
+
+
 def load_rows(path: Path) -> list[dict]:
     rows = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
     out = []
+    seen = set()
     for r in rows:
         ans = dict(r["answers"])
         for axis, remap in BAND_REMAP.items():
             if ans.get(axis) in remap:
                 ans[axis] = remap[ans[axis]]
-        if ans["vertical"] in V_BANDS and ans["horizontal"] in H_BANDS:
-            out.append({"fields": r["fields"], "answers": ans})
+        key = (canonical_scenario(r["fields"]["scenario"]), ans.get("vertical"), ans.get("horizontal"))
+        if ans["vertical"] in V_BANDS and ans["horizontal"] in H_BANDS and key not in seen:
+            seen.add(key)
+            out.append({"fields": {"scenario": canonical_scenario(r["fields"]["scenario"])}, "answers": ans})
     return out
 
 
@@ -100,7 +114,7 @@ def rebalance(rows: list[dict], rng: random.Random) -> list[dict]:
                 print(f"  !! empty cell {v}/{h}")
                 continue
             target = DIAG_CAP if v == h or (v, h) in (("aligned", "benefits"), ("contrary", "harms")) else FLOOR
-            target = min(target, len(pool) * MAX_OVERSAMPLE)
+            target = int(min(target, len(pool) * MAX_OVERSAMPLE))
             if target > len(pool):
                 picked = [rng.choice(pool) for _ in range(int(target))]
             else:
@@ -151,6 +165,11 @@ def main() -> int:
     canon = get_canon()
     src = load_rows(DATA / "conscience_training_outcome_v2.jsonl")
     src.extend(load_seed_rows())
+    unique = {}
+    for row in src:
+        key = (row["fields"]["scenario"], row["answers"]["vertical"], row["answers"]["horizontal"])
+        unique.setdefault(key, row)
+    src = list(unique.values())
 
     print(f"source rows: {len(src)}")
     print("joint grid before -> after:")

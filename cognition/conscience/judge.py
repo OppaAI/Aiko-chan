@@ -516,7 +516,9 @@ def blend(
 ) -> tuple[float, float, float, list[str], list[str]]:
     """Combine SLM and lexical scores by CCC_SLM_WEIGHT.
 
-    Axis scores blend, but confidence takes the MINIMUM rather than the blend:
+    Axis scores blend, but a negative signal is a one-way floor: an `unknown`
+    or positive answer from one judge may not erase a negative answer from the
+    other judge. Confidence takes the MINIMUM rather than the blend:
     if either scorer is unsure, the circuit is unsure. That asymmetry is what
     keeps a confident-but-wrong 0.8B model from talking the gate into a
     decision the retrieval never supported.
@@ -526,8 +528,15 @@ def blend(
     s_v, s_h, s_c, s_reasons, s_cited = slm
     l_v, l_h, l_c, l_reasons, l_cited = lexical
     w = SLM_WEIGHT
-    vertical = w * s_v + (1.0 - w) * l_v
-    horizontal = w * s_h + (1.0 - w) * l_h
+    def conservative_axis(model_score: float, lexical_score: float) -> float:
+        # Moral evidence is asymmetric. Averaging a real negative signal with
+        # `unknown` can turn a veto into a harmless-looking zero.
+        if model_score < 0.0 or lexical_score < 0.0:
+            return min(model_score, lexical_score)
+        return w * model_score + (1.0 - w) * lexical_score
+
+    vertical = conservative_axis(s_v, l_v)
+    horizontal = conservative_axis(s_h, l_h)
     confidence = min(s_c, max(l_c, 0.35))
     reasons = list(dict.fromkeys([*s_reasons, *l_reasons]))[:5]
     cited = list(dict.fromkeys([*s_cited, *l_cited]))[:10]

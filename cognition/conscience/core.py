@@ -545,7 +545,12 @@ class ConscienceCircuitCore:
         confirmed the reading. Anything else is weak retrieval alone.
         """
         if slm_result is not None:
-            return True
+            # A neutral or unknown model answer is not confirmation of a
+            # prohibition. It must not turn weak retrieval into a refusal.
+            # A negative model axis is independent confirmation.
+            s_v, s_h, _s_c, _s_reasons, _s_cited = slm_result
+            if s_v < 0.0 or s_h < 0.0:
+                return True
         if "deliberate" in layers:
             return True
         return ConscienceCircuitCore._best_prohibition(retrieved) >= _TRIGGER_LEVEL

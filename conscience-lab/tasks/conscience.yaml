@@ -1,10 +1,8 @@
-# Laya conscience task: two scripture questions, each answered true / false /
-# unknown. Option keys: vertical aligned/contrary/unclear, horizontal
-# benefits/harms/unclear. `unclear` on either axis means "escalate to a human",
-# so it deliberately absorbs both "no real effect" and "cannot be scored".
+# Laya conscience task: two scripture questions, each answered with a positive,
+# negative, or unknown band. Unknown means insufficient moral signal; it is not
+# approval. Stakes and the runtime gate decide whether unknown can proceed.
 # Existing boolean dataset maps: true->aligned/benefits, false->contrary/harms.
-# unclear rows are synthesized by `layaft generate` (labels by
-# construction), not converted — see ../convert_to_laya.py.
+# Historical unclear/mixed rows are normalized to unknown during rebuild.
 name: conscience
 fields:
   scenario:

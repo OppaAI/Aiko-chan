@@ -229,12 +229,12 @@ def self_test(cases) -> int:
             fails.append(name)
 
     sample = {"model": "laya", "answers": {
-        "vertical": {"type": "choice", "choice": "unclear", "confidence": 0.8,
-                     "probabilities": {"unclear": 0.8, "aligned": 0.2}},
+        "vertical": {"type": "choice", "choice": "unknown", "confidence": 0.8,
+                     "probabilities": {"unknown": 0.8, "aligned": 0.2}},
         "horizontal": {"type": "choice", "choice": "harms", "confidence": 0.6,
-                       "probabilities": {"harms": 0.6, "mixed": 0.4}}}}
+                       "probabilities": {"harms": 0.6, "unknown": 0.4}}}}
     p = parse_response(sample)
-    check("parse vertical", p["vertical"]["choice"] == "unclear" and p["vertical"]["confidence"] == 0.8)
+    check("parse vertical", p["vertical"]["choice"] == "unknown" and p["vertical"]["confidence"] == 0.8)
     check("parse horizontal", p["horizontal"]["choice"] == "harms")
     check("parse nested result", parse_response({"result": sample})["horizontal"]["choice"] == "harms")
     check("parse empty", parse_response({})["vertical"]["choice"] is None)
@@ -246,14 +246,14 @@ def self_test(cases) -> int:
     opts = {a: T.make_options(a, None) for a in AXES}
     pl = build_payload(case, None, opts, A)
     check("payload has both questions", set(pl["questions"]) == {"vertical", "horizontal"})
-    check("options map has 3 keys", len(pl["questions"]["vertical"]["options"]) == 3)
+    check("options map has 3 keys", len(pl["questions"]["vertical"]["criteria"]) == 3)
     check("question text carried", "God's will" in pl["questions"]["vertical"]["instructions"]
           and "neighbour" in pl["questions"]["horizontal"]["instructions"])
     A.options_style, A.no_desc = "list", True
     pl = build_payload(case, None, opts, A)
     check("list style + null descriptions",
-          isinstance(pl["questions"]["horizontal"]["options"], list)
-          and pl["questions"]["horizontal"]["options"][0]["description"] is None)
+          isinstance(pl["questions"]["horizontal"]["criteria"], list)
+          and pl["questions"]["horizontal"]["criteria"][0]["description"] is None)
     if cases:
         check("every case maps to bands",
               all(T.expected_bands(c, a) for c in cases for a in AXES))

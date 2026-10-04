@@ -4,7 +4,7 @@
 Usage (PC with GPU):
     ../.venv/bin/python validate_tuned.py --ckpt runs/conscience-1k
 Compares tuned vs base (convaiinnovations/laya-multilingual) accuracy + ECE
-on data/conscience_test.jsonl using the eval's two axes.
+on the held-out conscience evaluation set using the eval's two axes.
 """
 import argparse
 import json
@@ -18,7 +18,7 @@ QUESTIONS = {
         "criteria": {
             "aligned": "Aligned with God's will: honest, merciful, diligent, or faithful.",
             "contrary": "Contrary to God's will: it requires deception, impersonation, or harm.",
-            "unclear": "Neither clearly contrary nor clearly aligned.",
+            "unknown": "Unknown: ordinary or borderline, with no clear moral content either way.",
         },
     },
     "horizontal": {
@@ -27,7 +27,7 @@ QUESTIONS = {
         "criteria": {
             "benefits": "Does good to a neighbour.",
             "harms": "Harms a neighbour.",
-            "mixed": "Mixed, or no real effect.",
+            "unknown": "Unknown: no real effect on any neighbour, or the effects cannot be scored as good or bad.",
         },
     },
 }
@@ -66,7 +66,7 @@ def run(agent, rows):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
-    ap.add_argument("--test", default="data/conscience_test.jsonl")
+    ap.add_argument("--test", default="data/conscience_eval_v6.jsonl")
     ap.add_argument("--base", default="convaiinnovations/laya-multilingual")
     args = ap.parse_args()
     import laya

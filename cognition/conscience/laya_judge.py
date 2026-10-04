@@ -98,6 +98,13 @@ class LayaJudge:
         self._base_url = (base_url if base_url is not None else LAYA_BASE_URL).rstrip("/")
         self._model = model or LAYA_MODEL_NAME
         self._path = decide_path or LAYA_DECIDE_PATH
+        self._canon = None
+        try:
+            from .canon import get_canon
+
+            self._canon = get_canon()
+        except Exception:  # noqa: BLE001 - filter degrades to passthrough
+            self._canon = None
         self._lock = threading.Lock()
         self._consecutive_failures = 0
         self.last_bands: dict[str, str] = {}
@@ -136,7 +143,8 @@ class LayaJudge:
         """
         if not self.available:
             return None
-        state = _build_state(situation, canon_block, parties or [])
+        canon_block = filter_canon_block(canon_block, situation, canon=self._canon)
+        state = _build_state(situation, canon_block, signal_parties(parties or []))
         payload = {
             "state": state,
             "questions": {"vertical": _VERTICAL_Q, "horizontal": _HORIZONTAL_Q},
@@ -233,6 +241,81 @@ def _norm_ids(canon_block: str) -> list[str]:
     return out[:8]
 
 
+# ── relevance filter ────────────────────────────────────────────────────────
+# The checkpoint is trained partly on canon-wrapped states, and on those the
+# cited norms usually agree with the label. That teaches it to read a citation
+# as evidence of guilt rather than as material to reason over. Measured
+# consequence: citing two prohibitions for "can you introduce yourself?" returns
+# `contrary/harms`.
+#
+# So we only forward norms that are actually connected to the text. The canon is
+# already 27 prohibitions against 25 goods, so an unfiltered top-6 retrieval on
+# ordinary text returns prohibitions by default -- which makes this the common
+# case, not the rare one.
+def filter_canon_block(
+    canon_block: str,
+    situation: str,
+    *,
+    canon=None,
+    min_overlap: int = 1,
+) -> str:
+    """Drop cited norms with no lexical connection to `situation`.
+
+    A norm is kept only when the situation trips one of its curated triggers,
+    or when its statement shares at least `min_overlap` *distinctive* content
+    tokens with the situation. Root norms ("V-ROOT-00" and friends) are always
+    retrieved at zero relevance and always share generic vocabulary, so they are
+    dropped: a citation nobody matched is not evidence.
+
+    Returns "" when nothing survives. That is the common case for ordinary text
+    and it is the correct one -- no canon block is better than a misleading one,
+    because the model then reads the situation on its own.
+    """
+    if not canon_block or not canon_block.strip():
+        return canon_block
+
+    from .canon import _tokens, _trigger_hit, get_canon
+
+    store = canon if canon is not None else get_canon()
+    lowered = (situation or "").lower()
+    sit_tokens = _tokens(situation)
+    keep: list[str] = []
+
+    for line in canon_block.splitlines():
+        stripped = line.strip()
+        if not (stripped[:2] in ("V-", "H-") and len(stripped) > 3):
+            keep.append(line)  # preamble / closing tag: preserve structure
+            continue
+        norm_id = stripped.split()[0]
+        if "-ROOT-" in norm_id:
+            continue  # always retrieved at zero relevance
+        norm = store.get(norm_id)
+        if norm is None:
+            keep.append(line)  # unknown id: canon may be newer than this code
+            continue
+        if any(_trigger_hit(t, lowered) for t in (norm.triggers or ())):
+            keep.append(line)
+            continue
+        if sit_tokens and len(sit_tokens & _tokens(norm.statement)) >= min_overlap:
+            keep.append(line)
+
+    if not [l for l in keep if l.strip() and not l.strip().startswith("<canon")]:
+        return ""
+    return "\n".join(keep)
+
+
+def signal_parties(parties: list[Party]) -> list[Party]:
+    """Keep only parties that actually move the horizontal reading.
+
+    `enumerate_parties` always appends Aiko's own integrity as a `self` party at
+    benefit 0.0. Measured: adding that block flips "Can you introduce yourself?"
+    from `unknown/unknown` to `contrary/benefits`. A zero delta is not evidence of
+    harm, and a constant party carries no discriminative signal -- it only tells
+    the model that this shape of input is a moral scenario.
+    """
+    return [p for p in parties if abs(float(p.benefit)) > 1e-6]
+
+
 _instance: LayaJudge | None = None
 _instance_lock = threading.Lock()
 
@@ -260,4 +343,5 @@ def evaluate(
     return out
 
 
-__all__ = ["LayaJudge", "get_laya", "evaluate", "LAYA_BASE_URL", "LAYA_MODEL_NAME"]
+__all__ = ["LayaJudge", "get_laya", "evaluate", "filter_canon_block", "signal_parties",
+           "LAYA_BASE_URL", "LAYA_MODEL_NAME"]

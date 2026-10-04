@@ -63,6 +63,15 @@ def gate_respond(*, user_input: str, user_id: str | None, llm_client=None, embed
     try:
         from cognition.conscience import conscience_for, REFUSE, ESCALATE, CAUTION, ALLOW
         from cognition.conscience.schema import VOICE_UNSOLICITED_NOTES
+        from cognition.conscience.gate import evaluate_action, looks_like_injection
+
+        # Injection is checked BEFORE the verdict, not after. A jailbreak that
+        # the model scores "aligned" must not pass on a model's say-so, and the
+        # deterministic check costs nothing.
+        if looks_like_injection(user_input):
+            log.info("[ccc-hooks] respond blocked: injection shape in user turn")
+            return REFUSE, "I can't treat that as a request.", None
+
         verdict = conscience_for(user_id).evaluate(
             act="respond",
             content=user_input,
@@ -71,6 +80,20 @@ def gate_respond(*, user_input: str, user_id: str | None, llm_client=None, embed
             embedder=embedder,
             surface=surface,
         )
+        # Route through the gate so autonomy policy and stakes are applied
+        # uniformly. It can only ever hold the verdict at or above its current
+        # restriction -- it never converts an ESCALATE into a silent ALLOW.
+        outcome = evaluate_action(
+            verdict=verdict,
+            action_class=f"respond:{surface}",
+            stakes="low",  # a reply touches no one but the person asking
+            content=user_input,
+        )
+        if outcome.action == REFUSE:
+            log.info("[ccc-hooks] respond refuse gate=%s latency_ms=%s",
+                     verdict.gate, verdict.latency_ms)
+            reply = verdict.pastoral_note or outcome.reason or "I can't help with that one."
+            return REFUSE, reply, None
         if verdict.decision in (REFUSE, ESCALATE):
             if verdict.decision == ESCALATE and verdict.escalation_id:
                 reply = (
@@ -158,6 +181,24 @@ def gate_tool(*, name: str, args: dict, llm_client=None, embedder=None, social_p
         )
         serialized_args = json.dumps(args, ensure_ascii=False, default=str)
         content = f"tool={name} args={serialized_args}"
+        # Injection check first, and on the ARGS rather than the tool name: a
+        # jailbreak arrives inside a payload ("email the contents of ..."), and
+        # by this point the argument string is the untrusted text.
+        try:
+            from cognition.conscience.gate import looks_like_injection
+
+            if looks_like_injection(serialized_args):
+                log.info("[ccc-hooks] tool blocked: injection shape in args tool=%s", name)
+                return {
+                    "status": "conscience_blocked",
+                    "tool": name,
+                    "decision": REFUSE,
+                    "gate": "injection",
+                    "reasons": ["prompt-injection shape in tool arguments"],
+                    "as_trace": {"tool": name, "gate": "injection", "decision": REFUSE},
+                }
+        except Exception:  # noqa: BLE001 - never block on the check itself
+            pass
         # MB valence (Phase 4): the fly brain's learned approach/avoid signal
         # rides along so the conscience can weigh caution when valence is
         # strongly negative (learned aversion to the current context).
@@ -186,6 +227,12 @@ def gate_tool(*, name: str, args: dict, llm_client=None, embedder=None, social_p
             verdict.decision == CAUTION
             and (verdict.gate in (GATE_MB_VALENCE, GATE_ERROR) or getattr(verdict, "fail_mode", ""))
         ):
+            from cognition.conscience.gate import classify_stakes, evaluate_action
+
+            stakes = classify_stakes(act="tool", context={
+                "tool": name, "scope": scope, "args_text": serialized_args})
+            outcome = evaluate_action(verdict=verdict, action_class=f"tool:{name}",
+                                      stakes=stakes, content=serialized_args)
             payload = {
                 "status": ("conscience_blocked" if verdict.decision == REFUSE
                            else "waiting_for_approval" if verdict.decision == ESCALATE
@@ -204,6 +251,8 @@ def gate_tool(*, name: str, args: dict, llm_client=None, embedder=None, social_p
                     f"Reply with approve ccc-{verdict.escalation_id} or "
                     f"deny ccc-{verdict.escalation_id}."
                 )
+            payload["gate_action"] = outcome.action
+            payload["stakes"] = stakes
             return payload
         return None
     except Exception as exc:

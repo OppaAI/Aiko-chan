@@ -97,7 +97,7 @@ CCC:
   # it is calibrated (ECE ~0.05-0.08) where the generative SLM is not.
   # Empty = tier stays off and the ladder runs on the lexical scorer.
   # NOT a chat/completions endpoint -- Laya has no /v1/chat/completions.
-  LAYA_BASE_URL: ""            # e.g. "http://127.0.0.1:8093"
+  LAYA_BASE_URL: "http://127.0.0.1:8093"   # live: laya serve on :8093 (see systemd/README)
   LAYA_MODEL: ""              # empty = omit the field; else the server's INTERNAL name
   LAYA_DECIDE_PATH: "/v1/decide"
   LAYA_TIMEOUT: 2.5

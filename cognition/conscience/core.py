@@ -197,8 +197,21 @@ class ConscienceCircuitCore:
         canon_block = store.render_block(retrieved)
         parties = judge_mod.enumerate_parties(text, ctx)
 
-        if ceiling < 2 or not scoring:
-            # Nothing in the canon engaged. That is a real answer, not a gap:
+        # A capable tier-2 judge must be consulted even when retrieval scored
+        # zero. The short-circuit below is safe for the lexical scorer only,
+        # because it shares the canon's triggers -- if nothing matched, it has
+        # nothing to add. The fine-tuned judge reads the situation instead, so
+        # skipping it hands the exact inputs least likely to trip a keyword
+        # (novel harms in ordinary language) straight to ALLOW, unexamined.
+        tier2 = None
+        if ceiling >= 2:
+            candidate = judge_mod.get_tier2()
+            if candidate.available:
+                tier2 = candidate
+
+        if ceiling < 2 or (not scoring and tier2 is None):
+            # Nothing in the canon engaged, and no judge that can read the
+            # situation without a trigger. That is a real answer, not a gap:
             # most turns are morally unremarkable and should cost nothing.
             layered = Verdict(decision=ALLOW, gate=GATE_JUDGE, confidence=0.8,
                               parties=parties, layers_run=["reflex", "recall"])
@@ -207,10 +220,8 @@ class ConscienceCircuitCore:
         # ── L2 judge ──────────────────────────────────────────────────────
         lexical = judge_mod.LexicalJudge.score(retrieved, parties)
         slm_result = None
-        if ceiling >= 2:
-            slm = judge_mod.get_slm()
-            if slm.available:
-                slm_result = slm.score(self._situation(act, text, ctx), canon_block, parties)
+        if tier2 is not None:
+            slm_result = tier2.score(self._situation(act, text, ctx), canon_block, parties)
 
         vertical, horizontal, confidence, reasons, cited = judge_mod.blend(slm_result, lexical)
         evidence = judge_mod.LexicalJudge.evidence_weight(retrieved)

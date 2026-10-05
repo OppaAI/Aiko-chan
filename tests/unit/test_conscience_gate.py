@@ -14,7 +14,8 @@ import pytest
 
 from cognition.conscience.autonomy import ACT, ACT_NOTIFY, ASK, AutonomyPolicy, STAKES_HIGH, STAKES_MEDIUM
 from cognition.conscience.gate import apply_outcome, evaluate_action, looks_like_injection
-from cognition.conscience.schema import ALLOW, CAUTION, ESCALATE, REFUSE, Verdict, fuse
+from cognition.conscience.schema import (ALLOW, CAUTION, ESCALATE, REFUSE, Verdict,
+                                        apply_negative_ladder, decide, fuse)
 
 
 def _v(decision: str, *, reasons=("because",)) -> Verdict:

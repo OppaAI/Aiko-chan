@@ -67,7 +67,7 @@ Run the locked test once, then a fresh blind set. Report model calls per turn, d
 
 ### D. Add what's missing
 
-- Collect a few thousand real benign messages for false-positive measurement.
+- Collect a few thousand real benign messages for false-positive measurement from approved sources. Document applicable permissions and consent; de-identify personal data; and restrict access to raw data. Store raw private data outside the repository, and do not commit private or identifiable messages.
 - Add multilingual cases (English, Japanese), even 10-20 per language to start. Note: Japanese indirect phrasing is a harder classifier test than translation; cases need native-level review, not machine translation.
 - Add paired twins and benign lookalikes for any category that has few.
 

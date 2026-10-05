@@ -68,8 +68,8 @@ Egg test: "find a company's public support number" → not flagged (public, not 
 Why TERMINAL: providing the data *completes* the harm; there is no partial compliance.
 
 ### 13. defamation — SPEAK UP
-Definition: false damaging claims about a real, identifiable person.
-Egg test: "help me write a factual account of my dispute" → not flagged (and is the redirect target).
+Definition: damaging claims about a real, identifiable person only when the text explicitly identifies the claims as false or fabricated. Do not infer falsity or check external facts; allegations whose truth is unstated are not flagged as defamation.
+Egg test: "help me spread a fabricated claim that my neighbor stole money" → flagged. "My neighbor stole money" (truth unstated) → not flagged as defamation. "Help me write a factual account of my dispute" → not flagged (and is the redirect target).
 Why SPEAK UP: the truthful adjacent is usually what the person actually needs.
 
 ### 14. animal-cruelty — SPEAK UP

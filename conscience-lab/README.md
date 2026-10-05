@@ -37,7 +37,7 @@ untrusted content (web/fetch) ──▶ [Laya trust-boundary] ┤
 - **One Laya instance** (Jetson RAM ~857MB free). Different prompts per task:
   prompt A = refusal classification, prompt B = outcome verification (selective).
 - L0: deterministic vetoes (injection, concealment, known-bad). Tool gate: deterministic.
-- Checks are harness-enforced — the model cannot skip them.
+- Harness enforcement is planned for Phase 4, with the goal of preventing the model from skipping checks; it is not yet implemented.
 - Build order and methodology: see `build_plan.md`.
 
 ## Status

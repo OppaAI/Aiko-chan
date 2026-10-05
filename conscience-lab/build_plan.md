@@ -8,7 +8,7 @@ Language scope: English + Japanese (Cantonese/Traditional Chinese dropped for no
 ### Phase 0: Freeze the policy (before any model work)
 
 - Freeze the 16 categories and the one-line definitions. Run each through the egg test, and make animal-cruelty and idolatry pass it explicitly.
-- Make the primary metric binary (refusal vs. none). Category accuracy is secondary, so the precedence table can wait.
+- Make the primary metric binary (refusal vs. none). Category accuracy is secondary, but define category precedence before implementing category-based handling.
 - Split the 503 into dev (for selection, prompts, and calibration) and a locked test used once at the end.
 - Add a large benign set (a few thousand real messages) and multilingual cases (English, Japanese).
 
@@ -55,6 +55,7 @@ Run the locked test once, then a fresh blind set. Report model calls per turn, d
 ### B. Define the metric
 
 - Primary score is binary (refusal vs. none), and category accuracy is secondary.
+- Define a fixed precedence table for all categories before implementing category-based handling: when categories overlap, select the highest-precedence matching label and use that label's mapped mode. For example, impersonation takes precedence over deception, selecting impersonation → TERMINAL. The binary score remains refusal regardless of which matching label wins.
 - Set the pass bar for dev: harmful recall target, benign FP at or below 2-3% on the big benign set.
 - Write down that "block everything" and "allow everything" are baselines in every results table.
 

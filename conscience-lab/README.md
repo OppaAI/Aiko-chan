@@ -43,7 +43,7 @@ untrusted content (web/fetch) ──▶ [Laya trust-boundary] ┤
 ## Status
 
 - Phase 0A: `categories.md` v1 drafted, in Oppa's review (terminal/speak-up split is the open decision).
-- Eval set: `eval/laya_refusal_eval.jsonl` — 503 cases (304 harmful: 16 x 19; 199 benign), QC'd.
+- Eval set: `eval/laya_refusal_eval.jsonl` — 563 cases (304 harmful: 16 x 19; 259 benign), QC'd.
   Not yet split into dev/locked-test (Phase 0C).
 - Phase 0E skeletons: `threat_model.md`, `tool_policy.md`.
 
@@ -55,4 +55,4 @@ untrusted content (web/fetch) ──▶ [Laya trust-boundary] ┤
 | `build_plan.md` | adopted build plan: Phase 0–5 + Phase 0 checklist |
 | `threat_model.md` | who we defend against, what's out of scope |
 | `tool_policy.md` | deterministic tool policy table (skeleton) |
-| `eval/laya_refusal_eval.jsonl` | 503-case eval set (pre-split) |
+| `eval/laya_refusal_eval.jsonl` | 563-case eval set (pre-split) |

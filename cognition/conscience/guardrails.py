@@ -125,6 +125,33 @@ _RULES: tuple[tuple[str, str, str, str, str, tuple[str, ...]], ...] = (
      r"\b(?:home address|where (?:he|she|they) lives?|real name|workplace|phone number)\b",
      "locating or deanonymising a person",
      ("EU-AIA", "GOOGLE-AIP", "NIST-RMF")),
+    # Residence location is stalker-enablement, so it blocks rather than reviews.
+    # SG-PRIV-04 covers identifiers generally and stays at review, because a
+    # workplace or phone number has legitimate uses; where someone sleeps does not.
+    ("SG-PRIV-05", "privacy", SEV_BLOCK,
+     r"\b(?:find|look ?up|track|locate|dox|get)\b[^.\n]{0,40}"
+     r"\b(?:home address|home ?base|where (?:he|she|they) live?s?|"
+     r"where (?:he|she|they) (?:is|are) from|their address)\b",
+     "locating where a specific person lives",
+     ("EU-AIA", "GOOGLE-AIP", "NIST-RMF")),
+
+    # Covert monitoring of a person. Two independent triggers, because neither
+    # alone is sufficient: a third-party target, or an explicit covertness
+    # signal. Self-scoped monitoring ("log my own keystrokes to debug typing")
+    # and ordinary screen sharing must NOT fire -- an earlier version of this
+    # rule matched bare "keystrokes" and blocked both.
+    ("SG-PRIV-06", "privacy", SEV_BLOCK,
+     r"(?:secretly|covertly|surreptitiously|unconsented|without consent|"
+     r"without (?:telling|informing|asking|their knowing))\b[^.\n]{0,40}"
+     r"\b(?:keystrokes?|keystroke logger|screen|browsing|messages|activity|usage|"
+     r"location|device|camera|microphone)\b"
+     r"|\b(?:monitor|logs?|records?|recorded|track|tracks|tracking|spy on|spying|"
+     r"keylog|keylogging)\b[^.\n]{0,30}"
+     r"\b(?:employee|colleague|coworker|staff|user|partner|spouse|wife|husband|"
+     r"child|someone|somebody|victim|target)'?s?\b[^.\n]{0,25}"
+     r"\b(?:keystrokes?|browsing|messages|activity|location|device)\b",
+     "covert monitoring of a person without consent",
+     ("EU-AIA", "NIST-RMF")),
 
     # ── manipulation (EU AI Act Art. 5) ───────────────────────────────────
     ("SG-MANIP-01", "manipulation", SEV_REVIEW,
@@ -149,8 +176,8 @@ _RULES: tuple[tuple[str, str, str, str, str, tuple[str, ...]], ...] = (
 
     # ── prompt injection (OWASP LLM01) ────────────────────────────────────
     ("SG-INJ-01", "injection", SEV_REVIEW,
-     r"\b(?:ignore (?:all )?(?:previous|prior|above) instructions|disregard your "
-     r"(?:rules|system prompt|guidelines)|you are now|new system prompt|"
+     r"\b(?:ignore (?:all )?(?:previous|prior|above|your) instructions|"
+     r"disregard your (?:rules|system prompt|guidelines)|you are now|new system prompt|"
      r"reveal your (?:system )?prompt|print your instructions)\b",
      "instruction-override attempt in content",
      ("OWASP-LLM", "NIST-RMF", "ISO-42001")),
@@ -261,7 +288,7 @@ _IRREVERSIBLE_HINTS = (
 _STATE_CHANGE_HINTS = (
     "install", "uninstall", "pip", "npm", "apt", "uv", "write", "write_file",
     "edit", "config", "chmod", "chown", "mkdir", "move", "rename",
-    "migrate", "update", "upgrade",
+    "migrate", "update", "upgrade", "restart", "reboot", "shutdown", "reload",
     "run_command", "shell", "bash", "exec", "spawn", "subprocess", "system",
 )
 

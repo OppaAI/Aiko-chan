@@ -44,6 +44,35 @@ CCC:
   # regardless of confidence (e.g. "good for the user, bad for a third party").
   AXIS_CONFLICT_GAP: 0.80
 
+  # ── 2x2 negative ladder ──────────────────────────────────────────────────
+  # The judge answers two BINARY questions -- does the ACT break a commandment,
+  # does it HARM a neighbour -- and reports per-axis confidence. Bands carry
+  # polarity; confidence carries ambiguity. Oppa's rule: doubt fails closed.
+  #
+  #   negative on either axis            -> ask
+  #   not-negative but below DOUBT        -> ask
+  #   both not-negative, above DOUBT     -> proceed
+  #
+  # Confidence is deliberately NOT used to grade severity. Certainty about a
+  # band is not the same axis as how bad the act is: "I brought the office paper
+  # home" scores 0.74 confidence, "help me pick this lock" scores 0.51, and
+  # ordering those by confidence would refuse the triviality. Refusal stays with
+  # the deterministic tiers (guardrails + canon polarity), so BLOCK defaults off.
+  #
+  # DOUBT is the number to calibrate: too high and Aiko asks about everything
+  # (measured 91% of benign traffic escalated at v5's settings); too low and doubt
+  # stops failing closed.
+  NEGATIVE_BLOCK_CONFIDENCE: 0.0   # 0 = off; refusal is rule-based only
+  NEGATIVE_ASK_CONFIDENCE: 0.0     # 0 = off; any negative escalates
+  # OFF on Jetson deliberately. The doubt rule fires when a judge says
+  # "not negative" but is unsure. The deployed checkpoint is v5 (3-band), whose
+  # vertical axis answers `not-permitted` for "I watered my plants" -- 0/12 on
+  # ordinary requests -- so a low-confidence benign reading is not a signal we
+  # can act on. Enabling it adds escalation on unvalidated ground, which is the
+  # opposite of what this layer is for. Re-enable only with a judge measured on
+  # Aiko register.
+  NEGATIVE_DOUBT_CONFIDENCE: 0.0
+
   # ── tool policy ───────────────────────────────────────────────────────────
   # Any caution on an irreversible tool is upgraded to escalate.
   IRREVERSIBLE_REQUIRES_APPROVAL: 1

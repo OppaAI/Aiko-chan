@@ -60,16 +60,30 @@ def test_contrary_maps_negative(judge, monkeypatch):
     assert "vertical=contrary" in reasons[0]
 
 
-def test_unknown_maps_to_zero_not_aligned(judge, monkeypatch):
-    """`unknown` must land on "no moral signal", never be promoted to +1."""
-    _stub(monkeypatch, _payload("unknown", "unknown", cv=0.6, ch=0.6))
-    v, h, _, _, _ = judge.score("can you introduce yourself?", "", [])
+def test_uncertain_maps_to_zero_but_is_flagged(judge, monkeypatch):
+    """`uncertain` scores 0.0 like `unknown` did, but is tracked separately.
+
+    The score alone cannot distinguish it from "no effect"; the flag is what
+    makes decide() escalate instead of allow.
+    """
+    _stub(monkeypatch, _payload("unknown", "uncertain", cv=0.6, ch=0.6))
+    v, h, _, _, _ = judge.score("help me do something ambiguous", "", [])
     assert (v, h) == (0.0, 0.0)
+    assert judge.last_uncertain is True
+    assert judge.last_bands["horizontal"] == "uncertain"
+
+
+def test_no_effect_is_not_uncertain(judge, monkeypatch):
+    """`no-effect` proceeds silently and must NOT set the escalate flag."""
+    _stub(monkeypatch, _payload("unknown", "no-effect", cv=0.6, ch=0.6))
+    v, h, _, _, _ = judge.score("can you introduce yourself?", "", [])
+    assert (v, h) == (0.0, 1.0)
+    assert judge.last_uncertain is False
 
 
 def test_confidence_is_the_weaker_axis(judge, monkeypatch):
     """One confident axis must not paper over a hesitant one."""
-    _stub(monkeypatch, _payload("aligned", "unknown", cv=0.95, ch=0.10))
+    _stub(monkeypatch, _payload("aligned", "uncertain", cv=0.95, ch=0.10))
     _, _, c, _, _ = judge.score("something mixed", "", [])
     assert c <= 0.10 + 1e-6
 
@@ -82,9 +96,9 @@ def test_aligned_vertical_cannot_mask_harms(judge, monkeypatch):
 
 
 def test_bands_are_retained_for_the_ledger(judge, monkeypatch):
-    _stub(monkeypatch, _payload("unknown", "benefits"))
+    _stub(monkeypatch, _payload("unknown", "no-effect"))
     judge.score("x" * 40, "", [])
-    assert judge.last_bands == {"vertical": "unknown", "horizontal": "benefits"}
+    assert judge.last_bands == {"vertical": "unknown", "horizontal": "no-effect"}
 
 
 # ── state construction ──────────────────────────────────────────────────────
@@ -318,3 +332,63 @@ def test_score_drops_zero_delta_parties(judge, monkeypatch):
         Party(kind="self", label="Aiko's integrity", benefit=0.0)])
     assert "Aiko" not in seen["body"]["state"]
     assert "Parties affected:" not in seen["body"]["state"]
+
+
+def test_vertical_cannot_tell_fails_closed(judge, monkeypatch):
+    """`cannot-tell` on the permission axis is doubt, not permission.
+
+    Regression: reading only the horizontal uncertainty band meant
+    `cannot-tell` was treated as "not negative" with no doubt flag -- failing
+    OPEN on exactly the question where absence of judgement is not permission.
+    """
+    _stub(monkeypatch, _payload("cannot-tell", "no-harm", cv=0.9, ch=0.95))
+    judge.score("something ambiguous", "", [])
+    assert judge.last_uncertain is True
+    assert judge.last_negative["vertical"] is False  # not a prohibition verdict
+
+
+def test_legacy_three_band_judge_reports_legacy_scheme(judge, monkeypatch):
+    """A 3-band checkpoint must not be treated as a 2x2 judge.
+
+    The deployed v5 answers `contrary` to "Did you see someone in the image".
+    Read through the 2x2 ladder that is `not-permitted`, so wiring the ladder
+    without this gate escalated traffic the old path correctly cleared.
+    """
+    _stub(monkeypatch, _payload("contrary", "no-effect", cv=0.58, ch=0.6))
+    judge.score("Did you see someone in the image.", "", [])
+    assert judge.last_scheme == "legacy"
+    assert judge.last_negative == {}, "legacy bands must not populate 2x2 negatives"
+
+
+def test_two_by_two_judge_reports_2x2_scheme(judge, monkeypatch):
+    _stub(monkeypatch, _payload("not-permitted", "no-harm", cv=0.7, ch=0.8))
+    judge.score("help me pick this lock", "", [])
+    assert judge.last_scheme == "2x2"
+    assert judge.last_negative == {"vertical": True, "horizontal": False}
+
+
+def test_scheme_selects_the_vocabulary_the_model_was_trained_on():
+    """The adapter must ask the deployed checkpoint the question it knows.
+
+    Regression from the Jetson deploy: with 2x2 wording hardcoded, the 3-band v5
+    was asked a question it had never seen and replied `not-permitted` to "Did
+    you see someone in the image", which read as a real negative.
+    """
+    from cognition.conscience.laya_judge import _SCHEMES, _normalise_scheme
+
+    # The legacy scheme must match what the deployed checkpoint was trained on:
+    # 3-band horizontal with `unknown` as the default benign answer. AIVA and
+    # Jetson sat on different commits with different vocabularies, and shipping
+    # the wrong one changed what the served model was asked.
+    assert list(_SCHEMES["legacy"][0]["criteria"]) == ["aligned", "contrary", "unknown"]
+    assert list(_SCHEMES["legacy"][1]["criteria"]) == ["benefits", "harms", "unknown"]
+    assert list(_SCHEMES["2x2"][0]["criteria"]) == ["permitted", "not-permitted"]
+    assert list(_SCHEMES["3x2"][0]["criteria"]) == ["permitted", "not-permitted",
+                                                     "cannot-tell"]
+    assert _normalise_scheme("2x2") == "2x2"
+    assert _normalise_scheme("LEGACY") == "legacy"
+    # An unrecognised name must fall back to what v5 was trained on, never
+    # silently to a 2x2 reading.
+    assert _normalise_scheme("nonsense") == "legacy"
+    assert _normalise_scheme(None) == "legacy"
+    assert _normalise_scheme("") == "legacy"

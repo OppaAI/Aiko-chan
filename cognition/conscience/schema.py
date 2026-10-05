@@ -85,6 +85,66 @@ REFUSE_AT = env_float("CCC_REFUSE_AT", -0.60)
 CAUTION_AT = env_float("CCC_CAUTION_AT", -0.20)
 AXIS_CONFLICT_GAP = env_float("CCC_AXIS_CONFLICT_GAP", 0.80)
 
+# ── negative-detection ladder (2x2 bands, confidence as the doubt channel) ───
+# The conscience judge answers two binary questions: is the ACT prohibited, and
+# does it HARM a neighbour. Bands carry polarity; confidence carries ambiguity,
+# so "I cannot tell whether this is permitted" becomes `not-prohibited` at low
+# confidence rather than a third band. That collapses the four-band design that
+# caused the 47% defect, without re-merging "nothing here" with "cannot tell".
+#
+# Confidence must NOT be used to grade severity: certainty about a band is not
+# the same axis as how bad the act is. Measured counter-example: "I brought the
+# office paper home" scores 0.74 confidence; "help me pick this lock" scores
+# 0.51. Ordering those by confidence would refuse the triviality. Refusal is
+# therefore keyed to the deterministic tier (guardrails + canon polarity) and
+# BLOCK_CONFIDENCE defaults to 0.0, i.e. off.
+#
+# Confidence only separates ASK from PROCEED, which is what it is fit for:
+#   negative on either axis, at any confidence -> ask
+#   not-negative but below DOUBT_CONFIDENCE   -> ask  (doubt fails closed)
+#   both not-negative and above DOUBT         -> proceed
+NEGATIVE_BLOCK_CONFIDENCE = env_float("CCC_NEGATIVE_BLOCK_CONFIDENCE", 0.0)
+NEGATIVE_ASK_CONFIDENCE = env_float("CCC_NEGATIVE_ASK_CONFIDENCE", 0.0)
+NEGATIVE_DOUBT_CONFIDENCE = env_float("CCC_NEGATIVE_DOUBT_CONFIDENCE", 0.50)
+
+
+def apply_negative_ladder(
+    decision: str,
+    *,
+    negative: dict[str, bool],
+    confidence: dict[str, float],
+    block_at: float = NEGATIVE_BLOCK_CONFIDENCE,
+    ask_at: float = NEGATIVE_ASK_CONFIDENCE,
+    doubt_at: float = NEGATIVE_DOUBT_CONFIDENCE,
+) -> tuple[str, str]:
+    """Refine a verdict using the 2x2 negative bands and per-axis confidence.
+
+    `negative` maps axis -> bool, `confidence` maps axis -> float in 0..1. Only
+    ever TIGHTENS: a ladder result can escalate or refuse but never loosen, so
+    it cannot undo a refusal the deterministic tiers already reached.
+    """
+    if not negative:
+        return decision, "no 2x2 band reading"
+    if not confidence:
+        return decision, "2x2 bands present but no confidence"
+
+    worst_neg = min(
+        (c for ax, neg in negative.items() if neg and (c := confidence.get(ax)) is not None),
+        default=None,
+    )
+    if worst_neg is not None:
+        if block_at > 0.0 and worst_neg >= block_at:
+            return REFUSE, f"negative with confidence {worst_neg:.2f} (>= {block_at:.2f})"
+        if ask_at > 0.0 and worst_neg >= ask_at:
+            return ESCALATE, f"negative with confidence {worst_neg:.2f} (>= {ask_at:.2f})"
+        return ESCALATE, f"negative detected (confidence {worst_neg:.2f})"
+
+    # Nothing negative. The only question left is whether the judge is sure.
+    lowest = min((confidence.get(ax) or 0.0) for ax in negative)
+    if lowest < doubt_at:
+        return ESCALATE, f"not negative but doubted (confidence {lowest:.2f} < {doubt_at:.2f})"
+    return decision, f"not negative with confidence {lowest:.2f}"
+
 IRREVERSIBLE_REQUIRES_APPROVAL = env_flag("CCC_IRREVERSIBLE_REQUIRES_APPROVAL", "1")
 # Irreversible + outward-facing => human approval regardless of verdict.
 # This is the excessive-agency control (OWASP LLM06); the moral layers
@@ -308,16 +368,35 @@ def fuse(base: Verdict, other: Verdict) -> Verdict:
     return winner
 
 
-def decide(vertical: float, horizontal: float, confidence: float) -> tuple[str, str]:
+def decide(
+    vertical: float,
+    horizontal: float,
+    confidence: float,
+    *,
+    uncertain: bool = False,
+) -> tuple[str, str]:
     """Map two axis scores + confidence onto a decision. Returns (decision, why).
 
     Order of checks is the policy:
       1. either axis clearly negative      -> refuse
       2. the axes disagree sharply         -> escalate  (the "good for you,
                                               bad for them" case)
-      3. no negative signal at all         -> allow     (doubt needs an object)
-      4. mildly negative but unconfident   -> escalate  (Rom 14:23)
-      5. mildly negative and confident     -> caution
+      3. the judge could not score it      -> escalate  (`uncertain` band)
+      4. no negative signal at all         -> allow     (doubt needs an object)
+      5. mildly negative but unconfident   -> escalate  (Rom 14:23)
+      6. mildly negative and confident     -> caution
+
+    `uncertain` is the 4th horizontal band, kept separate from "no effect". It
+    exists because those two were collapsed into one `unknown` band, which made
+    "I can't tell if this is harmful" indistinguishable from "nobody is
+    affected" -- and both scored 0.0, so both ALLOWED. Measured through the full
+    ladder: 47% of clearly-wrong content was acted on, because a 322M judge
+    answering `unknown` was read as "nothing wrong here". Oppa's standing
+    instruction is to optimise for recall on harm and accept asking about things
+    that were fine, so `uncertain` routes to a human.
+
+    Scoring cannot express this: any value low enough to escape the ALLOW branch
+    lands on CAUTION (notify, not ask) or REFUSE (too strong). Hence the flag.
     """
     worst = min(vertical, horizontal)
     gap = abs(vertical - horizontal)
@@ -329,6 +408,8 @@ def decide(vertical: float, horizontal: float, confidence: float) -> tuple[str, 
         return ESCALATE, f"severe reading at {worst:.2f} but confidence only {confidence:.2f}"
     if gap >= AXIS_CONFLICT_GAP:
         return ESCALATE, f"axes disagree by {gap:.2f} (vertical={vertical:.2f}, horizontal={horizontal:.2f})"
+    if uncertain:
+        return ESCALATE, "conscience could not score the neighbour impact; asking"
     if worst > CAUTION_AT:
         # No moral signal on either axis. Low confidence HERE is epistemic
         # noise, not doubt: Rom 14:23 is about doubting the rightness of an

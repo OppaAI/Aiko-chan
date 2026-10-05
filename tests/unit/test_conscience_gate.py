@@ -342,3 +342,111 @@ def test_containment_comes_from_call_site_not_text():
     ctx = {"tool": "delete_files", "scope": "local", "reversible": False,
            "args_text": "sandboxed: true dry_run: yes please"}
     assert classify_stakes(act="tool", context=ctx) == "high"
+
+
+# ── the `uncertain` band: the defect this closes ────────────────────────────
+# `unknown` used to mean both "nobody is affected" and "I cannot score this".
+# Both scored 0.0, so both hit decide()'s "no moral signal" branch and ALLOWED.
+# Traced through the full ladder: 47% of clearly-wrong content was acted on.
+# Oppa's standing instruction is to favour recall on harm over precision.
+
+def test_uncertain_escalates_even_with_no_negative_signal():
+    from cognition.conscience.schema import ESCALATE, decide
+
+    decision, why = decide(0.0, 0.0, confidence=0.60, uncertain=True)
+    assert decision == ESCALATE
+    assert "could not score" in why
+
+
+def test_no_negative_signal_without_uncertainty_still_allows():
+    from cognition.conscience.schema import ALLOW, decide
+
+    decision, _ = decide(0.0, 0.0, confidence=0.60, uncertain=False)
+    assert decision == ALLOW
+
+
+def test_uncertain_does_not_weaken_a_refusal():
+    from cognition.conscience.schema import REFUSE, decide
+
+    decision, _ = decide(-1.0, -1.0, confidence=0.9, uncertain=True)
+    assert decision == REFUSE
+
+
+def test_uncertain_never_silences_an_axis_conflict():
+    from cognition.conscience.schema import ESCALATE, decide
+
+    decision, _ = decide(1.0, 0.0, confidence=0.9, uncertain=True)
+    assert decision == ESCALATE
+
+
+def test_deliberation_can_clear_the_uncertain_flag():
+    """A resolved verdict should not stay escalated forever."""
+    from cognition.conscience.schema import ALLOW, decide
+
+    # deliberation supplied real axis scores (non-zero), so the flag is dropped
+    decision, _ = decide(1.0, 1.0, confidence=0.8, uncertain=False)
+    assert decision == ALLOW
+
+
+# ── the 2x2 negative ladder ─────────────────────────────────────────────────
+# Bands carry polarity, confidence carries ambiguity, doubt fails closed.
+
+def test_negative_on_either_axis_escalates():
+    from cognition.conscience.schema import ALLOW, ESCALATE, apply_negative_ladder
+
+    d, why = apply_negative_ladder(
+        ALLOW, negative={"vertical": True, "horizontal": False},
+        confidence={"vertical": 0.2, "horizontal": 0.99})
+    assert d == ESCALATE and "negative" in why
+
+    d, _ = apply_negative_ladder(
+        ALLOW, negative={"vertical": False, "horizontal": True},
+        confidence={"vertical": 0.99, "horizontal": 0.2})
+    assert d == ESCALATE
+
+
+def test_not_negative_above_doubt_proceeds():
+    from cognition.conscience.schema import ALLOW, apply_negative_ladder
+
+    d, _ = apply_negative_ladder(
+        ALLOW, negative={"vertical": False, "horizontal": False},
+        confidence={"vertical": 0.8, "horizontal": 0.7}, doubt_at=0.5)
+    assert d == ALLOW
+
+
+def test_doubt_fails_closed():
+    from cognition.conscience.schema import ALLOW, ESCALATE, apply_negative_ladder
+
+    d, why = apply_negative_ladder(
+        ALLOW, negative={"vertical": False, "horizontal": False},
+        confidence={"vertical": 0.30, "horizontal": 0.85}, doubt_at=0.5)
+    assert d == ESCALATE and "doubted" in why
+
+
+def test_block_is_off_by_default():
+    """Confidence must not grade severity; refusal stays rule-based."""
+    from cognition.conscience.schema import ESCALATE, apply_negative_ladder
+
+    d, _ = apply_negative_ladder(
+        ESCALATE, negative={"vertical": True, "horizontal": False},
+        confidence={"vertical": 0.99, "horizontal": 0.99}, block_at=0.0)
+    assert d == ESCALATE, "high confidence wrongly escalated to a refusal"
+
+
+def test_ladder_can_only_tighten():
+    from cognition.conscience.schema import ALLOW, ESCALATE, REFUSE, apply_negative_ladder
+
+    # a refusal from the deterministic tiers is never loosened
+    d, _ = apply_negative_ladder(
+        REFUSE, negative={"vertical": False, "horizontal": False},
+        confidence={"vertical": 0.99, "horizontal": 0.99}, doubt_at=0.5)
+    assert d == REFUSE
+
+
+def test_legacy_bands_map_onto_2x2_polarity():
+    from cognition.conscience.laya_judge import is_negative
+
+    assert is_negative("contrary", "unknown") == {"vertical": True, "horizontal": False}
+    assert is_negative("aligned", "harms") == {"vertical": False, "horizontal": True}
+    assert is_negative("permitted", "no-harm") == {"vertical": False, "horizontal": False}
+    assert is_negative("not-permitted", "no-harm") == {"vertical": True, "horizontal": False}

@@ -275,10 +275,19 @@ class ConscienceCircuitCore:
         if tier2 is not None and getattr(tier2, "last_scheme", "legacy") != "legacy":
             neg = getattr(tier2, "last_negative", None)
             if neg:
-                decision, why = apply_negative_ladder(
+                ladder_decision, ladder_why = apply_negative_ladder(
                     decision, negative=neg,
                     confidence=getattr(tier2, "last_confidence", {}) or {},
                 )
+                # REFUSE is stricter than ESCALATE, so honouring the ladder
+                # unconditionally could turn a canon refusal into an ask --
+                # loosening, which is the one thing this must never do. The
+                # swap to the 3x2 judge surfaced it: a trigger-strength
+                # prohibition that used to refuse came back as an escalation.
+                if decision == REFUSE and ladder_decision != REFUSE:
+                    log.info("[ccc] keeping canon refusal over ladder: %s", ladder_why)
+                else:
+                    decision, why = ladder_decision, ladder_why
         needs_more = confidence < DELIBERATE_THRESHOLD or decision == ESCALATE
         if needs_more and ceiling >= 3 and llm_client is not None:
             deliberated = judge_mod.deliberate(

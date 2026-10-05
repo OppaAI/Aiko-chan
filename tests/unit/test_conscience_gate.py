@@ -14,7 +14,8 @@ import pytest
 
 from cognition.conscience.autonomy import ACT, ACT_NOTIFY, ASK, AutonomyPolicy, STAKES_HIGH, STAKES_MEDIUM
 from cognition.conscience.gate import apply_outcome, evaluate_action, looks_like_injection
-from cognition.conscience.schema import ALLOW, CAUTION, ESCALATE, REFUSE, Verdict, fuse
+from cognition.conscience.schema import (ALLOW, CAUTION, ESCALATE, REFUSE, Verdict,
+                                        apply_negative_ladder, decide, fuse)
 
 
 def _v(decision: str, *, reasons=("because",)) -> Verdict:
@@ -450,3 +451,25 @@ def test_legacy_bands_map_onto_2x2_polarity():
     assert is_negative("aligned", "harms") == {"vertical": False, "horizontal": True}
     assert is_negative("permitted", "no-harm") == {"vertical": False, "horizontal": False}
     assert is_negative("not-permitted", "no-harm") == {"vertical": True, "horizontal": False}
+
+
+def test_ladder_cannot_loosen_a_canon_refusal():
+    """REFUSE is stricter than ESCALATE; the ladder must not downgrade it.
+
+    Regression found while swapping to the 3x2 judge: `apply_negative_ladder` is
+    documented as only ever tightening, but core.py assigned its result
+    unconditionally, so a trigger-strength canon prohibition returned as an
+    escalation instead of a refusal. A judge that says "not-permitted" was able
+    to trade a hard no for a question -- the opposite failure direction from the
+    one the ladder exists to prevent.
+    """
+    ladder = decide(0.0, 0.0, 0.9)          # no moral signal -> allow
+    assert ladder[0] == ALLOW
+    escalated, _ = apply_negative_ladder(
+        ladder[0],
+        negative={"vertical": True, "horizontal": True},
+        confidence={"vertical": 0.61, "horizontal": 0.61},
+    )
+    assert escalated == ESCALATE
+    # ...and the caller must keep a prior refusal rather than take that.
+    assert REFUSE != escalated

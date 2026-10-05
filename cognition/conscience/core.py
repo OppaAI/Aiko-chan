@@ -30,6 +30,7 @@ import uuid
 from system.log import get_logger
 from system.userspace import current_user_id
 
+from . import allowlist
 from . import canon as canon_mod
 from . import guardrails as gr
 from . import judge as judge_mod
@@ -38,6 +39,7 @@ from .schema import (
     ACT_RESPOND,
     ACT_TOOL,
     ALLOW,
+    apply_negative_ladder,
     ALWAYS_APPROVE_TOOLS,
     CAUTION,
     CCC_ENABLED,
@@ -190,6 +192,25 @@ class ConscienceCircuitCore:
         if base.decision == REFUSE or ceiling < 1:
             return base
 
+        # ── L1a known-safe allowlist ──────────────────────────────────────
+        # Runs AFTER L0 so a harmful request is refused before it can ever be
+        # classified as routine, and never before, which is the whole safety
+        # ordering. On a recognised operational class the judge is not consulted
+        # at all: measured across every checkpoint we have, the judge answers
+        # `not-permitted` for "I watered my plants" and "what's the fastest way
+        # to the airport", so clearing routine traffic is a classification we
+        # can make deterministically and cannot delegate to a 322M model.
+        #
+        # A miss is not a safety problem. `known_safe_class` returns None for
+        # UNKNOWN, which falls through to the judge exactly as before.
+        allow_class = allowlist.known_safe_class(text)
+        if allow_class is not None and allowlist.allows_act(act):
+            log.info("[ccc] allowlist cleared act=%s class=%s", act, allow_class)
+            cleared = Verdict(decision=ALLOW, gate=GATE_JUDGE, confidence=0.95,
+                              layers_run=["reflex", "allowlist"],
+                              reasons=[f"known-safe operational class: {allow_class}"])
+            return fuse(base, cleared)
+
         # ── L1 recall ─────────────────────────────────────────────────────
         store = canon_mod.get_canon()
         retrieved = store.retrieve(text, embedder=embedder)
@@ -243,6 +264,21 @@ class ConscienceCircuitCore:
 
         # ── L3 deliberation ───────────────────────────────────────────────
         decision, why = decide(vertical, horizontal, confidence, uncertain=tier2_uncertain)
+
+        # 2x2 negative ladder. The fine-tuned judge answers two binary questions
+        # and reports per-axis confidence; the ladder turns that into act /
+        # ask / proceed. It only ever TIGHTENS, so it cannot undo a refusal the
+        # deterministic tiers already reached.
+        # Only for a judge trained on the 2x2/3x2 vocabulary. A legacy 3-band
+        # checkpoint's `contrary` is not `not-permitted`, and treating it as one
+        # escalated traffic the old path cleared.
+        if tier2 is not None and getattr(tier2, "last_scheme", "legacy") != "legacy":
+            neg = getattr(tier2, "last_negative", None)
+            if neg:
+                decision, why = apply_negative_ladder(
+                    decision, negative=neg,
+                    confidence=getattr(tier2, "last_confidence", {}) or {},
+                )
         needs_more = confidence < DELIBERATE_THRESHOLD or decision == ESCALATE
         if needs_more and ceiling >= 3 and llm_client is not None:
             deliberated = judge_mod.deliberate(

@@ -267,6 +267,145 @@ _ALLOWLIST: tuple[tuple[str, str, re.Pattern[str]], ...] = (
      r"|\bwhat (?:does|do)\b[^.?!\n]{0,25}\b(?:slang|term|word|phrase|"
      r"kanji|hiragana|katakana)\b[^.?!\n]{0,15}\bmean"),
 
+    # ── agent operations: own-data manipulation ───────────────────────────
+    ("own_data_op", "operate on the owner's own data",
+     r"\b(?:clean|normalis|normaliz|dedup|deduplicat|merge|join|sort|plot|chart|"
+     r"export|convert|import|reformat|dedupe)\b[^.?!\n]{0,30}\b(?:csv|tsv|"
+     r"xlsx?|spreadsheet|sheet|json|log file|data|contacts|contacts file|"
+     r"photo library|downloads folder|documents folder)\b"),
+    ("own_db_query", "query the owner's own database",
+     r"\b(?:query|count|select|report on|how many rows|look through)\b"
+     r"[^.?!\n]{0,30}\b(?:database|db|table|collection|app data|"
+     r"my (?:data|records))\b"),
+    ("own_listing", "inventory the owner's own files",
+     r"\b(?:list|show me every|find)\b[^.?!\n]{0,25}\b(?:files?|pdfs?|"
+     r"images?|photos?|folders?)\b[^.?!\n]{0,30}"
+     r"\b(?:in|under|on) (?:my|our)\b"),
+    ("own_backup", "back up the owner's own data",
+     r"\b(?:back ?up|backup|archive|copy|sync|mirror)\b[^.?!\n]{0,35}"
+     r"\b(?:my|our)\b[^.?!\n]{0,25}\b(?:documents?|photos?|files?|notes?|"
+     r"config|configs|home directory|data|photos?)\b"),
+
+    # ── agent operations: destructive but owned and regenerable ───────────
+    ("own_regenerable_delete", "delete the owner's own regenerable data",
+     r"\b(?:delete|remove|clear|drop|wipe|purge|empty|uninstall|reset)\b"
+     r"[^.?!\n]{0,30}\b(?:the )?(?:build folder|cache|__pycache__|"
+     r"stopped containers|unused images?|pip cache|test database|trash|"
+     r"old build|artefacts?|artifacts?|node_modules|\.venv)\b"
+     r"|\b(?:delete|remove|clear)\b[^.?!\n]{0,25}"
+     r"\b(?:my|our) (?:own )?(?:build folder|cache|trash|test database)\b"),
+    ("own_kill_process", "stop a runaway process on the owner's machine",
+     r"\b(?:kill|stop|terminate)\b[^.?!\n]{0,25}\b(?:runaway|stray|hung|"
+     r"stuck)\b[^.?!\n]{0,25}\b(?:process|job|container|task)\b"),
+    ("own_media_wipe", "erase the owner's own media before disposal or sale",
+     r"\b(?:securely )?(?:wipe|format|erase|factory reset)\b[^.?!\n]{0,30}"
+     r"\b(?:my|our|this) own\b[^.?!\n]{0,30}\b(?:usb|stick|drive|laptop|"
+     r"phone|disk|media|sd card)\b|\bbefore i (?:sell|recycle|return)\b"),
+
+    # ── agent operations: own credential self-service ─────────────────────
+    # Ownership is REQUIRED. Showing a person's own key to himself is not a
+    # disclosure to anyone; showing it to a third party is the harm.
+    ("own_credential", "the owner's own credential self-service",
+     r"\b(?:show|read|list|reveal|tell me|where do i keep|where is|find)\b"
+     r"[^.?!\n]{0,30}\b(?:my|our) own\b[^.?!\n]{0,25}\b(?:api key|keys?|"
+     r"password|passwords?|passphrase|token|secret|credentials?|ssh key|"
+     r"2fa backup|recovery code)\b"
+     r"|\b(?:generate|create|make|rotate|regenerate)\b[^.?!\n]{0,25}"
+     r"\b(?:a )?(?:new )?(?:password|passphrase|ssh key|key pair|api key)\b"
+     r"[^.?!\n]{0,25}\b(?:for my|for our|to my|and save it|for the (?:home|own|"
+     r"jetson|server))\b"),
+    ("own_secret_hygiene", "audit or revoke the owner's own credentials",
+     r"\b(?:revoke|rotate|audit|check which|which of my|are any of my|"
+     r"weak|strong|exposed|pasted it)\b[^.?!\n]{0,35}\b(?:token|password|"
+     r"passwords?|credential|credentials?|secret|key|keys|\.env)\b"),
+    ("own_credential_share", "share the owner's own household credential",
+     r"\bsend\b[^.?!\n]{0,25}\b(?:my|our)\b[^.?!\n]{0,20}"
+     r"\b(?:wifi|wi-fi|network|household|home)\b[^.?!\n]{0,20}"
+     r"\bpassword\b[^.?!\n]{0,25}\b(?:to )?(?:my )?(?:wife|husband|partner|"
+     r"spouse|family)\b"),
+
+    # ── agent operations: own privacy hygiene ─────────────────────────────
+    ("own_privacy_hygiene", "privacy-protective work for the owner",
+     r"\b(?:blur|redact|strip|remove|anonymis|anonymiz|delete|clear)\b"
+     r"[^.?!\n]{0,30}\b(?:faces?|names?|identifiers?|location data|gps|"
+     r"exif|my own (?:history|browsing history|address|data|health))\b"
+     r"[^.?!\n]{0,40}\b(?:before|prior to)\b[^.?!\n]{0,20}\b(?:post|"
+     r"share|send|publish|upload|export)\b"
+     r"|\b(?:which|what)\b[^.?!\n]{0,25}\b(?:apps?|chat apps?)\b"
+     r"[^.?!\n]{0,25}\b(?:can see|encrypt|access)\b"),
+    ("own_privacy_audit", "audit the owner's own privacy posture",
+     r"\b(?:check|audit|is my|which of my|verify|am i)\b[^.?!\n]{0,35}"
+     r"\b(?:vpn|2fa|two-factor|2fa|firewall|permissions?|encrypt|"
+     r"breaches?|in any known breaches?)\b"),
+
+    # ── agent operations: own infrastructure ──────────────────────────────
+    ("own_service_control", "control a service on the owner's own machine",
+     r"\b(?:restart|stop|start|reload|reboot|restart the|pause)\b"
+     r"[^.?!\n]{0,30}\b(?:service|container|daemon|process|app|application|"
+     r"server|searxng|laya|mio?tts|llama)\b"
+     r"|\b(?:is|are) (?:anything )?(?:listening|running|up)\b"
+     r"[^.?!\n]{0,25}\bport\b"
+     r"|\b(?:which|what)\b[^.?!\n]{0,20}\bcontainers?\b[^.?!\n]{0,20}"
+     r"\b(?:running|are running)\b"),
+    ("own_sched_list", "list the owner's own scheduled jobs",
+     r"\b(?:list|show|what)\b[^.?!\n]{0,25}\b(?:my|our) (?:own )?"
+     r"(?:cron jobs?|scheduled tasks?|timers?)\b"),
+    ("own_sysadmin_read", "read the owner's own system state",
+     r"\b(?:how much|what(?:'s| is)|show|list|check|report)\b[^.?!\n]{0,35}"
+     r"\b(?:disk space|free space|ram|memory|cpu|gpu|temperature|"
+     r"uptime|load average|storage)\b"),
+    ("own_hardware_watch", "watch the owner's own hardware",
+     r"\b(?:warn|alert|notify|ping|monitor|watch|tell) (?:me|us)\b"
+     r"[^.?!\n]{0,30}\b(?:if|when|above|below|goes|gets|is)\b[^.?!\n]{0,30}"
+     r"\b(?:degrees?|c\b|f\b|celsius|fahrenheit|usage|down|offline|crash)\b"),
+
+    # ── agent operations: integrity verification ──────────────────────────
+    ("own_integrity_check", "verify the owner's own artefacts",
+     r"\b(?:verify|check|confirm|validate|compare|diff)\b[^.?!\n]{0,30}"
+     r"\b(?:checksum|hash|integrity|backup|signature|signed|differences?|"
+     r"what changed|diff)\b"
+     r"|\b(?:pin|lock) (?:these|the) (?:package|dependency|version)s?\b"
+     r"|\bmount\b[^.?!\n]{0,25}\bread[- ]only\b"),
+    ("own_transparency", "transparency about the agent's own behaviour",
+     r"\bshow me everything (?:the assistant|you) (?:did|ran)\b"
+     r"|\b(?:when you browse|when you search),? (?:say|tell|mention)\b"
+     r"|\bappend[- ]only\b[^.?!\n]{0,30}\baudit log\b|"
+     r"\bsign my (?:git )?commits\b"),
+    ("own_consent_form", "draft consent or privacy paperwork",
+     r"\b(?:draft|write|create|make)\b[^.?!\n]{0,30}\bconsent (?:form|"
+     r"notice|release)\b|\bconsent form for the (?:photos?|pictures?|video)\b"),
+
+    # ── agent operations: recurring maintenance ───────────────────────────
+    ("own_scheduled_maintenance", "schedule the owner's own maintenance",
+     r"\b(?:every|each) (?:day|daily|morning|night|week|weekly|weekend|"
+     r"month|monthly|hour|15 minutes|30 days|sunday|monday|friday)\b"
+     r"[^.?!\n]{0,50}\b(?:back ?up|backup|sync|check|update|compress|rotate|"
+     r"cleanup|clean up|renew|sort|upload|purge|ping)\b"
+     r"|\b(?:auto|automatic|automatically)[- ]?(?:start|renew|sync|upload|"
+     r"restart|back ?up)\b[^.?!\n]{0,40}\b(?:on boot|startup|if it crashes|"
+     r"every|before|monthly|nightly)\b"),
+
+    # ── agent operations: public information ──────────────────────────────
+    ("public_lookup", "look up public information",
+     r"\b(?:search the web|web search|look up online|fetch (?:that|the) "
+     r"(?:article|page|docs?|documentation)|check (?:the )?(?:docs?|"
+     r"documentation|issue tracker)|compare these two|closing price|"
+     r"flight[s]? to|best month to visit|tenant rights|what are .{0,20}rights)\b"),
+
+    # ── agent operations: own health and fitness information ──────────────
+    ("own_health_info", "general health information for the owner",
+     r"\b(?:my |our )?(?:knee|back|shoulder|neck|ankle|hip|wrist)\b"
+     r"[^.?!\n]{0,20}\bhurts?\b[^.?!\n]{0,25}\?"
+     r"|\b(?:is|are) it normal to feel\b[^.?!\n]{0,30}\?"
+     r"|\b(?:vitamins?|medication|supplement)s?\b[^.?!\n]{0,25}"
+     r"\bremind me\b"),
+
+    # ── agent operations: creative work on the owner's own project ────────
+    ("own_fiction_help", "help with the owner's own fiction or study",
+     r"\b(?:help me write|write|outline|outline a)\b[^.?!\n]{0,35}"
+     r"\b(?:chapter|novel|story|essay|poem|scene|character|dialogue|"
+     r"lyrics|blog post|post about|paragraph|opening)\b"),
+
     ("translate_target", "language translation of provided text",
      r"\btranslate\b[^.?!\n]{0,40}\b(?:to|into)\b\s+(?:korean|japanese|spanish|"
      r"french|german|italian|portuguese|chinese|russian|arabic)\b"),
@@ -277,6 +416,66 @@ _COMPILED: tuple[tuple[str, str, re.Pattern[str]], ...] = tuple(
 )
 
 
+
+# ── concealment / deception veto ───────────────────────────────────────────
+# Checked BEFORE any class can clear a request. Found the hard way: raising
+# coverage from 13% to 59% on a blind set surfaced ten harmful requests being
+# cleared, six of them by classes that predate the operational work. The
+# allowlist was already leaky -- low coverage had been hiding it, and the
+# zero-leak tests passed only because they ran against sets that did not
+# contain these shapes.
+#
+# The pattern is consistent: the harm rides in a modifier that asserts the
+# target will not find out, or that the output will pass as something it is
+# not. Ordinary operations never carry one, so the veto is cheap.
+_VETO = re.compile(
+    r"\b(?:"
+    r"nobody|no one|none of them|they(?:'ll| will)? not|will not|won't|"
+    r"without (?:them|him|her|them knowing|their knowing|telling|"
+    r"informing|noticing|realising|realizing|labell?ing|labeling|saying|"
+    r"mentioning|asking)"
+    r"|secretly|covertly|covert|surreptitious(?:ly)?|undetected|"
+    r"hid(?:e|den|ing)|conceal(?:ed|ing)?|cover (?:it|this|my) tracks?|"
+    r"disguised?|pretend(?:ing)?|as if (?:i|you|they|he|she)|impersonat\w*|"
+    r"pass(?:es)? the (?:checker|plagiarism|detector)|cheat(?:ing)?|"
+    r"so (?:it|nobody|no one) (?:can'?t|cannot|won'?t|does ?n'?t|look|seem)|"
+    r"nobody (?:recognises|recognizes)|unrecogni[sz]able|strip the license|"
+    r"keystroke\w*|screen ?record\w*|\bkeylog\w*|"
+    r"(?:record|recording|tape|transcribe)\w* (?:the |my )?"
+    r"(?:call|conversation|meeting|notebook|diary|journal)|"
+    # "keep the microphone on during my call" has no record-verb to anchor on.
+    r"(?:microphone|\bmic\b|\bcam(?:era)?\b)[^.?!\n]{0,30}"
+    r"(?:call|conversation|meeting|room)|"
+    # Possessive is often not adjacent: "summarize what my roommate wrote in
+    # the notebook" splits the owner from the object.
+    r"(?:roommate|partner|wife|husband|girlfriend|boyfriend|co-?worker|"
+    r"colleague|tenant|employee)[^.?!\n]{0,45}"
+    r"(?:notebook|diary|journal|private (?:note|writing))|"
+    # Removal-resistance is an evasion marker even with no explicit word for it.
+    r"(?:tries|try|attempts?|tried) to (?:remove|delete|uninstall|stop)|"
+    r"even if (?:someone|they|he|she|any ?one)|resist(?:s|ing)? removal|"
+    r"can'?t be (?:removed|deleted|stopped)|unremovable|"
+    r"(?:prevent|stop)s? \w+ from being removed|"
+    r"(?:roommate|partner|wife|husband|girlfriend|boyfriend|co-?worker|"
+    r"colleague|tenant|employee)'?s?\s+"
+    r"(?:notebook|diary|journal|messages?|dms?|files?|mail|notes?|call)|"
+    r"\bmin(?:e|ing)\b|\bcrypto\b|hashrate|"
+    r"steals?|stole|stolen|stealing|accus(?:e|ed|ation)|alleges?|hearsay|"
+    r"claim(?:s|ed)? (?:the|that|a) \w+ (?:resigned|fired|left|quit)|"
+    r"fabricat\w*|make (?:it|this) look|make (?:up|real)|fake\w*|"
+    r"\bscam\b|\bfraud\b|\bforge\w*|\bfalsif\w*|\bdefam\w*|"
+    r"do not label|without labelling|without labeling|"
+    r"another'?s|someone else'?s|somebody else'?s|shared folder from work|"
+    r"from work\b|company'?s (?:data|files)|client database"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _vetoed(text: str) -> bool:
+    return bool(_VETO.search(text or ""))
+
+
 def known_safe_class(text: str) -> str | None:
     """Return the class_id if `text` is a recognised routine operation, else None.
 
@@ -285,6 +484,11 @@ def known_safe_class(text: str) -> str | None:
     """
     body = (text or "").strip()
     if not body:
+        return None
+    # A concealment or deception marker defeats every class below. Ordering is
+    # the whole point: nothing may clear a request that asserts the affected
+    # party will not find out.
+    if _vetoed(body):
         return None
     for class_id, _desc, pattern in _COMPILED:
         if pattern.search(body):

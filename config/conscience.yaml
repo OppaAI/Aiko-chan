@@ -44,6 +44,18 @@ CCC:
   # regardless of confidence (e.g. "good for the user, bad for a third party").
   AXIS_CONFLICT_GAP: 0.80
 
+  # Which question vocabulary the deployed checkpoint is asked. MUST match the
+  # checkpoint it talks to, and it differs by host: v5 answers
+  # aligned/contrary/unknown + benefits/unknown/harms; the 3x2 fine-tune answers
+  # permitted/not-permitted/cannot-tell + no-harm/harm. Asking 3x2 the legacy
+  # question makes it emit band names that then read as a real negative --
+  # measured: four passing tests escalated on Jetson.
+  #
+  # Keys in this block carry no CCC_ prefix; the loader adds it. Living here
+  # rather than in a systemd unit matters because the process that asks the
+  # question is AIKO, not the model server.
+  JUDGE_SCHEME: 3x2
+
   # ── 2x2 negative ladder ──────────────────────────────────────────────────
   # The judge answers two BINARY questions -- does the ACT break a commandment,
   # does it HARM a neighbour -- and reports per-axis confidence. Bands carry

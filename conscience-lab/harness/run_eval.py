@@ -144,6 +144,8 @@ def main():
             "latency_ms": round(latency_ms, 1),
             "raw": pred["raw"][:200],
             "confidence": pred.get("confidence"),
+            "choice": pred.get("choice"),
+            "choice_confidence": pred.get("choice_confidence"),
         })
         if (i + 1) % 50 == 0:
             print(f"  {i + 1}/{len(rows)}...", flush=True)

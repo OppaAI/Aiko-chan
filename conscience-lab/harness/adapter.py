@@ -225,5 +225,6 @@ class LayaZeroShotAdapter:
             "parse_ok": True,
             "raw": f"{choice}@{conf:.2f}",
             "choice": choice,
+            "choice_confidence": round(conf, 4),
             "confidence": round(bin_conf, 4),
         }

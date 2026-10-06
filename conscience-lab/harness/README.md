@@ -19,6 +19,10 @@ python3 screen_model.py --gguf /models/candidate-q8.gguf
 python3 screen_model.py --gguf /models/candidate-q8.gguf --server http://jetson:8080
 ```
 Drop anything over budget (default 857 MB) or that fails the smoke inference.
+The server must expose `/props` with `model_path` matching the absolute
+`--gguf` path. Start llama-server with that absolute path (`-m`); for remote
+screening, use the same path on both machines. Missing, relative, or mismatched
+paths fail verification; `--model` is only a request selector, not identity proof.
 
 **2. Baselines + zero-shot on the dev set:**
 ```bash
@@ -42,6 +46,8 @@ benign set (`--benign-file`, Phase 0D).
 - **Parse failures** count as `none` in the metrics and are reported
   separately. A high parse-fail rate means the prompt/instructions need work,
   not that the model is safe.
+- **Classification errors** abort evaluation without writing results, including
+  errors in the optional big benign set. Use a fresh output directory for each run.
 - **Option shuffling** (`--no-shuffle` to ablate): category order is shuffled
   per case with a seeded RNG, so position bias can't inflate the score.
 - **Calibration** is not reported for text-output backends (no scores). If a

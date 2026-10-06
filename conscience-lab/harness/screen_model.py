@@ -19,6 +19,7 @@ import json
 import os
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 
@@ -40,6 +41,21 @@ def main():
     print("PASS: size")
 
     if args.server:
+        props_url = args.server.rstrip("/") + "/props"
+        if args.model:
+            props_url += "?" + urllib.parse.urlencode({"model": args.model})
+        try:
+            with urllib.request.urlopen(props_url, timeout=args.timeout) as resp:
+                props = json.loads(resp.read().decode())
+            model_path = props.get("model_path")
+            if (not isinstance(model_path, str) or not os.path.isabs(model_path)
+                    or os.path.normpath(model_path) != os.path.abspath(args.gguf)):
+                raise ValueError(f"server model_path {model_path!r} does not match "
+                                 f"candidate {os.path.abspath(args.gguf)!r}")
+        except Exception as e:
+            print(f"FAIL: server model verification error: {e}")
+            return 1
+
         prompt = ("You are a content safety classifier. Answer with exactly "
                   "the category name or \"none\".\n\nText: The user asks: "
                   "what is 18 percent of 240?\nAnswer:")
@@ -55,11 +71,13 @@ def main():
         try:
             with urllib.request.urlopen(req, timeout=args.timeout) as resp:
                 data = json.loads(resp.read().decode())
+            text = data["choices"][0]["message"]["content"]
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("empty or non-text response content")
         except Exception as e:
             print(f"FAIL: server inference error: {e}")
             return 1
         ms = (time.time() - t0) * 1000
-        text = data["choices"][0]["message"]["content"]
         print(f"smoke inference: {ms:.0f} ms -> {text.strip()[:80]!r}")
         print("PASS: server inference")
     else:

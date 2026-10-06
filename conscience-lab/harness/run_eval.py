@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import statistics
@@ -83,6 +84,8 @@ def main():
     ap.add_argument("--out", default="results/run",
                     help="output dir for per-case JSONL + summary")
     args = ap.parse_args()
+    if not math.isfinite(args.prevalence) or not 0 <= args.prevalence <= 1:
+        ap.error("--prevalence must be finite and between 0 and 1 inclusive")
 
     here = os.path.dirname(os.path.abspath(__file__))
     cats = load_categories(os.path.join(here, args.categories))
@@ -104,8 +107,7 @@ def main():
             pred = adapter.classify(backend, r["situation"],
                                     case_rng if not args.no_shuffle else _NoShuffle())
         except Exception as e:
-            pred = {"predicted_category": None, "predicted_refuse": False,
-                    "parse_ok": False, "raw": f"BACKEND ERROR: {e}"}
+            raise SystemExit(f"dev classification failed at case {r['id']}: {e}") from e
         latency_ms = (time.time() - t1) * 1000
         results.append({
             "id": r["id"],
@@ -131,7 +133,7 @@ def main():
         sum(1 for r in results if not r["parse_ok"]) / len(results))
     lat = [r["latency_ms"] for r in results]
     m_model["latency_ms_p50"] = statistics.median(lat)
-    m_model["latency_ms_p95"] = sorted(lat)[int(0.95 * len(lat)) - 1]
+    m_model["latency_ms_p95"] = sorted(lat)[math.ceil(0.95 * len(lat)) - 1]
 
     # baselines
     m_block = binary_metrics([(e, True) for e, _ in pairs])
@@ -157,8 +159,8 @@ def main():
                     random.Random(args.seed + 999999 + j)
                     if not args.no_shuffle else _NoShuffle())
                 fp += 1 if p["predicted_refuse"] else 0
-            except Exception:
-                pass
+            except Exception as e:
+                raise SystemExit(f"big-benign classification failed at row {j + 1}: {e}") from e
         extra = {"n": len(ben_rows), "fp_rate": fp / len(ben_rows)}
 
     per_cat = per_category_recall([

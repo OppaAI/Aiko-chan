@@ -107,9 +107,6 @@ class ZeroShotAdapter:
         for name in self.names:
             if t == name:
                 return name, True
-        for name in self.names:
-            if re.search(r"\b" + re.escape(name) + r"\b", t):
-                return name, False
         return None, False
 
     def classify(self, backend, situation, rng):

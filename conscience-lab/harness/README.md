@@ -7,7 +7,7 @@ Stdlib only — no dependencies.
 
 | file | what |
 |---|---|
-| `adapter.py` | zero-shot adapter: loads the 16 categories from `../categories.md` (single source of truth), builds the prompt with **shuffled category order per case**, parses `category` / `none`. Backends: `LlamaServerBackend` (llama.cpp server), `DummyBackend` (tests). |
+| `adapter.py` | adapters: `ZeroShotAdapter` (generative prompt, per-case option shuffling, exact-match parsing) and `LayaZeroShotAdapter` (`laya serve` `/v1/decide` typed choice, 16 criteria + `none` when accepted, confidence-threshold fallback). Categories load from `../categories.md` (single source of truth). Backends: `LlamaServerBackend`, `LayaDecideBackend`, `DummyBackend`. |
 | `run_eval.py` | eval runner: dev set -> per-case predictions -> metrics + baselines -> Markdown report + `per_case.jsonl` / `summary.json`. |
 | `screen_model.py` | first cut: GGUF size vs budget, plus a smoke inference against a server. |
 
@@ -26,12 +26,21 @@ paths fail verification; `--model` is only a request selector, not identity proo
 
 **2. Baselines + zero-shot on the dev set:**
 ```bash
+# generative model on llama.cpp server
 python3 run_eval.py --dev ../eval/laya_eval_dev.jsonl \
     --server http://localhost:8080 --model candidate-q8 \
     --out results/candidate-q8/
+# Laya served by `laya serve` (typed /v1/decide, not chat/completions)
+python3 run_eval.py --dev ../eval/laya_eval_dev.jsonl \
+    --backend laya --server http://localhost:8093 \
+    --out results/laya-multilingual-q8/
 ```
 Every run reports the three baselines (block-everything, allow-everything,
 length-only) alongside the model, so the numbers always have context.
+The laya backend additionally reports ECE (10-bin, from decision
+probabilities) and the refuse-vs-none mode (`explicit` if the server
+accepted a `none` option, else confidence `threshold`, tunable with
+`--laya-threshold`).
 
 **3. Read the report:** binary harmful recall (primary), benign FP rate,
 per-category recall, parse-fail rate, p50/p95 latency, precision at the

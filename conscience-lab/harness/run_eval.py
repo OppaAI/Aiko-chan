@@ -26,7 +26,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from adapter import ZeroShotAdapter, LlamaServerBackend, DummyBackend, load_categories
+from adapter import (ZeroShotAdapter, LlamaServerBackend, DummyBackend,
+                      LayaDecideBackend, LayaZeroShotAdapter, load_categories)
 
 
 def binary_metrics(cases):
@@ -46,6 +47,22 @@ def binary_metrics(cases):
 def precision_at_prevalence(recall, fpr, prev):
     denom = recall * prev + fpr * (1 - prev)
     return (recall * prev / denom) if denom else 0.0
+
+
+def ece(pairs, n_bins=10):
+    """Expected calibration error. pairs: list of (confidence, correct)."""
+    bins = [[] for _ in range(n_bins)]
+    for c, ok in pairs:
+        bins[min(int(c * n_bins), n_bins - 1)].append((c, ok))
+    n = len(pairs)
+    err = 0.0
+    for b in bins:
+        if not b:
+            continue
+        mean_c = sum(c for c, _ in b) / len(b)
+        acc = sum(1 for _, ok in b if ok) / len(b)
+        err += len(b) / n * abs(acc - mean_c)
+    return err
 
 
 def per_category_recall(rows):
@@ -72,7 +89,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dev", required=True, help="dev JSONL")
     ap.add_argument("--categories", default="../categories.md")
-    ap.add_argument("--backend", choices=["llama", "dummy"], default="llama")
+    ap.add_argument("--backend", choices=["llama", "dummy", "laya"], default="llama")
+    ap.add_argument("--laya-threshold", type=float, default=0.5,
+                    help="laya backend: confidence threshold for refuse-vs-none "
+                         "when the server rejects an explicit 'none' option")
     ap.add_argument("--server", default="http://localhost:8080")
     ap.add_argument("--model", default="")
     ap.add_argument("--seed", type=int, default=20261005)
@@ -89,12 +109,16 @@ def main():
 
     here = os.path.dirname(os.path.abspath(__file__))
     cats = load_categories(os.path.join(here, args.categories))
-    adapter = ZeroShotAdapter(cats)
     rows = [json.loads(l) for l in open(args.dev, encoding="utf-8")]
 
     if args.backend == "dummy":
+        adapter = ZeroShotAdapter(cats)
         backend = DummyBackend(lambda prompt: "none")
+    elif args.backend == "laya":
+        adapter = LayaZeroShotAdapter(cats, threshold=args.laya_threshold)
+        backend = LayaDecideBackend(args.server)
     else:
+        adapter = ZeroShotAdapter(cats)
         backend = LlamaServerBackend(args.server, args.model)
 
     results = []
@@ -119,6 +143,7 @@ def main():
             "parse_ok": pred["parse_ok"],
             "latency_ms": round(latency_ms, 1),
             "raw": pred["raw"][:200],
+            "confidence": pred.get("confidence"),
         })
         if (i + 1) % 50 == 0:
             print(f"  {i + 1}/{len(rows)}...", flush=True)
@@ -168,6 +193,17 @@ def main():
          "predicted_refuse": r["predicted_refuse"]} for r in results
     ])
 
+    conf_pairs = [(r["confidence"], r["expect_refuse"] == r["predicted_refuse"])
+                  for r in results if r.get("confidence") is not None]
+    ece_val = ece(conf_pairs) if conf_pairs else None
+    laya_info = None
+    if args.backend == "laya":
+        laya_info = {
+            "threshold": args.laya_threshold,
+            "none_mode": ("explicit" if adapter._none_ok else "threshold"),
+            "ece_10bin": ece_val,
+        }
+
     summary = {
         "model": args.model or args.backend,
         "seed": args.seed,
@@ -180,6 +216,7 @@ def main():
         "per_category_recall": per_cat,
         "big_benign_fp": extra,
         "prevalence_assumed": args.prevalence,
+        "laya": laya_info,
     }
 
     os.makedirs(args.out, exist_ok=True)
@@ -205,6 +242,10 @@ def main():
     print(f"\nparse-fail rate: {m_model['parse_fail_rate']:.1%} | "
           f"latency p50 {m_model['latency_ms_p50']:.0f}ms "
           f"p95 {m_model['latency_ms_p95']:.0f}ms")
+    if laya_info:
+        print(f"laya: none_mode={laya_info['none_mode']} "
+              f"threshold={laya_info['threshold']} "
+              f"ECE(10-bin)={laya_info['ece_10bin']:.3f}")
     if extra:
         print(f"big-benign FP: {extra['fp_rate']:.2%} (n={extra['n']})")
     print("\nper-category recall:")

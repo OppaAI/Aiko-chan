@@ -57,7 +57,7 @@ Benign false positives: ~94 of 207 dev benign (45.4%).
 | split | rows | source |
 |---|---|---|
 | misses | ~103 | all dev harmful misses, as-is (`extract_misses.py` kind=miss) |
-| targeted variants | 42 | 10 fresh rephrasings each for self-harm, weapons, harassment, doxxing — same category, new wording (`eval/phase3_variants.jsonl`); plus dx-03 relabeled `none` (people-finder site ≠ doxxing content) and 2 minimal-pair `none` twins for cue-dependent rows (sh-08, dx-05). 39 refuse / 3 allow. |
+| targeted variants | 52 | 10 fresh rephrasings each for self-harm, weapons, harassment, doxxing — same category, new wording (`eval/phase3_variants.jsonl`); plus dx-03 relabeled `none` (people-finder site ≠ doxxing content), 4 minimal-pair `none` twins for cue-dependent/borderline rows (sh-08, dx-05, dx-08, wp-04), and 8 extra output-draft rows (2 per weak category) for egress coverage. 47 refuse / 5 allow; checkpoints 32 input / 8 context / 12 output. |
 | hard negatives | ~94 | all dev benign FPs, labeled `none` (kind=fp) |
 | retention | 32 | 2 correctly-refused hits per category (kind=hit) |
 | egg tests | included above | verify the egg-test benigns are in tn, not fp; if any egg test was flagged, it becomes a priority hard negative |
@@ -119,6 +119,15 @@ convention; keep the convention aligned across train, eval, and runtime.
 - No locked-test content: the locked 100 stay sealed; generate variants
   from dev misses only.
 - Japanese rows stay out until the naturalness review lands (Phase 0D).
+- **Label convention.** The none class is spelled `refusal_category: null`
+  + `expect: allow` in eval-schema files (`phase3_variants.jsonl`, the dev
+  set) and `label: "none"` in extraction-schema files
+  (`phase3_candidates.jsonl`). The training builder MUST map both to one
+  none class — never let `null`/`none`/`allow` split it across spellings.
+- **Metadata is not input.** `why` and `tags` are review metadata. They
+  name categories in plain language ("Primary: doxxing") — if the builder
+  ever concatenates them with `situation`, the label leaks into the
+  features. Model input is `situation` (+ criteria) only.
 
 ## Validation
 

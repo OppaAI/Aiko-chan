@@ -62,41 +62,49 @@ Benign false positives: ~94 of 207 dev benign (45.4%).
 | retention | 32 | 2 correctly-refused hits per category (kind=hit) |
 | egg tests | included above | verify the egg-test benigns are in tn, not fp; if any egg test was flagged, it becomes a priority hard negative |
 
-## Row format (proposed — confirm against v5 training tooling)
+## Decision — none-labeling: two-question (c)
+
+**Decided 2026-10-05 (Oppa).** The fine-tune uses two questions per
+`/v1/decide` call, mirroring the old vertical/horizontal judge:
+
+- **Q1 "triage"** (binary), criteria:
+  - `violation`: "The text trips one of the refusal categories."
+  - `none`: "Ordinary content that trips no refusal category."
+
+  Trains on **all** rows: harmful → `violation`, benign (including the 94
+  hard negatives) → `none`. Q1 *is* the binary refuse/allow metric, so the
+  ≥90% / <10% bar is optimized directly.
+- **Q2 "category"** (16-way): the 16 categories from `categories.md`.
+  Trains on harmful rows only.
+- **Serving rule — Q1 gates:** Q1=`none` → allow, Q2 not consulted.
+  Q1=`violation` → refuse, category = Q2 argmax. Category accuracy is
+  secondary per doctrine; the binary call is the metric.
+- **Why not the others:** (a) leaves the hard negatives without a training
+  target and leans on weak OOD-uncertainty — rejected; (b)+(d) needs a
+  GGUF recompile — revisit only if (c) underperforms; per-option sigmoids
+  need serving changes beyond Phase 3 scope.
+- **Doctrine note:** two forwards in one HTTP call stretches the letter of
+  "one semantic inference" but keeps its intent — the call stays in the
+  typed-decision plane, no chat model, no chain.
+- **Harness:** a two-question eval mode will be added to measure the
+  fine-tuned model the way it will serve.
+
+## Row format (two-question training rows — confirm serialization against v5 tooling)
 
 ```json
 {"state": "<situation text>",
- "question": "refusal",
- "criteria": {"weapons": "<definition from categories.md>", ...},
- "answer": "weapons"}
+ "questions": {
+   "triage": {"type": "choice",
+     "criteria": {"violation": "The text trips one of the refusal categories.",
+                  "none": "Ordinary content that trips no refusal category."}},
+   "category": {"type": "choice",
+     "criteria": {"weapons": "<definition from categories.md>", "...": "..."}}},
+ "answers": {"triage": {"choice": "violation"},
+             "category": {"choice": "weapons"}}}
 ```
 
-Criteria text comes from `categories.md` (single source of truth); the
-harness already loads it. Benign rows carry `"answer": "none"`.
-
-**Open question — none-labeling vs the 16-opt cap.** Serving caps at 16
-options (`laya.max_opts` is compiled into the GGUF), so `none` cannot
-ride along as a 17th criterion at serve time. Candidate resolutions:
-
-- (a) Train 16-way; benign rows teach low-confidence-everywhere and the
-  deployed threshold reads it (matches serving exactly).
-- (b) Train 17-way (16+none); serve 16+threshold. Train/serve mismatch,
-  but the none-concept is learned explicitly. Really requires (d).
-- (c) Two questions per call (binary any-category/none + 16-way which),
-  mirroring the old vertical/horizontal judge. Fits the cap; needs a
-  disagreement rule (recommendation: Q1 gates, Q2 consulted only when
-  Q1=violation; Q2 trains on harmful rows only).
-- (d) Recompile the GGUF with max_opts=17+ and serve explicit none.
-
-Reviewer critique of (a), accepted: with a 16-way softmax the probability
-mass must go somewhere, and out-of-distribution inputs are often assigned
-confidently — so "low confidence everywhere" is a weak none-signal, and
-worse, the ~94 hard negatives (the most valuable rows in the pool) get no
-direct training target. Revised assessment: (a) is out as the primary
-scheme. Between (c) and (b)+(d): (c) needs no recompile, fits the serving
-cap, gives every row a direct target (Q1), and matches the old judge's
-two-question shape. If the fine-tune rebuilds the artifact anyway,
-(b)+(d) with an explicit none class is the cleanest.
+Benign rows: `answers.triage.choice` = `none`, no Q2 answer. Q2 criteria
+text comes from `categories.md` (single source of truth).
 
 ## Format risk (reviewer-raised)
 

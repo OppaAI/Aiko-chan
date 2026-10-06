@@ -119,7 +119,12 @@ def _laya_smoke(args):
     try:
         with urllib.request.urlopen(req, timeout=args.timeout) as resp:
             data = json.loads(resp.read().decode())
-        ans = data["smoke"]
+        # laya serve wraps answers: {"answers": {name: {...}}, ...}
+        answers = (data.get("answers") if isinstance(data, dict) else None) or data
+        if "smoke" not in answers:
+            raise ValueError(f"response has no 'smoke' key; got keys "
+                             f"{sorted(answers)[:8]}: {json.dumps(data)[:300]}")
+        ans = answers["smoke"]
         choice, conf = ans["choice"], ans.get("confidence")
         if choice not in ("benign", "weapons"):
             raise ValueError(f"unexpected choice {choice!r}")

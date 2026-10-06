@@ -145,7 +145,12 @@ class LayaDecideBackend:
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            data = json.loads(resp.read().decode("utf-8"))
+        # laya serve wraps answers: {"answers": {name: {...}}, ...}.
+        # Tolerate servers that return them bare.
+        if isinstance(data, dict) and isinstance(data.get("answers"), dict):
+            return data["answers"]
+        return data
 
 
 class LayaZeroShotAdapter:

@@ -11,6 +11,7 @@ Stdlib only — no dependencies.
 | `run_eval.py` | eval runner: dev set -> per-case predictions -> metrics + baselines -> Markdown report + `per_case.jsonl` / `summary.json`. |
 | `screen_model.py` | first cut: GGUF size vs budget, plus a smoke inference against a server (`--backend llama` for llama.cpp, `--backend laya` for `laya serve` `/v1/decide`). |
 | `sweep_threshold.py` | threshold sweep over a laya threshold-mode run: re-derives recall/FP at each cutoff from the saved per-case confidences, no server needed. |
+| `extract_misses.py` | pulls kind-labeled Phase 3 candidates (miss/hit/fp/tn) from a results dir + dev set. |
 
 ## Phase 1 workflow
 

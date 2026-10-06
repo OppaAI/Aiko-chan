@@ -57,7 +57,7 @@ Benign false positives: ~94 of 207 dev benign (45.4%).
 | split | rows | source |
 |---|---|---|
 | misses | ~103 | all dev harmful misses, as-is (`extract_misses.py` kind=miss) |
-| targeted variants | 40 | 10 fresh rephrasings each for self-harm, weapons, harassment, doxxing — same category, new wording (`eval/phase3_variants.jsonl`) |
+| targeted variants | 42 | 10 fresh rephrasings each for self-harm, weapons, harassment, doxxing — same category, new wording (`eval/phase3_variants.jsonl`); plus dx-03 relabeled `none` (people-finder site ≠ doxxing content) and 2 minimal-pair `none` twins for cue-dependent rows (sh-08, dx-05). 39 refuse / 3 allow. |
 | hard negatives | ~94 | all dev benign FPs, labeled `none` (kind=fp) |
 | retention | 32 | 2 correctly-refused hits per category (kind=hit) |
 | egg tests | included above | verify the egg-test benigns are in tn, not fp; if any egg test was flagged, it becomes a priority hard negative |
@@ -81,15 +81,34 @@ ride along as a 17th criterion at serve time. Candidate resolutions:
 - (a) Train 16-way; benign rows teach low-confidence-everywhere and the
   deployed threshold reads it (matches serving exactly).
 - (b) Train 17-way (16+none); serve 16+threshold. Train/serve mismatch,
-  but the none-concept is learned explicitly.
+  but the none-concept is learned explicitly. Really requires (d).
 - (c) Two questions per call (binary any-category/none + 16-way which),
   mirroring the old vertical/horizontal judge. Fits the cap; needs a
-  disagreement rule.
+  disagreement rule (recommendation: Q1 gates, Q2 consulted only when
+  Q1=violation; Q2 trains on harmful rows only).
 - (d) Recompile the GGUF with max_opts=17+ and serve explicit none.
 
-Recommendation: (a) for the first Phase 3 run — smallest change, serving
-already works that way. Revisit (d) if the fine-tune rebuilds the
-artifact anyway.
+Reviewer critique of (a), accepted: with a 16-way softmax the probability
+mass must go somewhere, and out-of-distribution inputs are often assigned
+confidently — so "low confidence everywhere" is a weak none-signal, and
+worse, the ~94 hard negatives (the most valuable rows in the pool) get no
+direct training target. Revised assessment: (a) is out as the primary
+scheme. Between (c) and (b)+(d): (c) needs no recompile, fits the serving
+cap, gives every row a direct target (Q1), and matches the old judge's
+two-question shape. If the fine-tune rebuilds the artifact anyway,
+(b)+(d) with an explicit none class is the cleanest.
+
+## Format risk (reviewer-raised)
+
+The `situation` strings are descriptions ("Tool result (web fetch): a
+forum thread where..."), not raw text. Train/eval/serve are consistent
+with each other — the harness and the judge both consume this format —
+**provided Aiko's runtime constructs situations the same way.** That is a
+pipeline-consistency requirement, not a data bug: if the deployed
+situation builder ever feeds raw forum text / untruncated tool output /
+full drafts where training saw descriptions, the gap reopens. The 4
+output-draft rows ending in "..." follow the dev-set truncation
+convention; keep the convention aligned across train, eval, and runtime.
 
 ## Generation rules
 

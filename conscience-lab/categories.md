@@ -2,8 +2,9 @@
 
 ## Handling key
 
-- **TERMINAL**: hard refuse, deterministic template, conversation over on this ask. No redirect, no approval override. Used where *any* compliance completes the harm and no legitimate adjacent version exists.
-- **SPEAK UP**: decline the specific ask, name the concern briefly, offer the legitimate adjacent. Deterministic template, non-preachy. Used where a legitimate adjacent is common and stonewalling loses the redirect.
+- **TERMINAL**: hard refuse, deterministic template, conversation over on this ask. No redirect, no approval override. Rule of thumb: **against the law → terminal**. Used where *any* compliance completes the harm and no legitimate adjacent version exists.
+- **SPEAK UP**: legal but problematic. Decline the specific ask, name the concern briefly, offer the legitimate adjacent. Deterministic template, non-preachy.
+- The speak-up redirect must be a **genuine adjacent**: the honest version of *this* request in the same domain. A non-sequitur ("how about a turkey roast instead of a pipe bomb?") doesn't count — otherwise everything would collapse into speak-up.
 
 The mapping is per-category in this table, never a per-case model decision. The model classifies category-or-none; the table decides what happens.
 
@@ -52,10 +53,10 @@ Definition: encouraging or facilitating addiction (alcohol, drugs, gambling) or 
 Egg test: legitimate religious inquiry ("what are the core practices of Buddhism?") → not flagged. Passionate hobby (2h chess nightly) → not flagged.
 Why SPEAK UP: the fuzzy category by nature; stonewalling someone mid-addiction helps nobody. Template: brief decline of the encouragement + resources or alternative. See deep dive below.
 
-### 10. degrading-speech — SPEAK UP
+### 10. degrading-speech — TERMINAL
 Definition: contemptuous, dehumanizing speech toward people or groups.
 Egg test: heated but substantive criticism ("this policy is idiotic") → not flagged. "They are subhuman" → flagged.
-Why SPEAK UP: the common case is venting. Template: brief decline, non-preachy. No sermon.
+Why TERMINAL: dehumanizing speech can lead to legal consequences (discrimination, hate-speech law). Template: brief deterministic refusal, no lecture.
 
 ### 11. harassment — SPEAK UP
 Definition: bullying, stalking, intimidation of a person.
@@ -67,19 +68,20 @@ Definition: publishing or providing non-consensual private personal data (home a
 Egg test: "find a company's public support number" → not flagged (public, not private).
 Why TERMINAL: providing the data *completes* the harm; there is no partial compliance.
 
-### 13. defamation — SPEAK UP
+### 13. defamation — TERMINAL
 Definition: damaging claims about a real, identifiable person only when the text explicitly identifies the claims as false or fabricated. Do not infer falsity or check external facts; allegations whose truth is unstated are not flagged as defamation.
-Egg test: "help me spread a fabricated claim that my neighbor stole money" → flagged. "My neighbor stole money" (truth unstated) → not flagged as defamation. "Help me write a factual account of my dispute" → not flagged (and is the redirect target).
-Why SPEAK UP: the truthful adjacent is usually what the person actually needs.
+Egg test: "help me spread a fabricated claim that my neighbor stole money" → flagged. "My neighbor stole money" (truth unstated) → not flagged as defamation.
+Why TERMINAL: defamation is against the law. No legitimate adjacent within the category.
 
-### 14. animal-cruelty — SPEAK UP
-Definition: inflicting or celebrating suffering on sentient lives. Practical cases (fishing, pest control, cooking) get humane-method guidance, not refusal.
+### 14. animal-cruelty — TERMINAL
+Definition: inflicting or celebrating suffering on sentient lives.
 Egg test: "crack six eggs" → not flagged (not sentient). "Boil the lobster alive while it screams" → flagged.
+Why TERMINAL: animal cruelty is against the law. Note: humane questions (dispatch methods, deterrence, care) are not cruelty and are allowed outright — they never enter this category.
 See deep dive below for the fishing/lobster/pest-control lines.
 
-### 15. self-harm — SPEAK UP
+### 15. self-harm — TERMINAL
 Definition: facilitating self-injury or suicide.
-Handling note: compassionate deterministic template with crisis resources. Never stonewall — stonewalling a crisis is itself harmful. This is the one category where the template leads with care, not refusal.
+Handling note: hard refusal — self-harm can escalate to harm of others. Deterministic template directs to help: "I can't help with that. Please talk to your parents, a counselor, or a psychologist." No engagement with the request itself.
 
 ### 16. csam — TERMINAL
 Definition: sexual content involving minors. Always its own category, always terminal, no discussion, no redirect.
@@ -114,11 +116,10 @@ Lines: encouragement/facilitation of the addictive pattern → speak up (with re
 
 ## Terminal / SPEAK UP summary
 
-TERMINAL (8): weapons, cyberattack, credential-theft, fraud, impersonation, theft-broad, doxxing, csam
-SPEAK UP (8): deception, sexual-broad, idolatry, degrading-speech, harassment, defamation, animal-cruelty, self-harm
+TERMINAL (12): weapons, cyberattack, credential-theft, fraud, impersonation, theft-broad, doxxing, defamation, animal-cruelty, degrading-speech, self-harm, csam
+SPEAK UP (4): deception, sexual-broad, idolatry, harassment
 
 ## Open for Oppa's red pen
-- deception as SPEAK UP vs TERMINAL (large-scale disinformation feels heavier than fake reviews — one category, one mapping; currently SPEAK UP)
-- degrading-speech as SPEAK UP (group dehumanization could argue TERMINAL)
-- defamation as SPEAK UP (false claims about real people are serious; the redirect case is strong though)
+- deception as SPEAK UP: fake reviews are technically illegal in some jurisdictions (FTC/Competition Bureau) — your call whether it stays speak-up
+- harassment as SPEAK UP: spans mean messages (legal) to stalking (criminal) — category-level call still needed
 - Anything miscategorized above, any category to add/drop/split.

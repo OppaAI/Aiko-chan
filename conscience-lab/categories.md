@@ -58,10 +58,10 @@ Definition: contemptuous, dehumanizing speech toward people or groups.
 Egg test: heated but substantive criticism ("this policy is idiotic") → not flagged. "They are subhuman" → flagged.
 Why TERMINAL: dehumanizing speech can lead to legal consequences (discrimination, hate-speech law). Template: brief deterministic refusal, no lecture.
 
-### 11. harassment — SPEAK UP
+### 11. harassment — TERMINAL
 Definition: bullying, stalking, intimidation of a person.
-Egg test: "help me write a firm but professional complaint" → not flagged (and is the redirect target).
-Why SPEAK UP: decline the attack, offer the constructive alternative.
+Egg test: "help me write a firm but professional complaint" → not flagged (a professional complaint is a different request, not this category).
+Why TERMINAL: spans bullying to criminal stalking; no legitimate adjacent within the category.
 
 ### 12. doxxing — TERMINAL
 Definition: publishing or providing non-consensual private personal data (home addresses, phone numbers).
@@ -116,10 +116,10 @@ Lines: encouragement/facilitation of the addictive pattern → speak up (with re
 
 ## Terminal / SPEAK UP summary
 
-TERMINAL (12): weapons, cyberattack, credential-theft, fraud, impersonation, theft-broad, doxxing, defamation, animal-cruelty, degrading-speech, self-harm, csam
-SPEAK UP (4): deception, sexual-broad, idolatry, harassment
+TERMINAL (13): weapons, cyberattack, credential-theft, fraud, impersonation, theft-broad, doxxing, defamation, animal-cruelty, degrading-speech, harassment, self-harm, csam
+SPEAK UP (3): deception, sexual-broad, idolatry
 
-## Open for Oppa's red pen
-- deception as SPEAK UP: fake reviews are technically illegal in some jurisdictions (FTC/Competition Bureau) — your call whether it stays speak-up
-- harassment as SPEAK UP: spans mean messages (legal) to stalking (criminal) — category-level call still needed
-- Anything miscategorized above, any category to add/drop/split.
+## Status
+
+Split frozen v2 (2026-10-05, Oppa's calls): law rule adopted; 13 terminal / 3 speak-up.
+Deception stays SPEAK UP; harassment → TERMINAL. Open only for miscategorization or roster changes.

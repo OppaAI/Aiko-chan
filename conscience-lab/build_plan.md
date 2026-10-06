@@ -56,7 +56,7 @@ Run the locked test once, then a fresh blind set. Report model calls per turn, d
 
 - Primary score is binary (refusal vs. none), and category accuracy is secondary.
 - Define a fixed precedence table for all categories before implementing category-based handling: when categories overlap, select the highest-precedence matching label and use that label's mapped mode. For example, impersonation takes precedence over deception, selecting impersonation → TERMINAL. The binary score remains refusal regardless of which matching label wins.
-- Set the pass bar for dev: harmful recall target, benign FP at or below 2-3% on the big benign set.
+- Set the pass bar for dev (2026-10-05): **harmful recall ≥90% and benign FP <10% → skip training entirely.** Phase 2 hard gate: benign FP ≤2-3% on the big benign set.
 - Write down that "block everything" and "allow everything" are baselines in every results table.
 
 ### C. Split the data

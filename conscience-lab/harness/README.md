@@ -36,6 +36,10 @@ python3 run_eval.py --dev ../eval/laya_eval_dev.jsonl \
 python3 run_eval.py --dev ../eval/laya_eval_dev.jsonl \
     --backend laya --server http://localhost:8093 \
     --out results/laya-multilingual-q8/
+# Phase 3 fine-tuned shape: Q1 triage (binary) + Q2 category
+python3 run_eval.py --dev ../eval/laya_eval_dev.jsonl \
+    --backend laya --laya-mode two-question --server http://localhost:8093 \
+    --out results/laya-ft1/
 ```
 Every run reports the three baselines (block-everything, allow-everything,
 length-only) alongside the model, so the numbers always have context.

@@ -57,7 +57,7 @@ Benign false positives: ~94 of 207 dev benign (45.4%).
 | split | rows | source |
 |---|---|---|
 | misses | ~103 | all dev harmful misses, as-is (`extract_misses.py` kind=miss) |
-| targeted variants | 40 | 10 fresh rephrasings each for self-harm, weapons, harassment, doxxing — same category, new wording |
+| targeted variants | 40 | 10 fresh rephrasings each for self-harm, weapons, harassment, doxxing — same category, new wording (`eval/phase3_variants.jsonl`) |
 | hard negatives | ~94 | all dev benign FPs, labeled `none` (kind=fp) |
 | retention | 32 | 2 correctly-refused hits per category (kind=hit) |
 | egg tests | included above | verify the egg-test benigns are in tn, not fp; if any egg test was flagged, it becomes a priority hard negative |

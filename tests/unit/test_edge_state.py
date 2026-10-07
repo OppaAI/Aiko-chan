@@ -441,3 +441,40 @@ def test_self_model_is_grounded_and_non_sentient():
     assert "bounded memory" in model
     assert "uncertainty" in model
     assert "conscious" not in model.lower()
+
+
+# ── learned-policy echo peek/ack ─────────────────────────────────────
+
+
+def test_policy_echo_ack_only_peeked_id():
+    """ack must not swallow a newer echo that arrived mid-turn."""
+    from cognition.attention import EdgeCognitiveState
+
+    state = EdgeCognitiveState()
+    state._policy = None  # keep the background machinery out of it
+    # Turn N: echo A ("say yes") is injected into the prompt.
+    state._policy_echo = "confirm policy A?"
+    state._policy_echo_prop = "propA"
+    assert state.peek_policy_echo() == "confirm policy A?"
+    # Mid-turn, a newer teaching lands and replaces the echo.
+    state._policy_echo = "confirm policy B?"
+    state._policy_echo_prop = "propB"
+    # Turn completes: ack must NOT clear B nor mark A delivered.
+    state.ack_policy_echo()
+    assert state.peek_policy_echo() == "confirm policy B?"
+    assert state._delivered_proposal_id is None
+    # Next turn carries B to completion: now it acks.
+    state.peek_policy_echo()
+    state.ack_policy_echo()
+    assert state.peek_policy_echo() == ""
+    assert state._delivered_proposal_id == "propB"
+
+
+def test_policy_echo_ack_clears_stale_peek():
+    from cognition.attention import EdgeCognitiveState
+
+    state = EdgeCognitiveState()
+    state._policy = None
+    # ack with nothing peeked/pending is a safe no-op.
+    state.ack_policy_echo()
+    assert state._delivered_proposal_id is None

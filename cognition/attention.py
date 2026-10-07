@@ -728,6 +728,7 @@ class EdgeCognitiveState:
             self._policy_bus_fns = {}
         self._policy_echo = ""          # pending confirmation text (peeked, not popped)
         self._policy_echo_prop = None   # proposal id the pending echo belongs to
+        self._peeked_prop = None        # proposal id actually injected into the prompt
         self._delivered_proposal_id = None  # echo confirmed delivered this turn
         self._last_user_t = time.time()
         self._last_idle_bucket = -1
@@ -974,22 +975,29 @@ class EdgeCognitiveState:
 
         The echo stays pending until the turn that carried it completes
         successfully (see ack_policy_echo) — a failed LLM call must not
-        swallow the "say yes to confirm" text.
+        swallow the "say yes to confirm" text. Records which proposal id
+        was peeked so ack can't clear a newer echo that arrived mid-turn.
         """
         with self._lock:
+            self._peeked_prop = self._policy_echo_prop
             return self._policy_echo
 
     def ack_policy_echo(self) -> None:
-        """Mark the pending echo delivered after a successful turn.
+        """Mark the peeked echo delivered after a successful turn.
 
-        Only a delivered proposal id can be confirmed by a later "yes",
-        so Oppa can never confirm a policy he wasn't shown.
+        Only acknowledges the exact echo (proposal id) that rode this
+        turn's prompt: if a newer echo arrived mid-turn, it stays pending
+        for the next turn instead of being swallowed. Only a delivered
+        proposal id can be confirmed by a later "yes", so Oppa can never
+        confirm a policy he wasn't shown.
         """
         with self._lock:
-            if self._policy_echo:
+            if (self._policy_echo
+                    and self._policy_echo_prop == self._peeked_prop):
                 self._delivered_proposal_id = self._policy_echo_prop
                 self._policy_echo = ""
                 self._policy_echo_prop = None
+            self._peeked_prop = None
 
     def _idle_poll(self) -> None:
         """Background idle check: fire learned policies on bucket change.

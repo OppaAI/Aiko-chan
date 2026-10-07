@@ -2827,11 +2827,14 @@ class AikoThink:
             with self._history_lock:
                 self._history.append({"role": "assistant", "content": raw_response})
 
-            # The turn completed: any pending policy echo riding this turn's
-            # prompt counts as delivered, unlocking "yes"-confirmation.
+            # The turn completed successfully: the pending policy echo that
+            # rode this turn's prompt counts as delivered, unlocking
+            # "yes"-confirmation. An [LLM error] response delivered nothing,
+            # so the echo stays pending for the next turn.
             try:
-                from cognition.attention import for_identity
-                for_identity(current_user_id()).ack_policy_echo()
+                if not (raw_response or "").startswith("[LLM error]"):
+                    from cognition.attention import for_identity
+                    for_identity(current_user_id()).ack_policy_echo()
             except Exception:
                 pass
 

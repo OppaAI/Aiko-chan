@@ -234,7 +234,11 @@ def test_extract_teaching_mocked():
 
 
 def test_extract_teaching_rejects_non_teaching():
-    assert extract_teaching("what's the weather like?") is None
+    from unittest.mock import Mock
+
+    client = Mock()
+    assert extract_teaching("what's the weather like?", llm_client=client) is None
+    client.chat.completions.create.assert_not_called()
 
 
 # ── outcomes ─────────────────────────────────────────────────────────

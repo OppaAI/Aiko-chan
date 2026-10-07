@@ -44,9 +44,13 @@ log = get_logger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MAX_PATCH_CHARS = 50_000
-MAX_READ_CHARS = 20_000
+# Context budgets (2026-10-06): tuned for Ministral-3B's small window.
+# The old 20k read cap could kill the context in 2 operations. Subagents
+# (needle_subagent) handle bulk exploration; direct reads stay tiny and
+# paginated. See agentic/toolkit/needle_subagent.py for the pattern.
+MAX_READ_CHARS = 3_000
 TEST_TIMEOUT = 90
-TEST_TAIL_CHARS = 4000
+TEST_TAIL_CHARS = 800
 
 _ALLOWED_CODE_SUFFIXES = {".py", ".md", ".json", ".txt", ".sh", ".html", ".css", ".js", ".yaml", ".yml", ".toml"}
 _FORBIDDEN_SUBSTRINGS = (".env", "secret", "token", "private_key", ".pem", ".key", "credentials")

@@ -31,6 +31,7 @@ for context retrieval before proposing a patch.
 from __future__ import annotations
 
 import difflib
+import json
 import subprocess
 import sys
 import time
@@ -207,6 +208,35 @@ def code_apply_patch(relative_path: str = "", old_text: str = "", new_text: str 
 
 
 @tool(
+    "code_apply_correction",
+    description="Apply a structured triage correction (APPROVAL REQUIRED).",
+    graph=True,
+    react=True,
+    domain="coding",
+    needs_approval=True,
+)
+def code_apply_correction(correction: str = "") -> str:
+    """Unpack a Needle summary and apply it through the normal patch checks."""
+    try:
+        prefix = "[needle_subagent]"
+        raw = correction.strip()
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):].strip()
+        result = json.loads(raw)
+        if result.get("ok") is not True or result.get("truncated"):
+            raise ValueError("triage did not produce a complete correction")
+        patch = json.loads(result["summary"])
+        fields = ("relative_path", "old_text", "new_text")
+        if not isinstance(patch, dict) or set(patch) != set(fields):
+            raise ValueError("correction must contain relative_path, old_text, and new_text")
+        if not all(isinstance(patch[key], str) for key in fields):
+            raise ValueError("correction fields must be strings")
+        return code_apply_patch(**patch)
+    except (ValueError, TypeError, KeyError, AttributeError) as e:
+        return json_block("code_apply_correction", {"ok": False, "error": str(e)[:300]})
+
+
+@tool(
     _spec("code_run_tests", "Run bounded pytest (90s timeout, tail output)."),
     description="Run bounded pytest (90s timeout, tail output).",
     graph=True,
@@ -271,12 +301,13 @@ def code_lint(relative_path: str = "") -> str:
         return json_block("code_lint", {"ok": False, "error": str(e)[:250]})
 
 
-__all__ = ["code_plan", "code_diff_preview", "code_apply_patch", "code_run_tests", "code_lint"]
+__all__ = ["code_plan", "code_diff_preview", "code_apply_patch", "code_apply_correction",
+           "code_run_tests", "code_lint", "sandbox_run", "ssh_run", "shell_run"]
 
 # ── sandbox_run — execute Python in a confined sandbox ──────────────────
 #
-# Lets the coding agent (and subagents) actually RUN code, not just write
-# it. Path-confined to the repo, timeout-bounded, output-capped.
+# Lets the coding agent RUN code after approval, not just write it.
+# Path-confined to the repo, timeout-bounded, output-capped.
 # This is the "write code, run it, see what happens, fix it" loop.
 
 SANDBOX_TIMEOUT = 30
@@ -289,6 +320,7 @@ SANDBOX_OUTPUT_CHARS = 2000
     graph=True,
     react=True,
     domain="coding",
+    needs_approval=True,
 )
 def sandbox_run(relative_path: str, args: str = "", timeout: int = SANDBOX_TIMEOUT) -> str:
     """Run a Python file from the repo in a confined subprocess.
@@ -438,9 +470,7 @@ def ssh_run(host_id: str = "", command: str = "", timeout: int = SSH_TIMEOUT) ->
 #   - DENYLIST: catastrophic patterns are blocked outright, no override.
 #   - READONLY allowlist: ls/cat/grep/find/etc skip approval (still logged).
 #   - Everything else needs approval, even with the gate.
-#   - cwd defaults to repo root; absolute paths outside the repo are
-#     flagged in the log (not blocked — she may need /tmp, but Oppa
-#     sees it in the approval prompt).
+#   - cwd defaults to repo root; resolved paths must stay in the repo or /tmp.
 #   - Timeout-bounded (60s default, 300s max), output-capped.
 #   - NOT in subagent tools — only Aiko herself.
 
@@ -507,10 +537,11 @@ def shell_run(command: str = "", cwd: str = "", timeout: int = SHELL_TIMEOUT) ->
 
         workdir = str(REPO_ROOT)
         if (cwd or "").strip():
-            p = (REPO_ROOT / cwd.strip().lstrip("/\\")).resolve()
-            # Allow /tmp explicitly; otherwise confine to repo
-            if p != REPO_ROOT and REPO_ROOT not in p.parents and str(p) != "/tmp":
-                log.warning("shell_run cwd outside repo: %s", p)
+            p = Path(cwd.strip())
+            p = (p if p.is_absolute() else REPO_ROOT / p).resolve()
+            # Resolve symlinks before checking both allowed directory trees.
+            if not any(p == root or root in p.parents for root in (REPO_ROOT, Path("/tmp"))):
+                return json_block("shell_run", {"ok": False, "error": "cwd outside repository and /tmp"})
             workdir = str(p) if p.is_dir() else str(REPO_ROOT)
 
         timeout = max(5, min(int(timeout or SHELL_TIMEOUT), 300))
@@ -532,37 +563,3 @@ def shell_run(command: str = "", cwd: str = "", timeout: int = SHELL_TIMEOUT) ->
         return json_block("shell_run", {"ok": False, "error": f"timeout after {timeout}s"})
     except Exception as e:
         return json_block("shell_run", {"ok": False, "error": str(e)[:300]})
-    except Exception as e:
-        return json_block("code_run_tests", {"ok": False, "error": str(e)[:300]})
-
-
-@tool(
-    _spec("code_lint", "Syntax-check a Python file (py_compile, read-only)."),
-    description="Syntax-check a Python file (py_compile, read-only).",
-    graph=True,
-    react=True,
-    domain="coding",
-)
-def code_lint(relative_path: str = "") -> str:
-    """python -m py_compile on one file, 15s timeout. No writes."""
-    try:
-        relative = (relative_path or "").strip()
-        if not relative:
-            return json_block("code_lint", {"ok": False, "error": "relative_path required"})
-        path = _confine(relative)
-        if path.suffix.lower() != ".py":
-            return json_block("code_lint", {"ok": False, "error": "only .py files"})
-        if not path.exists():
-            return json_block("code_lint", {"ok": False, "error": "file not found"})
-        proc = subprocess.run([sys.executable, "-m", "py_compile", str(path)],
-                              capture_output=True, text=True, timeout=15)
-        if proc.returncode == 0:
-            return json_block("code_lint", {"ok": True, "path": relative, "clean": True})
-        return json_block("code_lint", {"ok": False, "path": relative, "error": (proc.stderr or "compile failed")[:1000]})
-    except subprocess.TimeoutExpired:
-        return json_block("code_lint", {"ok": False, "error": "timeout"})
-    except Exception as e:
-        return json_block("code_lint", {"ok": False, "error": str(e)[:250]})
-
-
-__all__ = ["code_plan", "code_diff_preview", "code_apply_patch", "code_run_tests", "code_lint"]

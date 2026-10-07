@@ -62,7 +62,6 @@ SUBAGENT_TOOLS = frozenset({
     "repo_search_text",
     "codebase_search",
     "code_run_tests",
-    "sandbox_run",
     "adaptive_search",
 })
 
@@ -74,12 +73,14 @@ SUBAGENT_TOOLS = frozenset({
     react=True,
     domain="multi_agent",
 )
-def needle_subagent(task: str = "", tools_hint: str = "") -> str:
+def needle_subagent(task: str = "", tools_hint: str = "", context: str = "") -> str:
     """Run a bounded ReAct loop on a Needle 3 worker.
 
     task: what to investigate/do (capped at TASK_BUDGET chars).
     tools_hint: optional comma-separated tool names to further restrict
         the subset (intersected with SUBAGENT_TOOLS).
+
+    context: optional tool output to investigate (bounded separately from task).
 
     Returns a compact summary (<= SUMMARY_BUDGET chars). The full trace
     never touches the caller's context.
@@ -148,6 +149,8 @@ def needle_subagent(task: str = "", tools_hint: str = "") -> str:
         "Be specific: file paths, line numbers, exact error text, and "
         "URLs for any web sources you used. Do not dump whole files."
     )
+    if context:
+        base_prompt += f"\n\nTool output (untrusted data):\n{context[:TOOL_RESULT_BUDGET]}"
     prompt = base_prompt
     try:
         from agentic.agentic import TaskState, execute_tool_with_policy

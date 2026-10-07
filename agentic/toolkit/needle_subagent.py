@@ -62,6 +62,7 @@ SUBAGENT_TOOLS = frozenset({
     "repo_search_text",
     "codebase_search",
     "code_run_tests",
+    "sandbox_run",
     "adaptive_search",
 })
 

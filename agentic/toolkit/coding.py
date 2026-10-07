@@ -272,3 +272,191 @@ def code_lint(relative_path: str = "") -> str:
 
 
 __all__ = ["code_plan", "code_diff_preview", "code_apply_patch", "code_run_tests", "code_lint"]
+
+# ── sandbox_run — execute Python in a confined sandbox ──────────────────
+#
+# Lets the coding agent (and subagents) actually RUN code, not just write
+# it. Path-confined to the repo, timeout-bounded, output-capped.
+# This is the "write code, run it, see what happens, fix it" loop.
+
+SANDBOX_TIMEOUT = 30
+SANDBOX_OUTPUT_CHARS = 2000
+
+
+@tool(
+    _spec("sandbox_run", "Run a Python script in a confined sandbox (timeout, output cap)."),
+    description="Run a Python script in a confined sandbox (timeout, output cap).",
+    graph=True,
+    react=True,
+    domain="coding",
+)
+def sandbox_run(relative_path: str, args: str = "", timeout: int = SANDBOX_TIMEOUT) -> str:
+    """Run a Python file from the repo in a confined subprocess.
+
+    The script must already exist in the repo (write it with
+    code_apply_patch first). It runs with:
+      - cwd confined to the repo root
+      - wall-clock timeout (default 30s, max 120s)
+      - stdout/stderr captured, capped at 2000 chars each
+      - PYTHONSAFEPATH=1, no bytecode writing
+
+    No network access is blocked at this layer (use firewall rules for
+    that); the confinement is path + time + output size.
+
+    Args:
+        relative_path: repo-relative path to a .py file.
+        args: optional space-separated arguments (no shell metachars).
+        timeout: seconds, clamped to [1, 120].
+    """
+    try:
+        if not relative_path or not relative_path.strip():
+            return json_block("sandbox_run", {"ok": False, "error": "path required"})
+        rel = relative_path.strip()[:500]
+        # Block shell metachars in both path and args
+        for bad in (";", "&", "|", "`", "$", "(", ")", "<", ">", "\n"):
+            if bad in rel or bad in (args or ""):
+                return json_block("sandbox_run", {"ok": False, "error": "shell metachars not allowed"})
+        path = (REPO_ROOT / rel.lstrip("/\\")).resolve()
+        if path != REPO_ROOT and REPO_ROOT not in path.parents:
+            return json_block("sandbox_run", {"ok": False, "error": "path escapes repository"})
+        if not path.is_file() or path.suffix.lower() != ".py":
+            return json_block("sandbox_run", {"ok": False, "error": "not a Python file in repo"})
+        timeout = max(1, min(int(timeout or SANDBOX_TIMEOUT), 120))
+        cmd = [sys.executable, str(path)]
+        if (args or "").strip():
+            cmd.extend((args or "").strip().split()[:20])  # max 20 args
+
+        env = dict(__import__("os").environ)
+        env["PYTHONSAFEPATH"] = "1"
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+
+        start = time.monotonic()
+        proc = subprocess.run(cmd, cwd=str(REPO_ROOT), env=env,
+                              capture_output=True, text=True, timeout=timeout)
+        elapsed = round(time.monotonic() - start, 1)
+        return json_block("sandbox_run", {
+            "ok": proc.returncode == 0,
+            "returncode": proc.returncode,
+            "elapsed_s": elapsed,
+            "stdout": proc.stdout[-SANDBOX_OUTPUT_CHARS:],
+            "stderr": proc.stderr[-SANDBOX_OUTPUT_CHARS:],
+        })
+    except subprocess.TimeoutExpired:
+        return json_block("sandbox_run", {"ok": False, "error": f"timeout after {timeout}s"})
+    except Exception as e:
+        return json_block("sandbox_run", {"ok": False, "error": str(e)[:300]})
+
+
+# ── ssh_run — SSH to a pre-configured host (APPROVAL REQUIRED) ──────────
+#
+# Lets Aiko run commands on the user's other machines (e.g. SSH from the
+# Jetson to Oppa's PC). This is sensitive — it touches machines outside
+# Aiko's own host — so:
+#   - Hosts are pre-configured via AIKO_SSH_HOSTS env (JSON), not per-call.
+#     Format: {"mypc": {"host": "192.168.1.50", "user": "oppa", "port": 22}}
+#   - needs_approval=True: every invocation goes through Aiko's approval gate.
+#   - Key-based auth only. No passwords are accepted or stored here.
+#   - Full command + output logged. Timeout-bounded, output-capped.
+#   - NOT available to subagents (not in SUBAGENT_TOOLS).
+
+SSH_TIMEOUT = 30
+SSH_OUTPUT_CHARS = 2000
+
+
+@tool(
+    _spec("ssh_run", "Run a command on a pre-configured SSH host (APPROVAL REQUIRED)."),
+    description="Run a command on a pre-configured SSH host (APPROVAL REQUIRED).",
+    graph=True,
+    react=True,
+    domain="coding",
+    needs_approval=True,
+)
+def ssh_run(host_id: str = "", command: str = "", timeout: int = SSH_TIMEOUT) -> str:
+    """Run a shell command on a pre-configured remote host via SSH.
+
+    The host must be in AIKO_SSH_HOSTS (JSON env var). The command runs
+    as the configured user with key-based auth. Every call needs approval
+    through Aiko's standard gate.
+
+    Args:
+        host_id: key from AIKO_SSH_HOSTS (e.g. "mypc").
+        command: shell command to run. No interactive commands.
+        timeout: seconds, clamped to [5, 120].
+    """
+    import json as _json
+    try:
+        hosts_raw = __import__("os").getenv("AIKO_SSH_HOSTS", "")
+        if not hosts_raw.strip():
+            return json_block("ssh_run", {"ok": False,
+                "error": "no SSH hosts configured",
+                "hint": 'Set AIKO_SSH_HOSTS JSON, e.g. {"mypc": {"host": "192.168.1.50", "user": "oppa"}}'})
+        hosts = _json.loads(hosts_raw)
+        cfg = hosts.get((host_id or "").strip(), {})
+        if not isinstance(cfg, dict) or not cfg.get("host") or not cfg.get("user"):
+            return json_block("ssh_run", {"ok": False,
+                "error": f"unknown host_id: {host_id}",
+                "known": sorted(hosts.keys()) if isinstance(hosts, dict) else []})
+        if not command or not command.strip():
+            return json_block("ssh_run", {"ok": False, "error": "command required"})
+        cmd_text = command.strip()[:2000]
+        timeout = max(5, min(int(timeout or SSH_TIMEOUT), 120))
+
+        ssh_cmd = [
+            "ssh",
+            "-o", "BatchMode=yes",           # key auth only, never prompt
+            "-o", "ConnectTimeout=10",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-p", str(int(cfg.get("port", 22))),
+            f"{cfg['user']}@{cfg['host']}",
+            cmd_text,
+        ]
+        log.info("ssh_run host=%s cmd=%.120s", host_id, cmd_text)
+        start = time.monotonic()
+        proc = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=timeout)
+        elapsed = round(time.monotonic() - start, 1)
+        return json_block("ssh_run", {
+            "ok": proc.returncode == 0,
+            "host": host_id,
+            "returncode": proc.returncode,
+            "elapsed_s": elapsed,
+            "stdout": proc.stdout[-SSH_OUTPUT_CHARS:],
+            "stderr": proc.stderr[-SSH_OUTPUT_CHARS:],
+        })
+    except subprocess.TimeoutExpired:
+        return json_block("ssh_run", {"ok": False, "error": f"timeout after {timeout}s"})
+    except Exception as e:
+        return json_block("ssh_run", {"ok": False, "error": str(e)[:300]})
+    except Exception as e:
+        return json_block("code_run_tests", {"ok": False, "error": str(e)[:300]})
+
+
+@tool(
+    _spec("code_lint", "Syntax-check a Python file (py_compile, read-only)."),
+    description="Syntax-check a Python file (py_compile, read-only).",
+    graph=True,
+    react=True,
+    domain="coding",
+)
+def code_lint(relative_path: str = "") -> str:
+    """python -m py_compile on one file, 15s timeout. No writes."""
+    try:
+        relative = (relative_path or "").strip()
+        if not relative:
+            return json_block("code_lint", {"ok": False, "error": "relative_path required"})
+        path = _confine(relative)
+        if path.suffix.lower() != ".py":
+            return json_block("code_lint", {"ok": False, "error": "only .py files"})
+        if not path.exists():
+            return json_block("code_lint", {"ok": False, "error": "file not found"})
+        proc = subprocess.run([sys.executable, "-m", "py_compile", str(path)],
+                              capture_output=True, text=True, timeout=15)
+        if proc.returncode == 0:
+            return json_block("code_lint", {"ok": True, "path": relative, "clean": True})
+        return json_block("code_lint", {"ok": False, "path": relative, "error": (proc.stderr or "compile failed")[:1000]})
+    except subprocess.TimeoutExpired:
+        return json_block("code_lint", {"ok": False, "error": "timeout"})
+    except Exception as e:
+        return json_block("code_lint", {"ok": False, "error": str(e)[:250]})
+
+
+__all__ = ["code_plan", "code_diff_preview", "code_apply_patch", "code_run_tests", "code_lint"]

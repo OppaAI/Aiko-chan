@@ -87,6 +87,15 @@ def _policy_ddl(dims: int = EMBED_DIMS) -> str:
     return _POLICY_DDL_TEMPLATE.format(dims=dims)
 
 
+# Approval levels. Anything unrecognized fails closed to "ask".
+_APPROVALS = ("autonomous", "notify", "ask")
+
+
+def _normalize_approval(value: object) -> str:
+    v = str(value or "").strip().lower()
+    return v if v in _APPROVALS else "ask"
+
+
 # ── condition evaluation (no LLM; pure data) ───────────────────────────
 
 _OPS: dict[str, Callable[[float, float], bool]] = {
@@ -134,15 +143,31 @@ class TriggerBus:
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._handlers: dict[str, list[Callable]] = {}
+        # kind -> list of (user_id or None for broadcast, fn)
+        self._handlers: dict[str, list[tuple[str | None, Callable]]] = {}
 
-    def register(self, kind: str, fn: Callable[[dict, str], None]) -> None:
+    def register(self, kind: str, fn: Callable[[dict, str], None],
+                 user_id: str | None = None) -> None:
+        """Register a handler, optionally scoped to one identity's triggers."""
         with self._lock:
-            self._handlers.setdefault(kind, []).append(fn)
+            self._handlers.setdefault(kind, []).append((user_id, fn))
 
-    def emit(self, kind: str, readings: dict, context: str = "") -> None:
+    def unregister(self, kind: str, fn: Callable) -> None:
+        """Remove a handler (call on state eviction so dead states can't fire)."""
         with self._lock:
-            fns = list(self._handlers.get(kind, []))
+            kept = [(u, f) for (u, f) in self._handlers.get(kind, []) if f is not fn]
+            if kept:
+                self._handlers[kind] = kept
+            else:
+                self._handlers.pop(kind, None)
+
+    def emit(self, kind: str, readings: dict, context: str = "",
+             user_id: str | None = None) -> None:
+        """Emit a trigger. Only handlers scoped to this user_id (or broadcast)
+        are invoked — one identity's sensor event never fires another's policy."""
+        with self._lock:
+            fns = [fn for (uid, fn) in self._handlers.get(kind, [])
+                   if uid is None or uid == user_id]
         for fn in fns:
             try:
                 fn(dict(readings), context)
@@ -236,13 +261,18 @@ class PolicyEngine:
                     " WHERE id = ?",
                     (now, prev["id"]),
                 )
+                # Keep the vec table in sync: dead vectors would otherwise
+                # fill the KNN overscan slots and push active rows out.
+                conn.execute(
+                    "DELETE FROM learned_policies_vec WHERE id = ?", (prev["id"],)
+                )
             row = {
                 "id": pid, "user_id": self._user_id, "name": name,
                 "situation": situation, "trigger_kind": trigger_kind,
                 "condition_json": json.dumps(condition or {}),
                 "action": action,
                 "action_params_json": json.dumps(action_params or {}),
-                "approval": approval, "teacher": teacher,
+                "approval": _normalize_approval(approval), "teacher": teacher,
                 "version": version, "supersedes_id": supersedes,
                 "status": "active", "created_at": now, "updated_at": now,
             }
@@ -347,10 +377,13 @@ class PolicyEngine:
     PROPOSAL_TTL_S = 3600.0
 
     def propose(self, draft: dict) -> tuple[str, str]:
-        """Stage a taught policy; returns (proposal_id, confirmation_text)."""
+        """Stage a taught policy; returns (proposal_id, confirmation_text).
+
+        The draft is staged only after the DB lookup and confirmation-text
+        generation succeed, so a DB exception can't leave an orphan proposal
+        that a later "yes" would confirm blind.
+        """
         prop_id = uuid.uuid4().hex[:8]
-        with self._lock:
-            self._proposals[prop_id] = (time.time(), draft)
         prev = None
         with self._lock:
             conn = self._connect()
@@ -366,12 +399,15 @@ class PolicyEngine:
             f"{cond.get('metric')} {cond.get('op')} {cond.get('value')}"
             if cond.get("metric") else "when it triggers"
         )
+        approval_txt = _normalize_approval(draft.get("approval", "notify"))
         if prev:
             text = (f"Got it — updating '{draft['name']}' to v{prev + 1}: "
                     f"{draft['action']} when {cond_txt}. Say yes to confirm.")
         else:
             text = (f"Got it — new policy '{draft['name']}': {draft['action']} "
-                    f"when {cond_txt} ({draft.get('approval', 'notify')}). Say yes to confirm.")
+                    f"when {cond_txt} ({approval_txt}). Say yes to confirm.")
+        with self._lock:
+            self._proposals[prop_id] = (time.time(), draft)
         return prop_id, text
 
     def confirm_proposal(self, prop_id: str) -> dict | None:
@@ -420,7 +456,9 @@ class PolicyEngine:
                 args=params,
                 depends_on=("check",),
                 run_if={"policy_check.ok": True},
-                needs_approval=(policy.get("approval") == "ask"),
+                needs_approval=(
+                    _normalize_approval(policy.get("approval")) not in ("autonomous", "notify")
+                ),
             ),
             PlanNode(
                 id="verify",
@@ -450,8 +488,13 @@ class PolicyEngine:
         self._action_handlers[name] = fn
 
     def dispatch(self, policy: dict, readings: dict) -> None:
-        """Execute a matched policy: DAG when possible, handler fallback."""
-        approval = policy.get("approval", "notify")
+        """Execute a matched policy: DAG when possible, handler fallback.
+
+        Fail-closed: only "autonomous" and "notify" execute. Anything else —
+        including an unrecognized approval value smuggled in via LLM
+        extraction — is treated as "ask".
+        """
+        approval = _normalize_approval(policy.get("approval", "notify"))
         if approval == "ask":
             log.info("policy: '%s' needs approval — queuing ask", policy["name"])
             self._handle_ask(policy, readings)
@@ -465,8 +508,11 @@ class PolicyEngine:
                 log.warning("policy: action '%s' failed: %s", policy["action"], e)
                 self.record_outcome(policy["id"], False)
         else:
-            log.info("policy: no handler for action '%s' — logged only", policy["action"])
-            self.record_outcome(policy["id"], True)
+            # Nothing ran: recording success would poison the outcome stats
+            # that later distill into the fast habit layer.
+            log.warning("policy: no handler for action '%s' — not executed",
+                        policy["action"])
+            self.record_outcome(policy["id"], False)
 
     def _handle_log(self, ctx: dict) -> None:
         p = ctx["policy"]
@@ -549,7 +595,7 @@ def extract_teaching(user_text: str, llm_client=None) -> dict | None:
                 "value": float(cond.get("value", 0)),
             },
             "action": str(data.get("action", "notify"))[:64],
-            "approval": data.get("approval", "notify"),
+            "approval": _normalize_approval(data.get("approval", "notify")),
             "teacher": "oppa",
         }
     except Exception as e:

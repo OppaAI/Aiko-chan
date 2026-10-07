@@ -248,3 +248,98 @@ def test_record_outcome(engine):
     row = engine.get(p["id"])
     assert row["use_count"] == 2
     assert row["success_count"] == 1
+
+
+# ── CodeRabbit follow-ups ────────────────────────────────────────────
+
+
+def test_supersede_deletes_vec_row(engine):
+    v1 = engine.teach(name="gpu_rest", situation="GPU hot", trigger_kind="sensor",
+                      condition={"metric": "t", "op": ">", "value": 85},
+                      action="log")
+    v2 = engine.teach(name="gpu_rest", situation="GPU hot", trigger_kind="sensor",
+                      condition={"metric": "t", "op": ">", "value": 75},
+                      action="log")
+    rows = engine._conn.execute("SELECT id FROM learned_policies_vec").fetchall()
+    ids = {r["id"] for r in rows}
+    assert v2["id"] in ids
+    assert v1["id"] not in ids  # dead vector must not fill KNN slots
+
+
+def test_approval_normalized_at_teach(engine):
+    p = engine.teach(name="x", situation="y", trigger_kind="event",
+                     condition={}, action="log", approval="Ask")
+    assert p["approval"] == "ask"
+    p2 = engine.teach(name="z", situation="y", trigger_kind="event",
+                      condition={}, action="log", approval="whenever")
+    assert p2["approval"] == "ask"
+
+
+def test_dispatch_fail_closed_on_bad_approval(engine):
+    asked = []
+    engine._handle_ask = lambda policy, readings: asked.append(policy["name"])
+    ran = []
+    engine.register_action("do_thing", lambda ctx: ran.append(1))
+    # Simulate a legacy/corrupt row with an unrecognized approval value.
+    p = engine.teach(name="x", situation="y", trigger_kind="event",
+                     condition={}, action="do_thing", approval="notify")
+    p["approval"] = "Maybe"  # bypass teach() normalization
+    engine.dispatch(p, {})
+    assert asked == ["x"]      # asked, not executed
+    assert ran == []
+
+
+def test_dispatch_unregistered_action_records_failure(engine):
+    p = engine.teach(name="x", situation="y", trigger_kind="event",
+                     condition={}, action="no_such_handler", approval="notify")
+    engine.dispatch(p, {})
+    row = engine.get(p["id"])
+    assert row["use_count"] == 1
+    assert row["success_count"] == 0  # nothing ran: must not count as success
+
+
+def test_bus_user_scoping_and_unregister():
+    bus = TriggerBus()
+    seen = []
+    fn_a = lambda r, c: seen.append(("a", r))
+    fn_b = lambda r, c: seen.append(("b", r))
+    bus.register("sensor", fn_a, user_id="alice")
+    bus.register("sensor", fn_b)  # broadcast
+    bus.emit("sensor", {"t": 1}, user_id="alice")
+    assert ("a", {"t": 1}) in seen and ("b", {"t": 1}) in seen
+    seen.clear()
+    bus.emit("sensor", {"t": 2}, user_id="bob")
+    assert seen == [("b", {"t": 2})]  # alice's handler not fired
+    bus.unregister("sensor", fn_b)
+    seen.clear()
+    bus.emit("sensor", {"t": 3}, user_id="alice")
+    assert seen == [("a", {"t": 3})]
+
+
+def test_extract_teaching_normalizes_approval():
+    import json as _json
+    payload = _json.dumps({
+        "is_teaching": True, "name": "p", "situation": "s",
+        "trigger_kind": "event",
+        "condition": {"metric": "m", "op": ">", "value": 1},
+        "action": "log", "approval": "Sometimes",
+    })
+
+    class FakeResp:
+        class Choice:
+            class Msg:
+                content = payload
+            message = Msg()
+        choices = [Choice()]
+
+    class FakeClient:
+        class Chat:
+            class Completions:
+                @staticmethod
+                def create(**kw):
+                    return FakeResp()
+            completions = Completions()
+        chat = Chat()
+
+    draft = extract_teaching("when x then do y from now on", llm_client=FakeClient())
+    assert draft["approval"] == "ask"  # unrecognized -> fail closed

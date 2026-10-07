@@ -1112,9 +1112,11 @@ class AikoThink:
             if inner_turn:
                 volatile_parts.append(inner_turn)
             # Learned-policy confirmation echo: if Oppa taught a behavior
-            # last turn, confirm it in her own words briefly.
+            # last turn, confirm it in her own words briefly. Peeked, not
+            # popped — the echo is acknowledged only after this turn
+            # completes successfully (see ack below in chat()).
             try:
-                policy_echo = state_obj.policy_echo()
+                policy_echo = state_obj.peek_policy_echo()
                 if policy_echo:
                     volatile_parts.append(
                         "Deliver this confirmation to Oppa naturally and briefly,"
@@ -2824,6 +2826,14 @@ class AikoThink:
 
             with self._history_lock:
                 self._history.append({"role": "assistant", "content": raw_response})
+
+            # The turn completed: any pending policy echo riding this turn's
+            # prompt counts as delivered, unlocking "yes"-confirmation.
+            try:
+                from cognition.attention import for_identity
+                for_identity(current_user_id()).ack_policy_echo()
+            except Exception:
+                pass
 
             if store_turn:
                 self._store_async(raw_input, raw_response)

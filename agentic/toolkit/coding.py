@@ -426,6 +426,112 @@ def ssh_run(host_id: str = "", command: str = "", timeout: int = SSH_TIMEOUT) ->
         return json_block("ssh_run", {"ok": False, "error": f"timeout after {timeout}s"})
     except Exception as e:
         return json_block("ssh_run", {"ok": False, "error": str(e)[:300]})
+
+
+# ── shell_run — general shell on Aiko's own host (APPROVAL REQUIRED) ────
+#
+# Claude Code-style Bash tool: sed, rm, grep, find, and every other Linux
+# command for debugging, testing, and auditing the codebase.
+#
+# Safety (defense in depth):
+#   - needs_approval=True: every call goes through Aiko's approval gate.
+#   - DENYLIST: catastrophic patterns are blocked outright, no override.
+#   - READONLY allowlist: ls/cat/grep/find/etc skip approval (still logged).
+#   - Everything else needs approval, even with the gate.
+#   - cwd defaults to repo root; absolute paths outside the repo are
+#     flagged in the log (not blocked — she may need /tmp, but Oppa
+#     sees it in the approval prompt).
+#   - Timeout-bounded (60s default, 300s max), output-capped.
+#   - NOT in subagent tools — only Aiko herself.
+
+SHELL_TIMEOUT = 60
+SHELL_OUTPUT_CHARS = 3000
+
+# Patterns that are never allowed, even with approval.
+_SHELL_DENYLIST = (
+    "rm -rf /", "rm -rf /*", "rm -rf ~", "mkfs", "dd of=/dev",
+    ":(){:|:&};:", "chmod -R 777 /", "> /dev/sda", "shutdown",
+    "reboot", "poweroff", "halt",
+)
+
+# Commands that are read-only and skip the approval gate (still logged).
+_SHELL_READONLY = frozenset({
+    "ls", "cat", "grep", "find", "head", "tail", "wc", "diff", "file",
+    "stat", "du", "df", "ps", "top", "sed", "awk", "sort", "uniq",
+    "cut", "tr", "echo", "pwd", "whoami", "uname", "date", "env",
+    "which", "type", "git",
+})
+
+
+def _shell_is_readonly(command: str) -> bool:
+    first = (command.strip().split() or [""])[0].lstrip("/")
+    # sed -i writes; plain sed reads
+    if first == "sed" and " -i" in f" {command} ":
+        return False
+    return first in _SHELL_READONLY
+
+
+@tool(
+    _spec("shell_run", "Run a shell command on Aiko's host (APPROVAL REQUIRED unless read-only)."),
+    description="Run a shell command on Aiko's host (APPROVAL REQUIRED unless read-only).",
+    graph=True,
+    react=True,
+    domain="coding",
+    needs_approval=True,
+)
+def shell_run(command: str = "", cwd: str = "", timeout: int = SHELL_TIMEOUT) -> str:
+    """Run an arbitrary shell command on Aiko's own host.
+
+    Read-only commands (ls, cat, grep, find, git, ...) run directly.
+    Anything that modifies state needs approval via the standard gate.
+    Catastrophic patterns (rm -rf /, fork bombs, dd to devices, ...) are
+    blocked outright.
+
+    Args:
+        command: the shell command to run.
+        cwd: working directory (default: repo root).
+        timeout: seconds, clamped to [5, 300].
+    """
+    try:
+        cmd_text = (command or "").strip()
+        if not cmd_text:
+            return json_block("shell_run", {"ok": False, "error": "command required"})
+        cmd_text = cmd_text[:4000]
+
+        lowered = f" {cmd_text.lower()} "
+        for bad in _SHELL_DENYLIST:
+            if bad in lowered:
+                log.warning("shell_run blocked denylisted pattern: %.60s", cmd_text)
+                return json_block("shell_run", {"ok": False,
+                    "error": f"blocked: command contains denylisted pattern '{bad}'"})
+
+        workdir = str(REPO_ROOT)
+        if (cwd or "").strip():
+            p = (REPO_ROOT / cwd.strip().lstrip("/\\")).resolve()
+            # Allow /tmp explicitly; otherwise confine to repo
+            if p != REPO_ROOT and REPO_ROOT not in p.parents and str(p) != "/tmp":
+                log.warning("shell_run cwd outside repo: %s", p)
+            workdir = str(p) if p.is_dir() else str(REPO_ROOT)
+
+        timeout = max(5, min(int(timeout or SHELL_TIMEOUT), 300))
+        readonly = _shell_is_readonly(cmd_text)
+        log.info("shell_run readonly=%s cwd=%s cmd=%.150s", readonly, workdir, cmd_text)
+
+        proc = subprocess.run(
+            cmd_text, shell=True, cwd=workdir, capture_output=True,
+            text=True, timeout=timeout, executable="/bin/bash",
+        )
+        return json_block("shell_run", {
+            "ok": proc.returncode == 0,
+            "returncode": proc.returncode,
+            "readonly": readonly,
+            "stdout": proc.stdout[-SHELL_OUTPUT_CHARS:],
+            "stderr": proc.stderr[-SHELL_OUTPUT_CHARS:],
+        })
+    except subprocess.TimeoutExpired:
+        return json_block("shell_run", {"ok": False, "error": f"timeout after {timeout}s"})
+    except Exception as e:
+        return json_block("shell_run", {"ok": False, "error": str(e)[:300]})
     except Exception as e:
         return json_block("code_run_tests", {"ok": False, "error": str(e)[:300]})
 

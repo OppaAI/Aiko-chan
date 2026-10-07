@@ -30,7 +30,9 @@ Design rules:
 
 from __future__ import annotations
 
+import json
 import os
+from collections import deque
 
 from agentic.registry import TOOLS, tool
 from agentic.toolkit.common import json_block
@@ -47,6 +49,7 @@ def _spec(name: str, description: str):
 TASK_BUDGET = 1500          # max task description sent to worker
 SUMMARY_BUDGET = 800        # max summary returned to Aiko
 TOOL_RESULT_BUDGET = 1200   # max per tool-result fed back to Needle
+TOOL_HISTORY_BUDGET = 4800  # max combined tool-call/result history
 MAX_TURNS = 6               # ReAct iterations before force-summarize
 
 # Tools a subagent is allowed to use. Deliberately narrow:
@@ -99,33 +102,31 @@ def needle_subagent(task: str = "", tools_hint: str = "") -> str:
             "fallback": "Do the subtask inline with tight budgets (repo_read_file <= 3000 chars).",
         })
 
-    # Resolve allowed tools: SUBAGENT_TOOLS intersected with hint + registry
-    allowed = set(SUBAGENT_TOOLS)
-    if tools_hint.strip():
-        hinted = {t.strip() for t in tools_hint.split(",") if t.strip()}
-        allowed &= hinted
-    tool_schemas = []
-    for name in sorted(allowed):
-        spec = registry.get(name)
-        if spec:
-            tool_schemas.append(spec)
-
-    if not tool_schemas:
-        return json_block("needle_subagent", {"ok": False, "error": "no allowed tools resolved"})
-
     try:
         workers = load_needle_workers(
             raw,
             default_timeout=float(os.getenv("NEEDLE_TIMEOUT", "20")),
             default_confidence_threshold=float(os.getenv("NEEDLE_CONFIDENCE_THRESHOLD", "0.85")),
-            max_workers=1,  # one worker per subagent call; fan-out via needle_team_run
+            max_workers=int(os.getenv("NEEDLE_MAX_WORKERS", "4")),
         )
     except Exception as e:
         return json_block("needle_subagent", {"ok": False, "error": f"worker load failed: {e}"})
     if not workers:
         return json_block("needle_subagent", {"ok": False, "error": "no workers loaded"})
 
-    worker = workers[0]
+    worker = workers[0]  # one worker per call; fan-out via needle_team_run
+    allowed = set(SUBAGENT_TOOLS) & set(worker.allowed_tools)
+    if tools_hint.strip():
+        allowed &= {t.strip() for t in tools_hint.split(",") if t.strip()}
+    tool_schemas = []
+    for name in sorted(allowed):
+        spec = registry.get(name)
+        if spec:
+            tool_schemas.append(spec.to_openai_schema())
+    allowed = {schema["function"]["name"] for schema in tool_schemas}
+    if not allowed:
+        return json_block("needle_subagent", {"ok": False, "error": "no allowed tools resolved"})
+
     client = NeedleClient(
         worker.base_url,
         timeout=worker.timeout,
@@ -133,8 +134,9 @@ def needle_subagent(task: str = "", tools_hint: str = "") -> str:
     )
 
     # ---- bounded ReAct loop ----
-    transcript = []
-    prompt = (
+    transcript = deque(maxlen=4)
+    history = ""
+    base_prompt = (
         f"You are a coding subagent. Task: {task}\n\n"
         "Use the provided tools to investigate. You may search the web "
         "(adaptive_search) to find the best library, docs, or approach "
@@ -145,13 +147,19 @@ def needle_subagent(task: str = "", tools_hint: str = "") -> str:
         "Be specific: file paths, line numbers, exact error text, and "
         "URLs for any web sources you used. Do not dump whole files."
     )
+    prompt = base_prompt
     try:
+        from agentic.agentic import TaskState, execute_tool_with_policy
+
+        state = TaskState(goal=task)
         for turn in range(MAX_TURNS):
             try:
                 resp = client.complete(prompt, tool_schemas)
             except NeedleLowConfidence as e:
                 log.warning("needle_subagent low confidence on turn %d: %s", turn, e)
-                break
+                return json_block("needle_subagent", {
+                    "ok": False, "error": f"low confidence: {e}"[:300], "turns": turn + 1,
+                })
             except NeedleError as e:
                 return json_block("needle_subagent", {"ok": False, "error": str(e)[:300]})
 
@@ -162,31 +170,28 @@ def needle_subagent(task: str = "", tools_hint: str = "") -> str:
                 })
 
             # Execute proposed calls through Aiko's registry (validate + run)
-            results = []
             for call in resp.calls:
+                arguments = json.dumps(call.arguments, ensure_ascii=False)[:400]
                 if call.name not in allowed:
-                    results.append(f"[{call.name}] DENIED: outside subagent toolset")
-                    continue
-                try:
-                    fn = registry.get(call.name)
-                    if not fn:
-                        results.append(f"[{call.name}] DENIED: unknown tool")
-                        continue
-                    out = fn(**call.arguments) if isinstance(call.arguments, dict) else fn()
-                    out_str = str(out)[:TOOL_RESULT_BUDGET]
-                except Exception as e:
-                    out_str = f"ERROR: {e}"[:TOOL_RESULT_BUDGET]
-                results.append(f"[{call.name}] {out_str}")
-                transcript.append(f"turn {turn}: {call.name} -> {out_str[:200]}")
+                    out_str = "DENIED: outside subagent toolset"
+                else:
+                    try:
+                        result = execute_tool_with_policy(call.name, call.arguments, state)
+                        out_str = result.observation()[:TOOL_RESULT_BUDGET]
+                    except Exception as e:
+                        out_str = f"ERROR: {e}"[:TOOL_RESULT_BUDGET]
+                entry = f"turn {turn + 1}: {call.name[:100]}({arguments}) -> {out_str}"
+                history = (history + "\n" + entry)[-TOOL_HISTORY_BUDGET:]
+                transcript.append(f"turn {turn + 1}: {call.name[:100]} -> {out_str[:200]}")
 
             prompt = (
-                f"Task: {task}\n\nTool results:\n" + "\n".join(results) +
+                base_prompt + "\n\nRecent tool calls and results:\n" + history +
                 "\n\nContinue investigating, or respond with type 'answer' "
                 "and your findings under 800 characters."
             )
 
         # Force-summarize from transcript if we hit the turn cap
-        fallback = " | ".join(transcript[-4:])[:SUMMARY_BUDGET]
+        fallback = " | ".join(transcript)[:SUMMARY_BUDGET]
         return json_block("needle_subagent", {
             "ok": True, "summary": fallback or "max turns reached, no findings",
             "turns": MAX_TURNS, "truncated": True,

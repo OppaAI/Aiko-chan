@@ -124,6 +124,7 @@ class RepoFileTreeArgs(BaseModel):
 class RepoReadFileArgs(BaseModel):
     relative_path: str = Field(min_length=1)
     max_chars: int = Field(default=20000, ge=1, le=200000)
+    offset: int = Field(default=0, ge=0)
 
 
 class RepoSearchTextArgs(BaseModel):

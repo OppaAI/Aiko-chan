@@ -260,6 +260,8 @@ interface/webui/static/silero_vad_op18_ifless.onnx
 conscience-lab/runs/
 # Local HF snapshot of the base checkpoint (already on the Hub).
 conscience-lab/.model-cache/
+# Local training venv (torch + layaft; reproducible via pip).
+conscience-lab/.venv-train/
 # The datasets, task definitions and analysis scripts ARE tracked: the dataset
 # is the doctrine, and it is the only reproducibility record for a checkpoint.
 *.gguf

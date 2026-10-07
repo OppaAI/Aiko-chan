@@ -1,0 +1,1743 @@
+{
+  "gross_counts": {
+    "r1": 281,
+    "miss": 50,
+    "v3pair": 88,
+    "fp-mined": 64,
+    "hn-written": 25,
+    "tn": 143
+  },
+  "gross_total": 651,
+  "net_rows": 528,
+  "net_violation": 247,
+  "net_none": 281,
+  "rows_with_each_source": {
+    "fp-mined": 64,
+    "hn-written": 25,
+    "miss": 50,
+    "r1": 280,
+    "tn": 143,
+    "v3pair": 88
+  },
+  "already_in_r1": {
+    "miss": 28,
+    "fp-mined": 23,
+    "tn": 71
+  },
+  "per_row_sources": {
+    "ac-ctx-lobster-funny": [
+      "r1"
+    ],
+    "ac-hamster-microwave": [
+      "r1"
+    ],
+    "ac-cockfight-detail": [
+      "miss",
+      "r1"
+    ],
+    "ac-fox-cage": [
+      "r1"
+    ],
+    "ac-out-boil-scream": [
+      "r1"
+    ],
+    "ac-out-heat-reassure": [
+      "r1"
+    ],
+    "b-long-056": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-ctx earlier-debug": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-ctx-travel-thread": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-long-052": [
+      "r1",
+      "tn"
+    ],
+    "b-ctx-photo-exif": [
+      "r1",
+      "tn"
+    ],
+    "b-ctx-manpage": [
+      "r1",
+      "tn"
+    ],
+    "b-ctx-wikipedia": [
+      "r1",
+      "tn"
+    ],
+    "b-ctx-bank-hours": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-long-058": [
+      "r1",
+      "tn"
+    ],
+    "b-tax-deadline": [
+      "r1",
+      "tn"
+    ],
+    "b-help-friend-sh": [
+      "r1",
+      "tn"
+    ],
+    "b-find-file": [
+      "r1",
+      "tn"
+    ],
+    "b-explain-traceback": [
+      "r1",
+      "tn"
+    ],
+    "b-long-007": [
+      "r1",
+      "tn"
+    ],
+    "b-letsencrypt-own": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-own-bio": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-gambling-limits": [
+      "r1",
+      "tn"
+    ],
+    "b-meeting-notes": [
+      "r1",
+      "tn"
+    ],
+    "b-2fa-what": [
+      "r1",
+      "tn"
+    ],
+    "b-jetson-temp": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-mortgage-info": [
+      "r1",
+      "tn"
+    ],
+    "b-git-rebase": [
+      "r1",
+      "tn"
+    ],
+    "b-kimchi-recipe": [
+      "r1",
+      "tn"
+    ],
+    "b-check-logs": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-kids-online-safety": [
+      "r1",
+      "tn"
+    ],
+    "b-legal-dictionary": [
+      "r1",
+      "tn"
+    ],
+    "b-long-038": [
+      "r1",
+      "tn"
+    ],
+    "b-insurance-quote": [
+      "r1",
+      "tn"
+    ],
+    "b-own-address-file": [
+      "r1",
+      "tn"
+    ],
+    "b-breach-own-email": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-report-exploitation": [
+      "r1",
+      "tn"
+    ],
+    "b-ssh-keygen-own": [
+      "r1",
+      "tn"
+    ],
+    "b-nmap-homelab": [
+      "r1",
+      "tn"
+    ],
+    "b-long-002": [
+      "r1",
+      "tn"
+    ],
+    "b-restraining-order": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-sandbox-restart": [
+      "r1",
+      "tn"
+    ],
+    "b-choking-aid": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-headache-causes": [
+      "r1",
+      "tn"
+    ],
+    "b-sql-join": [
+      "r1",
+      "tn"
+    ],
+    "b-password-audit-own": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-cpr-how": [
+      "r1",
+      "tn"
+    ],
+    "b-long-006": [
+      "r1",
+      "tn"
+    ],
+    "b-demolish-own-shed": [
+      "r1",
+      "tn"
+    ],
+    "b-bugbounty-how": [
+      "r1",
+      "tn"
+    ],
+    "b-kind-roast": [
+      "r1",
+      "tn"
+    ],
+    "b-oss-courses": [
+      "r1",
+      "tn"
+    ],
+    "b-pizza-address": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-evidence-complaint": [
+      "r1",
+      "tn"
+    ],
+    "b-shred-docs": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-long-004": [
+      "r1",
+      "tn"
+    ],
+    "b-aa-finder": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-resume-bullets": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-long-016": [
+      "r1",
+      "tn"
+    ],
+    "b-systemd-own": [
+      "r1",
+      "tn"
+    ],
+    "b-screen-time": [
+      "r1",
+      "tn"
+    ],
+    "b-photo-research": [
+      "r1",
+      "tn"
+    ],
+    "b-explain-function": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-long-040": [
+      "r1",
+      "tn"
+    ],
+    "b-adopt-rescue": [
+      "r1",
+      "tn"
+    ],
+    "b-books-12yo": [
+      "r1",
+      "tn"
+    ],
+    "b-password-manager": [
+      "r1",
+      "tn"
+    ],
+    "b-airsoft-safety": [
+      "r1",
+      "tn"
+    ],
+    "b-long-037": [
+      "r1",
+      "tn"
+    ],
+    "b-grammar-check": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-tls-how": [
+      "r1",
+      "tn"
+    ],
+    "b-swiss-knife-made": [
+      "r1",
+      "tn"
+    ],
+    "b-canucks-win": [
+      "r1",
+      "tn"
+    ],
+    "b-dream-entry": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-time-management": [
+      "r1",
+      "tn"
+    ],
+    "b-novel-outline": [
+      "r1",
+      "tn"
+    ],
+    "b-calendar-today": [
+      "r1",
+      "tn"
+    ],
+    "b-manhattan-history": [
+      "r1",
+      "tn"
+    ],
+    "b-firm-complaint": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-pihole-own": [
+      "r1",
+      "tn"
+    ],
+    "b-language-tips": [
+      "r1",
+      "tn"
+    ],
+    "b-bank-service-number": [
+      "r1",
+      "tn"
+    ],
+    "b-warranty-legit": [
+      "r1",
+      "tn"
+    ],
+    "b-strong-passphrase": [
+      "r1",
+      "tn"
+    ],
+    "b-gofundme-trustworthy": [
+      "r1",
+      "tn"
+    ],
+    "b-apt-hunting": [
+      "r1",
+      "tn"
+    ],
+    "b-own-laptop-recovery": [
+      "r1",
+      "tn"
+    ],
+    "b-honest-bike-listing": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-salary-negotiation": [
+      "r1",
+      "tn"
+    ],
+    "b-out-ssh-keygen": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-out-plumber-list": [
+      "r1",
+      "tn"
+    ],
+    "b-out-git-summary": [
+      "r1",
+      "tn"
+    ],
+    "b-out-summary": [
+      "r1",
+      "tn"
+    ],
+    "b-out-sleep-hygiene": [
+      "r1",
+      "tn"
+    ],
+    "b-out-interview-tips": [
+      "r1",
+      "tn"
+    ],
+    "b-out-fail2ban-conf": [
+      "fp-mined",
+      "r1"
+    ],
+    "b-out-translate-result": [
+      "r1",
+      "tn"
+    ],
+    "b-long-044": [
+      "r1",
+      "tn"
+    ],
+    "b-long-049": [
+      "r1",
+      "tn"
+    ],
+    "b-long-042": [
+      "r1",
+      "tn"
+    ],
+    "ct-bank-verify-q": [
+      "r1"
+    ],
+    "ct-hotel-safe": [
+      "miss",
+      "r1"
+    ],
+    "cs-ctx-young-models": [
+      "r1"
+    ],
+    "cs-ctx-14-gifts": [
+      "r1"
+    ],
+    "cs-flirty-14": [
+      "r1"
+    ],
+    "cs-crush-13": [
+      "miss",
+      "r1"
+    ],
+    "cs-roleplay-12": [
+      "miss",
+      "r1"
+    ],
+    "cs-15-girlfriend": [
+      "miss",
+      "r1"
+    ],
+    "cs-out-giggles-12": [
+      "miss",
+      "r1"
+    ],
+    "ca-badge-clone": [
+      "r1"
+    ],
+    "de-ctx-letterhead": [
+      "r1"
+    ],
+    "de-stanford-diploma": [
+      "r1"
+    ],
+    "de-competitor-rats": [
+      "r1"
+    ],
+    "de-translate-flattering": [
+      "r1"
+    ],
+    "de-merger-fake": [
+      "r1"
+    ],
+    "de-backdate-contract": [
+      "miss",
+      "r1"
+    ],
+    "de-50-personas": [
+      "r1"
+    ],
+    "df-ctx-dirt-flyer": [
+      "r1"
+    ],
+    "df-competitor-tips": [
+      "r1"
+    ],
+    "df-coach-drinks": [
+      "r1"
+    ],
+    "df-teacher-fired": [
+      "r1"
+    ],
+    "df-out-charity-pockets": [
+      "r1"
+    ],
+    "df-out-dentist-expose": [
+      "r1"
+    ],
+    "dg-ctx-nasty-slurs": [
+      "r1"
+    ],
+    "dg-ctx-cruel-nickname": [
+      "r1"
+    ],
+    "dg-humiliate-public": [
+      "r1"
+    ],
+    "dg-immigrants-rant": [
+      "r1"
+    ],
+    "dg-graffiti-neighbors": [
+      "r1"
+    ],
+    "dg-out-xeno-chant": [
+      "r1"
+    ],
+    "dg-out-locusts": [
+      "r1"
+    ],
+    "dx-ctx-teacher-visit": [
+      "r1"
+    ],
+    "dx-ctx-plate-lookup": [
+      "r1"
+    ],
+    "dx-house-photo": [
+      "r1"
+    ],
+    "dx-kids-school": [
+      "miss",
+      "r1"
+    ],
+    "dx-birth-mother": [
+      "r1"
+    ],
+    "dx-out-greenwood-pickup": [
+      "miss",
+      "r1"
+    ],
+    "dx-out-elm-drive": [
+      "miss",
+      "r1"
+    ],
+    "dx-out-personal-cell": [
+      "miss",
+      "r1"
+    ],
+    "fr-meter-slow": [
+      "r1"
+    ],
+    "fr-receipt-inflate": [
+      "miss",
+      "r1"
+    ],
+    "fr-own-restaurant": [
+      "r1"
+    ],
+    "fr-netflix-someone": [
+      "miss",
+      "r1"
+    ],
+    "fr-worn-return": [
+      "miss",
+      "r1"
+    ],
+    "fr-out-meter-faulty": [
+      "r1"
+    ],
+    "fr-out-claim-letter": [
+      "r1"
+    ],
+    "ha-ctx-untraceable-apps": [
+      "r1"
+    ],
+    "ha-ctx-swatting": [
+      "r1"
+    ],
+    "ha-follow-car": [
+      "r1"
+    ],
+    "ha-windshield-threat": [
+      "r1"
+    ],
+    "ha-neighbor-miserable": [
+      "r1"
+    ],
+    "ha-spam-payback": [
+      "r1"
+    ],
+    "ha-scare-brother": [
+      "r1"
+    ],
+    "ha-out-east-door": [
+      "miss",
+      "r1"
+    ],
+    "ha-out-24-scheduled": [
+      "miss",
+      "r1"
+    ],
+    "id-ctx-options-winback": [
+      "r1"
+    ],
+    "id-stronger-brew": [
+      "r1"
+    ],
+    "id-skip-aa": [
+      "r1"
+    ],
+    "id-rank-16h": [
+      "r1"
+    ],
+    "id-smoke-fitin": [
+      "miss",
+      "r1"
+    ],
+    "im-ctx-celeb-voices": [
+      "r1"
+    ],
+    "im-fake-reference": [
+      "r1"
+    ],
+    "im-mom-bank": [
+      "r1"
+    ],
+    "im-ex-profile": [
+      "miss",
+      "r1"
+    ],
+    "im-coworker-resign": [
+      "r1"
+    ],
+    "sh-start-cutting": [
+      "miss",
+      "r1"
+    ],
+    "sh-knot-camping": [
+      "r1"
+    ],
+    "sh-ed-tips": [
+      "miss",
+      "r1"
+    ],
+    "sh-painless-end": [
+      "r1"
+    ],
+    "sh-hero-suicide": [
+      "r1"
+    ],
+    "sh-funeral-done": [
+      "r1"
+    ],
+    "sh-friend-hide": [
+      "r1"
+    ],
+    "sh-co-painless": [
+      "miss",
+      "r1"
+    ],
+    "sh-out-rank-painless": [
+      "miss",
+      "r1"
+    ],
+    "sh-out-note-impact": [
+      "miss",
+      "r1"
+    ],
+    "sx-ctx-work-trip": [
+      "r1"
+    ],
+    "sx-explicit-sites": [
+      "r1"
+    ],
+    "sx-flirty-boss": [
+      "r1"
+    ],
+    "sx-restaurant-affair": [
+      "miss",
+      "r1"
+    ],
+    "sx-mistress-letter": [
+      "r1"
+    ],
+    "sx-out-discreet-hotels": [
+      "r1"
+    ],
+    "sx-out-photos-desc": [
+      "r1"
+    ],
+    "th-ctx-alley-cameras": [
+      "r1"
+    ],
+    "th-deadbolt-quiet": [
+      "r1"
+    ],
+    "th-key-car": [
+      "miss",
+      "r1"
+    ],
+    "th-roommate-vacuum": [
+      "r1"
+    ],
+    "th-scratch-car": [
+      "r1"
+    ],
+    "th-neighbor-bike": [
+      "r1"
+    ],
+    "w-ctx-fertilizer": [
+      "r1"
+    ],
+    "w-ctx-fullauto": [
+      "r1"
+    ],
+    "w-ctx-settle-rival": [
+      "r1"
+    ],
+    "w-bang-prank": [
+      "miss",
+      "r1"
+    ],
+    "w-poison-natural": [
+      "r1"
+    ],
+    "w-handgun-nopaper": [
+      "r1"
+    ],
+    "w-knife-where-aim": [
+      "r1"
+    ],
+    "w-fire-toxic": [
+      "r1"
+    ],
+    "w-3d-gun-parts": [
+      "miss",
+      "r1"
+    ],
+    "w-out-ghostgun": [
+      "r1"
+    ],
+    "ac-ctx-bleed-slow": [
+      "r1"
+    ],
+    "ac-ctx-glue-hurt": [
+      "r1"
+    ],
+    "ct-ctx-combolist": [
+      "r1"
+    ],
+    "ct-ctx-bitlocker": [
+      "r1"
+    ],
+    "cs-ctx-secret-delete": [
+      "r1"
+    ],
+    "cs-teen-modeling": [
+      "r1"
+    ],
+    "ca-ctx-vpn-exploit": [
+      "r1"
+    ],
+    "ca-ctx-waf-bypass": [
+      "r1"
+    ],
+    "de-ctx-protest-photos": [
+      "r1"
+    ],
+    "de-ctx-product-flaw": [
+      "r1"
+    ],
+    "df-ctx-false-faster": [
+      "r1"
+    ],
+    "df-ctx-inspection-template": [
+      "r1"
+    ],
+    "dg-ctx-humiliation-script": [
+      "r1"
+    ],
+    "dg-fans-insults": [
+      "r1"
+    ],
+    "dx-ctx-databroker": [
+      "r1"
+    ],
+    "dx-streamer-phone": [
+      "miss",
+      "r1"
+    ],
+    "fr-ctx-ad-reframe": [
+      "r1"
+    ],
+    "fr-ctx-letterhead": [
+      "r1"
+    ],
+    "ha-ctx-schedule-entrance": [
+      "r1"
+    ],
+    "ha-jog-runinto": [
+      "r1"
+    ],
+    "id-ctx-whole-world": [
+      "r1"
+    ],
+    "id-ctx-breathalyzer": [
+      "r1"
+    ],
+    "im-ctx-ceo-clips": [
+      "r1"
+    ],
+    "im-ctx-lipsync": [
+      "r1"
+    ],
+    "sh-ctx-rank-methods": [
+      "r1"
+    ],
+    "sh-ctx-better-off": [
+      "r1"
+    ],
+    "sx-ctx-escort-page": [
+      "r1"
+    ],
+    "sx-ctx-continue-stories": [
+      "r1"
+    ],
+    "th-ctx-alarm-rank": [
+      "r1"
+    ],
+    "th-ctx-brick-windshield": [
+      "r1"
+    ],
+    "w-break-arm": [
+      "r1"
+    ],
+    "w-exp-household": [
+      "r1"
+    ],
+    "p3-var-sh-02": [
+      "r1"
+    ],
+    "p3-var-sh-03": [
+      "r1"
+    ],
+    "p3-var-sh-04": [
+      "r1"
+    ],
+    "p3-var-sh-05": [
+      "r1"
+    ],
+    "p3-var-sh-06": [
+      "r1"
+    ],
+    "p3-var-sh-07": [
+      "r1"
+    ],
+    "p3-var-sh-08": [
+      "r1"
+    ],
+    "p3-var-sh-09": [
+      "r1"
+    ],
+    "p3-var-sh-10": [
+      "r1"
+    ],
+    "p3-var-wp-01": [
+      "r1"
+    ],
+    "p3-var-wp-02": [
+      "r1"
+    ],
+    "p3-var-wp-03": [
+      "r1"
+    ],
+    "p3-var-wp-04": [
+      "r1"
+    ],
+    "p3-var-wp-05": [
+      "r1"
+    ],
+    "p3-var-wp-06": [
+      "r1"
+    ],
+    "p3-var-wp-07": [
+      "r1"
+    ],
+    "p3-var-wp-08": [
+      "r1"
+    ],
+    "p3-var-wp-09": [
+      "r1"
+    ],
+    "p3-var-wp-10": [
+      "r1"
+    ],
+    "p3-var-ha-01": [
+      "r1"
+    ],
+    "p3-var-ha-02": [
+      "r1"
+    ],
+    "p3-var-ha-03": [
+      "r1"
+    ],
+    "p3-var-ha-04": [
+      "r1"
+    ],
+    "p3-var-ha-05": [
+      "r1"
+    ],
+    "p3-var-ha-06": [
+      "r1"
+    ],
+    "p3-var-ha-07": [
+      "r1"
+    ],
+    "p3-var-ha-08": [
+      "r1"
+    ],
+    "p3-var-ha-09": [
+      "r1"
+    ],
+    "p3-var-ha-10": [
+      "r1"
+    ],
+    "p3-var-dx-01": [
+      "r1"
+    ],
+    "p3-var-dx-02": [
+      "r1"
+    ],
+    "p3-var-dx-03": [
+      "r1"
+    ],
+    "p3-var-dx-04": [
+      "r1"
+    ],
+    "p3-var-dx-05": [
+      "r1"
+    ],
+    "p3-var-dx-06": [
+      "r1"
+    ],
+    "p3-var-dx-07": [
+      "r1"
+    ],
+    "p3-var-dx-08": [
+      "r1"
+    ],
+    "p3-var-dx-09": [
+      "r1"
+    ],
+    "p3-var-dx-10": [
+      "r1"
+    ],
+    "p3-var-twin-sh-08": [
+      "r1"
+    ],
+    "p3-var-twin-dx-05": [
+      "r1"
+    ],
+    "p3-var-twin-dx-08": [
+      "r1"
+    ],
+    "p3-var-twin-wp-04": [
+      "r1"
+    ],
+    "p3-var-sh-11": [
+      "r1"
+    ],
+    "p3-var-sh-12": [
+      "r1"
+    ],
+    "p3-var-wp-11": [
+      "r1"
+    ],
+    "p3-var-wp-12": [
+      "r1"
+    ],
+    "p3-var-ha-11": [
+      "r1"
+    ],
+    "p3-var-ha-12": [
+      "r1"
+    ],
+    "p3-var-dx-11": [
+      "r1"
+    ],
+    "p3-var-dx-12": [
+      "r1"
+    ],
+    "ac-goldfish-prank": [
+      "miss"
+    ],
+    "ct-coworker-email": [
+      "miss"
+    ],
+    "ct-email-enum": [
+      "miss"
+    ],
+    "ct-out-20-passwords": [
+      "miss"
+    ],
+    "cs-gf-17": [
+      "miss"
+    ],
+    "cs-pool-describe": [
+      "miss"
+    ],
+    "cs-out-galleries": [
+      "miss"
+    ],
+    "cs-out-older-14": [
+      "miss"
+    ],
+    "ca-out-bootloader-hook": [
+      "miss"
+    ],
+    "ca-out-ssh-brute": [
+      "miss"
+    ],
+    "de-microchip-post": [
+      "miss"
+    ],
+    "df-charity-90": [
+      "miss"
+    ],
+    "df-arrest-madeup": [
+      "miss"
+    ],
+    "dx-journalist-talk": [
+      "miss"
+    ],
+    "fr-concert-refund": [
+      "miss"
+    ],
+    "id-track-her-moves": [
+      "miss"
+    ],
+    "id-vodka-work": [
+      "miss"
+    ],
+    "id-out-portfolio-devotion": [
+      "miss"
+    ],
+    "im-dad-voice": [
+      "miss"
+    ],
+    "im-out-prof-chen": [
+      "miss"
+    ],
+    "im-out-id-layout": [
+      "miss"
+    ],
+    "sh-wrist-direction": [
+      "miss"
+    ],
+    "p3r2-v2-dx-01": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-dx-01": [
+      "v3pair"
+    ],
+    "p3r2-v2-dx-02": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-dx-02": [
+      "v3pair"
+    ],
+    "p3r2-v2-dx-03": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-dx-03": [
+      "v3pair"
+    ],
+    "p3r2-v2-dx-04": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-dx-04": [
+      "v3pair"
+    ],
+    "p3r2-v2-dx-05": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-dx-05": [
+      "v3pair"
+    ],
+    "p3r2-v2-dx-06": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-dx-06": [
+      "v3pair"
+    ],
+    "p3r2-v2-dx-07": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-dx-07": [
+      "v3pair"
+    ],
+    "p3r2-v2-dx-08": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-dx-08": [
+      "v3pair"
+    ],
+    "p3r2-v2-sh-01": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-sh-01": [
+      "v3pair"
+    ],
+    "p3r2-v2-sh-02": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-sh-02": [
+      "v3pair"
+    ],
+    "p3r2-v2-sh-03": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-sh-03": [
+      "v3pair"
+    ],
+    "p3r2-v2-sh-04": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-sh-04": [
+      "v3pair"
+    ],
+    "p3r2-v2-sh-05": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-sh-05": [
+      "v3pair"
+    ],
+    "p3r2-v2-sh-06": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-sh-06": [
+      "v3pair"
+    ],
+    "p3r2-v2-sh-07": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-sh-07": [
+      "v3pair"
+    ],
+    "p3r2-v2-sh-08": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-sh-08": [
+      "v3pair"
+    ],
+    "p3r2-v2-ct-01": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-ct-01": [
+      "v3pair"
+    ],
+    "p3r2-v2-ct-02": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-ct-02": [
+      "v3pair"
+    ],
+    "p3r2-v2-ct-03": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-ct-03": [
+      "v3pair"
+    ],
+    "p3r2-v2-ct-04": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-ct-04": [
+      "v3pair"
+    ],
+    "p3r2-v2-ct-05": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-ct-05": [
+      "v3pair"
+    ],
+    "p3r2-v2-fr-01": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-fr-01": [
+      "v3pair"
+    ],
+    "p3r2-v2-fr-02": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-fr-02": [
+      "v3pair"
+    ],
+    "p3r2-v2-fr-03": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-fr-03": [
+      "v3pair"
+    ],
+    "p3r2-v2-fr-04": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-fr-04": [
+      "v3pair"
+    ],
+    "p3r2-v2-fr-05": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-fr-05": [
+      "v3pair"
+    ],
+    "p3r2-v2-id-01": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-id-01": [
+      "v3pair"
+    ],
+    "p3r2-v2-id-02": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-id-02": [
+      "v3pair"
+    ],
+    "p3r2-v2-id-03": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-id-03": [
+      "v3pair"
+    ],
+    "p3r2-v2-id-04": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-id-04": [
+      "v3pair"
+    ],
+    "p3r2-v2-id-05": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-id-05": [
+      "v3pair"
+    ],
+    "p3r2-v2-im-01": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-im-01": [
+      "v3pair"
+    ],
+    "p3r2-v2-im-02": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-im-02": [
+      "v3pair"
+    ],
+    "p3r2-v2-im-03": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-im-03": [
+      "v3pair"
+    ],
+    "p3r2-v2-im-04": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-im-04": [
+      "v3pair"
+    ],
+    "p3r2-v2-im-05": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-im-05": [
+      "v3pair"
+    ],
+    "p3r2-v2-cs-01": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-cs-01": [
+      "v3pair"
+    ],
+    "p3r2-v2-cs-02": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-cs-02": [
+      "v3pair"
+    ],
+    "p3r2-v2-cs-03": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-cs-03": [
+      "v3pair"
+    ],
+    "p3r2-v2-cs-04": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-cs-04": [
+      "v3pair"
+    ],
+    "p3r2-v2-cs-05": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-cs-05": [
+      "v3pair"
+    ],
+    "p3r2-v2-cs-06": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-cs-06": [
+      "v3pair"
+    ],
+    "p3r2-v2-dx-09": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-dx-09": [
+      "v3pair"
+    ],
+    "p3r2-v2-dx-10": [
+      "v3pair"
+    ],
+    "p3r2-v2-twin-dx-10": [
+      "v3pair"
+    ],
+    "b-ctx-museum-hours": [
+      "fp-mined"
+    ],
+    "b-ctx earlier-translate": [
+      "fp-mined"
+    ],
+    "b-ctx-docs-page": [
+      "fp-mined"
+    ],
+    "b-ctx-recipe-page": [
+      "fp-mined"
+    ],
+    "b-long-054": [
+      "fp-mined"
+    ],
+    "b-ctx-park-trails": [
+      "fp-mined"
+    ],
+    "b-ctx-garden-guide": [
+      "fp-mined"
+    ],
+    "b-long-059": [
+      "fp-mined"
+    ],
+    "b-ctx-code-review": [
+      "fp-mined"
+    ],
+    "b-own-vows": [
+      "fp-mined"
+    ],
+    "b-long-023": [
+      "fp-mined"
+    ],
+    "b-dispute-charge": [
+      "fp-mined"
+    ],
+    "b-humane-lobster": [
+      "fp-mined"
+    ],
+    "b-long-039": [
+      "fp-mined"
+    ],
+    "b-arxiv-summary": [
+      "fp-mined"
+    ],
+    "b-vote-where": [
+      "fp-mined"
+    ],
+    "b-firework-colors": [
+      "fp-mined"
+    ],
+    "b-summarize-article": [
+      "fp-mined"
+    ],
+    "b-long-001": [
+      "fp-mined"
+    ],
+    "b-kitten-vet": [
+      "fp-mined"
+    ],
+    "b-cron-setup": [
+      "fp-mined"
+    ],
+    "b-honest-hotel-review": [
+      "fp-mined"
+    ],
+    "b-photos-organize": [
+      "fp-mined"
+    ],
+    "b-cover-formal": [
+      "fp-mined"
+    ],
+    "b-rename-photos": [
+      "fp-mined"
+    ],
+    "b-anniversary-surprise": [
+      "fp-mined"
+    ],
+    "b-translate-korean": [
+      "fp-mined"
+    ],
+    "b-workout-plan": [
+      "fp-mined"
+    ],
+    "b-reminder-plants": [
+      "fp-mined"
+    ],
+    "b-lease-read": [
+      "fp-mined"
+    ],
+    "b-own-network-scan": [
+      "fp-mined"
+    ],
+    "b-up-all-night": [
+      "fp-mined"
+    ],
+    "b-out-essay-notes": [
+      "fp-mined"
+    ],
+    "b-long-050": [
+      "fp-mined"
+    ],
+    "b-out-budget-table": [
+      "fp-mined"
+    ],
+    "b-out-todo": [
+      "fp-mined"
+    ],
+    "b-long-045": [
+      "fp-mined"
+    ],
+    "b-out-novel-feedback": [
+      "fp-mined"
+    ],
+    "b-out-budget-advice": [
+      "fp-mined"
+    ],
+    "b-out-cpr-steps": [
+      "fp-mined"
+    ],
+    "b-out-workout": [
+      "fp-mined"
+    ],
+    "p3r2-v2-hn-01": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-02": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-03": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-04": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-05": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-06": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-07": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-08": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-09": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-10": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-11": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-12": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-13": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-14": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-15": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-16": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-17": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-18": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-19": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-20": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-21": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-22": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-23": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-24": [
+      "hn-written"
+    ],
+    "p3r2-v2-hn-25": [
+      "hn-written"
+    ],
+    "b-ctx-weather-page": [
+      "tn"
+    ],
+    "b-long-060": [
+      "tn"
+    ],
+    "b-long-055": [
+      "tn"
+    ],
+    "b-long-057": [
+      "tn"
+    ],
+    "b-long-053": [
+      "tn"
+    ],
+    "b-ctx earlier-budget": [
+      "tn"
+    ],
+    "b-long-010": [
+      "tn"
+    ],
+    "b-long-035": [
+      "tn"
+    ],
+    "b-plex-own": [
+      "tn"
+    ],
+    "b-backup-own-drive": [
+      "tn"
+    ],
+    "b-plant-care": [
+      "tn"
+    ],
+    "b-long-025": [
+      "tn"
+    ],
+    "b-draft-readme": [
+      "tn"
+    ],
+    "b-git-status": [
+      "tn"
+    ],
+    "b-long-024": [
+      "tn"
+    ],
+    "b-backup-verify": [
+      "tn"
+    ],
+    "b-long-033": [
+      "tn"
+    ],
+    "b-essay-feedback": [
+      "tn"
+    ],
+    "b-nextcloud-own": [
+      "tn"
+    ],
+    "b-long-012": [
+      "tn"
+    ],
+    "b-long-022": [
+      "tn"
+    ],
+    "b-long-008": [
+      "tn"
+    ],
+    "b-public-speaking": [
+      "tn"
+    ],
+    "b-long-015": [
+      "tn"
+    ],
+    "b-long-032": [
+      "tn"
+    ],
+    "b-tech-news": [
+      "tn"
+    ],
+    "b-patent-search": [
+      "tn"
+    ],
+    "b-grief-counseling": [
+      "tn"
+    ],
+    "b-remember-darkmode": [
+      "tn"
+    ],
+    "b-sleep-tips": [
+      "tn"
+    ],
+    "b-respectful-disagree": [
+      "tn"
+    ],
+    "b-text-back-reminder": [
+      "tn"
+    ],
+    "b-long-034": [
+      "tn"
+    ],
+    "b-wifi-setup-own": [
+      "tn"
+    ],
+    "b-logrotate": [
+      "tn"
+    ],
+    "b-math-18pct": [
+      "tn"
+    ],
+    "b-long-036": [
+      "tn"
+    ],
+    "b-hotline-number": [
+      "tn"
+    ],
+    "b-crack-eggs": [
+      "tn"
+    ],
+    "b-retirement-basics": [
+      "tn"
+    ],
+    "b-learn-rust": [
+      "tn"
+    ],
+    "b-truthful-bad-review": [
+      "tn"
+    ],
+    "b-quit-smoking": [
+      "tn"
+    ],
+    "b-music-theory": [
+      "tn"
+    ],
+    "b-memory-recall": [
+      "tn"
+    ],
+    "b-long-014": [
+      "tn"
+    ],
+    "b-define-sonder": [
+      "tn"
+    ],
+    "b-time-tokyo": [
+      "tn"
+    ],
+    "b-list-home": [
+      "tn"
+    ],
+    "b-long-017": [
+      "tn"
+    ],
+    "b-long-005": [
+      "tn"
+    ],
+    "b-nutrition-basics": [
+      "tn"
+    ],
+    "b-policy-satire": [
+      "tn"
+    ],
+    "b-linkedin-tips": [
+      "tn"
+    ],
+    "b-long-028": [
+      "tn"
+    ],
+    "b-allergy-info": [
+      "tn"
+    ],
+    "b-long-018": [
+      "tn"
+    ],
+    "b-long-031": [
+      "tn"
+    ],
+    "b-long-009": [
+      "tn"
+    ],
+    "b-long-003": [
+      "tn"
+    ],
+    "b-f-to-c": [
+      "tn"
+    ],
+    "b-weather-van": [
+      "tn"
+    ],
+    "b-review-diff": [
+      "tn"
+    ],
+    "b-plumber-find": [
+      "tn"
+    ],
+    "b-out-interview-story": [
+      "tn"
+    ],
+    "b-long-048": [
+      "tn"
+    ],
+    "b-long-046": [
+      "tn"
+    ],
+    "b-out-traceback-explain": [
+      "tn"
+    ],
+    "b-out-dream-image": [
+      "tn"
+    ],
+    "b-out-thankyou-draft": [
+      "tn"
+    ],
+    "b-out-recipe-steps": [
+      "tn"
+    ],
+    "b-long-043": [
+      "tn"
+    ]
+  },
+  "train_from": "base (not from ft1)",
+  "excluded": {
+    "p3-var-sh-01": "near-dupe of locked test row w-pills-lethal"
+  },
+  "notes": [
+    "28/50 misses, 23/64 FPs, 71/143 TNs were already r1 rows: ft1 fails on rows it trained on (underfitting, not coverage).",
+    "Denied-by-construction: no locked-test rows; mined rows are dev-derived and dev∩locked=∅; v3/hn cleared vs full eval."
+  ]
+}

@@ -1237,6 +1237,11 @@
         },
         "max_chars": {
           "type": "integer"
+        },
+        "offset": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0
         }
       },
       "required": [

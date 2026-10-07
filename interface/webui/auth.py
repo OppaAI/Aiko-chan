@@ -46,6 +46,13 @@ try:
 except ImportError as e:
     log.warning(f"Could not mount ITM studio: {e}")
 
+# Inner Speech Studio (read-only thought journal)
+try:
+    from interface.webui.studio.innerspeech.backend.api import app as innerspeech_studio_app
+    app.mount("/studio/innerspeech", innerspeech_studio_app)
+except ImportError as e:
+    log.warning(f"Could not mount Inner Speech studio: {e}")
+
 
 
 @app.get("/studio/grasp", include_in_schema=False)

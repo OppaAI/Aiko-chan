@@ -707,6 +707,19 @@ class EdgeCognitiveState:
         self._inner_speech = (
             InnerSpeech(user_id=self._identity or None) if InnerSpeech is not None else None
         )
+        # Learned policies: behavior as data. Trigger bus inputs (idle,
+        # sensors later) match versioned policies; Oppa teaches via chat.
+        try:
+            from cognition.policy import PolicyEngine, trigger_bus
+            self._policy = PolicyEngine(user_id=self._identity or None)
+            _bus = trigger_bus()
+            _bus.register("event", lambda r, c="", _s=self: _s._policy_trigger("event", r, c))
+            _bus.register("sensor", lambda r, c="", _s=self: _s._policy_trigger("sensor", r, c))
+        except Exception:
+            self._policy = None
+        self._policy_echo = ""
+        self._last_user_t = time.time()
+        self._last_idle_bucket = -1
         # Motion director: maps conversation events to avatar gestures.
         self._motion_director = MotionDirector() if MotionDirector is not None else None
         self._last_tick = time.monotonic()
@@ -750,6 +763,7 @@ class EdgeCognitiveState:
         if not user and not assistant:
             return
         inner_turn = None  # deferred inner-speech observe args; runs after unlock
+        self._last_user_t = time.time()
         with self._lock:
             self._scrub_style_junk()
             self._apply_explicit_preferences(user)
@@ -852,6 +866,13 @@ class EdgeCognitiveState:
                             bridge.play_gesture(gesture)
             except Exception:
                 pass
+        # Deferred policy teaching: did Oppa teach (or confirm) a behavior?
+        # Extraction runs on a daemon thread; the confirmation echo rides
+        # the next turn's prompt via policy_echo().
+        try:
+            self._policy_turn(user)
+        except Exception:
+            pass
         # Deferred inner-speech observe: lock released, heavy LLM/embedding
         # work runs on its own daemon thread inside observe().
         if inner_turn is not None and self._inner_speech is not None:
@@ -865,6 +886,74 @@ class EdgeCognitiveState:
                 )
             except Exception:
                 pass
+
+    # ── learned policies ─────────────────────────────────────────────
+
+    def _policy_trigger(self, kind: str, readings: dict, context: str = "") -> None:
+        """Trigger-bus entry: match a policy and dispatch its action."""
+        try:
+            if self._policy is None:
+                return
+            policy = self._policy.lookup(kind, readings, context)
+            if policy is not None:
+                self._policy.dispatch(policy, readings)
+        except Exception:
+            pass
+
+    _POLICY_AFFIRM_RE = None  # compiled lazily
+
+    def _policy_turn(self, user_text: str) -> None:
+        """Post-turn: confirm pending proposals or detect new teaching."""
+        if self._policy is None:
+            return
+        import re as _re
+        # 1. Affirmation of the most recent pending proposal?
+        pending = self._policy.pending_proposals()
+        if pending and _re.match(
+            r"^(yes|yeah|yep|ok|okay|sure|correct|do it|confirmed|go ahead)\b",
+            (user_text or "").strip().lower(),
+        ):
+            # Oldest-first expiry is handled in pending_proposals().
+            prop_id = pending[-1][0]
+            policy = self._policy.confirm_proposal(prop_id)
+            if policy is not None:
+                with self._lock:
+                    self._policy_echo = (
+                        f"Done — '{policy['name']}' v{policy['version']} is active. "
+                        f"I'll {policy['action']} when the trigger fires."
+                    )
+            return
+        # 2. New teaching? Heuristic pre-filter, then LLM extraction async.
+        try:
+            from cognition.policy import looks_like_teaching
+        except Exception:
+            return
+        if looks_like_teaching(user_text or ""):
+            import threading as _threading
+
+            _threading.Thread(
+                target=self._extract_teaching_async,
+                args=(user_text,), daemon=True,
+                name="policy-extract",
+            ).start()
+
+    def _extract_teaching_async(self, user_text: str) -> None:
+        try:
+            from cognition.policy import extract_teaching
+
+            draft = extract_teaching(user_text)
+            if draft is not None and self._policy is not None:
+                prop_id, text = self._policy.propose(draft)
+                with self._lock:
+                    self._policy_echo = text
+        except Exception:
+            pass
+
+    def policy_echo(self) -> str:
+        """Pop a pending policy confirmation for the next turn's prompt."""
+        with self._lock:
+            echo, self._policy_echo = self._policy_echo, ""
+        return echo
 
     def clear(self) -> None:
         """Wipe all dormant state. Engram erasure (rare; identity reset only)."""
@@ -1335,6 +1424,17 @@ class EdgeCognitiveState:
                     thought = self._inner_speech.spontaneous_recall()
                     if thought:
                         self._inner_speech.queue_aside(thought)
+            except Exception:
+                pass
+            # Idle trigger for learned policies (5-min buckets to avoid spam).
+            try:
+                idle_s = max(0.0, time.time() - self._last_user_t)
+                bucket = int(idle_s // 300)
+                if bucket != self._last_idle_bucket:
+                    self._last_idle_bucket = bucket
+                    from cognition.policy import trigger_bus
+                    trigger_bus().emit("event", {"idle_seconds": idle_s},
+                                       f"oppa idle {idle_s / 60:.0f} min")
             except Exception:
                 pass
             return {"elapsed_s": round(elapsed, 3), "energy": round(self._energy, 3), "uncertainty": round(self._uncertainty, 3)}

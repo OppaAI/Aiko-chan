@@ -707,6 +707,31 @@ class EdgeCognitiveState:
         self._inner_speech = (
             InnerSpeech(user_id=self._identity or None) if InnerSpeech is not None else None
         )
+        # Learned policies: behavior as data. Trigger bus inputs (idle,
+        # sensors later) match versioned policies; Oppa teaches via chat.
+        try:
+            from cognition.policy import PolicyEngine, trigger_bus
+            self._policy = PolicyEngine(user_id=self._identity or None)
+            # Bus handlers are scoped to this identity: another user's
+            # sensor event can never fire this state's policies.
+            _bus = trigger_bus()
+            uid = self._identity or None
+            self._policy_bus_fns = {
+                "event": lambda r, c="", _s=self: _s._policy_trigger("event", r, c),
+                "sensor": lambda r, c="", _s=self: _s._policy_trigger("sensor", r, c),
+            }
+            for _kind, _fn in self._policy_bus_fns.items():
+                _bus.register(_kind, _fn, user_id=uid)
+            _ensure_idle_poller()
+        except Exception:
+            self._policy = None
+            self._policy_bus_fns = {}
+        self._policy_echo = ""          # pending confirmation text (peeked, not popped)
+        self._policy_echo_prop = None   # proposal id the pending echo belongs to
+        self._peeked_prop = None        # proposal id actually injected into the prompt
+        self._delivered_proposal_id = None  # echo confirmed delivered this turn
+        self._last_user_t = time.time()
+        self._last_idle_bucket = -1
         # Motion director: maps conversation events to avatar gestures.
         self._motion_director = MotionDirector() if MotionDirector is not None else None
         self._last_tick = time.monotonic()
@@ -750,6 +775,7 @@ class EdgeCognitiveState:
         if not user and not assistant:
             return
         inner_turn = None  # deferred inner-speech observe args; runs after unlock
+        self._last_user_t = time.time()
         with self._lock:
             self._scrub_style_junk()
             self._apply_explicit_preferences(user)
@@ -852,6 +878,13 @@ class EdgeCognitiveState:
                             bridge.play_gesture(gesture)
             except Exception:
                 pass
+        # Deferred policy teaching: did Oppa teach (or confirm) a behavior?
+        # Extraction runs on a daemon thread; the confirmation echo rides
+        # the next turn's prompt via policy_echo().
+        try:
+            self._policy_turn(user)
+        except Exception:
+            pass
         # Deferred inner-speech observe: lock released, heavy LLM/embedding
         # work runs on its own daemon thread inside observe().
         if inner_turn is not None and self._inner_speech is not None:
@@ -865,6 +898,145 @@ class EdgeCognitiveState:
                 )
             except Exception:
                 pass
+
+    # ── learned policies ─────────────────────────────────────────────
+
+    def _policy_trigger(self, kind: str, readings: dict, context: str = "") -> None:
+        """Trigger-bus entry: match a policy and dispatch its action."""
+        try:
+            if self._policy is None:
+                return
+            policy = self._policy.lookup(kind, readings, context)
+            if policy is not None:
+                self._policy.dispatch(policy, readings)
+        except Exception:
+            pass
+
+    _POLICY_AFFIRM_RE = None  # compiled lazily
+
+    def _policy_turn(self, user_text: str) -> None:
+        """Post-turn: confirm pending proposals or detect new teaching."""
+        if self._policy is None:
+            return
+        import re as _re
+        # The delivery window lasts exactly one turn: any turn consumes it,
+        # so a "yes" two turns later can't confirm a stale proposal.
+        with self._lock:
+            delivered = self._delivered_proposal_id
+            self._delivered_proposal_id = None
+        # 1. Affirmation — but only of the proposal whose echo was actually
+        # delivered last turn. A "yes" to anything else must not confirm
+        # a policy Oppa never saw.
+        pending = self._policy.pending_proposals()
+        if pending and _re.match(
+            r"^(yes|yeah|yep|ok|okay|sure|correct|do it|confirmed|go ahead)\b",
+            (user_text or "").strip().lower(),
+        ):
+            prop_id = pending[-1][0]
+            if delivered is not None and prop_id == delivered:
+                policy = self._policy.confirm_proposal(prop_id)
+                if policy is not None:
+                    with self._lock:
+                        self._policy_echo = (
+                            f"Done — '{policy['name']}' v{policy['version']} is active. "
+                            f"I'll {policy['action']} when the trigger fires."
+                        )
+                        self._policy_echo_prop = None  # terminal echo, no proposal
+            return
+        # 2. New teaching? Heuristic pre-filter, then LLM extraction async.
+        try:
+            from cognition.policy import looks_like_teaching
+        except Exception:
+            return
+        if looks_like_teaching(user_text or ""):
+            import threading as _threading
+
+            _threading.Thread(
+                target=self._extract_teaching_async,
+                args=(user_text,), daemon=True,
+                name="policy-extract",
+            ).start()
+
+    def _extract_teaching_async(self, user_text: str) -> None:
+        try:
+            from cognition.policy import extract_teaching
+
+            draft = extract_teaching(user_text)
+            if draft is not None and self._policy is not None:
+                prop_id, text = self._policy.propose(draft)
+                with self._lock:
+                    self._policy_echo = text
+                    self._policy_echo_prop = prop_id
+        except Exception:
+            pass
+
+    def peek_policy_echo(self) -> str:
+        """Read the pending policy confirmation WITHOUT clearing it.
+
+        The echo stays pending until the turn that carried it completes
+        successfully (see ack_policy_echo) — a failed LLM call must not
+        swallow the "say yes to confirm" text. Records which proposal id
+        was peeked so ack can't clear a newer echo that arrived mid-turn.
+        """
+        with self._lock:
+            self._peeked_prop = self._policy_echo_prop
+            return self._policy_echo
+
+    def ack_policy_echo(self) -> None:
+        """Mark the peeked echo delivered after a successful turn.
+
+        Only acknowledges the exact echo (proposal id) that rode this
+        turn's prompt: if a newer echo arrived mid-turn, it stays pending
+        for the next turn instead of being swallowed. Only a delivered
+        proposal id can be confirmed by a later "yes", so Oppa can never
+        confirm a policy he wasn't shown.
+        """
+        with self._lock:
+            if (self._policy_echo
+                    and self._policy_echo_prop == self._peeked_prop):
+                self._delivered_proposal_id = self._policy_echo_prop
+                self._policy_echo = ""
+                self._policy_echo_prop = None
+            self._peeked_prop = None
+
+    def _idle_poll(self) -> None:
+        """Background idle check: fire learned policies on bucket change.
+
+        Runs on the poller thread — never holds the state lock across the
+        policy lookup (which may do embedding HTTP), and never routes the
+        state's own idle event through the global bus.
+        """
+        if self._policy is None:
+            return
+        try:
+            idle_s = max(0.0, time.time() - self._last_user_t)
+            bucket = int(idle_s // 300)
+            with self._lock:
+                changed = bucket != self._last_idle_bucket
+                self._last_idle_bucket = bucket
+            if changed and bucket > 0:
+                self._policy_trigger(
+                    "event", {"idle_seconds": idle_s},
+                    f"oppa idle {idle_s / 60:.0f} min",
+                )
+        except Exception:
+            pass
+
+    def _on_evict(self) -> None:
+        """State is leaving the identity cache: detach from the trigger bus
+        and close the policy store so dead states can't fire or leak."""
+        try:
+            from cognition.policy import trigger_bus
+            _bus = trigger_bus()
+            for _kind, _fn in (self._policy_bus_fns or {}).items():
+                _bus.unregister(_kind, _fn)
+        except Exception:
+            pass
+        try:
+            if self._policy is not None:
+                self._policy.close()
+        except Exception:
+            pass
 
     def clear(self) -> None:
         """Wipe all dormant state. Engram erasure (rare; identity reset only)."""
@@ -2239,6 +2411,41 @@ class EdgeCognitiveState:
 _states: OrderedDict[str, EdgeCognitiveState] = OrderedDict()
 _states_lock = threading.Lock()
 
+_IDLE_POLL_S = 60.0
+_idle_poller_started = False
+
+
+def _ensure_idle_poller() -> None:
+    """Start the single background idle poller (idempotent).
+
+    The turn-bound continuous_tick only runs when Oppa talks, so true
+    idle detection needs its own cadence. Every 60s each live state
+    checks its idle bucket; on change it fires its own _policy_trigger
+    directly (no bus round-trip, no state lock held during lookup).
+    """
+    global _idle_poller_started
+    with _states_lock:
+        if _idle_poller_started:
+            return
+        _idle_poller_started = True
+
+    def _loop() -> None:
+        while True:
+            try:
+                time.sleep(_IDLE_POLL_S)
+                with _states_lock:
+                    states = list(_states.values())
+                for st in states:
+                    try:
+                        st._idle_poll()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_loop, daemon=True, name="idle-poller")
+    t.start()
+
 
 def flush_all_persist() -> None:
     """Explicitly flush all pending persists (call at run-end)."""
@@ -2254,7 +2461,11 @@ def for_identity(identity: str) -> EdgeCognitiveState:
             state.load_persistent()
         _states[key] = state
         while len(_states) > EDGE_COGNITION_MAX_IDENTITIES:
-            _states.popitem(last=False)
+            _victim = _states.popitem(last=False)[1]
+            try:
+                _victim._on_evict()
+            except Exception:
+                pass
         return state
 
 

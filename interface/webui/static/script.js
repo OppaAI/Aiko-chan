@@ -189,6 +189,10 @@ function switchToChat() {
 // ── chat rendering ────────────────────────────────────────────────────────
 let streamActive = false;
 let streamRawText = '';
+// Inner-thoughts box: thinking tags stripped from her spoken reply arrive as
+// {type:'thinking'} events and render in a collapsible box above her caption
+// for this turn only. Cleared when a new turn starts.
+let pendingThinking = "";
 let streamExprApplied = null;  // expression name applied once per stream turn
 let sourcesRow = null;
 let filesRow = null;
@@ -285,7 +289,27 @@ function captionRender(dialogue, emoji) {
   captionTextEl.scrollTop = captionTextEl.scrollHeight;
   captionShow();
 }
+function renderThinkingBox() {
+  if (!captionBox) return;
+  const old = document.getElementById('thinking-box');
+  if (old) old.remove();
+  if (!pendingThinking) return;
+  const details = document.createElement('details');
+  details.id = 'thinking-box';
+  details.className = 'thinking-box';
+  details.open = true;
+  const summary = document.createElement('summary');
+  summary.textContent = '\u{1F4AD} inner thoughts';
+  const body = document.createElement('div');
+  body.className = 'thinking-body';
+  body.textContent = pendingThinking;
+  details.appendChild(summary);
+  details.appendChild(body);
+  captionBox.insertBefore(details, captionBox.firstChild);
+  pendingThinking = "";
+}
 function captionCommit(dialogue, emoji, holdMs = 14000) {
+  renderThinkingBox();
   captionRender(dialogue, emoji);
   clearTimeout(captionHideTimer);
   captionHideTimer = setTimeout(() => {
@@ -1176,6 +1200,9 @@ function submitInput() {
   if (!text || !wsReady()) return;
   window.dispatchEvent(new CustomEvent('aiko:msg-sent'));
   clearAuxRows();
+  pendingThinking = "";
+  const staleThink = document.getElementById('thinking-box');
+  if (staleThink) staleThink.remove();
   flushStream();
   showTypingIndicator();
   ws.send(JSON.stringify({ type: 'user_input', text }));
@@ -1372,6 +1399,9 @@ function connectWS() {
         }
         break;
       case 'commit': flushStream(); hideTypingIndicator(); break;
+      case 'thinking':
+        if (msg.text) pendingThinking += (pendingThinking ? "\n" : "") + msg.text;
+        break;
       case 'tool': toolStatus.textContent = msg.status ? `  ⚙  ${msg.status}` : ''; break;
       case 'vitals': applyVitals(msg); break;
       case 'voice':

@@ -434,6 +434,26 @@ def dream_and_post(
     if display_name is None:
         display_name = current_display_name()
 
+    # Midnight join: the day's inner speech folds into the dream. Unprocessed
+    # experience becomes consolidated memory; source rows are marked done.
+    # (The dream is the garbage collector — no separate decay logic.)
+    inner_ids: list[str] = []
+    try:
+        from cognition.memory.inner_speech_store import InnerSpeechStore
+
+        _store = InnerSpeechStore()
+        _day_start = date.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        _thoughts = _store.unconsolidated_since(_day_start)
+        if _thoughts:
+            _lines = [
+                f"- [{t.get('kind', 'reflection')}] {t.get('text', '')}".strip()
+                for t in _thoughts
+            ]
+            prose = prose + "\n\nMy private thoughts today (never spoken aloud):\n" + "\n".join(_lines[:40])
+            inner_ids = [t["id"] for t in _thoughts if t.get("id")]
+    except Exception as e:
+        log.debug("dream: inner-speech join failed: %s", e)
+
     feelings = _generate_feelings(prose, display_name)
     log.info(f"Feelings generated: {feelings[:80]}...")
 
@@ -476,6 +496,16 @@ def dream_and_post(
         pushed = True
 
     log.info(f"Dream done — slug={slug}, feelings={len(feelings)} chars, image={image_generated}, pushed={pushed}, duration={duration}s")
+
+    # The day's inner thoughts have been folded into the dream — mark them
+    # consolidated so future recall treats them as lived-in, not fresh.
+    if inner_ids:
+        try:
+            from cognition.memory.inner_speech_store import InnerSpeechStore
+
+            InnerSpeechStore().mark_consolidated(inner_ids)
+        except Exception as e:
+            log.debug("dream: mark_consolidated failed: %s", e)
 
     return {
         "success":         True,

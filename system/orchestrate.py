@@ -989,6 +989,11 @@ def run_session(ui, args) -> None:
         # Never buffered for karaoke/TTS reveal — these aren't spoken
         # content. Forward straight to the UI, which intercepts and
         # renders its own markers (see _is_status_marker docstring above).
+        if stripped.startswith("__THINKING__:"):
+            # Inner-thoughts side channel: the WebUI renders it as a thinking
+            # box above the caption; the TUI has no such surface, so drop it
+            # here rather than letting it leak into streamed text.
+            return
         if _is_status_marker(stripped):
             ui.stream_token(token)
             return

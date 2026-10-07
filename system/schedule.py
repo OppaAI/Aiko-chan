@@ -2650,6 +2650,16 @@ class ScheduleRunner:
                     continue
                 completed_at = bioclock.local_now(tz_name)
                 job["last_ran_at"] = completed_at.isoformat()
+                # Inner-speech write path: reflect on the completed job so
+                # future similar tasks benefit. Daemon thread — never blocks
+                # the sequential job loop.
+                try:
+                    _reflect_on_completed_job(
+                        user_id,
+                        event.title or event.id or "scheduled job",
+                    )
+                except Exception:
+                    pass
                 if job.get("frequency") == "once":
                     job["enabled"] = False
                 else:
@@ -2906,3 +2916,22 @@ def start_scheduler(
     return scheduler
 
 
+
+
+def _reflect_on_completed_job(user_id: str, job_title: str) -> None:
+    """Fire-and-forget inner-speech reflection on a completed scheduled job."""
+    import threading as _threading
+
+    def _run() -> None:
+        try:
+            from cognition.attention import for_identity
+
+            state = for_identity(user_id)
+            inner = getattr(state, "_inner_speech", None)
+            if inner is not None:
+                inner.reflect_on_task(f"scheduled job: {job_title}", outcome="completed")
+        except Exception:
+            pass
+
+    t = _threading.Thread(target=_run, daemon=True, name="inner-speech-reflect")
+    t.start()

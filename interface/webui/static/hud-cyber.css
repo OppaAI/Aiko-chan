@@ -1316,3 +1316,45 @@ html[data-theme="light"] #stage-status #stage-status-text { color: #4E4238 !impo
 html[data-theme="light"] .sg-name { color: #8A7A66 !important; text-shadow: none !important; }
 html[data-theme="light"] #stage-growth .sg-row { text-shadow: none !important; }
 html[data-theme="light"] #focus-progress-label { text-shadow: none !important; }
+
+/* ── Inner-thoughts box: thinking tags stripped from her spoken reply render
+   in a collapsible box above the caption for the turn. Hidden with the caption. */
+#thinking-box {
+  margin: 0 0 8px 0;
+  padding: 8px 12px;
+  max-width: 420px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(230, 225, 255, 0.85);
+  background: rgba(40, 32, 72, 0.72);
+  border: 1px solid rgba(150, 130, 220, 0.35);
+  border-radius: 12px;
+  backdrop-filter: blur(6px);
+}
+#thinking-box > summary {
+  cursor: pointer;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: rgba(190, 175, 240, 0.95);
+  list-style: none;
+  user-select: none;
+}
+#thinking-box > summary::-webkit-details-marker { display: none; }
+#thinking-box > summary::before {
+  content: '▸ ';
+  color: rgba(150, 130, 220, 0.8);
+}
+#thinking-box[open] > summary::before { content: '▾ '; }
+#thinking-box .thinking-body {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(150, 130, 220, 0.25);
+  white-space: pre-wrap;
+  font-style: italic;
+}
+html[data-theme="light"] #thinking-box {
+  background: rgba(255, 255, 255, 0.92) !important;
+  border: 1px solid rgba(150, 130, 200, 0.4) !important;
+  color: #5A4E6E !important;
+}
+html[data-theme="light"] #thinking-box > summary { color: #7A68A6 !important; }

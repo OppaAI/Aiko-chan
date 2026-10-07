@@ -175,6 +175,11 @@ class AikoSimpleCLI:
             self.add_message('sys', _c(_CTX_COLORS["thinking"], f"[thinking] step {self._agent_step}"))
             return
 
+        if stripped.startswith("__THINKING__:"):
+            payload = stripped[len("__THINKING__:"):].strip()
+            self.add_message('sys', _c(_CTX_COLORS["thinking"], f"[inner] {_ctx_preview(payload, 300)}"))
+            return
+
         if stripped.startswith("__SEARCHING__:"):
             query = stripped[len("__SEARCHING__:"):].strip()
             self.add_message('sys', _c(_CTX_COLORS["web"], f"[web] {_ctx_preview(query, 300)}"))

@@ -810,7 +810,13 @@ class AikoWeb:
     def stream_token(self, token: str) -> None:
         """Stream a single LLM token or special status marker to the current user."""
         if token.startswith("__THINKING__"):
-            self._broadcast_to_current_user({"type": "tool", "status": "thinking…"})
+            payload = token[len("__THINKING__"):].lstrip(":").strip()
+            if payload:
+                # Inner-thoughts box content: thinking tags stripped from the
+                # spoken reply. The frontend renders this above the caption.
+                self._broadcast_to_current_user({"type": "thinking", "text": payload})
+            else:
+                self._broadcast_to_current_user({"type": "tool", "status": "thinking…"})
             self._broadcast_to_current_user({"type": "pose", "name": "thinking", "active": True})
             return
         if token.startswith("__TOOL__:"):

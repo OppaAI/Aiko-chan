@@ -702,8 +702,11 @@ class EdgeCognitiveState:
         # Created after _lock so it can share the same RLock.
         self._subliminal = SubliminalLayer(lock=self._lock) if SubliminalLayer is not None else None
         self._intuitions: deque[str] = self._subliminal._intuitions if self._subliminal is not None else deque(maxlen=4)  # alias for compat
-        # Inner voice: the conscious stream of thought (Jetson-clean split).
-        self._inner_speech = InnerSpeech() if InnerSpeech is not None else None
+        # Inner speech: the conscious stream of thought. Bound to this
+        # state's identity so per-user thought partitions stay separate.
+        self._inner_speech = (
+            InnerSpeech(user_id=self._identity or None) if InnerSpeech is not None else None
+        )
         # Motion director: maps conversation events to avatar gestures.
         self._motion_director = MotionDirector() if MotionDirector is not None else None
         self._last_tick = time.monotonic()
@@ -746,6 +749,7 @@ class EdgeCognitiveState:
         assistant = " ".join((assistant or "").split())[:360]
         if not user and not assistant:
             return
+        inner_turn = None  # deferred inner-speech observe args; runs after unlock
         with self._lock:
             self._scrub_style_junk()
             self._apply_explicit_preferences(user)
@@ -811,23 +815,27 @@ class EdgeCognitiveState:
                     self._subliminal.broadcast_vrm()
             except Exception:
                 pass
-            # Inner speech update: gate this turn for genuine thought.
-            # Silent turns cost the gate alone; salient turns recall past
-            # thoughts and think with the LLM, then persist to inner_speech.db.
+            # Inner speech update: gather the signals while holding the lock,
+            # but run observe() AFTER releasing it — the embedding recall +
+            # LLM think can take seconds and must never block the turn path.
+            # (observe() itself keeps only the cheap gate synchronous and
+            # dispatches the heavy work to a daemon thread.)
             try:
                 if self._inner_speech is not None and self._subliminal is not None:
-                    emo, inten = self._subliminal.emotion()
-                    scan = self._subliminal._pre_attentive
-                    self._inner_speech.observe(
-                        user, assistant,
-                        emotion=emo, intensity=inten,
-                        impulse=self._subliminal.impulse(),
-                        cues=scan.cues if scan is not None else {},
-                        recurring_focus=scan.recurring_focus if scan is not None else frozenset(),
-                        lingering=self._subliminal.lingering_dispositions(),
+                    _emo, _inten = self._subliminal.emotion()
+                    _scan = self._subliminal._pre_attentive
+                    inner_turn = (
+                        user,
+                        assistant,
+                        _emo,
+                        _inten,
+                        self._subliminal.impulse(),
+                        dict(_scan.cues) if _scan is not None else {},
+                        _scan.recurring_focus if _scan is not None else frozenset(),
+                        self._subliminal.lingering_dispositions(),
                     )
             except Exception:
-                pass
+                inner_turn = None
             # Reactive avatar motion: the body answers faster than the LLM.
             # A lean-in / clap / bow lands in <100 ms and makes the turn
             # feel instant even while tokens are still generating.
@@ -842,6 +850,19 @@ class EdgeCognitiveState:
                         bridge = webui_bridge()
                         if bridge is not None and hasattr(bridge, "play_gesture"):
                             bridge.play_gesture(gesture)
+            except Exception:
+                pass
+        # Deferred inner-speech observe: lock released, heavy LLM/embedding
+        # work runs on its own daemon thread inside observe().
+        if inner_turn is not None and self._inner_speech is not None:
+            try:
+                _u, _a, _emo, _inten, _imp, _cues, _focus, _ling = inner_turn
+                self._inner_speech.observe(
+                    _u, _a,
+                    emotion=_emo, intensity=_inten,
+                    impulse=_imp, cues=_cues,
+                    recurring_focus=_focus, lingering=_ling,
+                )
             except Exception:
                 pass
 
@@ -1304,13 +1325,15 @@ class EdgeCognitiveState:
             self._uncertainty = max(0.0, self._uncertainty * max(0.0, 1.0 - 0.18 * steps))
             self._energy += (0.5 - self._energy) * min(1.0, 0.12 * steps)
             # Daydream: idle-time subconscious consolidation. Folds the recent
-            # affective weather into slow lingering dispositions and lets the
-            # mind wander — never on the hot path, LLM-free.
+            # affective weather into slow lingering dispositions — pure
+            # signal, LLM-free. Idle pop-ups come from genuine past
+            # thoughts (inner_speech.db), never templates.
             try:
                 if self._subliminal is not None:
                     self._subliminal.daydream()
-                    thought = self._subliminal.spontaneous_thought()
-                    if thought and self._inner_speech is not None:
+                if self._inner_speech is not None:
+                    thought = self._inner_speech.spontaneous_recall()
+                    if thought:
                         self._inner_speech.queue_aside(thought)
             except Exception:
                 pass

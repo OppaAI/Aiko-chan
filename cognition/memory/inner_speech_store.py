@@ -206,7 +206,9 @@ class InnerSpeechStore:
                     ORDER BY v.distance ASC
                     LIMIT ?
                     """,
-                    (blob, overscan, self._user_id, k),
+                    # LIMIT takes the overscan: the recency re-rank below
+                    # needs the extra candidates, then trims to k.
+                    (blob, overscan, self._user_id, overscan),
                 ).fetchall()
         except Exception as e:
             log.debug("inner_speech: knn recall failed: %s", e)

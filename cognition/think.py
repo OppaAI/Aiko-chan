@@ -393,6 +393,10 @@ DEEP_THINK_KNOWLEDGE_LIMIT = env_int("DEEP_THINK_KNOWLEDGE_LIMIT", max(KNOWLEDGE
 # working through the property shims on AikoThink below.
 _reasoning_ctx: contextvars.ContextVar[bool] = contextvars.ContextVar("aiko_reasoning", default=False)
 _deep_think_ctx: contextvars.ContextVar[bool] = contextvars.ContextVar("aiko_deep_think", default=False)
+# Stream-harvested thinking text, scoped per call (not per instance): the
+# shared AikoThink serves concurrent turns, so instance state would let one
+# turn's thinking leak into another's UI box / inner-speech store.
+_thinking_text_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("aiko_thinking_text", default="")
 
 def _resolve_base_tokens() -> int:
     try:
@@ -3436,7 +3440,7 @@ class AikoThink:
             if _tail:
                 full_response.append(_tail)
                 sentence_buffer += _tail
-            self._last_thinking_text = _think_filter.thinking
+            _thinking_text_ctx.set(_think_filter.thinking)
             _drain_sentence_buffer(final=True)
             _latency.mark("final_token")
             text = "".join(full_response).strip()
@@ -3641,8 +3645,8 @@ class AikoThink:
         # path / safety net). Extracted thinking goes to the UI thinking box via
         # the __THINKING__ channel — it must never be spoken, shown as chat
         # text, or stored as her words.
-        stream_thinking = (getattr(self, "_last_thinking_text", "") or "").strip()
-        self._last_thinking_text = ""
+        stream_thinking = (_thinking_text_ctx.get() or "").strip()
+        _thinking_text_ctx.set("")
         tag_thinking, draft = _split_thinking(draft)
         thinking = "\n".join(p for p in (stream_thinking, tag_thinking) if p).strip()
         if thinking and token_callback:

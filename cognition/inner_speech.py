@@ -90,6 +90,9 @@ class InnerSpeech:
         self._last_intensity = 0.4
         self._last_think_ts = 0.0
         self._last_snapshot: dict[str, Any] = {}
+        self._think_in_flight = False      # one background think at a time
+        self._surfaced_ids: set[str] = set()  # db thoughts already popped up
+        self._last_spont_t = -1800.0          # idle pop-ups: start "due"
 
     # ── lazy resources ─────────────────────────────────────────────
 
@@ -228,8 +231,10 @@ class InnerSpeech:
     ) -> None:
         """Fold one turn into inner speech.
 
-        Same signature as the old InnerVoice.observe: gate the turn, and only
-        on salient turns recall past thoughts + think genuinely + persist.
+        The salience gate stays synchronous (microseconds). On salient turns
+        the heavy work — embedding recall, LLM think, db persist — is
+        dispatched to a daemon thread so the caller's turn path is never
+        blocked. At most one background think runs at a time.
         Silent turns cost the gate alone.
         """
         try:
@@ -242,47 +247,70 @@ class InnerSpeech:
             s = 0.0
         with self._lock:
             self._last_intensity = intensity if isinstance(intensity, (int, float)) else 0.4
-        if s < _salience_threshold():
-            self._update_snapshot(s, emotion=emotion, intensity=intensity,
-                                  impulse=impulse, focus=recurring_focus, thought=None)
-            return
-        # Salient: recall, think, persist.
-        recalled: list[str] = []
-        try:
-            query = f"{user_text}\n{assistant_text}"
-            for r in self._get_store().recall(query, k=3):
-                if r.get("text"):
-                    recalled.append(r["text"])
-        except Exception as e:
-            log.debug("inner_speech: recall failed: %s", e)
-        with self._lock:
-            self._recalled = recalled[:3]
-        thoughts: list[str] = []
-        try:
-            thoughts = self.think(
-                user_text, assistant_text,
-                emotion=emotion, intensity=intensity, impulse=impulse,
-                recurring_focus=recurring_focus, recalled=recalled,
-            )
-        except Exception as e:
-            log.debug("inner_speech: think failed: %s", e)
-        with self._lock:
-            for t in thoughts:
-                if not self._thread or self._thread[-1] != t:
-                    self._thread.append(t)
-            self._thread = self._thread[-self._THREAD_KEEP:]
-            self._last_think_ts = time.time()
-        # Persist genuine thoughts for future recall + midnight consolidation.
-        if thoughts:
-            try:
-                store = self._get_store()
-                for t in thoughts:
-                    store.write(t, kind="reflection", source="turn")
-            except Exception as e:
-                log.debug("inner_speech: persist failed: %s", e)
+            in_flight = self._think_in_flight
+            if s >= _salience_threshold() and not in_flight:
+                self._think_in_flight = True
+        # Snapshot updates synchronously — the fly reads it every turn.
         self._update_snapshot(s, emotion=emotion, intensity=intensity,
-                              impulse=impulse, focus=recurring_focus,
-                              thought=thoughts[0] if thoughts else None)
+                              impulse=impulse, focus=recurring_focus, thought=None)
+        if s < _salience_threshold() or in_flight:
+            return
+        # Salient: heavy work off the caller's thread.
+        t = threading.Thread(
+            target=self._think_async,
+            args=(user_text, assistant_text, s, emotion, intensity, impulse,
+                  tuple(sorted(recurring_focus)) if recurring_focus else ()),
+            daemon=True,
+            name="inner-speech-think",
+        )
+        t.start()
+
+    def _think_async(self, user_text: str, assistant_text: str, salience: float,
+                     emotion: str, intensity: float, impulse: str,
+                     focus: tuple) -> None:
+        """Background recall + think + persist for one salient turn."""
+        try:
+            recalled: list[str] = []
+            try:
+                query = f"{user_text}\n{assistant_text}"
+                for r in self._get_store().recall(query, k=3):
+                    if r.get("text"):
+                        recalled.append(r["text"])
+            except Exception as e:
+                log.debug("inner_speech: recall failed: %s", e)
+            with self._lock:
+                self._recalled = recalled[:3]
+            thoughts: list[str] = []
+            try:
+                thoughts = self.think(
+                    user_text, assistant_text,
+                    emotion=emotion, intensity=intensity, impulse=impulse,
+                    recurring_focus=set(focus), recalled=recalled,
+                )
+            except Exception as e:
+                log.debug("inner_speech: think failed: %s", e)
+            with self._lock:
+                for t in thoughts:
+                    if not self._thread or self._thread[-1] != t:
+                        self._thread.append(t)
+                self._thread = self._thread[-self._THREAD_KEEP:]
+                self._last_think_ts = time.time()
+                self._think_in_flight = False
+            # Persist genuine thoughts for future recall + midnight consolidation.
+            if thoughts:
+                try:
+                    store = self._get_store()
+                    for t in thoughts:
+                        store.write(t, kind="reflection", source="turn")
+                except Exception as e:
+                    log.debug("inner_speech: persist failed: %s", e)
+            self._update_snapshot(salience, emotion=emotion, intensity=intensity,
+                                  impulse=impulse, focus=set(focus),
+                                  thought=thoughts[0] if thoughts else None)
+        except Exception as e:
+            log.debug("inner_speech: _think_async failed: %s", e)
+            with self._lock:
+                self._think_in_flight = False
 
     # ── explicit write paths ───────────────────────────────────────
 
@@ -373,6 +401,38 @@ class InnerSpeech:
                 self._asides = []
         lines.append("</inner_speech>")
         return "\n".join(lines)
+
+    def spontaneous_recall(self) -> str | None:
+        """One genuine idle pop-up: a recent unconsolidated thought, not yet surfaced.
+
+        Replaces the subliminal's template pop-ups. Returns None when there
+        is nothing worth surfacing — silence is a valid outcome.
+        Cooldown: at most one surfacing per 30 minutes.
+        """
+        now = time.monotonic()
+        with self._lock:
+            if now - self._last_spont_t < 1800.0:
+                return None
+            self._last_spont_t = now
+        try:
+            from datetime import datetime, timedelta, timezone
+
+            since = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+            rows = self._get_store().unconsolidated_since(since)
+        except Exception as e:
+            log.debug("inner_speech: spontaneous_recall failed: %s", e)
+            return None
+        with self._lock:
+            for r in reversed(rows):  # most recent first
+                rid = r.get("id")
+                text = (r.get("text") or "").strip()
+                if rid and text and rid not in self._surfaced_ids and len(text) >= 20:
+                    self._surfaced_ids.add(rid)
+                    # Bounded memory of what has surfaced.
+                    if len(self._surfaced_ids) > 200:
+                        self._surfaced_ids = set(list(self._surfaced_ids)[-100:])
+                    return text
+        return None
 
     def queue_aside(self, thought: str) -> None:
         thought = _clip(thought)

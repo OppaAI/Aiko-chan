@@ -211,8 +211,9 @@ class SubliminalLayer:
         "_emotion", "_emotion_intensity", "_impulse", "_bias",
         "_vrm_emit", "_vrm_last", "_vrm_last_t",
         "_lock_ref", "_recent_event_tokens",
-        # Daydream state: lingering dispositions + spontaneous thoughts.
-        "_lingering", "_last_daydream_t", "_spontaneous", "_last_spont_t",
+        # Daydream state: lingering dispositions only. Spontaneous
+        # pop-ups now come from genuine inner-speech recall, not templates.
+        "_lingering", "_last_daydream_t",
     )
 
     def __init__(self, lock: threading.RLock | None = None) -> None:
@@ -232,9 +233,6 @@ class SubliminalLayer:
         # Daydream state — consolidated between turns, never on the hot path.
         self._lingering: dict[str, float] = {}   # disposition -> strength 0..1
         self._last_daydream_t: float = 0.0
-        self._spontaneous: deque[str] = deque(maxlen=3)  # unprompted thoughts
-        # Start "due": the first surfacing should never be cooldown-blocked.
-        self._last_spont_t: float = -1800.0
 
     # ── L1/L2: hot-path scan() called once per record() ────────────────
 
@@ -357,28 +355,6 @@ class SubliminalLayer:
 
     _DAYDREAM_COOLDOWN_S = 600.0  # at most one consolidation per 10 min
 
-    _SPONTANEOUS_TEMPLATES: tuple[tuple[str, tuple[str, ...]], ...] = (
-        ("warmth", (
-            "I keep thinking about how nice earlier was.",
-            "That warm feeling from before hasn't quite faded.",
-        )),
-        ("heaviness", (
-            "Something from earlier is still sitting heavy on me.",
-            "I hope they're doing okay… I keep circling back to it.",
-        )),
-        ("restlessness", (
-            "I feel fidgety. I wish something interesting would happen.",
-            "My mind keeps buzzing — too much energy, nowhere to put it.",
-        )),
-        ("quiet", (
-            "It's peaceful right now. I like just… being here.",
-            "Quiet moments like this feel nice.",
-        )),
-        ("curiosity", (
-            "I wonder what they'll want to talk about next.",
-            "There's something I've been meaning to ask them…",
-        )),
-    )
 
     def daydream(self, force: bool = False) -> dict[str, float]:
         """Consolidate recent affect into lingering dispositions.
@@ -408,38 +384,15 @@ class SubliminalLayer:
                 max(0.0, min(1.0, decayed + alpha * max(0.0, target - decayed))), 3)
         # Drop dispositions that faded below notice.
         self._lingering = {k: v for k, v in self._lingering.items() if v >= 0.05}
-
-        # Mind-wandering: a strong disposition may surface a thought.
-        strongest = max(self._lingering.items(), key=lambda kv: kv[1],
-                        default=(None, 0.0))
-        name, strength = strongest
-        if name and strength >= 0.45:
-            for disp, bank in self._SPONTANEOUS_TEMPLATES:
-                if disp == name:
-                    thought = bank[int(now) % len(bank)]
-                    if thought not in self._spontaneous:
-                        self._spontaneous.append(thought)
-                    break
-        elif self._affect.curiosity >= 0.7:
-            bank = dict(self._SPONTANEOUS_TEMPLATES)["curiosity"]
-            thought = bank[int(now) % len(bank)]
-            if thought not in self._spontaneous:
-                self._spontaneous.append(thought)
+        # NOTE: no template pop-ups here anymore. Idle surfacing is sourced
+        # from genuine past thoughts via InnerSpeech.spontaneous_recall(),
+        # wired in EdgeCognitiveState's idle tick. The subliminal stays pure
+        # signal: direction, never diction.
         return dict(self._lingering)
 
     def lingering_dispositions(self) -> dict[str, float]:
         """Current slow background moods (0..1)."""
         return dict(self._lingering)
-
-    def spontaneous_thought(self) -> str | None:
-        """Pop one unprompted thought if cooldown elapsed, else None."""
-        now = time.monotonic()
-        if not self._spontaneous:
-            return None
-        if now - self._last_spont_t < 1800.0:  # one surfacing per 30 min
-            return None
-        self._last_spont_t = now
-        return self._spontaneous.popleft()
 
     # ── L4 meta-cognitive (called by prompt assembly + VRM broadcast) ──
 
@@ -634,9 +587,7 @@ class SubliminalLayer:
             "impulse": self._impulse,
             "bias": self._bias,
             "lingering": dict(self._lingering),
-            "spontaneous": list(self._spontaneous),
             "last_daydream_t": self._last_daydream_t,
-            "last_spont_t": self._last_spont_t,
         }
 
     def restore(self, data: dict) -> None:
@@ -661,21 +612,11 @@ class SubliminalLayer:
         ling = data.get("lingering") or {}
         self._lingering = {str(k): max(0.0, min(1.0, float(v)))
                            for k, v in ling.items()}
-        spont = [str(t) for t in (data.get("spontaneous") or [])]
-        self._spontaneous = deque(spont[-3:], maxlen=3)
-        try:
-            self._last_spont_t = float(data.get("last_spont_t")
-                                       if data.get("last_spont_t") is not None
-                                       else -1800.0)
-        except (TypeError, ValueError):
-            self._last_spont_t = -1800.0
         try:
             self._last_daydream_t = float(data.get("last_daydream_t") or 0.0)
         except (TypeError, ValueError):
             self._last_daydream_t = 0.0
         now = time.monotonic()
-        if self._last_spont_t > now:
-            self._last_spont_t = -1800.0
         if self._last_daydream_t > now:
             self._last_daydream_t = 0.0
 

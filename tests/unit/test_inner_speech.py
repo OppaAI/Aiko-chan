@@ -98,11 +98,23 @@ def test_gate_fires_on_affect_swing(speech):
 
 # ── observe: silence vs thought ────────────────────────────────────────
 
+import time as _time
+
+
+def _wait_for(fn, timeout=5.0):
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        if fn():
+            return True
+        _time.sleep(0.02)
+    return bool(fn())
+
 
 def test_observe_silent_turn_thinks_nothing(speech, monkeypatch):
     calls = []
     monkeypatch.setattr(speech, "think", lambda *a, **k: calls.append(1) or ["x"])
     speech.observe("ok", "sure")
+    _time.sleep(0.1)  # give any stray thread a chance to (not) run
     assert calls == []
     assert speech.prompt_block() == ""  # no fake thinking, no filler
 
@@ -114,20 +126,57 @@ def test_observe_salient_turn_thinks_and_persists(speech, monkeypatch, store):
     )
     speech.observe("look at these red leaves photos", "wow, beautiful",
                    cues={"question": 1.0}, intensity=0.8)
-    assert "walk this weekend" in speech.latest()
+    assert _wait_for(lambda: "walk this weekend" in speech.latest())
     block = speech.prompt_block()
     assert "<inner_speech>" in block
     assert "</inner_speech>" in block
     assert "<inner_voice>" not in block
     # persisted for future recall
-    rows = store.unconsolidated_since("2000-01-01T00:00:00")
-    assert any("walk this weekend" in r["text"] for r in rows)
+    assert _wait_for(lambda: any(
+        "walk this weekend" in r["text"]
+        for r in store.unconsolidated_since("2000-01-01T00:00:00")
+    ))
 
 
 def test_observe_empty_thinker_result_stays_silent(speech, monkeypatch):
     monkeypatch.setattr(speech, "think", lambda *a, **k: [])
     speech.observe("urgent question?", "", cues={"urgency": 1.0, "question": 1.0})
+    assert _wait_for(lambda: not speech._think_in_flight)
     assert speech.prompt_block() == ""
+
+
+def test_observe_never_blocks_caller(speech, monkeypatch):
+    import threading
+
+    started = threading.Event()
+
+    def slow_think(*a, **k):
+        started.set()
+        _time.sleep(2.0)
+        return ["slow thought"]
+
+    monkeypatch.setattr(speech, "think", slow_think)
+    t0 = _time.time()
+    speech.observe("urgent question?", "", cues={"urgency": 1.0, "question": 1.0})
+    elapsed = _time.time() - t0
+    assert elapsed < 1.0  # gate sync, heavy work on daemon thread
+    assert started.wait(timeout=5.0)
+    assert _wait_for(lambda: "slow thought" in speech.latest(), timeout=8.0)
+
+
+def test_observe_coalesces_concurrent_thinks(speech, monkeypatch):
+    calls = []
+
+    def counting_think(*a, **k):
+        calls.append(1)
+        _time.sleep(0.3)
+        return ["t"]
+
+    monkeypatch.setattr(speech, "think", counting_think)
+    speech.observe("urgent one?", "", cues={"urgency": 1.0, "question": 1.0})
+    speech.observe("urgent two?", "", cues={"urgency": 1.0, "question": 1.0})
+    assert _wait_for(lambda: not speech._think_in_flight, timeout=8.0)
+    assert len(calls) == 1  # second salient turn skipped while one in flight
 
 
 # ── recall ─────────────────────────────────────────────────────────────
@@ -159,9 +208,29 @@ def test_recall_never_leaves_the_inner_layer(speech, monkeypatch, store):
     store.write("A private musing about the weekend.", kind="reflection")
     monkeypatch.setattr(speech, "think", lambda *a, **k: ["Noted internally."])
     speech.observe("weekend plans?", "", cues={"question": 1.0, "urgency": 1.0})
+    assert _wait_for(lambda: "You've thought before:" in speech.prompt_block())
     block = speech.prompt_block()
-    assert "You've thought before:" in block
     assert "private musing" in block
+
+
+def test_spontaneous_recall_surfaces_genuine_thought(speech, store):
+    store.write("I should look up efficient training tips tomorrow.", kind="reflection")
+    thought = speech.spontaneous_recall()
+    assert thought is not None
+    assert "training tips" in thought
+    # Cooldown: second call within 30 min returns None.
+    assert speech.spontaneous_recall() is None
+
+
+def test_spontaneous_recall_skips_surfaced_and_short(speech, store):
+    store.write("A sufficiently long genuine thought about the weekend.", kind="reflection")
+    first = speech.spontaneous_recall()
+    assert first is not None
+    speech._last_spont_t = -1800.0  # reset cooldown
+    store.write("Another sufficiently long genuine thought about code.", kind="reflection")
+    second = speech.spontaneous_recall()
+    assert second is not None
+    assert second != first  # already-surfaced thoughts are not repeated
 
 
 # ── asides / snapshot / fly ────────────────────────────────────────────

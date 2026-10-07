@@ -12,7 +12,7 @@ import os
 import re
 import textwrap
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -440,17 +440,25 @@ def dream_and_post(
     inner_ids: list[str] = []
     try:
         from cognition.memory.inner_speech_store import InnerSpeechStore
+        from system.userspace import current_user_id
 
-        _store = InnerSpeechStore()
-        _day_start = date.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        _store = InnerSpeechStore(user_id=current_user_id())
+        # Day start in UTC: rows store UTC ISO text, so the lexical
+        # comparison needs a UTC boundary, not local midnight.
+        _day_start = (
+            date.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            if date.tzinfo else date.replace(hour=0, minute=0, second=0, microsecond=0)
+        ).isoformat()
         _thoughts = _store.unconsolidated_since(_day_start)
         if _thoughts:
+            _used = _thoughts[:40]
             _lines = [
                 f"- [{t.get('kind', 'reflection')}] {t.get('text', '')}".strip()
-                for t in _thoughts
+                for t in _used
             ]
-            prose = prose + "\n\nMy private thoughts today (never spoken aloud):\n" + "\n".join(_lines[:40])
-            inner_ids = [t["id"] for t in _thoughts if t.get("id")]
+            prose = prose + "\n\nMy private thoughts today (never spoken aloud):\n" + "\n".join(_lines)
+            # Mark only the thoughts actually folded into the dream.
+            inner_ids = [t["id"] for t in _used if t.get("id")]
     except Exception as e:
         log.debug("dream: inner-speech join failed: %s", e)
 
@@ -502,8 +510,9 @@ def dream_and_post(
     if inner_ids:
         try:
             from cognition.memory.inner_speech_store import InnerSpeechStore
+            from system.userspace import current_user_id
 
-            InnerSpeechStore().mark_consolidated(inner_ids)
+            InnerSpeechStore(user_id=current_user_id()).mark_consolidated(inner_ids)
         except Exception as e:
             log.debug("dream: mark_consolidated failed: %s", e)
 

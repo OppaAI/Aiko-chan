@@ -46,11 +46,16 @@ def test_lingering_decays():
     assert after < before
 
 
-def test_spontaneous_thought_surfaces_and_cooldown():
+def test_daydream_emits_no_template_thoughts():
+    # The subliminal is pure signal now: daydream folds dispositions only.
+    # Idle pop-ups come from genuine inner-speech recall, not templates.
     s = _layer()
-    s.restore({"spontaneous": ["A wandering thought", "Another thought"]})
-    assert s.spontaneous_thought() == "A wandering thought"
-    assert s.spontaneous_thought() is None
+    assert not hasattr(s, "spontaneous_thought")
+    s.scan("I love spending time talking with you, this is wonderful",
+           {}, __import__("collections").deque())
+    s.daydream(force=True)
+    assert s.lingering_dispositions()  # dispositions still fold
+    assert "spontaneous" not in s.snapshot_extra()
 
 
 def test_guidance_mentions_lingering():
@@ -77,11 +82,12 @@ def test_restore_resets_future_monotonic_timestamps():
     s = _layer()
     s.restore({"last_daydream_t": future, "last_spont_t": future})
     assert s._last_daydream_t == 0.0
-    assert s._last_spont_t == -1800.0
+    assert not hasattr(s, "_last_spont_t")
 
 
-def test_snapshot_includes_spontaneous_cooldown_timestamp():
+def test_snapshot_has_no_spontaneous_state():
     s = _layer()
-    s.restore({"spontaneous": ["A thought"]})
-    assert s.spontaneous_thought() == "A thought"
-    assert s.snapshot_extra()["last_spont_t"] == s._last_spont_t
+    s.restore({"spontaneous": ["A thought"], "last_spont_t": 123.0})
+    snap = s.snapshot_extra()
+    assert "spontaneous" not in snap
+    assert "last_spont_t" not in snap

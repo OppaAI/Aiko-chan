@@ -51,7 +51,9 @@ class ConversationSession:
 
     def _token_callback(self, token: str) -> None:
         stripped = token.rstrip("\r\n") if token else ""
-        if stripped == "__THINKING__":
+        if stripped == "__THINKING__" or stripped.startswith("__THINKING__:"):
+            # Bare marker: agentic step pulse. Payload marker: inner-thoughts
+            # side channel for the WebUI thinking box — never reply text.
             return
         if stripped.startswith("__TOOL__:") or stripped.startswith("__SEARCHING__:"):
             return

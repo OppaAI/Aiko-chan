@@ -44,6 +44,40 @@ _TRAIL_MAX = int(os.getenv("AIKO_FLY_ACTION_TRAIL", "50") or 50)
 # vote weights: mb, cx, dn, gf
 _VOTE_W = (0.40, 0.20, 0.20, 0.20)
 
+# Inner-speech modulatory weight: bounded additive bias, live mode only.
+# Inner proposes (urge signals); the fly disposes. Never overrides priors.
+_INNER_W = max(0.0, min(0.5, float(os.getenv("AIKO_FLY_INNER_WEIGHT", "0.15") or 0.15)))
+
+
+def _inner_speech_vote(cand: Candidate, user_id: str | None) -> float:
+    """Modulatory vote from Aiko's inner speech. Never raises.
+
+    Reads the latest modulatory snapshot (valence/energy/urge/focus) and
+    nudges candidates: reply kinds ride urge_speak, tool kinds ride
+    urge_act. Boost-only — quiet inner speech never punishes a candidate.
+    """
+    try:
+        from cognition.attention import for_identity
+
+        state = for_identity(user_id)
+        inner = getattr(state, "_inner_speech", None)
+        if inner is None:
+            return 0.0
+        snap = inner.modulatory_snapshot()
+        if not snap:
+            return 0.0
+        if cand.kind == "reply":
+            urge = float(snap.get("urge_speak", 0.0) or 0.0)
+        elif cand.kind == "tool":
+            urge = float(snap.get("urge_act", 0.0) or 0.0)
+        else:
+            return 0.0
+        vote = max(0.0, urge - 0.4) * 1.25  # 0..~0.75; threshold keeps quiet turns quiet
+        return max(0.0, min(0.75, vote))
+    except Exception as exc:
+        log.debug("action_select inner-speech vote skipped: %s", exc)
+        return 0.0
+
 # ── candidates ────────────────────────────────────────────────────────────
 
 @dataclass
@@ -231,7 +265,9 @@ def _votes_for(cand: Candidate, *, user_id: str | None, context_text: str) -> di
         log.debug("action_select cx drive vote skipped: %s", exc)
         cx_drive = 0.0
 
-    return {"mb": mb, "cx": cx, "dn": dn, "gf": gf, "cx_drive": cx_drive}
+    inner = _inner_speech_vote(cand, user_id)
+
+    return {"mb": mb, "cx": cx, "dn": dn, "gf": gf, "cx_drive": cx_drive, "inner": inner}
 
 
 def score_candidates(
@@ -264,6 +300,10 @@ def score_candidates(
             # Phase 7: drive bias enters additively — bounded by cx_w,
             # never overriding the LLM prior + fly votes.
             fly += cx_w * votes["cx_drive"]
+        if mode == "live":
+            # Inner speech: modulatory only — a strong urge to speak/act
+            # nudges the matching candidate, never decides alone.
+            fly += _INNER_W * votes["inner"]
         fly01 = (max(-1.0, min(1.0, fly)) + 1.0) / 2.0
         prior = max(0.0, min(1.0, float(cand.llm_prior)))
         final = (1.0 - _WEIGHT) * prior + _WEIGHT * fly01

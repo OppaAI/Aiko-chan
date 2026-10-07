@@ -32,9 +32,9 @@ try:
 except Exception:
     SubliminalLayer = None  # type: ignore
 try:
-    from cognition.inner_voice import InnerVoice
+    from cognition.inner_speech import InnerSpeech
 except Exception:
-    InnerVoice = None  # type: ignore
+    InnerSpeech = None  # type: ignore
 try:
     from interface.webui.motion_director import MotionDirector
 except Exception:
@@ -702,8 +702,11 @@ class EdgeCognitiveState:
         # Created after _lock so it can share the same RLock.
         self._subliminal = SubliminalLayer(lock=self._lock) if SubliminalLayer is not None else None
         self._intuitions: deque[str] = self._subliminal._intuitions if self._subliminal is not None else deque(maxlen=4)  # alias for compat
-        # Inner voice: the conscious stream of thought (Jetson-clean split).
-        self._inner_voice = InnerVoice() if InnerVoice is not None else None
+        # Inner speech: the conscious stream of thought. Bound to this
+        # state's identity so per-user thought partitions stay separate.
+        self._inner_speech = (
+            InnerSpeech(user_id=self._identity or None) if InnerSpeech is not None else None
+        )
         # Motion director: maps conversation events to avatar gestures.
         self._motion_director = MotionDirector() if MotionDirector is not None else None
         self._last_tick = time.monotonic()
@@ -746,6 +749,7 @@ class EdgeCognitiveState:
         assistant = " ".join((assistant or "").split())[:360]
         if not user and not assistant:
             return
+        inner_turn = None  # deferred inner-speech observe args; runs after unlock
         with self._lock:
             self._scrub_style_junk()
             self._apply_explicit_preferences(user)
@@ -811,23 +815,27 @@ class EdgeCognitiveState:
                     self._subliminal.broadcast_vrm()
             except Exception:
                 pass
-            # Conscious thread update: fold this turn into the inner voice
-            # so the next reply continues the same train of thought.
-            # Cheap template selection only — no LLM, no I/O.
+            # Inner speech update: gather the signals while holding the lock,
+            # but run observe() AFTER releasing it — the embedding recall +
+            # LLM think can take seconds and must never block the turn path.
+            # (observe() itself keeps only the cheap gate synchronous and
+            # dispatches the heavy work to a daemon thread.)
             try:
-                if self._inner_voice is not None and self._subliminal is not None:
-                    emo, inten = self._subliminal.emotion()
-                    scan = self._subliminal._pre_attentive
-                    self._inner_voice.observe(
-                        user, assistant,
-                        emotion=emo, intensity=inten,
-                        impulse=self._subliminal.impulse(),
-                        cues=scan.cues if scan is not None else {},
-                        recurring_focus=scan.recurring_focus if scan is not None else frozenset(),
-                        lingering=self._subliminal.lingering_dispositions(),
+                if self._inner_speech is not None and self._subliminal is not None:
+                    _emo, _inten = self._subliminal.emotion()
+                    _scan = self._subliminal._pre_attentive
+                    inner_turn = (
+                        user,
+                        assistant,
+                        _emo,
+                        _inten,
+                        self._subliminal.impulse(),
+                        dict(_scan.cues) if _scan is not None else {},
+                        _scan.recurring_focus if _scan is not None else frozenset(),
+                        self._subliminal.lingering_dispositions(),
                     )
             except Exception:
-                pass
+                inner_turn = None
             # Reactive avatar motion: the body answers faster than the LLM.
             # A lean-in / clap / bow lands in <100 ms and makes the turn
             # feel instant even while tokens are still generating.
@@ -842,6 +850,19 @@ class EdgeCognitiveState:
                         bridge = webui_bridge()
                         if bridge is not None and hasattr(bridge, "play_gesture"):
                             bridge.play_gesture(gesture)
+            except Exception:
+                pass
+        # Deferred inner-speech observe: lock released, heavy LLM/embedding
+        # work runs on its own daemon thread inside observe().
+        if inner_turn is not None and self._inner_speech is not None:
+            try:
+                _u, _a, _emo, _inten, _imp, _cues, _focus, _ling = inner_turn
+                self._inner_speech.observe(
+                    _u, _a,
+                    emotion=_emo, intensity=_inten,
+                    impulse=_imp, cues=_cues,
+                    recurring_focus=_focus, lingering=_ling,
+                )
             except Exception:
                 pass
 
@@ -1304,14 +1325,16 @@ class EdgeCognitiveState:
             self._uncertainty = max(0.0, self._uncertainty * max(0.0, 1.0 - 0.18 * steps))
             self._energy += (0.5 - self._energy) * min(1.0, 0.12 * steps)
             # Daydream: idle-time subconscious consolidation. Folds the recent
-            # affective weather into slow lingering dispositions and lets the
-            # mind wander — never on the hot path, LLM-free.
+            # affective weather into slow lingering dispositions — pure
+            # signal, LLM-free. Idle pop-ups come from genuine past
+            # thoughts (inner_speech.db), never templates.
             try:
                 if self._subliminal is not None:
                     self._subliminal.daydream()
-                    thought = self._subliminal.spontaneous_thought()
-                    if thought and self._inner_voice is not None:
-                        self._inner_voice.queue_aside(thought)
+                if self._inner_speech is not None:
+                    thought = self._inner_speech.spontaneous_recall()
+                    if thought:
+                        self._inner_speech.queue_aside(thought)
             except Exception:
                 pass
             return {"elapsed_s": round(elapsed, 3), "energy": round(self._energy, 3), "uncertainty": round(self._uncertainty, 3)}
@@ -1520,7 +1543,7 @@ class EdgeCognitiveState:
         lines.append("Treat these as associations to verify, never as facts.")
         return "<subconscious_guidance>\n" + "\n".join(lines) + "\n</subconscious_guidance>"
 
-    def inner_voice_block(self) -> str:
+    def inner_speech_block(self) -> str:
         """Conscious stream of thought for prompt injection.
 
         The rolling first-person thread of what Aiko is thinking right now.
@@ -1528,17 +1551,17 @@ class EdgeCognitiveState:
         restarting the persona from scratch every turn.
         """
         try:
-            if self._inner_voice is not None:
-                return self._inner_voice.prompt_block()
+            if self._inner_speech is not None:
+                return self._inner_speech.prompt_block()
         except Exception:
             pass
-        return "<inner_voice>\nListening.\n</inner_voice>"
+        return ""
 
     def maybe_aside(self) -> str | None:
         """One unprompted aside (a surfaced daydream) if due, else None."""
         try:
-            if self._inner_voice is not None:
-                return self._inner_voice.maybe_aside()
+            if self._inner_speech is not None:
+                return self._inner_speech.maybe_aside()
         except Exception:
             pass
         return None
@@ -1634,10 +1657,10 @@ class EdgeCognitiveState:
                         self._intuitions = self._subliminal._intuitions
                     except Exception:
                         pass
-                if self._inner_voice is not None:
+                if self._inner_speech is not None:
                     # Restore the conscious thread — she wakes up mid-thought.
                     try:
-                        self._inner_voice.restore(data.get("inner_voice"))
+                        self._inner_speech.restore(data.get("inner_speech"))
                     except Exception:
                         pass
                 self._self_preferences = {str(k): str(v) for k, v in (data.get("self_preferences") or {}).items()}
@@ -1680,7 +1703,7 @@ class EdgeCognitiveState:
             from cognition.memory.vecstore import connect_sqlite_db
             with self._lock:
                 data = {"open_loops": list(self._open_loops), "goals": [g.text for g in self._goals if g.progress == "active"], "lessons": list(self._lessons), "tool_outcomes": list(self._tool_outcomes), "contradictions": list(self._contradictions), "durable_lessons": list(self._durable_lessons), "lesson_evidence": dict(self._lesson_counts), "preferences": dict(self._preferences), "activity": self._activity, "affect": self._affect, "energy": self._energy, "uncertainty": self._uncertainty, "attention": self._attention, "self_preferences": dict(self._self_preferences), "self_preference_evidence": dict(self._self_preference_counts), "self_notes": list(self._self_notes), "self_decisions": list(self._self_decisions)[:6],
-                        "inner_voice": self._inner_voice.snapshot() if self._inner_voice is not None else {},
+                        "inner_speech": self._inner_speech.snapshot() if self._inner_speech is not None else {},
                         "subliminal": self._subliminal.snapshot_extra() if self._subliminal is not None else {}}
             conn = connect_sqlite_db("memory/memory.db", user_id=self._identity)
             conn.execute("CREATE TABLE IF NOT EXISTS cognitive_state (user_id TEXT PRIMARY KEY, state_json TEXT NOT NULL, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
@@ -2145,23 +2168,23 @@ class EdgeCognitiveState:
                 f"any 'superseded' status in hits: {'superseded' in statuses}",
             ],
         )
-        # NOTE: the inner-voice block is NOT appended here. It rides on every
-        # turn via EdgeCognitiveState.inner_voice_turn_block(), injected
-        # unconditionally in think._current_system_prompt_parts(). Keeping
-        # this method a pure confidence checkpoint avoids double-injection
-        # on deliberation turns.
+        # NOTE: the inner-speech block is NOT appended here. It rides on
+        # every turn via EdgeCognitiveState.inner_speech_turn_block(),
+        # injected unconditionally in think._current_system_prompt_parts().
+        # Keeping this method a pure confidence checkpoint avoids
+        # double-injection on deliberation turns.
         return block
 
-    def inner_voice_turn_block(self) -> str:
-        """Inner-voice block for prompt injection on every turn.
+    def inner_speech_turn_block(self) -> str:
+        """Inner-speech block for prompt injection on every turn.
 
-        The rolling first-person thought thread plus one unprompted aside
-        if one is due (cooldown enforced by InnerVoice). Cheap (no LLM,
-        no DB, bounded deque) — safe on the hot path. Returns "" when the
-        inner voice is unavailable.
+        Genuine thoughts from salient turns (LLM, persisted to
+        inner_speech.db) plus one unprompted aside if due. Returns ""
+        on silent turns — no filler, no fake thinking. Only past
+        recalled thoughts and fresh genuine ones ever appear here.
         """
         try:
-            inner = self.inner_voice_block()
+            inner = self.inner_speech_block()
         except Exception:
             inner = ""
         try:
@@ -2169,7 +2192,7 @@ class EdgeCognitiveState:
         except Exception:
             aside = None
         if aside and inner:
-            closing = "</inner_voice>"
+            closing = "</inner_speech>"
             if closing in inner:
                 inner = inner.replace(closing, f"- {aside}\n{closing}", 1)
             else:

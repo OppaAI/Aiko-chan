@@ -15,6 +15,15 @@ LLM_NO_SYSTEM: "1"  # llama.cpp chat template rejects system roles; merge person
 # LLM_MODEL to the endpoint and exact model ID shown in AISA's documentation.
 LLM_API_KEY: ""
 
+# -- Inner speech --
+# Model used for inner-speech thinking (the voice in her head). Blank falls
+# back to LLM_MODEL. Point at a tiny model (SmolLM2-class) when one is
+# available; ministral (already loaded) costs zero extra VRAM.
+INNER_SPEECH_MODEL: ""
+INNER_SPEECH_MAX_TOKENS: "96"  # Inner utterances are short; keep them compressed.
+INNER_SPEECH_TIMEOUT: "30"  # Seconds before an inner-speech LLM call times out.
+INNER_SPEECH_SALIENCE: "0.5"  # Gate threshold 0..1; higher = thinks less often.
+
 # -- WebUI camera vision --
 # The camera button sends one in-memory JPEG to this OpenAI-compatible vision
 # endpoint. Leave the URL blank to use VISION_BASE_URL, then LLM_BASE_URL.

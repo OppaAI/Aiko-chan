@@ -52,11 +52,14 @@ MAX_TURNS = 6               # ReAct iterations before force-summarize
 # Tools a subagent is allowed to use. Deliberately narrow:
 # read + search + test. No writes — the subagent investigates,
 # Aiko decides and patches.
+# adaptive_search (web) lets the subagent find the best approach/
+# library/docs for a goal, like Claude Code does.
 SUBAGENT_TOOLS = frozenset({
     "repo_read_file",
     "repo_search_text",
     "codebase_search",
     "code_run_tests",
+    "adaptive_search",
 })
 
 
@@ -133,10 +136,14 @@ def needle_subagent(task: str = "", tools_hint: str = "") -> str:
     transcript = []
     prompt = (
         f"You are a coding subagent. Task: {task}\n\n"
-        "Use the provided tools to investigate. When you have the answer, "
-        "respond with type 'answer' and put the complete findings in the "
-        "response field, under 800 characters. Be specific: file paths, "
-        "line numbers, exact error text. Do not dump whole files."
+        "Use the provided tools to investigate. You may search the web "
+        "(adaptive_search) to find the best library, docs, or approach "
+        "for the task — like checking Stack Overflow or official docs "
+        "before writing code. "
+        "When you have the answer, respond with type 'answer' and put "
+        "the complete findings in the response field, under 800 characters. "
+        "Be specific: file paths, line numbers, exact error text, and "
+        "URLs for any web sources you used. Do not dump whole files."
     )
     try:
         for turn in range(MAX_TURNS):

@@ -160,3 +160,14 @@ def test_registered_reader_schema_and_validation_support_pagination(tmp_path, mo
     assert self_improve.repo_read_file(**args).startswith("abcd\n[truncated at 4/12")
     args = spec.validate_args({"relative_path": "sample.txt", "max_chars": 4, "offset": 4})
     assert self_improve.repo_read_file(**args).startswith("efgh\n[truncated at 8/12")
+
+
+def test_failure_context_is_delivered_and_bounded(harness):
+    from agentic.toolkit.needle_subagent import TOOL_RESULT_BUDGET
+
+    _, _, _, requests, responses, _ = harness
+    responses.append(_answer())
+    context = 'failure detail: ' + 'x' * TOOL_RESULT_BUDGET + 'NOT_INCLUDED'
+    needle_subagent('diagnose', context=context)
+    assert context[:TOOL_RESULT_BUDGET] in requests[0][1]
+    assert 'NOT_INCLUDED' not in requests[0][1]

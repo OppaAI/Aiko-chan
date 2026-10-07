@@ -50,10 +50,10 @@ def test_shell_allowed_cwd_and_fallback(kind, tmp_path, monkeypatch):
     }
     cwd, expected = paths[kind]
     monkeypatch.setattr(coding, 'REPO_ROOT', repo)
-    run = Mock(return_value=Mock(returncode=0, stdout='', stderr=''))
-    monkeypatch.setattr(coding.subprocess, 'run', run)
+    popen = Mock(wraps=coding.subprocess.Popen)
+    monkeypatch.setattr(coding.subprocess, 'Popen', popen)
     assert payload(coding.shell_run('pwd', cwd=cwd))['ok']
-    assert run.call_args.kwargs['cwd'] == str(expected)
+    assert popen.call_args.kwargs['cwd'] == str(expected)
 
 
 @pytest.mark.parametrize('cwd', ['/etc', '/tmp-other', '/etc/nonexistent', '../../../../../../etc', 'escape'])
@@ -62,12 +62,12 @@ def test_shell_rejects_escape_before_execution(cwd, tmp_path, monkeypatch):
     repo.mkdir()
     (repo / 'escape').symlink_to('/etc', target_is_directory=True)
     monkeypatch.setattr(coding, 'REPO_ROOT', repo)
-    run = Mock()
-    monkeypatch.setattr(coding.subprocess, 'run', run)
+    popen = Mock()
+    monkeypatch.setattr(coding.subprocess, 'Popen', popen)
     result = payload(coding.shell_run('pwd', cwd=cwd))
     assert result['ok'] is False
     assert 'outside' in result['error']
-    run.assert_not_called()
+    popen.assert_not_called()
 
 
 def test_correction_uses_patch_checks_and_backup(tmp_path, monkeypatch):

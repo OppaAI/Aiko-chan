@@ -30,8 +30,12 @@ for context retrieval before proposing a patch.
 
 from __future__ import annotations
 
+import codecs
 import difflib
+import io
 import json
+import locale
+import selectors
 import subprocess
 import sys
 import time
@@ -501,6 +505,33 @@ def _shell_is_readonly(command: str) -> bool:
     return first in _SHELL_READONLY
 
 
+def _drain_shell_output(proc: subprocess.Popen, timeout: int) -> tuple[str, str]:
+    """Drain both pipes with bounded reads and retain only their text tails."""
+    tails = {"stdout": "", "stderr": ""}
+    deadline = time.monotonic() + timeout
+    with selectors.DefaultSelector() as selector:
+        for name in tails:
+            stream = getattr(proc, name)
+            decoder = io.IncrementalNewlineDecoder(
+                codecs.getincrementaldecoder(locale.getpreferredencoding(False))(),
+                translate=True,
+            )
+            selector.register(stream, selectors.EVENT_READ, (name, decoder))
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(proc.args, timeout)
+            for key, _ in selector.select(remaining):
+                name, decoder = key.data
+                chunk = key.fileobj.read1(4096)
+                text = decoder.decode(chunk, final=not chunk)
+                tails[name] = (tails[name] + text)[-SHELL_OUTPUT_CHARS:]
+                if not chunk:
+                    selector.unregister(key.fileobj)
+        proc.wait(timeout=max(0, deadline - time.monotonic()))
+    return tails["stdout"], tails["stderr"]
+
+
 @tool(
     _spec("shell_run", "Run a shell command on Aiko's host (APPROVAL REQUIRED unless read-only)."),
     description="Run a shell command on Aiko's host (APPROVAL REQUIRED unless read-only).",
@@ -548,16 +579,21 @@ def shell_run(command: str = "", cwd: str = "", timeout: int = SHELL_TIMEOUT) ->
         readonly = _shell_is_readonly(cmd_text)
         log.info("shell_run readonly=%s cwd=%s cmd=%.150s", readonly, workdir, cmd_text)
 
-        proc = subprocess.run(
-            cmd_text, shell=True, cwd=workdir, capture_output=True,
-            text=True, timeout=timeout, executable="/bin/bash",
-        )
+        with subprocess.Popen(
+            cmd_text, shell=True, cwd=workdir,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, executable="/bin/bash",
+        ) as proc:
+            try:
+                stdout, stderr = _drain_shell_output(proc, timeout)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
         return json_block("shell_run", {
             "ok": proc.returncode == 0,
             "returncode": proc.returncode,
             "readonly": readonly,
-            "stdout": proc.stdout[-SHELL_OUTPUT_CHARS:],
-            "stderr": proc.stderr[-SHELL_OUTPUT_CHARS:],
+            "stdout": stdout,
+            "stderr": stderr,
         })
     except subprocess.TimeoutExpired:
         return json_block("shell_run", {"ok": False, "error": f"timeout after {timeout}s"})

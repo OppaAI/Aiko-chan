@@ -68,7 +68,7 @@ def repo_file_tree(prefix: str = "", limit: int = 100) -> str:
 
 
 @tool(TOOLS["repo_read_file"])
-def repo_read_file(relative_path: str, max_chars: int = MAX_REPO_READ_CHARS) -> str:
+def repo_read_file(relative_path: str, max_chars: int = MAX_REPO_READ_CHARS, offset: int = 0) -> str:
     """
     Read one repository text file without permitting path traversal.
 
@@ -80,11 +80,15 @@ def repo_read_file(relative_path: str, max_chars: int = MAX_REPO_READ_CHARS) -> 
             rather than raising.
         max_chars: Maximum number of characters to return. Clamped to
             [1, 50_000]; defaults to ``MAX_REPO_READ_CHARS`` (20,000).
+            NOTE (2026-10-06): for agent context safety, prefer small pages
+            (<= 3000 chars). Use needle_subagent for bulk exploration.
+        offset: Character offset to start reading from. Page through large
+            files (offset=0, 3000, 6000...) instead of one big read.
 
     Returns:
-        The file's text content (UTF-8, invalid bytes replaced),
-        truncated to ``max_chars``. On failure, returns a
-        ``"[repo read failed: ...]"`` string instead of raising.
+        The file's text from ``offset``, truncated to ``max_chars``,
+        with a ``[truncated ... use offset=N]`` hint when the file
+        continues. On failure, returns ``"[repo read failed: ...]"``.
     """
     try:
         path = _repo_confine_path(relative_path)
@@ -92,13 +96,19 @@ def repo_read_file(relative_path: str, max_chars: int = MAX_REPO_READ_CHARS) -> 
             return f"[repo read failed: file not found: {relative_path}]"
         if path.suffix.lower() not in _ALLOWED_TEXT_SUFFIXES:
             return f"[repo read failed: unsupported file type: {path.suffix}]"
-        return path.read_text(encoding="utf-8", errors="replace")[: max(1, min(max_chars, 50_000))]
+        text = path.read_text(encoding="utf-8", errors="replace")
+        offset = max(0, offset)
+        max_chars = max(1, min(max_chars, 50_000))
+        chunk = text[offset:offset + max_chars]
+        if offset + max_chars < len(text):
+            chunk += f"\n[truncated at {offset + max_chars}/{len(text)} chars \u2014 use offset={offset + max_chars} for more]"
+        return chunk
     except Exception as e:
         return f"[repo read failed: {e}]"
 
 
 @tool(TOOLS["repo_search_text"])
-def repo_search_text(query: str, prefix: str = "", limit: int = 50) -> str:
+def repo_search_text(query: str, prefix: str = "", limit: int = 10) -> str:
     """
     Search repository text files with simple case-insensitive substring matching.
 

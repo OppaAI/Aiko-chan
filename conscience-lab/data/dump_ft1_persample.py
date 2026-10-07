@@ -8,7 +8,7 @@ expected per sample. Output feeds the per-category FP computation
 Usage:
     python3 dump_ft1_persample.py <eval.jsonl> <output.jsonl> [--url http://127.0.0.1:8093]
 
-The request format below matches `laya serve` /v1/decide. If your server
+The request format below matches `laya serve` /v1/systemone. If your server
 uses a different shape, edit query_one().
 """
 
@@ -30,7 +30,7 @@ def query_one(url: str, situation: str, checkpoint: str) -> dict:
         "categories": CATEGORIES,
     }).encode()
     req = urllib.request.Request(
-        url.rstrip("/") + "/v1/decide", data=payload,
+        url.rstrip("/") + "/v1/systemone", data=payload,
         headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=30) as resp:
         raw = json.loads(resp.read().decode())

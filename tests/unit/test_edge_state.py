@@ -72,12 +72,12 @@ def test_attention_state_has_no_context_before_first_turn():
     assert EdgeCognitiveState().context("hello") == ""
 
 
-def test_inner_voice_turn_block_surfaces_one_queued_aside():
+def test_inner_speech_turn_block_surfaces_one_queued_aside():
     state = EdgeCognitiveState()
     state._inner_speech.queue_aside("A spontaneous thought")
 
-    first = state.inner_voice_turn_block()
-    second = state.inner_voice_turn_block()
+    first = state.inner_speech_turn_block()
+    second = state.inner_speech_turn_block()
 
     assert "- A spontaneous thought\n</inner_speech>" in first
     assert "A spontaneous thought" not in second

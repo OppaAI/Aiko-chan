@@ -2145,20 +2145,20 @@ class EdgeCognitiveState:
                 f"any 'superseded' status in hits: {'superseded' in statuses}",
             ],
         )
-        # NOTE: the inner-voice block is NOT appended here. It rides on every
-        # turn via EdgeCognitiveState.inner_voice_turn_block(), injected
-        # unconditionally in think._current_system_prompt_parts(). Keeping
-        # this method a pure confidence checkpoint avoids double-injection
-        # on deliberation turns.
+        # NOTE: the inner-speech block is NOT appended here. It rides on
+        # every turn via EdgeCognitiveState.inner_speech_turn_block(),
+        # injected unconditionally in think._current_system_prompt_parts().
+        # Keeping this method a pure confidence checkpoint avoids
+        # double-injection on deliberation turns.
         return block
 
-    def inner_voice_turn_block(self) -> str:
-        """Inner-voice block for prompt injection on every turn.
+    def inner_speech_turn_block(self) -> str:
+        """Inner-speech block for prompt injection on every turn.
 
-        The rolling first-person thought thread plus one unprompted aside
-        if one is due (cooldown enforced by InnerVoice). Cheap (no LLM,
-        no DB, bounded deque) — safe on the hot path. Returns "" when the
-        inner voice is unavailable.
+        Genuine thoughts from salient turns (LLM, persisted to
+        inner_speech.db) plus one unprompted aside if due. Returns ""
+        on silent turns — no filler, no fake thinking. Only past
+        recalled thoughts and fresh genuine ones ever appear here.
         """
         try:
             inner = self.inner_speech_block()

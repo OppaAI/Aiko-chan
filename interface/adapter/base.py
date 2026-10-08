@@ -119,6 +119,10 @@ class AdapterBase(ABC):
         self._memorize: Any = None
         self._running = False
         self._boot_lock = threading.Lock()
+        # Most recent inbound conversation id — used as the default target
+        # when an agent tool sends without an explicit chat id (e.g. alerts
+        # to the owner, who is normally the only person messaging the bot).
+        self.last_conversation_id: str | None = None
 
     @property
     def name(self) -> str:
@@ -156,6 +160,8 @@ class AdapterBase(ABC):
             on_response=self._on_platform_response,
             on_error=self._on_platform_error,
         )
+        if conversation_id:
+            self.last_conversation_id = conversation_id
         session.start(text)
         return session
 

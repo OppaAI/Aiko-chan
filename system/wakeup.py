@@ -303,11 +303,14 @@ class AikoWakeup:
                     memorize.cleanup()
 
                 _boot_step('mem_cleanup', _mem_cleanup_if_real_user)
+                mem_ready_evt.set()
+                log.debug('[wakeup] memory worker reached ready barrier')
                 _boot_step('mem_ready')                                                       # mark the memory system ready
 
                 return memorize                                                               # return the live AikoMemorize object
             except Exception:                                                                 # if error, log failure once — single point, full traceback
                 log.exception("[wakeup] Memory boot failed — Aiko will run without persistent memory.")
+                mem_ready_evt.set()
                 on_skip('mem_ready')                                                          # resolve the marker step so the UI doesn't hang on it
                 return None                                                                   # return None to indicate failure
             finally:                                                                          # whether success or failure,

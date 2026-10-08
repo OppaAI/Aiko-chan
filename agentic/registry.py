@@ -385,6 +385,7 @@ def register_tool_schema(
     name: str,
     description: str,
     *,
+    handler: Optional[Callable[..., Any]] = None,
     props: Optional[Dict[str, Any]] = None,
     required: Optional[List[str]] = None,
     domain: Optional[str] = None,
@@ -403,11 +404,14 @@ def register_tool_schema(
     Use for tools where the handler isn't a Python function (e.g., external
     services, graph nodes, etc.). The registry still tracks the schema and
     execution modes for routing purposes.
+
+    Pass handler together with the schema so the two are published
+    atomically — a schema must never be visible without its handler.
     """
     return registry.register(
         name=name,
         description=description,
-        handler=None,
+        handler=handler,
         props=props,
         required=required,
         domain=domain,

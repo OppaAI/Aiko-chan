@@ -373,6 +373,10 @@ class AikoWakeup:
                 return False
 
         mcp_future: Future = Future()
+        # Bound the MCP startup cost from worker start, not from result
+        # collection — otherwise a slow think phase would extend the bound
+        # (e.g. 110s think + 120s MCP wait = 230s).
+        mcp_deadline = time.monotonic() + _MCP_BOOT_TIMEOUT_S
         threading.Thread(target=_run_future, args=(mcp_future, _boot_mcp),
                          name="aiko-boot-mcp", daemon=True).start()
 
@@ -417,7 +421,7 @@ class AikoWakeup:
         # just collects the result, bounded so a wedged MCP server can never
         # stall boot (the old serial call had no bound at all).
         try:
-            mcp_ok = mcp_future.result(timeout=_MCP_BOOT_TIMEOUT_S)
+            mcp_ok = mcp_future.result(timeout=max(0.0, mcp_deadline - time.monotonic()))
         except FuturesTimeoutError:
             log.warning("[wakeup] MCP client boot timed out after %ds — continuing without it.",
                         _MCP_BOOT_TIMEOUT_S)

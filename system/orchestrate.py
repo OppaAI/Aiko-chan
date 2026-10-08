@@ -1914,6 +1914,12 @@ def run_session(ui, args) -> None:
             )
             _brain_trace.end_turn()
         finally:
+            try:
+                abort_turn = getattr(ui, "turn_abort", None)
+                if abort_turn is not None:
+                    abort_turn()
+            except Exception:
+                log.debug("turn abort cleanup failed", exc_info=True)
             session_active.clear()
             proactive.touch()
             current_latency = None

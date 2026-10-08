@@ -903,6 +903,17 @@ class AikoWeb:
         self._broadcast_to_current_user({"type": "commit"})
         self._push_vitals()
 
+    def turn_abort(self) -> None:
+        """Clear transport busy state when a turn exits exceptionally."""
+        with self._lock:
+            self._active_uid = None
+            self._stats["turn_tok"] = 0
+            self._stats["turn_start"] = None
+            self._streaming = ""
+        # Reset the browser too when a turn exits exceptionally.
+        self._broadcast_to_current_user({"type": "pose", "name": "thinking", "active": False})
+        self._broadcast_to_current_user({"type": "commit"})
+
     def turn_start(self) -> None:
         """Mark the start of a new turn and reset turn metrics."""
         uid = current_user_id()

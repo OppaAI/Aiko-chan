@@ -1998,12 +1998,16 @@ def telegram_send(
     chat_id: str = "",
     message: str = "$prompt",
     to_state: str = "items",
+    items_json: str = "",
+    from_state: str = "",
     *,
     state=None,
     **_kwargs,
 ) -> str:
     """Send via the live Telegram adapter (graceful when not running)."""
-    raw = _deliver_via_adapter("telegram", chat_id, _response_from_envelope(message or "", []))
+    raw = items = load_items(items_json or message, state, from_state)
+    text = _response_from_envelope(message or "", items)
+    raw = _deliver_via_adapter("telegram", chat_id, text)
     parsed = _loads(raw, {}) or {}
     return emit([_coerce_item(parsed)], state=state, to_state=to_state,
                 ok=bool(parsed.get("ok")), source="telegram")
@@ -2021,12 +2025,16 @@ def discord_send(
     chat_id: str = "",
     message: str = "$prompt",
     to_state: str = "items",
+    items_json: str = "",
+    from_state: str = "",
     *,
     state=None,
     **_kwargs,
 ) -> str:
     """Send via the live Discord adapter (graceful when not running)."""
-    raw = _deliver_via_adapter("discord", chat_id, _response_from_envelope(message or "", []))
+    raw = items = load_items(items_json or message, state, from_state)
+    text = _response_from_envelope(message or "", items)
+    raw = _deliver_via_adapter("discord", chat_id, text)
     parsed = _loads(raw, {}) or {}
     return emit([_coerce_item(parsed)], state=state, to_state=to_state,
                 ok=bool(parsed.get("ok")), source="discord")
@@ -2044,12 +2052,16 @@ def slack_send(
     chat_id: str = "",
     message: str = "$prompt",
     to_state: str = "items",
+    items_json: str = "",
+    from_state: str = "",
     *,
     state=None,
     **_kwargs,
 ) -> str:
     """Send via the live Slack adapter (graceful when not running)."""
-    raw = _deliver_via_adapter("slack", chat_id, _response_from_envelope(message or "", []))
+    raw = items = load_items(items_json or message, state, from_state)
+    text = _response_from_envelope(message or "", items)
+    raw = _deliver_via_adapter("slack", chat_id, text)
     parsed = _loads(raw, {}) or {}
     return emit([_coerce_item(parsed)], state=state, to_state=to_state,
                 ok=bool(parsed.get("ok")), source="slack")
@@ -2067,12 +2079,16 @@ def matrix_send(
     chat_id: str = "",
     message: str = "$prompt",
     to_state: str = "items",
+    items_json: str = "",
+    from_state: str = "",
     *,
     state=None,
     **_kwargs,
 ) -> str:
     """Send via the live Matrix adapter (graceful when not running)."""
-    raw = _deliver_via_adapter("matrix", chat_id, _response_from_envelope(message or "", []))
+    raw = items = load_items(items_json or message, state, from_state)
+    text = _response_from_envelope(message or "", items)
+    raw = _deliver_via_adapter("matrix", chat_id, text)
     parsed = _loads(raw, {}) or {}
     return emit([_coerce_item(parsed)], state=state, to_state=to_state,
                 ok=bool(parsed.get("ok")), source="matrix")
@@ -2090,6 +2106,8 @@ def email_send(
     body: str = "$prompt",
     to: str = "",
     to_state: str = "items",
+    items_json: str = "",
+    from_state: str = "",
     *,
     state=None,
     **_kwargs,
@@ -2097,8 +2115,9 @@ def email_send(
     """Send an email through notify_email (owner bridge / AIKO_EMAIL default)."""
     try:
         from agentic.workflows.common.notify import notify_email
+        items = load_items(items_json or body, state, from_state)
         result = notify_email(subject or "(no subject)",
-                              _response_from_envelope(body or "", []),
+                              _response_from_envelope(body or "", items),
                               to=(to or "").strip() or None) or {}
     except Exception as exc:
         result = {"ok": False, "error": str(exc)}

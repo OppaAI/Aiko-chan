@@ -99,27 +99,30 @@ class DiscordAdapter(AdapterBase):
                 log.warning("discord: async client close failed")
 
     def send_message(self, conversation_id: str, text: str) -> None:
+        """Send a text message, blocking until Discord confirms delivery.
+
+        Raises on delivery failure so callers can report it honestly.
+        Must not be called from the adapter's own asyncio event loop
+        thread (the blocking wait would deadlock).
+        """
+        import asyncio
         if not self._client or not self._client.is_ready():
-            log.warning("[discord] Client not ready, can't send to %s", conversation_id)
-            return
+            raise RuntimeError(f"discord client not ready; cannot send to {conversation_id}")
         channel_id = int(conversation_id)
         channel = self._client.get_channel(channel_id)
-        if channel is None:
-            log.warning("[discord] Channel %s not found in cache, trying fetch", conversation_id)
-            try:
-                import asyncio
-                asyncio.run_coroutine_threadsafe(
-                    self._fetch_and_send(channel_id, text), 
-                    self._client.loop
-                )
-            except Exception as exc:
-                log.error("[discord] Failed to fetch and send to %s: %s", conversation_id, exc)
-            return
         try:
-            import asyncio
-            asyncio.run_coroutine_threadsafe(channel.send(text), self._client.loop)
+            if channel is None:
+                log.warning("[discord] Channel %s not found in cache, trying fetch", conversation_id)
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._fetch_and_send(channel_id, text),
+                    self._client.loop,
+                )
+            else:
+                fut = asyncio.run_coroutine_threadsafe(channel.send(text), self._client.loop)
+            fut.result(timeout=30)
         except Exception as exc:
             log.error("[discord] Failed to send to %s: %s", conversation_id, exc)
+            raise
 
     async def _fetch_and_send(self, channel_id: int, text: str) -> None:
         """Fetch channel by ID and send message — used for DMs not in cache."""

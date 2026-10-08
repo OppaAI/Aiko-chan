@@ -112,8 +112,12 @@ class SlackAdapter(AdapterBase):
                 log.warning("slack: socket disconnect failed")
 
     def send_message(self, conversation_id: str, text: str) -> None:
+        """Send a text message via chat.postMessage (synchronous).
+
+        Raises on delivery failure so callers can report it honestly.
+        """
         if not self._web_client:
-            return
+            raise RuntimeError("slack client not configured")
         try:
             self._web_client.chat_postMessage(
                 channel=conversation_id,
@@ -121,3 +125,4 @@ class SlackAdapter(AdapterBase):
             )
         except SlackApiError as exc:
             log.error("[slack] Failed to send to %s: %s", conversation_id, exc)
+            raise

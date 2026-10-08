@@ -123,6 +123,11 @@ class AdapterBase(ABC):
         # when an agent tool sends without an explicit chat id (e.g. alerts
         # to the owner, who is normally the only person messaging the bot).
         self.last_conversation_id: str | None = None
+        # Platform user id that the default-send target is bound to. The
+        # first inbound user binds it; later users can still chat, but a
+        # stranger messaging the bot cannot hijack default-target sends
+        # (e.g. owner alerts) by overwriting last_conversation_id.
+        self._default_owner_platform_id: str | None = None
 
     @property
     def name(self) -> str:
@@ -161,7 +166,10 @@ class AdapterBase(ABC):
             on_error=self._on_platform_error,
         )
         if conversation_id:
-            self.last_conversation_id = conversation_id
+            if self._default_owner_platform_id is None:
+                self._default_owner_platform_id = platform_user_id
+            if platform_user_id == self._default_owner_platform_id:
+                self.last_conversation_id = conversation_id
         session.start(text)
         return session
 

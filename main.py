@@ -237,10 +237,10 @@ def _handle_clear_mem(log: logging.Logger) -> int:
     from cognition.memory.memorize import AikoMemorize
 
     try:
-        mem = AikoMemorize()                          # may load embedding models — on an 8 GB Orin,
+        mem = AikoMemorize()                            # may load embedding models — on an 8 GB Orin,
                                                         # check whether clear() needs models at all
                                                         # (storage-layer delete would skip that allocation)
-        mem.clear()                                   # NOTE: assumes clear() is atomic or idempotent —
+        mem.clear()                                     # NOTE: assumes clear() is atomic or idempotent —
                                                         # if it isn't, a mid-wipe failure can leave
                                                         # partially-cleared storage behind.
                                                         # (no explicit close: AikoMemorize owns no documented

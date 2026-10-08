@@ -2458,20 +2458,55 @@ def flush_all_persist() -> None:
 
 
 def for_identity(identity: str) -> EdgeCognitiveState:
-    """Retrieve or create bounded state for an identity. State factory."""
+    """Retrieve or create bounded state for an identity. State factory.
+
+    Double-checked locking: the fast path only touches the dict under
+    _states_lock and never blocks on init. Construction
+    (EdgeCognitiveState.__init__ runs subsystem init: policy bus
+    registration, idle-poller startup) and the sqlite load_persistent()
+    happen OUTSIDE the lock — holding the non-reentrant _states_lock
+    across construction deadlocked the first chat turn on 2026-10-08.
+    Only dict insert/evict stays under the lock, so concurrent
+    first-turns no longer serialize on the full construction cost.
+    """
+    key = identity or "default"
+    # Fast path: cached state. Dict touch only.
     with _states_lock:
-        key = identity or "default"
-        state = _states.pop(key, None) or EdgeCognitiveState(key)
-        if not state._persistent_loaded:
-            state.load_persistent()
-        _states[key] = state
-        while len(_states) > EDGE_COGNITION_MAX_IDENTITIES:
-            _victim = _states.popitem(last=False)[1]
-            try:
-                _victim._on_evict()
-            except Exception:
-                pass
+        state = _states.get(key)
+        if state is not None:
+            _states.move_to_end(key)
+    if state is not None:
         return state
+    # Slow path: construct outside the lock. (load_persistent sets
+    # _persistent_loaded in a finally, so every state that reaches the
+    # dict below is already loaded — no second check needed.)
+    new_state = EdgeCognitiveState(key)
+    new_state.load_persistent()
+    victims: list = []
+    with _states_lock:
+        existing = _states.get(key)
+        if existing is None:
+            _states[key] = new_state
+            while len(_states) > EDGE_COGNITION_MAX_IDENTITIES:
+                victims.append(_states.popitem(last=False)[1])
+            state = new_state
+        else:
+            # Lost the race: another thread built it first.
+            _states.move_to_end(key)
+            state = existing
+    if state is not new_state:
+        # Discard our duplicate: undo its bus registrations / open store
+        # so a dead state can neither fire nor leak.
+        try:
+            new_state._on_evict()
+        except Exception:
+            pass
+    for victim in victims:
+        try:
+            victim._on_evict()
+        except Exception:
+            pass
+    return state
 
 
 __all__ = ["EdgeCognitiveState", "for_identity"]

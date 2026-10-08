@@ -86,18 +86,18 @@ def test_stats_user_scoped(api):
 
 
 def test_thoughts_newest_first(api):
-    ts = _body(api.thoughts())["thoughts"]
+    ts = _body(api.thoughts(limit=50, offset=0))["thoughts"]
     assert [t["id"] for t in ts] == ["t3", "t2", "t1"]
     assert ts[0]["text"].startswith("Reminder fired")
 
 
 def test_thoughts_kind_filter(api):
-    ts = _body(api.thoughts(kind="learning"))["thoughts"]
+    ts = _body(api.thoughts(limit=50, offset=0, kind="learning"))["thoughts"]
     assert [t["id"] for t in ts] == ["t2"]
 
 
 def test_thoughts_fts_search(api):
-    ts = _body(api.thoughts(q="GPU"))["thoughts"]
+    ts = _body(api.thoughts(limit=50, offset=0, q="GPU"))["thoughts"]
     assert [t["id"] for t in ts] == ["t2"]
 
 
@@ -125,3 +125,23 @@ def test_missing_db_reports_cleanly(tmp_path, monkeypatch):
 
     assert _body(api_mod.stats()) == {"total": 0, "exists": False}
     assert _body(api_mod.thoughts()) == {"thoughts": [], "exists": False}
+
+
+def test_thoughts_malformed_fts_no_500(api):
+    # FTS5 metacharacter input must degrade to [] — never an exception.
+    for bad in ['"unbalanced', "foo-bar", "AND", "a:b", "*"]:
+        ts = _body(api.thoughts(limit=50, offset=0, q=bad))["thoughts"]
+        assert ts == [], bad
+    # Empty query means "no filter", not "match nothing".
+    ts = _body(api.thoughts(limit=50, offset=0, q=""))["thoughts"]
+    assert len(ts) == 3
+
+
+def test_thoughts_q_combined_with_filters(api):
+    # kind/source must apply in the FTS branch too, not be silently ignored.
+    ts = _body(api.thoughts(limit=50, offset=0, q="GPU", kind="reflection"))["thoughts"]
+    assert ts == []  # t2 is kind=learning
+    ts = _body(api.thoughts(limit=50, offset=0, q="GPU", kind="learning"))["thoughts"]
+    assert [t["id"] for t in ts] == ["t2"]
+    ts = _body(api.thoughts(limit=50, offset=0, q="tired", source="post_job"))["thoughts"]
+    assert ts == []  # t1 is source=turn

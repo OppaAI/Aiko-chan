@@ -21,6 +21,24 @@ from interface.webui.studio.session_binding import bind_login_session
 
 logger = logging.getLogger(__name__)
 
+import re as _re
+
+
+def _sanitize_fts(q: str) -> str:
+    """Quote each token so FTS5 metacharacters are literal.
+
+    Raw user input like `"unbalanced`, `foo-bar`, `AND` or `a:b` would
+    otherwise raise sqlite3.OperationalError (HTTP 500). Quoting makes
+    every token a literal phrase term; tokens that quote down to nothing
+    are dropped.
+    """
+    toks = []
+    for t in _re.findall(r"[^\s]+", (q or "").strip()):
+        t = t.replace('"', "")
+        if t:
+            toks.append('"' + t + '"')
+    return " ".join(toks)
+
 app = FastAPI(title="Aiko Inner Speech Studio")
 bind_login_session(app)
 
@@ -53,25 +71,35 @@ def _open_db(user_id: str) -> sqlite3.Connection | None:
 
 def _thoughts(conn: sqlite3.Connection, user_id: str, *, limit: int,
               offset: int, kind: str, source: str, q: str) -> list[dict[str, Any]]:
+    cond: list[str] = ["t.user_id = ?"]
+    args: list[Any] = [user_id]
+    if kind:
+        cond.append("t.kind = ?")
+        args.append(kind)
+    if source:
+        cond.append("t.source = ?")
+        args.append(source)
     if q:
-        rows = conn.execute(
-            """SELECT t.id, t.text, t.kind, t.source, t.created_at,
-                      t.consolidated, t.access_count
-               FROM thoughts_fts f
-               JOIN thoughts t ON t.rowid = f.rowid
-               WHERE t.user_id = ? AND thoughts_fts MATCH ?
-               ORDER BY t.created_at DESC LIMIT ? OFFSET ?""",
-            (user_id, q, limit, offset),
-        ).fetchall()
+        match = _sanitize_fts(q)
+        if not match:
+            return []
+        cond.append("thoughts_fts MATCH ?")
+        args.append(match)
+        try:
+            rows = conn.execute(
+                """SELECT t.id, t.text, t.kind, t.source, t.created_at,
+                          t.consolidated, t.access_count
+                   FROM thoughts_fts f
+                   JOIN thoughts t ON t.rowid = f.rowid
+                   WHERE """ + " AND ".join(cond) + """
+                   ORDER BY t.created_at DESC LIMIT ? OFFSET ?""",
+                (*args, limit, offset),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # Belt and suspenders: a query FTS5 still rejects degrades to
+            # no results instead of an HTTP 500.
+            return []
     else:
-        cond: list[str] = ["t.user_id = ?"]
-        args: list[Any] = [user_id]
-        if kind:
-            cond.append("t.kind = ?")
-            args.append(kind)
-        if source:
-            cond.append("t.source = ?")
-            args.append(source)
         rows = conn.execute(
             "SELECT t.id, t.text, t.kind, t.source, t.created_at,"
             " t.consolidated, t.access_count FROM thoughts t"
@@ -146,8 +174,8 @@ def stats() -> JSONResponse:
 
 @app.get("/api/thoughts")
 def thoughts(
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     kind: str = "",
     source: str = "",
     q: str = "",
@@ -159,8 +187,8 @@ def thoughts(
     if conn is None:
         return JSONResponse({"thoughts": [], "exists": False})
     try:
-        limit = max(1, min(200, int(limit or 50)))
-        offset = max(0, int(offset or 0))
+        # NB: tests call this handler directly, so always pass explicit
+        # ints there — the Query() defaults are FastAPI sentinels.
         return JSONResponse({
             "exists": True,
             "thoughts": _thoughts(conn, user_id, limit=limit, offset=offset,

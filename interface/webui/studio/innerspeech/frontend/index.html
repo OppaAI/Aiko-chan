@@ -44,32 +44,50 @@ copied into chat, spoken, or edited from here.</div>
 silence is normal. Unconsolidated thoughts join the midnight dream.</div>
 <script>
 const $ = id => document.getElementById(id);
+let _reqSeq = 0;          // stale-response guard for the debounced search
+let _debounceT = null;
+function showError(msg) {
+  $("list").innerHTML = `<div class="empty">⚠️ ${msg}</div>`;
+}
 async function api(path) {
   const r = await fetch(path);
+  if (!r.ok) throw new Error(`request failed (${r.status})`);
   return r.json();
 }
 function esc(s) {
   return (s || "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 }
 async function loadStats() {
-  const s = await api("api/stats");
-  if (!s.exists) { $("stats").innerHTML = '<div class="stat">no inner_speech.db yet — chat with her first</div>'; return; }
-  $("stats").innerHTML =
-    `<div class="stat"><b>${s.total}</b> thoughts</div>` +
-    `<div class="stat"><b>${s.unconsolidated}</b> unconsolidated</div>` +
-    `<div class="stat"><b>${s.consolidated}</b> in dreams</div>` +
-    (s.latest_at ? `<div class="stat">latest ${esc(s.latest_at.slice(0,16).replace("T"," "))}</div>` : "");
-  for (const [sel, obj] of [["kind", s.by_kind], ["source", s.by_source]]) {
-    const el = $(sel);
-    el.innerHTML = `<option value="">all ${sel}s</option>` +
-      Object.keys(obj || {}).sort().map(k => `<option>${esc(k)}</option>`).join("");
+  try {
+    const s = await api("api/stats");
+    if (!s.exists) { $("stats").innerHTML = '<div class="stat">no inner_speech.db yet — chat with her first</div>'; return; }
+    $("stats").innerHTML =
+      `<div class="stat"><b>${s.total}</b> thoughts</div>` +
+      `<div class="stat"><b>${s.unconsolidated}</b> unconsolidated</div>` +
+      `<div class="stat"><b>${s.consolidated}</b> in dreams</div>` +
+      (s.latest_at ? `<div class="stat">latest ${esc(s.latest_at.slice(0,16).replace("T"," "))}</div>` : "");
+    for (const [sel, obj] of [["kind", s.by_kind], ["source", s.by_source]]) {
+      const el = $(sel);
+      el.innerHTML = `<option value="">all ${sel}s</option>` +
+        Object.keys(obj || {}).sort().map(k => `<option>${esc(k)}</option>`).join("");
+    }
+  } catch (e) {
+    $("stats").innerHTML = '<div class="stat">⚠️ stats unavailable</div>';
   }
 }
 async function loadThoughts() {
+  const mySeq = ++_reqSeq;
   const p = new URLSearchParams({
     limit: 50, q: $("q").value.trim(), kind: $("kind").value, source: $("source").value,
   });
-  const d = await api("api/thoughts?" + p);
+  let d;
+  try {
+    d = await api("api/thoughts?" + p);
+  } catch (e) {
+    if (mySeq === _reqSeq) showError("couldn't load thoughts — " + (e.message || "network error"));
+    return;
+  }
+  if (mySeq !== _reqSeq) return;  // a newer keystroke already superseded this
   const list = $("list");
   if (!d.exists || !d.thoughts.length) {
     list.innerHTML = '<div class="empty">no thoughts yet — they appear when the salience gate fires</div>';
@@ -88,7 +106,10 @@ async function loadThoughts() {
     </div>`).join("");
 }
 $("reload").onclick = () => { loadStats(); loadThoughts(); };
-$("q").oninput = () => loadThoughts();
+$("q").oninput = () => {
+  clearTimeout(_debounceT);
+  _debounceT = setTimeout(loadThoughts, 250);
+};
 $("kind").onchange = () => loadThoughts();
 $("source").onchange = () => loadThoughts();
 loadStats(); loadThoughts();

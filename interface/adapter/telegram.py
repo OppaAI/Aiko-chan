@@ -111,14 +111,28 @@ class TelegramAdapter(AdapterBase):
                 log.warning("telegram: async app stop failed")
 
     def send_message(self, conversation_id: str, text: str) -> None:
-        if not self._app:
-            return
+        """Send a text message, blocking until Telegram confirms delivery.
+
+        Long texts are split into 4096-char chunks (Telegram's limit),
+        sent in order. Raises on delivery failure so callers can report
+        it honestly. Must not be called from the adapter's own asyncio
+        event loop thread (the blocking wait would deadlock).
+        """
+        app = self._app
+        if not app:
+            raise RuntimeError("telegram adapter not started")
         import asyncio
         try:
             chat_id = int(conversation_id)
-            asyncio.run_coroutine_threadsafe(
-                self._app.bot.send_message(chat_id=chat_id, text=text),
-                self._app.loop,
-            )
+
+            async def send_chunks() -> None:
+                for start in range(0, len(text), 4096):
+                    await app.bot.send_message(
+                        chat_id=chat_id,
+                        text=text[start:start + 4096],
+                    )
+
+            asyncio.run_coroutine_threadsafe(send_chunks(), app.loop).result(timeout=30)
         except Exception as exc:
             log.error("[telegram] Failed to send to %s: %s", conversation_id, exc)
+            raise

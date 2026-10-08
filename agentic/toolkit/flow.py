@@ -1490,6 +1490,43 @@ def _svc_result(service: str, hint: str = "") -> str:
     })
 
 
+def _deliver_via_adapter(service: str, chat_id: str, message: str) -> str:
+    """Send `message` through a running two-way adapter.
+
+    Resolves the live adapter instance started by start_background_adapters().
+    When `chat_id` is empty, falls back to the adapter's most recent inbound
+    conversation (normally the owner). Never raises — returns a JSON result.
+    Two-way channels are owner-to-Aiko, so no approval gate applies here.
+    """
+    text = (message or "").strip()
+    if not text:
+        return _dumps({"ok": False, "service": service, "error": "empty_message"})
+    try:
+        from interface.adapter import get_running_adapter
+    except Exception as exc:
+        return _dumps({"ok": False, "service": service,
+                       "error": f"adapter registry unavailable: {exc}"})
+    adapter = get_running_adapter(service)
+    if adapter is None:
+        return _svc_result(
+            service,
+            f"No {service} adapter is running. Set AIKO_MESSENGER_ADAPTERS "
+            f"to include '{service}' and restart Aiko.",
+        )
+    target = (chat_id or "").strip() or getattr(adapter, "last_conversation_id", None)
+    if not target:
+        return _dumps({"ok": False, "service": service,
+                       "error": "no_target",
+                       "hint": f"No {service} conversation on record yet — "
+                               f"send Aiko a {service} message first, or pass chat_id explicitly."})
+    try:
+        adapter.send_message(target, text)
+    except Exception as exc:
+        return _dumps({"ok": False, "service": service, "error": f"send failed: {exc}"})
+    return _dumps({"ok": True, "service": service, "chat_id": str(target),
+                   "chars": len(text)})
+
+
 # ── triggers ───────────────────────────────────────────────────────────────
 
 @tool(
@@ -1950,20 +1987,145 @@ def whatsapp_send(
 
 
 @tool(
-    _spec("telegram_send", "Telegram: send a message (not connected)."),
-    description="Send a Telegram message. No Telegram backend is configured — the node returns a graceful not-connected result instead of failing the run.",
-    graph=True, react=False, domain="social",
+    _spec("telegram_send", "Telegram: send a message via Aiko's Telegram bot."),
+    description="Send a Telegram message through the running Telegram adapter. "
+                "chat_id defaults to the most recent Telegram conversation (the owner). "
+                "Two-way channel — no approval needed.",
+    always_on=True,
+    graph=True, react=True, domain="social",
 )
 def telegram_send(
     chat_id: str = "",
     message: str = "$prompt",
     to_state: str = "items",
+    items_json: str = "",
+    from_state: str = "",
     *,
     state=None,
     **_kwargs,
 ) -> str:
-    """Graceful stub: no Telegram backend exists yet."""
-    return _svc_result("telegram", "No Telegram bot adapter is configured.")
+    """Send via the live Telegram adapter (graceful when not running)."""
+    raw = items = load_items(items_json or message, state, from_state)
+    text = _response_from_envelope(message or "", items)
+    raw = _deliver_via_adapter("telegram", chat_id, text)
+    parsed = _loads(raw, {}) or {}
+    return emit([_coerce_item(parsed)], state=state, to_state=to_state,
+                ok=bool(parsed.get("ok")), source="telegram")
+
+
+@tool(
+    _spec("discord_send", "Discord: send a message via Aiko's Discord bot."),
+    description="Send a Discord message through the running Discord adapter. "
+                "chat_id defaults to the most recent Discord conversation (the owner). "
+                "Two-way channel — no approval needed.",
+    always_on=True,
+    graph=True, react=True, domain="social",
+)
+def discord_send(
+    chat_id: str = "",
+    message: str = "$prompt",
+    to_state: str = "items",
+    items_json: str = "",
+    from_state: str = "",
+    *,
+    state=None,
+    **_kwargs,
+) -> str:
+    """Send via the live Discord adapter (graceful when not running)."""
+    raw = items = load_items(items_json or message, state, from_state)
+    text = _response_from_envelope(message or "", items)
+    raw = _deliver_via_adapter("discord", chat_id, text)
+    parsed = _loads(raw, {}) or {}
+    return emit([_coerce_item(parsed)], state=state, to_state=to_state,
+                ok=bool(parsed.get("ok")), source="discord")
+
+
+@tool(
+    _spec("slack_send", "Slack: send a message via Aiko's Slack app."),
+    description="Send a Slack message through the running Slack adapter. "
+                "chat_id defaults to the most recent Slack conversation (the owner). "
+                "Two-way channel — no approval needed.",
+    always_on=True,
+    graph=True, react=True, domain="social",
+)
+def slack_send(
+    chat_id: str = "",
+    message: str = "$prompt",
+    to_state: str = "items",
+    items_json: str = "",
+    from_state: str = "",
+    *,
+    state=None,
+    **_kwargs,
+) -> str:
+    """Send via the live Slack adapter (graceful when not running)."""
+    raw = items = load_items(items_json or message, state, from_state)
+    text = _response_from_envelope(message or "", items)
+    raw = _deliver_via_adapter("slack", chat_id, text)
+    parsed = _loads(raw, {}) or {}
+    return emit([_coerce_item(parsed)], state=state, to_state=to_state,
+                ok=bool(parsed.get("ok")), source="slack")
+
+
+@tool(
+    _spec("matrix_send", "Matrix: send a message via Aiko's Matrix client."),
+    description="Send a Matrix message through the running Matrix adapter. "
+                "chat_id defaults to the most recent Matrix conversation (the owner). "
+                "Two-way channel — no approval needed.",
+    always_on=True,
+    graph=True, react=True, domain="social",
+)
+def matrix_send(
+    chat_id: str = "",
+    message: str = "$prompt",
+    to_state: str = "items",
+    items_json: str = "",
+    from_state: str = "",
+    *,
+    state=None,
+    **_kwargs,
+) -> str:
+    """Send via the live Matrix adapter (graceful when not running)."""
+    raw = items = load_items(items_json or message, state, from_state)
+    text = _response_from_envelope(message or "", items)
+    raw = _deliver_via_adapter("matrix", chat_id, text)
+    parsed = _loads(raw, {}) or {}
+    return emit([_coerce_item(parsed)], state=state, to_state=to_state,
+                ok=bool(parsed.get("ok")), source="matrix")
+
+
+@tool(
+    _spec("email_send", "Email: send an email to the owner (or a given address)."),
+    description="Send an email via Aiko's mail bridge. Recipient defaults to "
+                "the owner's AIKO_EMAIL. Best-effort — check ok in the result.",
+    always_on=True,
+    graph=True, react=True, domain="email",
+)
+def email_send(
+    subject: str = "",
+    body: str = "$prompt",
+    to: str = "",
+    to_state: str = "items",
+    items_json: str = "",
+    from_state: str = "",
+    *,
+    state=None,
+    **_kwargs,
+) -> str:
+    """Send an email through notify_email (owner bridge / AIKO_EMAIL default)."""
+    try:
+        from agentic.workflows.common.notify import notify_email
+        items = load_items(items_json or body, state, from_state)
+        result = notify_email(subject or "(no subject)",
+                              _response_from_envelope(body or "", items),
+                              to=(to or "").strip() or None) or {}
+    except Exception as exc:
+        result = {"ok": False, "error": str(exc)}
+    if not isinstance(result, dict):
+        result = {"ok": True, "result": result}
+    items = [_coerce_item(result)]
+    return emit(items, state=state, to_state=to_state,
+                ok=bool(result.get("ok")), source="email")
 
 
 # ── utilities ──────────────────────────────────────────────────────────────
@@ -2162,7 +2324,8 @@ __all__ = [
     "instagram_read", "threads_read", "messenger_read",
     "gmail_search", "gmail_send", "gmail_draft",
     "tool_router", "reminder", "file_read",
-    "whatsapp_send", "telegram_send",
+    "whatsapp_send", "telegram_send", "discord_send", "slack_send", "matrix_send",
+    "email_send",
     "calendar_create", "calendar_list",
     "rss_read", "file_write", "notify_user",
 ]

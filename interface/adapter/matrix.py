@@ -137,10 +137,16 @@ class MatrixAdapter(AdapterBase):
                 log.warning("matrix: async client close failed")
 
     def send_message(self, conversation_id: str, text: str) -> None:
+        """Send a text message, blocking until the homeserver confirms.
+
+        Raises on delivery failure so callers can report it honestly.
+        Must not be called from the adapter's own asyncio event loop
+        thread (the blocking wait would deadlock).
+        """
         if not self._client or not self._loop:
-            return
+            raise RuntimeError("matrix client not started")
         try:
-            asyncio.run_coroutine_threadsafe(
+            fut = asyncio.run_coroutine_threadsafe(
                 self._client.room_send(
                     room_id=conversation_id,
                     message_type="m.room.message",
@@ -148,5 +154,7 @@ class MatrixAdapter(AdapterBase):
                 ),
                 self._loop,
             )
+            fut.result(timeout=30)
         except Exception as exc:
             log.error("[matrix] Failed to send to %s: %s", conversation_id, exc)
+            raise

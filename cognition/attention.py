@@ -2413,6 +2413,11 @@ _states_lock = threading.Lock()
 
 _IDLE_POLL_S = 60.0
 _idle_poller_started = False
+# Dedicated lock for poller startup. _ensure_idle_poller() is called from
+# EdgeCognitiveState.__init__, which for_identity() runs UNDER _states_lock
+# (a non-reentrant Lock). Taking _states_lock here again would deadlock the
+# first chat turn forever — the prompt would never reach the LLM.
+_idle_poller_lock = threading.Lock()
 
 
 def _ensure_idle_poller() -> None:
@@ -2424,7 +2429,7 @@ def _ensure_idle_poller() -> None:
     directly (no bus round-trip, no state lock held during lookup).
     """
     global _idle_poller_started
-    with _states_lock:
+    with _idle_poller_lock:
         if _idle_poller_started:
             return
         _idle_poller_started = True

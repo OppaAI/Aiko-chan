@@ -108,6 +108,10 @@ import time                                                 # for TTS warmup tim
 # bounded separately by the LLM server's own readiness.
 _MEM_BOOT_TIMEOUT_S = 300
 _THINK_BOOT_TIMEOUT_S = 600
+# MCP bridge spawns a Python subprocess + handshake; bounded so a wedged
+# MCP server can never stall boot (previously the serial call had no bound
+# at all and could hang here indefinitely).
+_MCP_BOOT_TIMEOUT_S = 120
 
 # Must run before the system.* imports below — those modules read secrets
 # from os.environ at import time, and this decrypts .env.age into os.environ.
@@ -293,6 +297,14 @@ class AikoWakeup:
                 # real identity connects (webui._ws_handler / cli.py); cleanup
                 # for the real user runs in webui's post-login hook.
 
+                # Signal readiness as soon as the store is constructed.
+                # cleanup() is a full prune scan (maintenance, not readiness);
+                # gating the ready barrier on it made the think thread — and
+                # the whole boot join — wait out the slowest possible scan.
+                mem_ready_evt.set()
+                log.debug('[wakeup] memory worker reached ready barrier')
+                _boot_step('mem_ready')                                                       # mark the memory system ready
+
                 def _mem_cleanup_if_real_user():
                     """Pruning a throwaway guest tempfile DB that was never
                     written to is pure waste — skip it until a real identity
@@ -300,12 +312,17 @@ class AikoWakeup:
                     if memorize.get_user_id() == "guest":
                         log.info("[wakeup] Skipping memory cleanup — guest boot.")
                         return
-                    memorize.cleanup()
+                    try:
+                        memorize.cleanup()
+                    except Exception:
+                        log.exception("[wakeup] Background memory cleanup failed.")
 
-                _boot_step('mem_cleanup', _mem_cleanup_if_real_user)
-                mem_ready_evt.set()
-                log.debug('[wakeup] memory worker reached ready barrier')
-                _boot_step('mem_ready')                                                       # mark the memory system ready
+                # Fire-and-forget: cleanup must never block boot or wedge the
+                # ready barrier, no matter how large the store has grown.
+                threading.Thread(
+                    target=lambda: _boot_step('mem_cleanup', _mem_cleanup_if_real_user),
+                    name="aiko-boot-mem-cleanup", daemon=True,
+                ).start()
 
                 return memorize                                                               # return the live AikoMemorize object
             except Exception:                                                                 # if error, log failure once — single point, full traceback
@@ -339,6 +356,29 @@ class AikoWakeup:
         threading.Thread(target=_run_future,
                          args=(think_future, lambda: init_think(lambda: mem_future.result())),
                          name="aiko-boot-think", daemon=True).start()
+
+        def _boot_mcp() -> bool:
+            """MCP bridge bootstrap — independent of think/mem, non-fatal.
+
+            Spawns the social MCP server subprocess and registers bridge
+            tools. Runs alongside the think/mem workers so its subprocess
+            spawn + handshake cost lands off the critical path.
+            """
+            try:
+                from agentic.mcp_client.bridge import bootstrap_mcp
+                return bool(_boot_step("mcp_client", lambda: bootstrap_mcp()))
+            except Exception:
+                # _boot_step already fired on_skip before re-raising.
+                log.exception("[wakeup] MCP client boot failed")
+                return False
+
+        mcp_future: Future = Future()
+        # Bound the MCP startup cost from worker start, not from result
+        # collection — otherwise a slow think phase would extend the bound
+        # (e.g. 110s think + 120s MCP wait = 230s).
+        mcp_deadline = time.monotonic() + _MCP_BOOT_TIMEOUT_S
+        threading.Thread(target=_run_future, args=(mcp_future, _boot_mcp),
+                         name="aiko-boot-mcp", daemon=True).start()
 
         think_ref: AikoThink | None = None                                                # will hold AikoThink reference
         think_exc: Exception | None = None                                                # holds exception from cognitive core initialization for error chaining
@@ -375,16 +415,19 @@ class AikoWakeup:
         _fly_warm = threading.Thread(target=_warm_fly_catalog, name="aiko-fly-warmup", daemon=True)
         _fly_warm.start()
 
-        # ── MCP client boot (non-fatal) ─────────────────────────────────────────
+        # ── MCP client boot (ran in parallel; non-fatal) ──────────────────────
+        # bootstrap_mcp() spawns a subprocess + handshake; it used to run
+        # here serially. It now runs alongside the think/mem workers — this
+        # just collects the result, bounded so a wedged MCP server can never
+        # stall boot (the old serial call had no bound at all).
         try:
-            from agentic.mcp_client.bridge import bootstrap_mcp
-            mcp_ok = _boot_step("mcp_client", lambda: bootstrap_mcp())
-            if not mcp_ok:
-                log.info("[wakeup] MCP client skipped or unavailable — Aiko will run without social posting tools.")
-        except Exception:
-            log.exception("[wakeup] MCP client boot failed")
-            # _boot_step already fired on_loading -> on_skip internally
-            # before re-raising — nothing further to signal here.
+            mcp_ok = mcp_future.result(timeout=max(0.0, mcp_deadline - time.monotonic()))
+        except FuturesTimeoutError:
+            log.warning("[wakeup] MCP client boot timed out after %ds — continuing without it.",
+                        _MCP_BOOT_TIMEOUT_S)
+            mcp_ok = False
+        if not mcp_ok:
+            log.info("[wakeup] MCP client skipped or unavailable — Aiko will run without social posting tools.")
 
         if think_ref is None:                                                                 # if cognitive core initialization failed (returned None)
             log.critical(                                                                     # single log point: critical severity + full traceback in one line

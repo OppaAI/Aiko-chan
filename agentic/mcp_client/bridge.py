@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from agentic.mcp_client import get_mcp_client, init_mcp_client
-from agentic.registry import registry, register_tool_schema
+from agentic.registry import register_tool_schema
 from system.log import get_logger
 
 log = get_logger(__name__)
@@ -44,6 +44,7 @@ def bootstrap_mcp(server_url: str = "") -> bool:
         register_tool_schema(
             name=name,
             description=description,
+            handler=bridge_fn,
             props=props,
             required=required,
             domain="social",
@@ -51,7 +52,6 @@ def bootstrap_mcp(server_url: str = "") -> bool:
             react=True,
             graph=True,
         )
-        registry._tools[name].handler = bridge_fn
         count += 1
 
     log.info("[mcp] Registered %d bridge tools from MCP server", count)

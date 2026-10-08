@@ -164,13 +164,17 @@ def resolve_ambient_valence(user_id: str | None = None) -> int | None:
     if not FORGET_MOOD_MATCH_ENABLED:
         return None
     try:
-        from cognition.attention import for_identity
+        from cognition.attention import _states, _states_lock
         from system.userspace import current_user_id
 
         uid = user_id or current_user_id()
         if not uid or uid in ("default", "guest"):
             return None
-        snap = for_identity(uid).snapshot()
+        with _states_lock:
+            state = _states.get(uid)
+        if state is None:
+            return None
+        snap = state.snapshot()
         affect = float(snap.get("affect") or 0.0)
         if affect > 0.2:
             return 1

@@ -84,15 +84,20 @@ class CliAuth:
         # is unspecified.  We verify it on use; if it fails we re-login.
         return bool(session.get("access_token"))
 
-    def get_user_id(self) -> str:
-        """Provider-scoped runtime id (e.g. 'github_123456') for filesystem paths."""
+    def get_user_id(self) -> str | None:
+        """Provider-scoped runtime id (e.g. 'github_123456') for filesystem paths.
+
+        Returns None when the stored session has no provider user id —
+        callers must treat that as unauthenticated, never fall back to a
+        shared 'cli-user' identity (wiping or writing the wrong stores).
+        """
         session = self.get_stored_session()
         if session:
             user = session.get("user", {})
             uid = user.get("id")
             if uid:
                 return normalize_user_id("github", uid)
-        return "cli-user"
+        return None
 
     def get_display_name(self) -> str:
         """GitHub login for display/prompt, not filesystem paths."""
@@ -224,6 +229,11 @@ class CliAuth:
         if not login:
             print("  ✗ Could not determine GitHub login.")
             return False
+        if not user.get("id"):
+            # get_user_id() depends on the provider id for the filesystem
+            # identity — never persist a profile without it.
+            print("  ✗ GitHub profile is missing the user id.")
+            return False
 
         # ── authorisation check ─────────────────────────────────────────
         if not self._is_authorised(login):
@@ -287,3 +297,28 @@ class CliAuth:
             print("  ✓ Logged out.")
         else:
             print("  Not logged in.")
+
+
+# ── shared identity ──────────────────────────────────────────────────────
+
+
+def resolve_cli_user_id() -> str | None:
+    """Resolve the CLI runtime user id, shared by run_cli() and --clear-mem.
+
+    GitHub OAuth configured → ensure a stored session (device-flow login
+    when none exists, exactly like run_cli) and return the provider-scoped
+    id (e.g. 'github_123456'). Not configured → 'guest', matching the CLI
+    session's own storage identity. Returns None when authentication fails
+    (caller aborts).
+    """
+    auth = CliAuth()
+    if not auth.is_configured():
+        # Preserve an explicitly set identity (e.g. Jetson service env);
+        # 'guest' only when nothing was set — matching run_cli, which leaves
+        # AIKO_USER_ID untouched in the non-OAuth path.
+        return os.getenv("AIKO_USER_ID") or "guest"
+    if not auth.is_authenticated():
+        print("  GitHub OAuth login required.")
+        if not auth.login():
+            return None
+    return auth.get_user_id()

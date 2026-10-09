@@ -87,3 +87,42 @@ def test_run_chain_failure_isolated():
 
     s = c.run_chain(_spec(), fake_invoke)
     assert not s["ok"] and len(s["errors"]) == 1
+
+
+def test_run_chain_malformed_steps_skipped_not_aborted():
+    calls = []
+
+    def fake_invoke(name, args):
+        calls.append(name)
+        return {"ok": True}
+
+    s = c.run_chain(
+        [
+            {"bogus": 1},                      # neither tool nor if
+            "not-a-dict",                      # not an object at all
+            {"tool": ""},                      # empty tool name
+            {"if": "not-a-dict", "then": []},  # non-dict condition
+            {"tool": "telegram_send"},         # good step still runs
+        ],
+        fake_invoke,
+    )
+    assert not s["ok"] and len(s["errors"]) == 4
+    assert calls == ["telegram_send"]
+
+
+def test_run_chain_nesting_bounded():
+    def fake_invoke(name, args):
+        return 1 if name == "set_flag" else {"ok": True}
+
+    # build a chain nested deeper than _MAX_NESTING, with the flag bound
+    # so every level takes the "then" branch
+    deep_inner: list = [{"tool": "x"}]
+    for _ in range(c._MAX_NESTING + 3):
+        deep_inner = [{"if": {"field": "flag", "op": "==", "value": 1}, "then": deep_inner}]
+    s = c.run_chain([{"tool": "set_flag", "as": "flag"}] + deep_inner, fake_invoke)
+    assert not s["ok"] and any("nesting" in e for e in s["errors"])
+
+
+def test_eval_condition_rejects_non_dict():
+    assert c.eval_condition("nope", {}) is False
+    assert c.eval_condition({"field": 123, "op": "==", "value": 1}, {}) is False

@@ -39,6 +39,11 @@ log = logging.getLogger(__name__)
 
 _CONDITION_OPS = {"==", "!=", ">", ">=", "<", "<=", "in", "not_in", "contains"}
 
+# Maximum nesting depth for if/then/else branches. Chains are validated at
+# creation, but a hand-edited schedule.json can bypass that — bound the
+# recursion so a pathological record cannot blow the stack.
+_MAX_NESTING = 10
+
 _TEMPLATE_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*)\}")
 
 
@@ -69,10 +74,14 @@ def resolve_path(dotted: str, bindings: dict[str, Any]) -> tuple[bool, Any]:
 
 def eval_condition(cond: dict[str, Any], bindings: dict[str, Any]) -> bool:
     """Evaluate {"field", "op", "value"} against bindings. Unknown field -> False."""
+    if not isinstance(cond, dict):
+        return False
     field = cond.get("field", "")
+    if not isinstance(field, str) or not field:
+        return False
     op = cond.get("op", "==")
     expected = cond.get("value")
-    found, actual = resolve_path(str(field), bindings)
+    found, actual = resolve_path(field, bindings)
     if not found:
         return False
     try:
@@ -162,16 +171,34 @@ def run_chain(
     chain: list[dict[str, Any]],
     invoke: Callable[[str, dict[str, Any]], Any],
 ) -> dict[str, Any]:
-    """Execute a validated chain. Returns a summary of what ran."""
+    """Execute a chain. Returns a summary of what ran.
+
+    Defensive by design: chains are validated at schedule creation, but a
+    hand-edited schedule.json can bypass that. Malformed steps are recorded
+    in ``errors`` and skipped — one bad step never aborts the rest of the
+    chain.
+    """
     bindings: dict[str, Any] = {}
     ran: list[str] = []
     skipped: list[str] = []
     errors: list[str] = []
 
-    def _run_steps(steps: list[dict[str, Any]]) -> None:
-        for step in steps:
+    def _run_steps(steps: Any, depth: int) -> None:
+        if depth > _MAX_NESTING:
+            errors.append(f"chain nesting exceeds {_MAX_NESTING}; deeper branch skipped")
+            return
+        if not isinstance(steps, list):
+            errors.append(f"chain branch is not a list ({type(steps).__name__}); skipped")
+            return
+        for idx, step in enumerate(steps):
+            if not isinstance(step, dict):
+                errors.append(f"step {idx}: not an object; skipped")
+                continue
             if "tool" in step:
                 name = step["tool"]
+                if not isinstance(name, str) or not name.strip():
+                    errors.append(f"step {idx}: 'tool' must be a non-empty string; skipped")
+                    continue
                 args = _render_args(step.get("args") or {}, bindings)
                 if not isinstance(args, dict):
                     args = {}
@@ -182,15 +209,22 @@ def run_chain(
                     log.warning("chain tool %r failed: %s", name, exc)
                     continue
                 ran.append(name)
-                if step.get("as"):
-                    bindings[step["as"]] = _coerce_output(result)
+                as_name = step.get("as")
+                if isinstance(as_name, str) and as_name:
+                    bindings[as_name] = _coerce_output(result)
             elif "if" in step:
                 cond = step["if"]
+                if not isinstance(cond, dict):
+                    errors.append(f"step {idx}: 'if' must be {{field, op, value}}; skipped")
+                    continue
                 matched = eval_condition(cond, bindings)
                 branch = step.get("then", []) if matched else step.get("else", [])
                 label = f"if {cond.get('field')} {cond.get('op')} {cond.get('value')}"
                 (ran if matched else skipped).append(label)
-                _run_steps(branch)
+                _run_steps(branch, depth + 1)
+            else:
+                errors.append(f"step {idx}: has neither 'tool' nor 'if'; skipped")
+                log.warning("chain %s", errors[-1])
 
-    _run_steps(chain)
+    _run_steps(chain if isinstance(chain, list) else [], 0)
     return {"ok": not errors, "ran": ran, "skipped": skipped, "errors": errors}

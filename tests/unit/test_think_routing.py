@@ -99,10 +99,12 @@ def test_refusal_route_flushes_before_reply(monkeypatch):
     monkeypatch.setattr(hooks, "gate_respond", lambda **_kwargs: ("refuse", "No thanks", ""))
     monkeypatch.setattr(ledger, "ledger_for", lambda *_args: SimpleNamespace(flush=lambda: events.append("flush")))
     monkeypatch.setattr(think, "_emit", lambda *_args, **_kwargs: events.append("emit"))
-    monkeypatch.setattr(think, "_route_intent", lambda *_args: events.append("route"))
+    # Gate and intent overlap: intent always runs now (its result is only
+    # unused on refusal). The invariant under test is flush-before-reply.
+    monkeypatch.setattr(think, "_route_intent", lambda *_args: events.append("route") or ("localchat", None))
 
     assert think.route("Please do the wrong thing") == "No thanks"
-    assert events == ["flush", "emit"]
+    assert events == ["route", "flush", "emit"]
 
 
 def test_non_greeting_route_starts_memory_after_intent(monkeypatch):

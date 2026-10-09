@@ -1176,16 +1176,67 @@ class AikoThink:
 
     # ── public api ────────────────────────────────────────────────────────────
 
+    def _collect_inbound_gate(self, gate_future, user_input: str, user_id: str,
+                              timeout: float = 90.0) -> tuple:
+        """Collect the overlapped gate_respond future submitted in route().
+
+        Returns (decision, reply, note) with the same caution fallback
+        route() always applied when the gate raised: failures and timeouts
+        degrade to a constraint note, never to a dropped turn.
+        """
+        _fallback_note = (
+            "<conscience_constraint>Conscience evaluation is temporarily unavailable. "
+            "Proceed cautiously and take no irreversible action.</conscience_constraint>"
+        )
+        if gate_future is None:
+            return "caution", "", _fallback_note
+        try:
+            decision, reply, note = gate_future.result(timeout=timeout)
+            return decision, reply, note
+        except concurrent.futures.TimeoutError:
+            log.warning("[route] conscience gate timed out after %.0fs; continuing with caution.", timeout)
+            return "caution", "", _fallback_note
+        except Exception as exc:
+            log.warning("[route] conscience gate failed; continuing with caution: %s", exc)
+            return "caution", "", _fallback_note
+
+    def _apply_gate_verdict(self, decision, reply, note, *, user_input: str, user_id: str,
+                            token_callback, system_note, route_t0) -> tuple:
+        """Apply a collected gate verdict. Returns ("return", reply) when the
+        turn ends here (refuse/escalate), else ("continue", system_note).
+        Shared by the deep-think fast path and the post-intent path so no
+        route can reach chat() without a gate verdict applied.
+        """
+        if decision in ("refuse", "escalate") and reply:
+            from cognition.conscience.ledger import ledger_for
+            ledger_for(user_id).flush()
+            self._emit(reply, token_callback=token_callback)
+            with self._history_lock:
+                self._history.append({"role": "user", "content": user_input})
+                self._history.append({"role": "assistant", "content": reply})
+            try:
+                from cognition.attention import for_identity
+                for_identity(user_id).record_turn_latency(time.monotonic() - route_t0)
+            except Exception:
+                pass
+            return "return", reply
+        if decision == "caution" and note:
+            system_note = (f"{system_note}" + "\n" + note).strip() if system_note else note
+        _latency.mark("conscience_inbound")
+        return "continue", system_note
+
     def route(self, user_input: str, token_callback=None, system_note: str | None = None) -> str:
         """Main entry point. Quaternary routing.
 
         Intent is resolved before recall. Greeting-only turns are
         intentionally cheap: they go straight to the LLM with persona + recent
         chat history only and skip memory recall, KB recall, and memory
-        extraction/writeback. Local/webchat turns run the chained recall
-        inside chat(): memory → entity-link knowledge hop → conditional
-        explicit knowledge search (no parallel future). Agentic turns keep
-        the shared memory+KB future.
+        extraction/writeback. The inbound conscience gate runs concurrently
+        with intent classification (both are independent reads of the input).
+        Local/webchat turns run overlapped recall inside chat(): the
+        memory→knowledge chain, system-prompt build, and gated codebase/wiki
+        fetches run on CONTEXT_POOL and assemble in fixed order. Agentic
+        turns keep the shared memory+KB future.
 
         Deep-think fast path: an explicit ask to think more carefully
         (_is_deep_think_request) is checked FIRST, before quaternary intent
@@ -1299,42 +1350,30 @@ class AikoThink:
             gate_result = (True, "gate unavailable", "proceed")
 
         # ── Conscience Circuit Core (inbound gate) ─────────────────────────
+        # Overlapped with intent classification below: both are independent
+        # reads of user_input (gate: SLM/Laya/deliberate chain; intent: LLM
+        # classify). The gate future is collected right after intent returns,
+        # so a turn pays max(gate, intent) instead of gate + intent.
+        from cognition.conscience import hooks as _ccc_hooks
+        _mem_for_gate = self._get_memorize()
+        _mem_inner_gate = getattr(_mem_for_gate, "_mem", None) if _mem_for_gate is not None else None
         try:
-            from cognition.conscience.hooks import gate_respond
-            memorize = self._get_memorize()
-            mem_inner = getattr(memorize, "_mem", None) if memorize is not None else None
-            embedder = getattr(mem_inner, "_embedder", None)
-            decision, reply, note = gate_respond(
+            _gate_future = CONTEXT_POOL.submit(
+                _ccc_hooks.gate_respond,
                 user_input=user_input,
                 user_id=user_id,
                 llm_client=getattr(self, "_client", None),
-                embedder=embedder,
+                embedder=getattr(_mem_inner_gate, "_embedder", None),
                 surface="chat",
             )
-            if decision in ("refuse", "escalate") and reply:
-                from cognition.conscience.ledger import ledger_for
-                ledger_for(user_id).flush()
-                self._emit(reply, token_callback=token_callback)
-                with self._history_lock:
-                    self._history.append({"role": "user", "content": user_input})
-                    self._history.append({"role": "assistant", "content": reply})
-                try:
-                    from cognition.attention import for_identity
-                    for_identity(user_id).record_turn_latency(time.monotonic() - _route_t0)
-                except Exception:
-                    pass
-                _finish_route_tracking()
-                return reply
-            if decision == "caution" and note:
-                system_note = (f"{system_note}" + "\n" + note).strip() if system_note else note
-            _latency.mark("conscience_inbound")
         except Exception as exc:
-            log.warning("[route] conscience gate failed; continuing with caution: %s", exc)
-            fallback_note = (
-                "<conscience_constraint>Conscience evaluation is temporarily unavailable. "
-                "Proceed cautiously and take no irreversible action.</conscience_constraint>"
-            )
-            system_note = (f"{system_note}\n{fallback_note}").strip() if system_note else fallback_note
+            log.warning("[route] conscience gate submit failed; continuing with caution: %s", exc)
+            _gate_future = None
+        # Gate result is collected after intent classification below — or
+        # right here on the deep-think fast path, which bypasses intent.
+        # No route reaches chat() without a gate verdict applied
+        # (see _collect_inbound_gate) — a failed submit degrades to the
+        # same caution fallback at collect time.
 
         try:
             # ── deep-think fast path ────────────────────────────────────────
@@ -1354,6 +1393,16 @@ class AikoThink:
                         "bypasses quaternary intent routing — same mechanism as /think",
                     ],
                 )
+                # Same gate verdict as the post-intent path: the fast path
+                # must not skip conscience.
+                _verdict, _text = self._apply_gate_verdict(
+                    *self._collect_inbound_gate(_gate_future, user_input, user_id),
+                    user_input=user_input, user_id=user_id, token_callback=token_callback,
+                    system_note=system_note, route_t0=_route_t0)
+                if _verdict == "return":
+                    _finish_route_tracking()
+                    return _text
+                system_note = _text
                 return self.chat(
                     user_input,
                     token_callback=token_callback,
@@ -1364,6 +1413,17 @@ class AikoThink:
             intent, route_vec = self._route_intent(user_input)
             log.info("[route] intent=%s", intent)
             _latency.mark("intent_embedded")
+
+            # Collect the inbound gate overlapped above: a turn pays
+            # max(gate, intent) instead of gate + intent.
+            _verdict, _text = self._apply_gate_verdict(
+                *self._collect_inbound_gate(_gate_future, user_input, user_id),
+                user_input=user_input, user_id=user_id, token_callback=token_callback,
+                system_note=system_note, route_t0=_route_t0)
+            if _verdict == "return":
+                _finish_route_tracking()
+                return _text
+            system_note = _text
 
             if intent == "greeting":
                 from cognition.conscience.ledger import ledger_for
@@ -1632,6 +1692,87 @@ class AikoThink:
                     before - len(memories), before, MEMORY_MIN_SCORE,
                 )
         return memories
+
+    def _recall_chat_blocks(
+        self, raw_input: str, query_vec, mem_limit: int, know_limit: int,
+        deep_think: bool, mem_kb_future,
+    ) -> dict:
+        """Chat recall chain as one submittable unit (CONTEXT_POOL overlap).
+
+        Moved verbatim out of chat(): memory → prioritize → deep rerank →
+        weak-set drop → chained knowledge → experience override → format →
+        persona. chat() runs this concurrently with system-prompt/codebase/
+        wiki fetches and assembles the returned blocks in the original
+        order, so the final prompt bytes are unchanged — only the wait
+        overlaps.
+        """
+        from cognition.attention import for_identity
+        memorize = self._get_memorize()
+        if mem_kb_future is not None:
+            # Legacy path: a pre-started future (tests / external
+            # callers). route() no longer passes one for chat.
+            memories, knowledge_block = self._resolve_mem_kb(raw_input, mem_kb_future)
+        else:
+            # Chained recall: memory → entity-link knowledge hop →
+            # explicit knowledge search only when memory can't answer.
+            memories = self._fetch_memory_only(
+                raw_input, query_vector=query_vec, mem_limit=mem_limit,
+            )
+        memories = for_identity(current_user_id()).prioritize_memories(raw_input, memories)
+        deep_think_meta = {}
+        if deep_think:
+            memories, deep_think_meta = _deep_think_rerank(memories, raw_input)
+        # Drop all-low weak sets: prioritize marks low when score<2.0
+        # (no query/context/goal overlap, not pinned/salient). Injecting
+        # those drifts small models off-topic; fall back to knowledge instead.
+        if memories and all(
+            (isinstance(m, dict) and (m.get("_reconstruction_confidence") or "").lower() == "low")
+            for m in memories
+        ):
+            memories = []
+        if mem_kb_future is None:
+            # Knowledge follows memory in the chain (after prioritize /
+            # weak-set drop so the hop and the gate see final memories).
+            knowledge_block = self._fetch_chained_knowledge(
+                raw_input, memories, query_vec, know_limit=know_limit,
+            )
+        # Skip cross-store related_knowledge when primary knowledge already
+        # hit — both search the same query, so this only duplicates chunks.
+        # Keep related_experience (different store, still useful).
+        _related_override = None
+        try:
+            if _blank_empty_knowledge(knowledge_block):
+                from cognition.memory.narrative import (
+                    related_experience,
+                    seed_entities_from_memories,
+                )
+                _seeds = seed_entities_from_memories(memories, query=raw_input)
+                _mem_for_exp = self._get_memorize()
+                _emb_for_exp = getattr(getattr(_mem_for_exp, "_mem", None), "_embedder", None)
+                _related_override = {
+                    "knowledge": [],
+                    "experience": related_experience(
+                        raw_input, _seeds, embedder=_emb_for_exp,
+                    ),
+                }
+        except Exception:
+            _related_override = None
+        if _related_override is not None:
+            memory_block = memorize.format_for_context(
+                memories, query=raw_input, query_vector=query_vec,
+                related=_related_override,
+            ) if memorize is not None else ""
+        else:
+            memory_block = memorize.format_for_context(
+              memories, query=raw_input, query_vector=query_vec
+            ) if memorize is not None else ""
+        persona_block = memorize.persona_context() if memorize is not None else ""
+        return {
+            "memories": memories,
+            "knowledge_block": knowledge_block,
+            "memory_block": memory_block,
+            "persona_block": persona_block,
+        }
 
     def _super_node_entities(self) -> set[str]:
         """Best-effort super-node entity set for link-hop seed filtering.
@@ -2496,69 +2637,65 @@ class AikoThink:
                 memory_block = ""
                 persona_block = ""
             else:
-                memorize = self._get_memorize()
-                from cognition.attention import for_identity
                 mem_limit = DEEP_THINK_MEMORY_LIMIT if deep_think else MEMORY_RECALL_LIMIT
                 know_limit = DEEP_THINK_KNOWLEDGE_LIMIT if deep_think else KNOWLEDGE_RECALL_LIMIT
-                if mem_kb_future is not None:
-                    # Legacy path: a pre-started future (tests / external
-                    # callers). route() no longer passes one for chat.
-                    memories, knowledge_block = self._resolve_mem_kb(raw_input, mem_kb_future)
+                # Overlapped recall: the memory→knowledge chain, the system
+                # prompt build, and the gated codebase/wiki fetches are
+                # independent reads — run them concurrently and assemble in
+                # the original order below, so prompt bytes don't change.
+                _recall_future = CONTEXT_POOL.submit(
+                    self._recall_chat_blocks, raw_input, query_vec,
+                    mem_limit, know_limit, deep_think, mem_kb_future,
+                )
+                _sys_future = CONTEXT_POOL.submit(self._current_system_prompt_parts, raw_input)
+                _code_wanted = any(k in (raw_input or "").lower() for k in ("codebase", "from your code", "from your codebase", "attention gate", "how does your code", "where is", "repo", "source file"))
+                if _code_wanted:
+                    from cognition.knowledge.codebase import codebase_context_for as _codebase_context_for
+                    _mem_for_code = self._get_memorize()
+                    _emb_for_code = _mem_for_code.embedder() if _mem_for_code is not None else None
+                    _code_future = CONTEXT_POOL.submit(
+                        _codebase_context_for, raw_input, limit=4, max_chars=3500, embedder=_emb_for_code)
                 else:
-                    # Chained recall: memory → entity-link knowledge hop →
-                    # explicit knowledge search only when memory can't answer.
-                    memories = self._fetch_memory_only(
-                        raw_input, query_vector=query_vec, mem_limit=mem_limit,
-                    )
-                memories = for_identity(current_user_id()).prioritize_memories(raw_input, memories)
-                deep_think_meta = {}
-                if deep_think:
-                    memories, deep_think_meta = _deep_think_rerank(memories, raw_input)
-                # Drop all-low weak sets: prioritize marks low when score<2.0
-                # (no query/context/goal overlap, not pinned/salient). Injecting
-                # those drifts small models off-topic; fall back to knowledge instead.
-                if memories and all(
-                    (isinstance(m, dict) and (m.get("_reconstruction_confidence") or "").lower() == "low")
-                    for m in memories
-                ):
-                    memories = []
-                if mem_kb_future is None:
-                    # Knowledge follows memory in the chain (after prioritize /
-                    # weak-set drop so the hop and the gate see final memories).
-                    knowledge_block = self._fetch_chained_knowledge(
-                        raw_input, memories, query_vec, know_limit=know_limit,
-                    )
-                # Skip cross-store related_knowledge when primary knowledge already
-                # hit — both search the same query, so this only duplicates chunks.
-                # Keep related_experience (different store, still useful).
-                _related_override = None
+                    _code_future = None
+                if _should_use_local_knowledge(raw_input):
+                    _mem_for_wiki = self._get_memorize()
+                    _emb_for_wiki = _mem_for_wiki.embedder() if _mem_for_wiki is not None else None
+                    _wiki_future = CONTEXT_POOL.submit(
+                        wiki_knowledge_context_for, raw_input, limit=3, max_chars=3000,
+                        embedder=_emb_for_wiki)
+                else:
+                    _wiki_future = None
                 try:
-                    if _blank_empty_knowledge(knowledge_block):
-                        from cognition.memory.narrative import (
-                            related_experience,
-                            seed_entities_from_memories,
-                        )
-                        _seeds = seed_entities_from_memories(memories, query=raw_input)
-                        _mem_for_exp = self._get_memorize()
-                        _emb_for_exp = getattr(getattr(_mem_for_exp, "_mem", None), "_embedder", None)
-                        _related_override = {
-                            "knowledge": [],
-                            "experience": related_experience(
-                                raw_input, _seeds, embedder=_emb_for_exp,
-                            ),
-                        }
+                    _blocks = _recall_future.result(timeout=MEMORY_RECALL_TIMEOUT * 3)
+                except concurrent.futures.TimeoutError:
+                    log.warning("Chat recall chain timed out after %.0fs; continuing without memory.",
+                                MEMORY_RECALL_TIMEOUT * 3)
+                    _blocks = {"memories": [], "knowledge_block": "", "memory_block": "", "persona_block": ""}
                 except Exception:
-                    _related_override = None
-                if _related_override is not None:
-                    memory_block = memorize.format_for_context(
-                        memories, query=raw_input, query_vector=query_vec,
-                        related=_related_override,
-                    ) if memorize is not None else ""
-                else:
-                    memory_block = memorize.format_for_context(
-                      memories, query=raw_input, query_vector=query_vec
-                    ) if memorize is not None else ""
-                persona_block = memorize.persona_context() if memorize is not None else ""
+                    log.exception("Chat recall chain failed; continuing without memory.")
+                    _blocks = {"memories": [], "knowledge_block": "", "memory_block": "", "persona_block": ""}
+                memories = _blocks["memories"]
+                knowledge_block = _blocks["knowledge_block"]
+                memory_block = _blocks["memory_block"]
+                persona_block = _blocks["persona_block"]
+                try:
+                    _sys_pair = _sys_future.result(timeout=MEMORY_RECALL_TIMEOUT * 3)
+                except Exception:
+                    log.exception("System-prompt build failed; continuing bare.")
+                    _sys_pair = ("", "")
+                _recall_core_system, _recall_volatile_system = _sys_pair
+                _code_block = ""
+                if _code_future is not None:
+                    try:
+                        _code_block = _code_future.result(timeout=MEMORY_RECALL_TIMEOUT * 3) or ""
+                    except Exception as e:
+                        log.debug("codebase_context inject failed: %s", e)
+                _wiki_block = ""
+                if _wiki_future is not None:
+                    try:
+                        _wiki_block = _wiki_future.result(timeout=MEMORY_RECALL_TIMEOUT * 3) or ""
+                    except Exception as e:
+                        log.error("Local wiki-knowledge lookup failed: %s", e)
                 try:
                     from cognition.attention import for_identity
                     from cognition.memory.narrative import query_wants_emotion
@@ -2587,7 +2724,11 @@ class AikoThink:
                 except Exception:
                     pass
 
-            core_system, volatile_system = self._current_system_prompt_parts(raw_input)
+            if skip_memory:
+                core_system, volatile_system = self._current_system_prompt_parts(raw_input)
+            else:
+                # Pre-fetched concurrently with the recall chain above.
+                core_system, volatile_system = _recall_core_system, _recall_volatile_system
             if not skip_memory:
                 if persona_block:
                     volatile_system = f"{volatile_system}\n\n{persona_block}"
@@ -2627,30 +2768,15 @@ class AikoThink:
                 )
                 if _kb_inject:
                     volatile_system = f"{volatile_system}\n\n{_kb_clean}"
-                # Codebase RAG — when user explicitly asks from your codebase/code
-                if not skip_memory and any(k in (raw_input or "").lower() for k in ("codebase", "from your code", "from your codebase", "attention gate", "how does your code", "where is", "repo", "source file")):
-                    try:
-                        from cognition.knowledge.codebase import codebase_context_for
-                        memorize = self._get_memorize()
-                        embedder = memorize.embedder() if memorize is not None else None
-                        cb_block = codebase_context_for(raw_input, limit=4, max_chars=3500, embedder=embedder)
-                        if cb_block and "No matching codebase" not in cb_block:
-                            volatile_system = f"{volatile_system}\n\n{cb_block}"
-                    except Exception as e:
-                        log.debug("codebase_context inject failed: %s", e)
+                # Codebase RAG — pre-fetched concurrently above under the
+                # same keyword gate and args; inject as before.
+                if not skip_memory and _code_block and "No matching codebase" not in _code_block:
+                    volatile_system = f"{volatile_system}\n\n{_code_block}"
 
-            if not skip_memory and _should_use_local_knowledge(raw_input):
-                try:
-                    memorize = self._get_memorize()
-                    embedder = memorize.embedder() if memorize is not None else None
-                    wiki_context = wiki_knowledge_context_for(
-                        raw_input, limit=3, max_chars=3000,
-                        embedder=embedder,
-                    )
-                    if _blank_empty_knowledge(wiki_context):
-                        volatile_system = f"{volatile_system}\n\n{wiki_context}"
-                except Exception as e:
-                    log.error("Local wiki-knowledge lookup failed: %s", e)
+            # Wiki RAG — pre-fetched concurrently above under the same gate
+            # and args; inject as before.
+            if not skip_memory and _wiki_block and _blank_empty_knowledge(_wiki_block):
+                volatile_system = f"{volatile_system}\n\n{_wiki_block}"
 
             net_context = ""
             if (

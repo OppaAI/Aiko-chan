@@ -29,6 +29,10 @@ from concurrent.futures import ThreadPoolExecutor
 import atexit
 
 # ThreadPoolExecutor for concurrent memory/knowledge fetch.
-# Jetson Orin Nano: 4 cores shared; limit workers to 2 to avoid context-switch overhead.
-CONTEXT_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ctx-fetch")
+# Jetson Orin Nano: 4 cores shared. Fetches are IO-bound (HTTP embeds,
+# sqlite reads), so 4 workers overlap without CPU contention. Chat submits
+# up to 4 (recall chain + system prompt + codebase + wiki); agentic submits
+# 2 (memory + KB). Callers always join with a timeout, so a slow backend
+# degrades to skipped context, never a hung turn.
+CONTEXT_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ctx-fetch")
 atexit.register(CONTEXT_POOL.shutdown, wait=False)

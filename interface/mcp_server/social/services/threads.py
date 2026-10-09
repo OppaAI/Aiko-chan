@@ -893,6 +893,14 @@ def _post_threads_reply(token: str, user_id: str, text: str, reply_to_id: str, i
 
 _MONITOR_RUN_LOCK = threading.Lock()
 
+# Root-post text cache: a root post's text is effectively immutable, but
+# every poll re-fetched it with a fields-heavy GET per tracked post just
+# to run the trigger check (which then usually hits "already processed"
+# and discards it). Cache (text, username) per post id; the cached copy
+# only ever serves the already-processed path, so staleness can't hide a
+# new trigger — first sight always fetches live.
+_ROOT_TEXT_CACHE: dict[str, tuple[str, str]] = {}
+
 
 def monitor_threads_replies(memorize=None) -> dict:
     """Find and answer new replies containing Hi {AI_NAME} or @{THREADS_USERNAME}.
@@ -937,10 +945,19 @@ def _monitor_threads_replies_locked(memorize=None) -> dict:
     errors = []
     for post_id in post_ids:
         replies = _threads_conversation(post_id, token)
-        root_result = _threads_get(post_id, token, fields="id,text,timestamp,username,media_type,media_url,thumbnail_url,permalink,children{media_type,media_url,thumbnail_url}")
-        root = root_result.get("data", {}) if root_result.get("ok") else {}
-        root_text = str(root.get("text") or "")
         root_key = f"root:{post_id}"
+        _cached_root = _ROOT_TEXT_CACHE.get(post_id)
+        if _cached_root is not None:
+            root_text, _cached_user = _cached_root
+            root = {"text": root_text, "username": _cached_user}
+        else:
+            root_result = _threads_get(post_id, token, fields="id,text,timestamp,username,media_type,media_url,thumbnail_url,permalink,children{media_type,media_url,thumbnail_url}")
+            root = root_result.get("data", {}) if root_result.get("ok") else {}
+            root_text = str(root.get("text") or "")
+            if root_result.get("ok"):
+                # Cache only successful fetches: a transient failure must
+                # retry next poll, not poison the cache with "".
+                _ROOT_TEXT_CACHE[post_id] = (root_text, str(root.get("username") or ""))
         if root_text and not db.has_processed_threads_reply(root_key) and _is_trigger(root_text):
             matched += 1
             if not beeped:

@@ -479,7 +479,22 @@ class AikoSpeak:
 
     def warmup(self) -> bool:
         """Health-check the MioTTS server — called from wakeup.py during boot."""
-        return self._health_check()
+        ok = self._health_check()
+        if ok:
+            # Prime synthesis in the background: the health ping doesn't
+            # warm the server's synthesis path, so the first utterance
+            # otherwise pays the full cold cost mid-turn. Fire-and-forget —
+            # boot and turns never wait on it.
+            import threading as _threading
+
+            def _prime() -> None:
+                try:
+                    self._synthesize("ok")
+                except Exception:
+                    pass
+
+            _threading.Thread(target=_prime, name="tts-synth-prime", daemon=True).start()
+        return ok
 
     def _health_check(self) -> bool:
         """Ping /health to confirm the server is up."""
@@ -1048,21 +1063,39 @@ class AikoSpeak:
     def is_playing(self) -> bool:
         return self._playing.is_set()
 
-    def wait(self) -> None:
-        """Block until playback finishes naturally."""
+    def wait(self, timeout: float = 600.0) -> bool:
+        """Block until playback finishes naturally. Bounded: returns False
+        (and logs) if the playing flag never clears, so a wedged audio
+        backend can't trap turn_done forever."""
+        import time as _time
+        deadline = _time.monotonic() + max(0.0, timeout)
         while self.is_playing():
-            time.sleep(0.05)
+            if _time.monotonic() >= deadline:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "speak.wait() timed out after %.0fs with playback still flagged — releasing turn.", timeout)
+                return False
+            _time.sleep(0.05)
+        return True
 
-    def wait_or_barge_in(self, barge_in_event: threading.Event) -> bool:
+    def wait_or_barge_in(self, barge_in_event: threading.Event, timeout: float = 600.0) -> bool:
         """
         Block until TTS finishes naturally OR barge_in_event is set.
         Returns True if interrupted, False if finished naturally.
+        Bounded like wait(): returns False with a warning on timeout.
         """
+        import time as _time
+        deadline = _time.monotonic() + max(0.0, timeout)
         while self.is_playing():
             if barge_in_event.is_set():
                 self.stop()
                 return True
-            time.sleep(0.02)
+            if _time.monotonic() >= deadline:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "speak.wait_or_barge_in() timed out after %.0fs — releasing turn.", timeout)
+                return False
+            _time.sleep(0.02)
         return False
 
     def stop(self) -> None:

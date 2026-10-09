@@ -235,16 +235,22 @@ def _save_interaction_memory(reply: dict, reply_text: str, memorize) -> bool:
 def _beep_on_trigger() -> None:
     if env("THREADS_REPLY_BEEP_ENABLED", "1").strip().lower() not in {"1", "true", "yes", "on"}:
         return
-    try:
-        subprocess.run(
-            ["paplay", "/usr/share/sounds/freedesktop/stereo/bell.oga"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        pass
+    # Fire-and-forget on a daemon thread: a beep is a nicety, and on a
+    # headless box paplay can block the full timeout per first match,
+    # stalling the whole poll.
+    def _play() -> None:
+        try:
+            subprocess.run(
+                ["paplay", "/usr/share/sounds/freedesktop/stereo/bell.oga"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+    import threading as _threading
+    _threading.Thread(target=_play, name="threads-beep", daemon=True).start()
 
 
 def _get_llm_client() -> OpenAI:

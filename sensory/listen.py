@@ -775,8 +775,14 @@ class AikoListen:
             data = json.load(f)
         self._enrolled_embedding = np.asarray(data["embedding"], dtype=np.float32)
 
-    def join_warmup(self) -> None:
-        self._warmup_done.wait()
+    def join_warmup(self, timeout: float = 120.0) -> bool:
+        """Bounded warmup join. Returns False on timeout instead of trapping
+        the caller forever."""
+        warmed = self._warmup_done.wait(timeout=timeout)
+        if not warmed:
+            import logging as _logging
+            _logging.getLogger(__name__).warning("listen warmup join timed out after %.0fs.", timeout)
+        return bool(warmed)
 
     # ── speaker verification ──────────────────────────────────────────────────
 

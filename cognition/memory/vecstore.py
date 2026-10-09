@@ -70,6 +70,10 @@ _EMBED_MODEL      = os.getenv("EMBED_MODEL", "harrier")
 _EMBED_DIMS       = env_int("EMBED_DIMS", 640)
 _BATCH_SIZE       = env_int("EMBED_BATCH_SIZE", 32)
 _EMBED_TIMEOUT    = env_float("EMBED_TIMEOUT_S", 30)
+# Circuit breaker: consecutive HTTP failures before failing fast, and how
+# long to fail fast. Env-tunable for slow/loaded backends.
+_CB_FAILURES     = max(1, env_int("EMBED_CB_FAILURES", 3))
+_CB_COOLDOWN_S   = max(1.0, env_float("EMBED_CB_COOLDOWN_S", 60.0))
 _QUERY_INSTRUCT   = os.getenv(
     "EMBED_QUERY_INSTRUCT",
     "Retrieve relevant memories that answer the query",
@@ -150,6 +154,9 @@ class HarrierEmbedder:
         )
         self._session.mount("http://", adapter)
         self._session.mount("https://", adapter)
+        # Consecutive-failure circuit-breaker state (guarded by _cache_lock).
+        self._cb_failures: int = 0
+        self._cb_open_until: float = 0.0
 
     def _load_disk_cache(self) -> None:
         """Load embeddings from disk cache (JSON Lines format).
@@ -176,6 +183,10 @@ class HarrierEmbedder:
                         if entry.get("flyal", "off") != _flyal_mode():
                             continue
                         vec = np.asarray(entry["vector"], dtype=np.float32)
+                        # Drop stale geometry: wrong dims poison sqlite-vec
+                        # inserts/searches downstream.
+                        if vec.shape != (self.dims,):
+                            continue
                         self._disk_cache[key] = vec
                     except Exception:
                         continue
@@ -213,7 +224,11 @@ class HarrierEmbedder:
             tmp = self._disk_cache_path.with_suffix(".tmp")
             with open(tmp, "w", encoding="utf-8") as f:
                 for key, vec in entries:
-                    f.write(json.dumps({"texts": list(key), "vector": np.asarray(vec).tolist()}, ensure_ascii=False) + "\n")
+                    # Keep the flyal tag: tagless entries are skipped on
+                    # reload whenever the mode is not off (mass cache miss
+                    # after one compaction).
+                    f.write(json.dumps({"texts": list(key), "vector": np.asarray(vec).tolist(),
+                                        "flyal": _flyal_mode()}, ensure_ascii=False) + "\n")
             tmp.replace(self._disk_cache_path)
             log.info(f"Compacted disk embedding cache to {len(entries)} entries")
         except Exception as e:
@@ -262,14 +277,38 @@ class HarrierEmbedder:
                         self._cache.popitem(last=False)
                 return disk_cached
 
+        # Circuit breaker: after _CB_FAILURES consecutive HTTP failures,
+        # fail fast for _CB_COOLDOWN_S instead of burning timeout×retries
+        # (≈90s) per batch. Callers already degrade (persist without
+        # vectors), so fast failure only converts stall time, not outcomes.
+        if self._cb_open_until and now >= self._cb_open_until:
+            self._cb_open_until = 0.0
+        if self._cb_open_until:
+            raise RuntimeError(f"embedding circuit open ({self._cb_failures} consecutive failures)")
+
         # HTTP call to embedding server
-        resp = self._session.post(
-            f"{self.base_url}/embedding",
-            json={"model": self.model, "content": texts},
-            timeout=self.timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        try:
+            resp = self._session.post(
+                f"{self.base_url}/embedding",
+                json={"model": self.model, "content": texts},
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception:
+            with self._cache_lock:
+                self._cb_failures += 1
+                if self._cb_failures >= _CB_FAILURES:
+                    import time as _time
+                    self._cb_open_until = _time.monotonic() + _CB_COOLDOWN_S
+                    log.warning("embedding circuit OPEN after %d consecutive failures — failing fast for %.0fs.",
+                                self._cb_failures, _CB_COOLDOWN_S)
+            raise
+        with self._cache_lock:
+            if self._cb_failures:
+                log.info("embedding circuit closed — server recovered.")
+            self._cb_failures = 0
+            self._cb_open_until = 0.0
 
         vecs = []
         for item in data:

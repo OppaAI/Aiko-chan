@@ -2663,8 +2663,14 @@ class AikoMemorize:
         Same caveat: does not take self._mem._db_lock itself."""
         self._conn.commit()
 
-    def switch_user(self, user_id: str) -> None:
-        """Switch to a different user's memory store after draining pending writes."""
+    def switch_user(self, user_id: str) -> bool:
+        """Switch to a different user's memory store after draining pending writes.
+
+        Returns True when the switch completed, False when it was aborted
+        (pending writes did not drain in time). Callers MUST check the
+        return value — proceeding after False means operating on the
+        previous user's store.
+        """
         with self._user_switch_lock:
             # Drain any pending writes first. If a write is still in flight when
             # we close the connection and reassign self._mem below, the
@@ -2682,7 +2688,7 @@ class AikoMemorize:
                     f"within {switch_timeout:.0f}s — aborting user switch to avoid writing to the "
                     "wrong connection. Try again shortly."
                 )
-                return
+                return False
 
             # Flush + close any per-user episode stores so no in-flight
             # episode DB write bleeds into the new user's connection. The
@@ -2710,6 +2716,7 @@ class AikoMemorize:
                     except Exception:
                         log.warning("memorize: closing old connection failed")
             self._open(user_id)
+            return True
 
     def get_user_id(self) -> str:
         """Return the user_id this instance is currently opened for."""
@@ -2926,7 +2933,10 @@ class AikoMemorize:
             item = self._write_queue.get()
             try:
                 if item is None:
-                    self._write_queue.task_done()
+                    # Shutdown sentinel: just return — the finally below does
+                    # the single task_done(). Calling it here too would
+                    # double-decrement the queue count (ValueError, dead
+                    # worker, and every later join() misbehaves).
                     return
                 user_input, response_text, user_id, display_name, is_active_turn, idle_since = item
                 self._wait_for_write_window(is_active_turn, idle_since)
@@ -4199,6 +4209,18 @@ class AikoMemorize:
         user_id = self._resolve_user_id(user_id)
         source = [_all_mems] if _all_mems is not None else self._iter_memory_batches(user_id)
 
+        # Lineage set once per cleanup(), not per batch: the supersedes
+        # table scan is full-table and batches otherwise repeat it.
+        lineage_ids: set[str] = set()
+        try:
+            with self._mem._db_lock:
+                rows = self._conn.execute(
+                    "SELECT supersedes_id FROM memories WHERE supersedes_id IS NOT NULL AND supersedes_id != ''"
+                ).fetchall()
+            lineage_ids = {str(r["supersedes_id"]) for r in rows if r["supersedes_id"]}
+        except Exception:
+            lineage_ids = set()
+
         kept = 0
         deleted: list[str] = []
         failed: list[dict] = []
@@ -4213,6 +4235,7 @@ class AikoMemorize:
                 batch,
                 user_id=user_id,
                 _pinned_ids=_pinned_ids,
+                _lineage_ids=lineage_ids,
             )
             kept += batch_kept
 
@@ -4258,6 +4281,7 @@ class AikoMemorize:
         all_mems: list[dict],
         user_id: str,
         _pinned_ids: set[str] | None = None,
+        _lineage_ids: set[str] | None = None,
     ) -> tuple[int, list[dict]]:
         mem_ids     = [str(m.get("id", "")) for m in all_mems if m.get("id")]
         payload_map = self._batch_get_payloads(mem_ids)
@@ -4266,16 +4290,19 @@ class AikoMemorize:
 
         candidates = []
         kept       = 0
-        lineage_ids: set[str] = set()
-
-        try:
-            with self._mem._db_lock:
-                rows = self._conn.execute(
-                    "SELECT supersedes_id FROM memories WHERE supersedes_id IS NOT NULL AND supersedes_id != ''"
-                ).fetchall()
-            lineage_ids = {str(r["supersedes_id"]) for r in rows if r["supersedes_id"]}
-        except Exception:
+        if _lineage_ids is not None:
+            lineage_ids = _lineage_ids
+        else:
+            # Standalone callers (no cleanup() hoist): one full-table scan.
             lineage_ids = set()
+            try:
+                with self._mem._db_lock:
+                    rows = self._conn.execute(
+                        "SELECT supersedes_id FROM memories WHERE supersedes_id IS NOT NULL AND supersedes_id != ''"
+                    ).fetchall()
+                lineage_ids = {str(r["supersedes_id"]) for r in rows if r["supersedes_id"]}
+            except Exception:
+                lineage_ids = set()
 
         # Ambient mood for offline cleanup so mood-dependent forgetting is live.
         ambient_valence = None

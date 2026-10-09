@@ -65,7 +65,8 @@ def _get_memorize(user_id: str):
                 # The facade opens its database during construction, so it
                 # must be explicitly bound instead of inheriting a later
                 # request's contextvar.
-                memorize.switch_user(user_id)
+                if not memorize.switch_user(user_id):
+                    raise RuntimeError(f"memory switch to {user_id!r} failed — store busy, retry shortly")
                 _memorize_by_user[user_id] = memorize
     else:
         # Move to end (LRU: mark as recently used)

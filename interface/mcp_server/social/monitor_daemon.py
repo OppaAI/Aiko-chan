@@ -121,7 +121,9 @@ def _fallback_owner_memorize():
             from cognition.memory.memorize import AikoMemorize
 
             mem = AikoMemorize(silent=True)
-            mem.switch_user(uid)
+            if not mem.switch_user(uid):
+                log.warning("[monitor_daemon] Owner-store fallback bind failed for %s — switch aborted.", uid)
+                return None
             disp = _resolve_owner_display_name(uid)
             if disp:
                 try:
@@ -151,6 +153,8 @@ def _poll_threads() -> None:
     errors = result.get("errors", [])
     if answered:
         log.info("[threads_daemon] Answered %d / %d matched replies", answered, matched)
+    elif matched:
+        log.warning("[threads_daemon] %d matched but 0 answered — all dropped in guards/claims, see service logs.", matched)
     if errors:
         log.warning("[threads_daemon] %d error(s): %s", len(errors), errors[:3])
 
@@ -164,6 +168,8 @@ def _poll_bluesky() -> None:
     errors = result.get("errors", [])
     if answered:
         log.info("[bluesky_daemon] Answered %d / %d matched replies", answered, matched)
+    elif matched:
+        log.warning("[bluesky_daemon] %d matched but 0 answered — all dropped in guards/claims, see service logs.", matched)
     if errors:
         log.warning("[bluesky_daemon] %d error(s): %s", len(errors), errors[:3])
 
@@ -177,6 +183,8 @@ def _poll_mastodon() -> None:
     errors = result.get("errors", [])
     if answered:
         log.info("[mastodon_daemon] Answered %d / %d matched replies", answered, matched)
+    elif matched:
+        log.warning("[mastodon_daemon] %d matched but 0 answered — all dropped in guards/claims, see service logs.", matched)
     if errors:
         log.warning("[mastodon_daemon] %d error(s): %s", len(errors), errors[:3])
 
@@ -300,12 +308,24 @@ def stop_social_monitor_daemon() -> None:
         pass
 
 
+def _stop_one_platform(label: str) -> None:
+    """Stop a single platform's polling without touching the others.
+
+    The old per-platform stoppers all funneled into
+    stop_social_monitor_daemon(), which cleared _DESIRED entirely —
+    stopping Threads also killed Bluesky and Mastodon.
+    """
+    _DESIRED.pop(label, None)
+    if not _DESIRED:
+        _SOCIAL_STOP_EVENT.set()
+
+
 def start_threads_monitor_daemon(interval_seconds: int | None = None) -> threading.Thread | None:
     return start_social_monitor_daemon(interval_seconds=interval_seconds, only="threads")
 
 
 def stop_threads_monitor_daemon() -> None:
-    stop_social_monitor_daemon()
+    _stop_one_platform("threads")
 
 
 def start_bluesky_monitor_daemon(interval_seconds: int | None = None) -> threading.Thread | None:
@@ -313,7 +333,7 @@ def start_bluesky_monitor_daemon(interval_seconds: int | None = None) -> threadi
 
 
 def stop_bluesky_monitor_daemon() -> None:
-    stop_social_monitor_daemon()
+    _stop_one_platform("bluesky")
 
 
 def start_mastodon_monitor_daemon(interval_seconds: int | None = None) -> threading.Thread | None:
@@ -321,4 +341,4 @@ def start_mastodon_monitor_daemon(interval_seconds: int | None = None) -> thread
 
 
 def stop_mastodon_monitor_daemon() -> None:
-    stop_social_monitor_daemon()
+    _stop_one_platform("mastodon")

@@ -86,6 +86,11 @@ class AikoSimpleCLI:
     # ── boot / status ────────────────────────────────────────────────────
     _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
+    # Bound for one blocking mic read before falling back to typed input.
+    # Headless sessions (SSH, no mic) would otherwise wait forever inside
+    # listen() while typed input sits unread. Env-tunable.
+    _VOICE_LISTEN_TIMEOUT_S = float(os.getenv("VOICE_LISTEN_TIMEOUT_S", "120") or 120)
+
     def _spin_loop(self, stop_event: threading.Event) -> None:
         idx = 0
         while not stop_event.is_set():
@@ -265,10 +270,26 @@ class AikoSimpleCLI:
             if callable(method):
                 print("🎤 listening... (speak now)")
                 listen_started_at = time.monotonic()
-                try:
-                    result = method()
-                except Exception as e:
-                    print(f"  [voice input failed: {e}]")
+                # Bound the blocking mic read: on a headless session with no
+                # mic, listen() never returns and typed input is never read.
+                # Run it on a worker and fall back to typing on timeout —
+                # the orphaned worker is daemon-scoped and discarded.
+                import threading as _threading
+                _voice_box: list = []
+                def _do_listen() -> None:
+                    try:
+                        _voice_box.append(method())
+                    except Exception as e:
+                        _voice_box.append(e)
+                _voice_thread = _threading.Thread(target=_do_listen, name="cli-voice-listen", daemon=True)
+                _voice_thread.start()
+                _voice_thread.join(timeout=self._VOICE_LISTEN_TIMEOUT_S)
+                if _voice_thread.is_alive() or not _voice_box:
+                    print(f"  [voice input timed out after {self._VOICE_LISTEN_TIMEOUT_S:.0f}s — type instead; /listen toggles voice attempts]")
+                    return self.get_input()
+                result = _voice_box[0]
+                if isinstance(result, Exception):
+                    print(f"  [voice input failed: {result}]")
                     return self.get_input()
                 recording_stopped_at = time.monotonic()
                 asr_done_at = recording_stopped_at

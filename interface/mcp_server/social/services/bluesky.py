@@ -602,6 +602,7 @@ def monitor_bluesky_replies(memorize=None) -> dict:
             beeped = True
 
         if not db.claim_bluesky_reply(reply_id, worker_id):
+            log.warning("[bluesky] reply %r matched but claim failed (another worker owns it) — skipping.", reply_id)
             continue
 
         try:

@@ -46,6 +46,7 @@ class DummyMemorize:
     def switch_user(self, uid: str) -> None:
         self.switched.append(uid)
 
+        return True
     def set_display_name(self, name: str) -> None:
         self.display_names.append(name)
 
@@ -274,6 +275,7 @@ def test_post_auth_binds_memory_to_logged_in_user():
         def switch_user(self, uid):
             self.switched_to.append(uid)
 
+            return True
         def cleanup(self):
             self.cleanup_user = current_user_id()
 
@@ -301,6 +303,7 @@ def test_concurrent_user_active_calls_run_post_auth_once(monkeypatch):
         def switch_user(self, uid):
             self.switch_calls.append(uid)
 
+            return True
         def cleanup(self):
             self.cleanup_calls += 1
 
@@ -342,6 +345,7 @@ def test_concurrent_user_active_different_users(monkeypatch):
         def switch_user(self, uid):
             self.switch_calls.append(uid)
 
+            return True
         def cleanup(self):
             self.cleanup_calls += 1
 

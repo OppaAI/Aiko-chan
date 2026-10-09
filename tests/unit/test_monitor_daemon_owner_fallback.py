@@ -25,6 +25,7 @@ class FakeMemorize:
 
     def switch_user(self, uid):
         self.switched_to.append(uid)
+        return True
 
 
 @pytest.fixture(autouse=True)
@@ -95,6 +96,7 @@ def test_fallback_owner_memorize_constructs_binds_and_caches(monkeypatch):
 
         def switch_user(self, uid):
             constructed.append(("switch", uid))
+            return True
 
         def get_display_name(self):
             return ""

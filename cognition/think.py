@@ -121,6 +121,9 @@ def _sync_goal_review_schedule(state) -> None:
 
 # ── boot labels ───────────────────────────────────────────────────────────────
 
+# git-status TTL cache for per-turn project signals (monotonic, signals).
+_GIT_STATUS_CACHE: tuple = (0.0, [])
+
 BOOT_LABELS = {
     'think_start':    'Loading llama.cpp client + persona...',
     'think_warmup':   'Warming up language model...',
@@ -1010,13 +1013,21 @@ class AikoThink:
                 model=self._llm_model,
                 messages=[{"role": "user", "content": "hi"}],
                 stream=False, max_tokens=1,
+                timeout=LLM_TIMEOUT,
             )
         except Exception as e:
             log.warning("LLM warmup failed: %s", e)
 
-    def join_warmup(self) -> None:
+    def join_warmup(self, timeout: float = 300.0) -> bool:
+        """Join the warmup thread, bounded. Returns False on timeout instead
+        of trapping the caller — a wedged warmup LLM call must degrade,
+        not hang boot."""
         if self._warmup_thread and self._warmup_thread.is_alive():
-            self._warmup_thread.join()
+            self._warmup_thread.join(timeout=timeout)
+            if self._warmup_thread.is_alive():
+                log.warning("[think] warmup join timed out after %.0fs — continuing without warmup.", timeout)
+                return False
+        return True
 
     def start_warmup(self) -> None:
         """Kick off the LLM warmup call. Call once, right after construction."""
@@ -1065,6 +1076,7 @@ class AikoThink:
         """
         core = self._persona_core()
         volatile_parts: list[str] = []
+        global _GIT_STATUS_CACHE
         try:
             from cognition.attention import for_identity
             state_obj = for_identity(current_user_id())
@@ -1082,11 +1094,18 @@ class AikoThink:
             project_signals = []
             if _CODE_TRIGGER_RE.search(user_input) or _LOCAL_KNOWLEDGE_RE.search(user_input):
                 try:
-                    result = subprocess.run(
-                        ["git", "status", "--short", "--untracked-files=no"],
-                        cwd=Path.cwd(), capture_output=True, text=True, timeout=1, check=False,
-                    )
-                    project_signals = [line.strip() for line in result.stdout.splitlines() if line.strip()][:5]
+                    # Repo status changes on human timescales, not per-turn:
+                    # cache up to 60s so code-heavy sessions don't pay a
+                    # subprocess spawn every turn.
+                    import time as _time
+                    if _time.monotonic() - _GIT_STATUS_CACHE[0] > 60.0:
+                        result = subprocess.run(
+                            ["git", "status", "--short", "--untracked-files=no"],
+                            cwd=Path.cwd(), capture_output=True, text=True, timeout=1, check=False,
+                        )
+                        _GIT_STATUS_CACHE = (_time.monotonic(),
+                                             [line.strip() for line in result.stdout.splitlines() if line.strip()][:5])
+                    project_signals = _GIT_STATUS_CACHE[1]
                 except Exception:
                     project_signals = []
             grounded = for_identity(current_user_id()).grounded_context(

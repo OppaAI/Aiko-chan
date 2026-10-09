@@ -615,6 +615,7 @@ def monitor_mastodon_replies(memorize=None) -> dict:
             beeped = True
 
         if not db.claim_mastodon_reply(reply_id, worker_id):
+            log.warning("[mastodon] reply %r matched but claim failed (another worker owns it) — skipping.", reply_id)
             continue
 
         try:

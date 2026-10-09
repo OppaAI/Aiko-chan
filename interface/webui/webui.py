@@ -451,8 +451,18 @@ class AikoWeb:
             }, ensure_ascii=False))
 
         # Post-login rebinding/seeding runs in the background so the socket
-        # receive loop starts immediately.
-        asyncio.ensure_future(asyncio.to_thread(self._on_user_active, uid))
+        # receive loop starts immediately. Done-callback logs failures —
+        # without it an exception outside _on_user_active's inner try
+        # surfaces only as "never retrieved" and is effectively silent.
+        _post_login_task = asyncio.ensure_future(asyncio.to_thread(self._on_user_active, uid))
+
+        def _log_post_login_failure(task: asyncio.Task) -> None:
+            try:
+                task.result()
+            except Exception:
+                log.exception("[webui] post-login background task failed for %s", uid)
+
+        _post_login_task.add_done_callback(_log_post_login_failure)
 
         with self._clients_lock:
             self._clients.add(ws)
@@ -1114,7 +1124,12 @@ class AikoWeb:
         # Lazy voice boot: overlap server-side ASR/VAD model load with the
         # browser's mic-permission/arming UX instead of blocking on it.
         if listen is not None and hasattr(listen, "ensure_ready"):
-            threading.Thread(target=listen.ensure_ready, daemon=True).start()
+            def _ensure_listen_ready() -> None:
+                try:
+                    listen.ensure_ready()
+                except Exception:
+                    log.exception("[webui] background ASR load failed")
+            threading.Thread(target=_ensure_listen_ready, daemon=True).start()
 
         self._broadcast({
             "type": "mic",

@@ -108,13 +108,33 @@ _knowledge_folder_watcher = None  # KnowledgeFolderWatcher instance (lazy)
 
 
 @contextmanager
-def _scheduler_run_lock(user_id: str, name: str, *, blocking: bool = False):
-    """Serialize one scheduler stream across processes sharing user state."""
+def _scheduler_run_lock(user_id: str, name: str, *, blocking: bool = False,
+                        timeout: float = 60.0):
+    """Serialize one scheduler stream across processes sharing user state.
+
+    blocking=True waits up to `timeout` (polling LOCK_NB) instead of
+    wedging forever on a stale holder — a crashed process's flock releases
+    on close, but a live wedged holder must not trap boot/seeding.
+    """
+    import time as _time
     path = user_state_path(f".locks/scheduler-{name}.lock", user_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        if blocking:
+            deadline = _time.monotonic() + max(0.0, timeout)
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if _time.monotonic() >= deadline:
+                        os.close(fd)
+                        yield False
+                        return
+                    _time.sleep(0.1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         os.close(fd)
         yield False
@@ -1890,6 +1910,13 @@ class ScheduleRunner:
         self._stop                 = threading.Event()
         self._thread: threading.Thread | None = None
         self._catchup_lock          = threading.Lock()
+        # In-flight schedule-graph guard: a graph whose run outlasts the
+        # fire tick must not stack a second concurrent run. Keyed by
+        # graph id; checked + set under _graphs_lock in
+        # _fire_due_schedule_graphs_locked (single scheduler thread today,
+        # lock kept for future/manual-run callers).
+        self._graphs_in_flight: set = set()
+        self._graphs_lock           = threading.Lock()
 
         # calculated once at startup, updated after each fire
         self._next_daily   = _next_daily_reflect_and_dream()
@@ -2123,7 +2150,9 @@ class ScheduleRunner:
                     uid_token = set_current_user_id(self._owner_user_id)
                     try:
                         if self._memorize is not None:
-                            self._memorize.switch_user(self._owner_user_id)
+                            if not self._memorize.switch_user(self._owner_user_id):
+                                log.warning("schedule: system job %r skipped — memory switch failed.", name)
+                                continue
                         if name == "daily":
                             self._run_daily_reflect_and_dream()
                             self._next_daily = _next_daily_reflect_and_dream()
@@ -2171,7 +2200,9 @@ class ScheduleRunner:
                     uid_token = set_current_user_id(uid)
                     try:
                         if self._memorize is not None:
-                            self._memorize.switch_user(uid)
+                            if not self._memorize.switch_user(uid):
+                                log.warning("schedule: user jobs for %r skipped — memory switch failed.", uid)
+                                continue
                         if due_user_jobs:
                             self._fire_due_user_jobs(uid)
                         if due_graphs:
@@ -2275,7 +2306,9 @@ class ScheduleRunner:
                     try:
                         self.set_user(uid)
                         if self._memorize is not None:
-                            self._memorize.switch_user(uid)
+                            if not self._memorize.switch_user(uid):
+                                log.warning("schedule: daily reflect skipped — memory switch failed.")
+                                return
                         self._run_daily_reflect_and_dream(for_date=date)
                     finally:
                         reset_current_user_id(token)
@@ -2324,8 +2357,10 @@ class ScheduleRunner:
                 owner = resolve_owner_user_id()
                 if owner:
                     try:
-                        self._memorize.switch_user(owner)
-                        log.info("[scheduler] memorize rebound to owner store %s", owner)
+                        if self._memorize.switch_user(owner):
+                            log.info("[scheduler] memorize rebound to owner store %s", owner)
+                        else:
+                            log.warning("[scheduler] memorize rebind to %s aborted — staying on current store.", owner)
                     except Exception as e:
                         log.error("[scheduler] memorize rebind to %s failed: %s", owner, e)
                 else:
@@ -2719,9 +2754,25 @@ class ScheduleRunner:
                 changed = True
 
             if due <= now:
-                self._run_schedule_graph(g)
-                g["last_ran_at"] = now.isoformat()
-                g["next_due"] = _schedule_graph_next_due(g, after=now).isoformat()
+                gid = g.get("graph_id") or g.get("id", "")
+                with self._graphs_lock:
+                    if gid and gid in self._graphs_in_flight:
+                        log.warning("Schedule graph %r still running from previous tick — skipping stacked fire.", gid)
+                        continue
+                    if gid:
+                        self._graphs_in_flight.add(gid)
+                try:
+                    self._run_schedule_graph(g)
+                finally:
+                    if gid:
+                        with self._graphs_lock:
+                            self._graphs_in_flight.discard(gid)
+                # next_due/last_ran_at from COMPLETION time: using the
+                # pre-run `now` leaves next_due in the past after a
+                # minutes-long run → immediate re-fire loop.
+                completed = bioclock.local_now()
+                g["last_ran_at"] = completed.isoformat()
+                g["next_due"] = _schedule_graph_next_due(g, after=completed).isoformat()
                 changed = True
 
         if changed:
@@ -2931,7 +2982,7 @@ def _reflect_on_completed_job(user_id: str, job_title: str) -> None:
             if inner is not None:
                 inner.reflect_on_task(f"scheduled job: {job_title}", outcome="completed")
         except Exception:
-            pass
+            log.debug("inner-speech reflection on %r failed", job_title, exc_info=True)
 
     t = _threading.Thread(target=_run, daemon=True, name="inner-speech-reflect")
     t.start()

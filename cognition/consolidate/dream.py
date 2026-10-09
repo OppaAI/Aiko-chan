@@ -193,15 +193,33 @@ def _generate_image_prompt(prose: str) -> str:
     return raw
 
 def _load_reference_images() -> list[str]:
-    """Load Aiko and user reference images as base64 strings."""
+    """Load Aiko and user reference images as base64 strings.
+
+    Cached on first load (keyed by file mtimes): reference files change
+    on human timescales, but every image reply was re-reading +
+    re-decoding them.
+    """
+    global _REFERENCE_IMAGES_CACHE
+    try:
+        current = _REFERENCE_IMAGES_CACHE
+    except NameError:
+        current = None
+    paths = [_reference_image_path(), _user_reference_image_path()]
+    try:
+        stamps = tuple((p, os.path.getmtime(p)) if p and os.path.exists(p) else (p, None) for p in paths)
+    except OSError:
+        stamps = None
+    if current is not None and current[0] == stamps:
+        return current[1]
     refs = []
-    for path in [_reference_image_path(), _user_reference_image_path()]:
+    for path in paths:
         if path and os.path.exists(path):
             with open(path, "rb") as f:
                 refs.append(base64.b64encode(f.read()).decode())
             log.info(f"Loaded reference image: {path}")
         else:
             log.warning(f"Reference image not found, skipping: {path}")
+    _REFERENCE_IMAGES_CACHE = (stamps, refs)
     return refs
 
 def _generate_image(prose: str) -> str | None:

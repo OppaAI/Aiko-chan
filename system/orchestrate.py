@@ -72,6 +72,7 @@ from __future__ import annotations
 import collections
 from datetime import datetime, timedelta
 import difflib
+import functools
 import json
 import os
 import queue
@@ -269,7 +270,15 @@ def _count_tokens(text: str) -> int:
     (llama-server compatible: POST {content: str} -> {tokens: [...]})
     Falls back to a crude whitespace-split estimate on any failure so
     debug output degrades gracefully instead of raising.
+
+    Memoized: debug turns count the same system/memory prompts repeatedly,
+    and each uncached call is a 5s-timeout HTTP round-trip.
     """
+    return _count_tokens_cached(text or "")
+
+
+@functools.lru_cache(maxsize=512)
+def _count_tokens_cached(text: str) -> int:
     global _TOKENIZE_FAILED_ONCE
     if not text:
         return 0
@@ -1079,6 +1088,7 @@ def run_session(ui, args) -> None:
     # of booting a second time. The old double boot also left a zombie
     # scheduler thread behind (each boot's ScheduleRunner kept ticking).
     result = getattr(ui, "_boot_result", None)
+    fresh_boot = result is None
     if result is None:
         try:
             result = AikoWakeup().boot(
@@ -1099,6 +1109,22 @@ def run_session(ui, args) -> None:
     memorize = result.memorize
     speak    = result.speak
     listen   = result.listen
+
+    # CLI boots straight into a real uid (no post-login hook like the
+    # WebUI), so without this the first turn pays the cold-cache embed
+    # cost. Fire-and-forget daemon thread — never blocks the loop.
+    if fresh_boot and think is not None and memorize is not None:
+        try:
+            from system.userspace import current_user_id
+            if current_user_id() != "guest":
+                def _cli_prewarm() -> None:
+                    try:
+                        think.prewarm_caches()
+                    except Exception:
+                        log.debug("CLI cache prewarm failed", exc_info=True)
+                threading.Thread(target=_cli_prewarm, name="cli-prewarm", daemon=True).start()
+        except Exception:
+            log.debug("CLI cache prewarm scheduling failed", exc_info=True)
 
     if hasattr(ui, "set_voice_backends"):
         ui.set_voice_backends(speak, listen)
@@ -1660,7 +1686,12 @@ def run_session(ui, args) -> None:
             # turns into another identity's prompt.
             think.reset_context()
             if memorize is not None:
-                memorize.switch_user(turn_uid)
+                if not memorize.switch_user(turn_uid):
+                    log.error("turn skipped: memory switch to %r failed — "
+                              "refusing to read the wrong user's store.", turn_uid)
+                    ui.add_message('sys', 'Turn skipped: memory was busy switching users. Please retry your message.')
+                    ui._draw()
+                    continue
             last_bound_uid = turn_uid
 
         # Drain per-user runtime notices (TTS/ASR/memory failures) so the

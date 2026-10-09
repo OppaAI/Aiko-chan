@@ -60,7 +60,10 @@ def run_post_auth(uid: str, *, memorize=None, think=None) -> None:
     display_token = set_current_display_name(uid)
     try:
         if memorize is not None:
-            memorize.switch_user(uid)
+            if not memorize.switch_user(uid):
+                log.error("[prepare] post-auth init aborted: memory still bound to "
+                          "previous store, refusing to run user init on it.")
+                return
 
         # Semantic cache warm under the REAL identity — moved out of wakeup boot:
         # as guest, per-user npz disk caches can't be read or written (see

@@ -3164,7 +3164,26 @@ class AikoThink:
         if job.action == "tool":
             threading.Thread(target=ctx.run, args=(self._run_scheduled_tool_job, job), daemon=True).start()
             return
+        if job.action == "chain":
+            threading.Thread(target=ctx.run, args=(self._run_scheduled_chain_job, job), daemon=True).start()
+            return
         threading.Thread(target=ctx.run, args=(self._run_scheduled_agentic_job, job), daemon=True).start()
+
+    def _run_scheduled_chain_job(self, job: DueJob) -> None:
+        """Run a compiled tool chain from a schedule.json record — no LLM.
+
+        The chain was compiled from the user's sentence once (by the agent);
+        every firing just executes it mechanically: tools in order, structured
+        conditions on their outputs, {dotted.path} templating into args.
+        """
+        try:
+            from agentic.agentic import invoke_registered_tool
+            from agentic.workflows.common.chain import run_chain
+            summary = run_chain(job.tool_chain or [], invoke_registered_tool)
+            log.info("Scheduled chain job %s completed: ran=%s skipped=%s errors=%s",
+                     job.id, summary["ran"], summary["skipped"], summary["errors"])
+        except Exception as e:
+            log.error("Scheduled chain job %s failed: %s", job.id, e)
 
     def _run_scheduled_tool_job(self, job: DueJob) -> None:
         """Invoke one registered agentic tool from a schedule.json record."""

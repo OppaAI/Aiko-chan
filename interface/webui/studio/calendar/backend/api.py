@@ -71,9 +71,10 @@ class ScheduleInput(BaseModel):
     timezone: str | None = None
     days_of_week: list[str] | str | None = None
     interval_seconds: int | None = None
-    action: Literal["announce", "agentic", "tool"] = "announce"
+    action: Literal["announce", "agentic", "tool", "chain"] = "announce"
     handler: str | None = None
     tool_call: dict[str, Any] | None = None
+    tool_chain: list[dict[str, Any]] | None = None
     skill: str | None = None
     requires_idle: bool = False
     idle_seconds: int | None = None
@@ -93,6 +94,7 @@ class SchedulePatch(BaseModel):
     action: str | None = None
     handler: str | None = None
     tool_call: dict[str, Any] | None = None
+    tool_chain: list[dict[str, Any]] | None = None
     skill: str | None = None
     requires_idle: bool | None = None
     idle_seconds: int | None = None
@@ -409,6 +411,7 @@ def create_schedule(spec: ScheduleInput) -> dict[str, Any]:
             handler=spec.handler,
             interval_seconds=spec.interval_seconds,
             tool_call=spec.tool_call,
+            tool_chain=spec.tool_chain,
             skill=spec.skill,
             requires_idle=spec.requires_idle,
             idle_seconds=spec.idle_seconds,

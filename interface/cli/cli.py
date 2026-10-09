@@ -350,12 +350,11 @@ def run_cli(args) -> None:
 
     cli_auth = _get_cli_auth()
     if cli_auth.is_configured():
-        if not cli_auth.is_authenticated():
-            print("  GitHub OAuth is required for CLI access.")
-            if not cli_auth.login():
-                print("  Authentication failed — exiting.")
-                sys.exit(1)
-        gh_user = cli_auth.get_user_id()
+        from interface.cli.auth import resolve_cli_user_id
+        gh_user = resolve_cli_user_id()
+        if gh_user is None:
+            print("  Authentication failed — exiting.")
+            sys.exit(1)
         os.environ["AIKO_USER_ID"] = gh_user
         from system.userspace import set_current_display_name
         set_current_display_name(cli_auth.get_display_name())

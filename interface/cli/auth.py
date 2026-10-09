@@ -287,3 +287,25 @@ class CliAuth:
             print("  ✓ Logged out.")
         else:
             print("  Not logged in.")
+
+
+# ── shared identity ──────────────────────────────────────────────────────
+
+
+def resolve_cli_user_id() -> str | None:
+    """Resolve the CLI runtime user id, shared by run_cli() and --clear-mem.
+
+    GitHub OAuth configured → ensure a stored session (device-flow login
+    when none exists, exactly like run_cli) and return the provider-scoped
+    id (e.g. 'github_123456'). Not configured → 'guest', matching the CLI
+    session's own storage identity. Returns None when authentication fails
+    (caller aborts).
+    """
+    auth = CliAuth()
+    if not auth.is_configured():
+        return "guest"
+    if not auth.is_authenticated():
+        print("  GitHub OAuth login required.")
+        if not auth.login():
+            return None
+    return auth.get_user_id()

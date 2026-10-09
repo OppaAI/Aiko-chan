@@ -171,22 +171,31 @@ def _console_enabled() -> bool:
     return os.environ.get("LOG_CONSOLE") == "1"                 # console logging is on if the env var LOG_CONSOLE == "1"
                                                                 # NOTE: this is the value set by _apply_debug_trace_env(), not the env var itself
 
-def _clear_dream_scratch(log: logging.Logger) -> None:
-    """Delete deep-study scratch DBs for the active user (transient work files)."""
+def _clear_dream_scratch(log: logging.Logger, user_id: str) -> None:
+    """Delete deep-study scratch DBs for the given user (transient work files)."""
+    import shutil                                               # deferred — only needed on this destructive branch
     from system.userspace import user_state_path                # deferred import — import the user-state path for the active user
-    dream_dir = user_state_path("dream")                        # set the dream dir path for the active user
+    dream_dir = user_state_path("dream", user_id=user_id)       # set the dream dir path for the given user
     if not dream_dir.is_dir():                                  # if the dream dir doesn't exist,
         return                                                  # nothing to wipe
     for child in dream_dir.iterdir():                           # for each entry in the dream dir (files, symlinks, or dirs),
-        try:                                                    # attempt to unlink the file/symlink
-            if child.is_file() or child.is_symlink():           # if the child is a file or a symlink,
-                child.unlink()                                  # unlink the file/symlink
+        try:
+            if child.is_symlink() or child.is_file():           # symlink first: is_dir() follows links —
+                child.unlink()                                  # a symlink-to-dir must be unlinked, not rmtree'd
+            elif child.is_dir():                                # nested scratch dirs are wiped too
+                shutil.rmtree(child)
         except OSError as e:                                    # keep wiping the rest; report at the end via log
             log.warning("[main] could not remove dream scratch %s: %s", child, e)  # log the failure to remove the dream scratch file
 
 
 def _handle_clear_mem(log: logging.Logger) -> int:
     """Handle --clear-mem branch: two-step confirm, wipe learned state, exit.
+
+    Identity: resolved FIRST via the shared CLI OAuth helper
+    (interface/cli/auth.py:resolve_cli_user_id — same function run_cli uses),
+    so the wipe targets the logged-in user's stores, not the guest sentinel.
+    Without OAuth configured this falls back to 'guest', matching the CLI
+    session's own storage identity.
 
     Scope (learned state only): episodic memories, learned knowledge,
     agentic experience, and deep-study scratch. Deliberately kept: the
@@ -200,13 +209,25 @@ def _handle_clear_mem(log: logging.Logger) -> int:
     Exit codes:
         0 — memories wiped, or aborted at either gate (intentionally
             indistinguishable so scripts don't treat a declined wipe as an error)
-        1 — wipe failed (traceback in aiko.log)
+        1 — wipe failed, or user identity could not be resolved (traceback in aiko.log)
     """
+    # Identity before gates: share run_cli()'s OAuth resolution so we wipe
+    # the logged-in user's stores. Set AIKO_USER_ID like run_cli does — every
+    # downstream current_user_id() (memorize, knowledge, experience,
+    # user_state_path) then resolves to this user with no signature changes.
+    from interface.cli.auth import resolve_cli_user_id           # deferred — requests only needed on CLI branches
+    user_id = resolve_cli_user_id()
+    if user_id is None:                                         # OAuth login failed — fail closed, wipe nothing
+        print("Authentication failed — cannot determine whose memories to clear. Aborted.")
+        return 1
+    os.environ["AIKO_USER_ID"] = user_id
+    log.info("[main] --clear-mem target user_id=%s", user_id)
+
     # Gate 1: Yes/No. Abort on Ctrl-C / Ctrl-D. Non-tty stdin (piped/CI) hits
     # EOFError here and aborts safely — --clear-mem never wipes unattended
     # unless a human answered both gates.
     try:
-        confirm = input("WARNING: This will PERMANENTLY erase all memories. Continue? [Yes/No]: ").strip().lower()
+        confirm = input(f'WARNING: This will PERMANENTLY erase all memories for user "{user_id}". Continue? [Yes/No]: ').strip().lower()
     except (EOFError, KeyboardInterrupt):             # Ctrl-D raises EOFError, Ctrl-C raises KeyboardInterrupt — both mean "stop, don't wipe"
         print("\nAborted.")
         return 0
@@ -217,12 +238,14 @@ def _handle_clear_mem(log: logging.Logger) -> int:
 
     # Gate 2: typed phrase. Guards against fat-finger 'y' on an irreversible
     # op, and against shell-history accidents re-running --clear-mem.
+    # Truly exact — no strip(): leading/trailing whitespace is rejected, so
+    # what the user typed is byte-identical to the phrase they were shown.
     try:
-        typed = input(f'To confirm, type exactly: "{_CONFIRM_PHRASE}"\n> ').strip()
+        typed = input(f'To confirm, type exactly: "{_CONFIRM_PHRASE}"\n> ')
     except (EOFError, KeyboardInterrupt):             # same abort semantics as gate 1
         print("\nAborted.")
         return 0
-    if typed != _CONFIRM_PHRASE:                      # exact match — case and punctuation must match;
+    if typed != _CONFIRM_PHRASE:                      # exact match — case, punctuation AND whitespace must match;
                                                       # near-misses ('clear all aiko memories') are deliberately rejected
         print("Confirmation phrase did not match. Aborted memory clear.")
         return 0
@@ -250,7 +273,7 @@ def _handle_clear_mem(log: logging.Logger) -> int:
         from agentic.experience.schema import delete_all as delete_experience
         knowledge_counts = delete_knowledge()         # learned docs/chunks (codebase index cache kept)
         experience_counts = delete_experience()       # agentic task outcomes
-        _clear_dream_scratch(log)                     # deep-study scratch DBs
+        _clear_dream_scratch(log, user_id)              # deep-study scratch DBs
         log.info("[main] cleared knowledge=%s experience=%s",
                  knowledge_counts, experience_counts)
     except Exception:                                 # Exception, not BaseException — lets Ctrl+C through.

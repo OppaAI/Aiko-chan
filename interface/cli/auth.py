@@ -307,9 +307,10 @@ def resolve_cli_user_id() -> str | None:
 
     GitHub OAuth configured → ensure a stored session (device-flow login
     when none exists, exactly like run_cli) and return the provider-scoped
-    id (e.g. 'github_123456'). Not configured → 'guest', matching the CLI
-    session's own storage identity. Returns None when authentication fails
-    (caller aborts).
+    id (e.g. 'github_123456'). A stored session whose provider id went
+    missing is treated as unusable and triggers a fresh login. Not
+    configured → 'guest', matching the CLI session's own storage identity.
+    Returns None when authentication fails (caller aborts).
     """
     auth = CliAuth()
     if not auth.is_configured():
@@ -317,7 +318,9 @@ def resolve_cli_user_id() -> str | None:
         # 'guest' only when nothing was set — matching run_cli, which leaves
         # AIKO_USER_ID untouched in the non-OAuth path.
         return os.getenv("AIKO_USER_ID") or "guest"
-    if not auth.is_authenticated():
+    if not auth.is_authenticated() or auth.get_user_id() is None:
+        # No session, or a stale one with an access token but no provider id —
+        # re-run the device flow so get_user_id() has an id to return.
         print("  GitHub OAuth login required.")
         if not auth.login():
             return None

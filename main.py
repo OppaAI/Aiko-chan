@@ -178,7 +178,10 @@ def _clear_dream_scratch(log: logging.Logger, user_id: str) -> bool:
     be reported as success by the caller.
     """
     import shutil                                               # deferred — only needed on this destructive branch
-    from system.userspace import user_state_path                # deferred import — import the user-state path for the active user
+    from system.userspace import user_state_dir, user_state_path  # deferred imports — only needed on this destructive branch
+    if (user_state_dir(user_id) / "dream").is_symlink():        # a symlinked dream dir could point at retained data —
+        log.warning("[main] dream scratch is a symlink; refusing to wipe")  # fail closed: wipe nothing, report failure
+        return False
     dream_dir = user_state_path("dream", user_id=user_id)       # set the dream dir path for the given user
     if not dream_dir.is_dir():                                  # if the dream dir doesn't exist,
         return True                                             # nothing to wipe — trivially complete

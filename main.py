@@ -171,21 +171,28 @@ def _console_enabled() -> bool:
     return os.environ.get("LOG_CONSOLE") == "1"                 # console logging is on if the env var LOG_CONSOLE == "1"
                                                                 # NOTE: this is the value set by _apply_debug_trace_env(), not the env var itself
 
-def _clear_dream_scratch(log: logging.Logger, user_id: str) -> None:
-    """Delete deep-study scratch DBs for the given user (transient work files)."""
+def _clear_dream_scratch(log: logging.Logger, user_id: str) -> bool:
+    """Delete deep-study scratch DBs for the given user (transient work files).
+
+    Returns True only when every entry was removed — a partial wipe must not
+    be reported as success by the caller.
+    """
     import shutil                                               # deferred — only needed on this destructive branch
     from system.userspace import user_state_path                # deferred import — import the user-state path for the active user
     dream_dir = user_state_path("dream", user_id=user_id)       # set the dream dir path for the given user
     if not dream_dir.is_dir():                                  # if the dream dir doesn't exist,
-        return                                                  # nothing to wipe
+        return True                                             # nothing to wipe — trivially complete
+    ok = True
     for child in dream_dir.iterdir():                           # for each entry in the dream dir (files, symlinks, or dirs),
         try:
             if child.is_symlink() or child.is_file():           # symlink first: is_dir() follows links —
                 child.unlink()                                  # a symlink-to-dir must be unlinked, not rmtree'd
             elif child.is_dir():                                # nested scratch dirs are wiped too
                 shutil.rmtree(child)
-        except OSError as e:                                    # keep wiping the rest; report at the end via log
+        except OSError as e:                                    # keep wiping the rest; report failures via log + return value
+            ok = False
             log.warning("[main] could not remove dream scratch %s: %s", child, e)  # log the failure to remove the dream scratch file
+    return ok
 
 
 def _handle_clear_mem(log: logging.Logger) -> int:
@@ -273,9 +280,9 @@ def _handle_clear_mem(log: logging.Logger) -> int:
         from agentic.experience.schema import delete_all as delete_experience
         knowledge_counts = delete_knowledge()         # learned docs/chunks (codebase index cache kept)
         experience_counts = delete_experience()       # agentic task outcomes
-        _clear_dream_scratch(log, user_id)              # deep-study scratch DBs
-        log.info("[main] cleared knowledge=%s experience=%s",
-                 knowledge_counts, experience_counts)
+        scratch_ok = _clear_dream_scratch(log, user_id)  # deep-study scratch DBs
+        log.info("[main] cleared knowledge=%s experience=%s scratch_ok=%s",
+                 knowledge_counts, experience_counts, scratch_ok)
     except Exception:                                 # Exception, not BaseException — lets Ctrl+C through.
                                                       # Contain the failure HERE — this branch sits outside
                                                       # main()'s front-end try/except, so a re-raise would
@@ -284,6 +291,12 @@ def _handle_clear_mem(log: logging.Logger) -> int:
         if not _console_enabled():
             print("ERROR: memory wipe failed — see aiko.log for details.")
         return 1                                      # failure — distinguishable from 0 == aborted/success
+
+    if not scratch_ok:                                # partial wipe — never report "Memory cleared."
+        log.error("[main] memory wipe incomplete — some scratch files could not be removed")
+        if not _console_enabled():
+            print("ERROR: memory wipe incomplete — some scratch files could not be removed. See aiko.log.")
+        return 1
 
     log.info("Memory cleared.")
     if not _console_enabled():

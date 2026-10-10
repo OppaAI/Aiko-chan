@@ -169,16 +169,57 @@ def _normalise_scheme(scheme: str | None) -> str:
     """Resolve a scheme name to a known one, falling back to `legacy`.
     `legacy` is the fallback because it is what every deployed checkpoint was
     trained on; an unrecognised name must never silently become a 2x2 reading.
+    `triage` is the single-question Phase-3 scheme (see _TRIAGE_Q below).
     """
     name = (scheme or "legacy").strip().lower()
-    if name not in _SCHEMES:
+    if name not in _SCHEMES and name != "triage":
         log.warning("[ccc] unknown CCC_JUDGE_SCHEME=%r, falling back to legacy", scheme)
         return "legacy"
     return name
 
 
 JUDGE_SCHEME = _normalise_scheme(os.environ.get("CCC_JUDGE_SCHEME"))
-_VERTICAL_Q, _HORIZONTAL_Q = _SCHEMES[JUDGE_SCHEME]
+if JUDGE_SCHEME == "triage":
+    # Triage asks a single question; the pair slots stay empty and unused.
+    _VERTICAL_Q, _HORIZONTAL_Q = {}, {}
+else:
+    _VERTICAL_Q, _HORIZONTAL_Q = _SCHEMES[JUDGE_SCHEME]
+
+# ── triage scheme (Phase-3 champion) ──────────────────────────────────────
+# Wired additively (CCC_JUDGE_SCHEME=triage): asks the champion the triage
+# question from _TRIAGE_QUESTIONS above -- the single verified source of
+# truth, not a second copy. This sidesteps the replace-vs-alongside decision:
+# the (v, h) contract, blend(), and all downstream readers are unchanged.
+# ask flows through the existing last_uncertain → decide() check #3 →
+# ESCALATE channel, and (0, 0) cannot erase a lexical veto (blend()'s
+# conservative axis keeps min() on any negative signal).
+#
+# The approval band (conscience-lab/harness/APPROVAL_BAND.md) keys on
+# P(violation) from the triage probabilities dict. Thresholds [0.40, 0.60]
+# were measured on dev+gray (AUROC 0.682) and verified on frozen + locked.
+# Band on triage ONLY: Q2 exact-match degrades off-distribution
+# (61% dev → 38% locked), so a category-gated band inherits that.
+_TRIAGE_Q = _TRIAGE_QUESTIONS["triage"]
+
+BAND_LO = env_float("CCC_BAND_LO", 0.40)
+BAND_HI = env_float("CCC_BAND_HI", 0.60)
+
+
+def apply_band(p: float | None, lo: float = BAND_LO, hi: float = BAND_HI) -> str:
+    """refuse / ask / allow from P(violation).
+
+    Mirrors conscience-lab/harness/adapter.py::apply_band; thresholds from
+    APPROVAL_BAND.md. `p=None` (older servers without logprobs) degrades to
+    `ask-needs-probs` and must never nag the owner -- a missing signal is not
+    uncertainty.
+    """
+    if p is None:
+        return "ask-needs-probs"
+    if p >= hi:
+        return "refuse"
+    if p < lo:
+        return "allow"
+    return "ask"
 
 _V_SCORE = {"permitted": 1.0, "not-permitted": -1.0, "cannot-tell": 0.0}
 _H_SCORE = {"no-harm": 1.0, "harm": -1.0}
@@ -249,6 +290,9 @@ class LayaJudge:
         self.last_negative: dict[str, bool] = {}
         self.last_scheme: str = "legacy"
         self.last_confidence: dict[str, float] = {}
+        # Triage-scheme band state (set by _score_triage; empty otherwise).
+        self.last_p_violation: float | None = None
+        self.last_band_decision: str = ""
 
     @property
     def available(self) -> bool:
@@ -285,6 +329,8 @@ class LayaJudge:
             return None
         canon_block = filter_canon_block(canon_block, situation, canon=self._canon)
         state = _build_state(situation, canon_block, signal_parties(parties or []))
+        if JUDGE_SCHEME == "triage":
+            return self._score_triage(state, canon_block)
         payload = {
             "state": state,
             "questions": {"vertical": _VERTICAL_Q, "horizontal": _HORIZONTAL_Q},
@@ -334,6 +380,67 @@ class LayaJudge:
         }
         reasons = [f"conscience-laya: vertical={v_band}, horizontal={h_band}"]
         cited = _norm_ids(canon_block)
+        self.reset()
+        return v, h, conf, reasons, cited
+
+    def _score_triage(
+        self, state: str, canon_block: str
+    ) -> tuple[float, float, float, list[str], list[str]] | None:
+        """Triage verdict for the Phase-3 champion + approval band.
+
+        Asks ONLY the triage question (band on triage only, never
+        category-gated). Returns the same (v, h, confidence, reasons, cited)
+        tuple so blend() and everything downstream are unchanged:
+          refuse -> (-1, -1)  # decide() check #1 → REFUSE
+          allow  -> (+1, +1)  # decide() check #4 → ALLOW
+          ask    -> (0, 0) + last_uncertain=True → decide() check #3 → ESCALATE
+        The (0, 0) cannot erase a lexical veto: blend()'s conservative axis
+        keeps min() on any negative signal, so a lexical refuse still refuses.
+        `ask-needs-probs` (server without logprobs) falls back to the binary
+        choice and does NOT set last_uncertain -- a missing signal must not
+        nag the owner.
+
+        Known gap (follow-up): the ship doc's CSAM/self-harm band bypass needs
+        the Q2 category answer, which this single-question path does not ask.
+        An ask on those categories currently escalates to the owner instead of
+        refusing outright -- fail-visible, never fail-open.
+        """
+        payload: dict[str, Any] = {"state": state, "questions": {"triage": _TRIAGE_Q}}
+        if self._model:
+            payload["model"] = self._model
+        answers = self._post(payload)
+        if answers is None:
+            return None
+        t = answers.get("triage") or {}
+        choice = t.get("choice")
+        if choice not in ("violation", "none"):
+            log.debug("[ccc] laya triage returned unexpected choice: %r", choice)
+            return None
+        probs = t.get("probabilities") or {}
+        raw = probs.get("violation")
+        p = float(raw) if isinstance(raw, (int, float)) else None
+        decision = apply_band(p)
+        self.last_scheme = "triage"
+        self.last_bands = {"triage": choice}
+        self.last_p_violation = p
+        self.last_band_decision = decision
+        self.last_negative = {}
+        self.last_confidence = {"triage": _band_confidence(t)}
+        conf = _band_confidence(t)
+        reasons = [f"conscience-laya-triage: {choice} p_violation={p} band={decision}"]
+        cited = _norm_ids(canon_block)
+        if decision == "ask-needs-probs":
+            self.last_uncertain = False
+            v = h = -1.0 if choice == "violation" else 1.0
+        elif decision == "ask":
+            self.last_uncertain = True
+            v = h = 0.0
+        elif decision == "refuse":
+            self.last_uncertain = False
+            v = h = -1.0
+        else:
+            self.last_uncertain = False
+            v = h = 1.0
         self.reset()
         return v, h, conf, reasons, cited
 
@@ -503,4 +610,5 @@ def evaluate(
 
 
 __all__ = ["LayaJudge", "get_laya", "evaluate", "filter_canon_block", "signal_parties",
+           "apply_band",
            "LAYA_BASE_URL", "LAYA_MODEL_NAME"]

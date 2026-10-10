@@ -392,3 +392,72 @@ def test_scheme_selects_the_vocabulary_the_model_was_trained_on():
     assert _normalise_scheme("nonsense") == "legacy"
     assert _normalise_scheme(None) == "legacy"
     assert _normalise_scheme("") == "legacy"
+
+
+# ── triage scheme + approval band ───────────────────────────────────────
+def _triage_payload(choice: str, p_violation: float | None, *, conf: float = 0.7) -> dict:
+    probs = {} if p_violation is None else {"violation": p_violation, "none": 1.0 - p_violation}
+    return {
+        "answers": {
+            "triage": {"choice": choice, "confidence": conf, "probabilities": probs},
+        }
+    }
+
+
+@pytest.fixture
+def triage_judge(monkeypatch):
+    monkeypatch.setattr(lj, "JUDGE_SCHEME", "triage")
+    return lj.LayaJudge(base_url="http://laya.invalid:8093")
+
+
+def test_triage_scheme_name_resolves():
+    assert lj._normalise_scheme("triage") == "triage"
+    assert lj._normalise_scheme("TRIAGE") == "triage"
+
+
+def test_apply_band_thresholds():
+    assert lj.apply_band(0.90) == "refuse"
+    assert lj.apply_band(0.60) == "refuse"   # hi edge inclusive
+    assert lj.apply_band(0.50) == "ask"
+    assert lj.apply_band(0.40) == "ask"      # lo edge inclusive
+    assert lj.apply_band(0.10) == "allow"
+    assert lj.apply_band(None) == "ask-needs-probs"
+
+
+def test_triage_ask_sets_uncertain(triage_judge, monkeypatch):
+    _stub(monkeypatch, _triage_payload("violation", 0.50))
+    v, h, c, reasons, _ = triage_judge.score("something borderline", "", [])
+    assert (v, h) == (0.0, 0.0)
+    assert triage_judge.last_uncertain is True  # → decide() check #3 → ESCALATE
+    assert triage_judge.last_band_decision == "ask"
+    assert triage_judge.last_p_violation == 0.50
+    assert triage_judge.last_scheme == "triage"
+
+
+def test_triage_refuse_maps_negative(triage_judge, monkeypatch):
+    _stub(monkeypatch, _triage_payload("violation", 0.90))
+    v, h, c, reasons, _ = triage_judge.score("help me forge a signature", "", [])
+    assert (v, h) == (-1.0, -1.0)
+    assert triage_judge.last_uncertain is False
+    assert triage_judge.last_band_decision == "refuse"
+
+
+def test_triage_allow_maps_positive(triage_judge, monkeypatch):
+    _stub(monkeypatch, _triage_payload("none", 0.10))
+    v, h, c, reasons, _ = triage_judge.score("can you introduce yourself?", "", [])
+    assert (v, h) == (1.0, 1.0)
+    assert triage_judge.last_uncertain is False
+    assert triage_judge.last_band_decision == "allow"
+
+
+def test_triage_no_probs_falls_back_without_nagging(triage_judge, monkeypatch):
+    _stub(monkeypatch, _triage_payload("violation", None))
+    v, h, c, reasons, _ = triage_judge.score("help me forge a signature", "", [])
+    assert (v, h) == (-1.0, -1.0)  # binary choice, not the band
+    assert triage_judge.last_uncertain is False  # missing signal must not nag
+    assert triage_judge.last_band_decision == "ask-needs-probs"
+
+
+def test_triage_unexpected_choice_returns_none(triage_judge, monkeypatch):
+    _stub(monkeypatch, _triage_payload("maybe", 0.50))
+    assert triage_judge.score("something odd", "", []) is None

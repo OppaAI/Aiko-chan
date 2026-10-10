@@ -40,10 +40,16 @@ def schedule_job(
     action: str = "agentic",
     relative_days: int | str | None = None,
     tool_call: dict | None = None,
+    tool_chain: list | None = None,
     skill: str | None = None,
     user_id: str | None = None,
 ) -> str:
-    """Schedule a local recurring job while Aiko is running."""
+    """Schedule a local recurring job while Aiko is running.
+
+    action="chain" + tool_chain runs a compiled tool/condition chain
+    mechanically (no LLM per firing) — see
+    agentic/workflows/common/chain.py for the spec.
+    """
     try:
         job = schedule_job_record(
             title,
@@ -55,6 +61,7 @@ def schedule_job(
             action,
             relative_days,
             tool_call=tool_call,
+            tool_chain=tool_chain,
             skill=skill,
             user_id=user_id,
         )

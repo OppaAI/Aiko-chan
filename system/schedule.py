@@ -842,6 +842,7 @@ def schedule_job_record(
     handler: str | None = None,
     interval_seconds: int | str | None = None,
     tool_call: dict[str, Any] | None = None,
+    tool_chain: list[dict[str, Any]] | None = None,
     skill: str | None = None,
     requires_idle: bool = False,
     idle_seconds: int | str | None = None,
@@ -859,14 +860,20 @@ def schedule_job_record(
     still stored for readability/logging but are otherwise unused for
     handler-based jobs.
 
+    `tool_chain`, if given, is a list of tool/condition steps executed
+    mechanically (no LLM) by the chain interpreter — the compiled form of
+    "when X, if <condition>, do <actions>". See
+    agentic/workflows/common/chain.py for the spec. Requires
+    action="chain".
+
     `dedupe` (default True): when a stored record with the same deterministic
     job identity already exists for the user (see _job_identity), return it
     instead of appending a duplicate. Pass False to force a second record
     with identical parameters.
     """
     action = (action or "agentic").lower().strip()
-    if action not in {"announce", "agentic", "tool"}:
-        raise ValueError("action must be 'announce', 'agentic', or 'tool'")
+    if action not in {"announce", "agentic", "tool", "chain"}:
+        raise ValueError("action must be 'announce', 'agentic', 'tool', or 'chain'")
     if skill is not None and not isinstance(skill, str):
         raise ValueError("skill must be Markdown text")
     normalized_skill = skill.strip() if skill else None
@@ -880,6 +887,15 @@ def schedule_job_record(
         normalized_tool_call = {"name": tool_call["name"].strip(), "arguments": arguments}
     if action == "tool" and normalized_tool_call is None:
         raise ValueError("tool action requires tool_call")
+    normalized_tool_chain: list[dict[str, Any]] | None = None
+    if tool_chain is not None:
+        from agentic.workflows.common.chain import validate_chain
+        chain_errors = validate_chain(tool_chain)
+        if chain_errors:
+            raise ValueError("tool_chain invalid: " + "; ".join(chain_errors))
+        normalized_tool_chain = [dict(s) for s in tool_chain]
+    if action == "chain" and normalized_tool_chain is None:
+        raise ValueError("chain action requires tool_chain")
     tz_name = bioclock.timezone_name(timezone)
     normalized_days = _normalize_weekdays(days_of_week)
     normalized_relative_days = _normalize_relative_days(relative_days)
@@ -918,6 +934,7 @@ def schedule_job_record(
         "action": action,
         "handler": handler,
         "tool_call": normalized_tool_call,
+        "tool_chain": normalized_tool_chain,
         "skill": normalized_skill,
         "requires_idle": requires_idle,
         "idle_seconds": normalized_idle_seconds,
@@ -1034,8 +1051,8 @@ def update_schedule_record(job_id: str, updates: dict[str, Any], user_id: str | 
             timing_changed = True
         if "action" in updates and updates["action"] is not None:
             action = str(updates["action"]).lower().strip()
-            if action not in {"announce", "agentic", "tool"}:
-                raise ValueError("action must be 'announce', 'agentic', or 'tool'")
+            if action not in {"announce", "agentic", "tool", "chain"}:
+                raise ValueError("action must be 'announce', 'agentic', 'tool', or 'chain'")
             updated["action"] = action
         if "handler" in updates:
             updated["handler"] = str(updates["handler"]).strip() or None if updates["handler"] else None
@@ -1050,6 +1067,16 @@ def update_schedule_record(job_id: str, updates: dict[str, Any], user_id: str | 
                 if not isinstance(arguments, dict):
                     raise ValueError("tool_call arguments must be an object")
                 updated["tool_call"] = {"name": tool_call["name"].strip(), "arguments": arguments}
+        if "tool_chain" in updates:
+            from agentic.workflows.common.chain import validate_chain
+            tool_chain = updates["tool_chain"]
+            if tool_chain is None:
+                updated["tool_chain"] = None
+            else:
+                chain_errors = validate_chain(tool_chain)
+                if chain_errors:
+                    raise ValueError("tool_chain invalid: " + "; ".join(chain_errors))
+                updated["tool_chain"] = [dict(s) for s in tool_chain]
         if "skill" in updates:
             skill = updates["skill"]
             updated["skill"] = skill.strip() if isinstance(skill, str) and skill.strip() else None
@@ -1069,6 +1096,8 @@ def update_schedule_record(job_id: str, updates: dict[str, Any], user_id: str | 
             updated["lean_context"] = None if value is None else bool(value)
         if updated.get("action") == "tool" and not updated.get("tool_call"):
             raise ValueError("action=tool requires tool_call")
+        if updated.get("action") == "chain" and not updated.get("tool_chain"):
+            raise ValueError("action=chain requires tool_chain")
         if timing_changed:
             updated["next_due"] = calculate_next_due(
                 updated.get("time_of_day", "06:00"),
@@ -1765,6 +1794,7 @@ class DueJob:
     task: str
     action: str = "agentic"
     tool_call: dict[str, Any] | None = None
+    tool_chain: list[dict[str, Any]] | None = None
     skill: str | None = None
     requires_idle: bool = False
     idle_seconds: int | None = None
@@ -2647,6 +2677,7 @@ class ScheduleRunner:
                             task=job.get("task", "Scheduled job"),
                             action=job.get("action", "agentic"),
                             tool_call=job.get("tool_call"),
+                            tool_chain=job.get("tool_chain"),
                             skill=job.get("skill"),
                             requires_idle=bool(job.get("requires_idle", False)),
                             idle_seconds=job.get("idle_seconds"),

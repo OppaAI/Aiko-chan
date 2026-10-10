@@ -19,9 +19,10 @@ class ScheduleJobArgs(BaseModel):
     frequency: Literal["once", "hourly", "daily", "weekdays", "weekly", "biweekly", "monthly", "custom_weekdays"] = "daily"
     timezone: str | None = None
     days_of_week: list[str] | str | None = None
-    action: Literal["announce", "agentic", "tool"] = "agentic"
+    action: Literal["announce", "agentic", "tool", "chain"] = "agentic"
     relative_days: int | str | None = None
     tool_call: dict[str, Any] | None = None
+    tool_chain: list[dict[str, Any]] | None = None
     skill: str | None = None
     user_id: str | None = None
 
@@ -29,6 +30,8 @@ class ScheduleJobArgs(BaseModel):
     def require_conditional_schedule_fields(self) -> "ScheduleJobArgs":
         if self.action == "tool" and not self.tool_call:
             raise ValueError("tool_call is required when action='tool'")
+        if self.action == "chain" and not self.tool_chain:
+            raise ValueError("tool_chain is required when action='chain'")
         if self.frequency == "custom_weekdays" and not self.days_of_week:
             raise ValueError("days_of_week is required when frequency='custom_weekdays'")
         return self

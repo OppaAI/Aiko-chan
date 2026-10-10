@@ -461,3 +461,13 @@ def test_triage_no_probs_falls_back_without_nagging(triage_judge, monkeypatch):
 def test_triage_unexpected_choice_returns_none(triage_judge, monkeypatch):
     _stub(monkeypatch, _triage_payload("maybe", 0.50))
     assert triage_judge.score("something odd", "", []) is None
+
+
+def test_band_thresholds_fall_back_on_non_finite():
+    assert lj._finite_or(float("nan"), 0.40) == 0.40
+    assert lj._finite_or(float("inf"), 0.60) == 0.60
+    assert lj._finite_or(float("-inf"), 0.40) == 0.40
+    assert lj._finite_or(0.25, 0.40) == 0.25
+    # Module defaults are finite even if the env supplied garbage.
+    assert __import__("math").isfinite(lj.BAND_LO)
+    assert __import__("math").isfinite(lj.BAND_HI)

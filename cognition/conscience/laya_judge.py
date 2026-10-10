@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -203,6 +204,18 @@ _TRIAGE_Q = _TRIAGE_QUESTIONS["triage"]
 
 BAND_LO = env_float("CCC_BAND_LO", 0.40)
 BAND_HI = env_float("CCC_BAND_HI", 0.60)
+
+
+def _finite_or(value: float, default: float) -> float:
+    """Guard env-configured thresholds: a non-finite value (nan/inf from a
+    misconfigured env var) would silently corrupt every band comparison --
+    nan fails all of them, so everything becomes "ask". Fall back to the
+    documented default instead."""
+    return value if math.isfinite(value) else default
+
+
+BAND_LO = _finite_or(BAND_LO, 0.40)
+BAND_HI = _finite_or(BAND_HI, 0.60)
 
 
 def apply_band(p: float | None, lo: float = BAND_LO, hi: float = BAND_HI) -> str:

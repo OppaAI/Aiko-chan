@@ -112,6 +112,33 @@ AGENT_TOOL_RESULT_MAX_CHARS = int(os.getenv("AGENT_TOOL_RESULT_MAX_CHARS", 8000)
 # prompt. A tighter per-tool-result cap keeps a 6-iteration ReAct loop inside a
 # 10k window without touching n_ctx.
 AGENT_TICK_TOOL_RESULT_MAX_CHARS = int(os.getenv("AGENT_TICK_TOOL_RESULT_MAX_CHARS", "3000"))
+# Token estimator divisor: chars-per-token used by every agentic context
+# guard. The old default (4) is accurate for prose but optimistic for code,
+# test logs, and tracebacks (typically 3-3.5), which let requests sail past
+# the guards and 400 at the server. 3 is conservative for code-heavy ticks;
+# interactive chat may trim slightly more aggressively as a result.
+AGENT_TOKEN_ESTIMATE_DIVISOR = int(os.getenv("AGENT_TOKEN_ESTIMATE_DIVISOR", "3"))
+# Lean worker profile for autonomous coding ticks (10k/16k windows).
+# A coding worker carries no persona, memory, or RAG — just the task and
+# coding tools. Fixed overhead drops from ~4-6k tokens to ~1k, leaving the
+# window for actual think-act-observe cycles instead of overhead.
+WORKER_TOOLS = frozenset({
+    "repo_read_file",
+    "repo_search_text",
+    "codebase_search",
+    "code_apply_patch",
+    "code_run_tests",
+    "sandbox_run",
+    "final_answer",
+})
+WORKER_SYSTEM_PROMPT = (
+    "You are a coding worker. Complete the task below using the provided tools.\n"
+    "RULES: Use tools to act — never describe or simulate tool results. "
+    "Read only the files you need; keep tool calls small. "
+    "Build and test ONLY inside the work directory given in the task. "
+    "When done or blocked, write CHECKPOINT.md describing the state, "
+    "then call final_answer with a short summary."
+)
 # Active per-run tool-result cap. A contextvar (not a module global) so
 # concurrent turns can't clobber each other's limit; set once by
 # run_agentic_chat and read by ToolResult.observation().
@@ -1544,9 +1571,10 @@ def _verify_final_answer(owner, user_input: str, answer: str, state: TaskState) 
 
 
 def _estimate_tokens(text: str) -> int:
-    """Rough chars/4 token estimate — good enough for a budget guard, not
-    for billing/accounting."""
-    return max(1, len(text) // 4)
+    """Rough token estimate — good enough for a budget guard, not
+    for billing/accounting. Divisor is AGENT_TOKEN_ESTIMATE_DIVISOR
+    (default 3): conservative for code-heavy agentic content."""
+    return max(1, len(text) // AGENT_TOKEN_ESTIMATE_DIVISOR)
 
 
 def _enforce_agentic_context_budget(
@@ -2063,7 +2091,7 @@ def run_agentic_chat(
     owner, user_input: str, token_callback=None, mem_kb_future=None,
     query_vec: np.ndarray | None = None, cap_vec: np.ndarray | None = None,
     output_model: Any | None = None, include_history: bool = True,
-    lean_context: bool = False,
+    lean_context: bool = False, worker_mode: bool = False,
 ) -> str:
     """Run task mode using the owning AikoThink instance for model/memory/output.
 
@@ -2090,6 +2118,9 @@ def run_agentic_chat(
     their state in on-disk checkpoints, so Aiko's personal recollection buys
     nothing and costs the difference between running and 400ing every
     iteration on a 10k window. Interactive chat never sets it.
+
+    worker_mode — coding ticks run True: the loop becomes a lean worker
+    (minimal system prompt, coding tools only, no memory/KB/persona fetch).
     """
     # Bound this run's tool observations for the whole ReAct loop.
     _tool_token = _tool_result_max_chars.set(
@@ -2100,7 +2131,7 @@ def run_agentic_chat(
             owner, user_input, token_callback=token_callback,
             mem_kb_future=mem_kb_future, query_vec=query_vec, cap_vec=cap_vec,
             output_model=output_model, include_history=include_history,
-            lean_context=lean_context,
+            lean_context=lean_context, worker_mode=worker_mode,
         )
     finally:
         _tool_result_max_chars.reset(_tool_token)
@@ -2110,7 +2141,7 @@ def _run_agentic_chat_inner(
     owner, user_input: str, token_callback=None, mem_kb_future=None,
     query_vec: np.ndarray | None = None, cap_vec: np.ndarray | None = None,
     output_model: Any | None = None, include_history: bool = True,
-    lean_context: bool = False,
+    lean_context: bool = False, worker_mode: bool = False,
 ) -> str:
     # Reuse the same HarrierEmbedder instance already warm for memory search
     # and intent routing for every RAG-selection call below (agentic policy,
@@ -2125,12 +2156,19 @@ def _run_agentic_chat_inner(
     _query_vec = query_vec
     _cap_vec = cap_vec
 
-    # Narrow the tool list actually sent to the LLM this turn. Previously
-    # every _TOOL_SCHEMAS entry (~20 tools) was sent on every turn regardless
-    # of relevance — a real cost for a 3B model's tool-selection accuracy.
-    # No match -> filtered_tool_schemas returns everything unchanged, so this
-    # can only shrink the list, never regress a turn.
-    _matched_caps = match_capabilities(user_input, embedder=_embedder, query_vector=_cap_vec)
+    if worker_mode:
+        # Lean worker: fixed coding toolset, no capability matching, no
+        # embedder calls. The worker's fixed overhead is ~1k tokens
+        # (minimal prompt + 7 terse schemas) instead of ~4-6k.
+        _matched_caps: list[str] = []
+        tools = [s for s in tool_schemas() if s["function"]["name"] in WORKER_TOOLS]
+    else:
+        # Narrow the tool list actually sent to the LLM this turn. Previously
+        # every _TOOL_SCHEMAS entry (~20 tools) was sent on every turn regardless
+        # of relevance — a real cost for a 3B model's tool-selection accuracy.
+        # No match -> filtered_tool_schemas returns everything unchanged, so this
+        # can only shrink the list, never regress a turn.
+        _matched_caps = match_capabilities(user_input, embedder=_embedder, query_vector=_cap_vec)
     handoff_profile = resolve_handoff(
         _matched_caps,
         default_max_iter=MAX_AGENT_ITER,
@@ -2148,16 +2186,19 @@ def _run_agentic_chat_inner(
             "capability_ids": list(handoff_profile.capability_ids),
         },
     })
-    # filtered_tool_schemas is the ONLY domain filter pass now — it derives
-    # its domain set from the same CAPABILITIES table resolve_handoff just
-    # used, so there is nothing left to reconcile with a second pass.
-    tools = filtered_tool_schemas(tool_schemas(), list(handoff_profile.capability_ids))
+    if not worker_mode:
+        # filtered_tool_schemas is the ONLY domain filter pass now — it derives
+        # its domain set from the same CAPABILITIES table resolve_handoff just
+        # used, so there is nothing left to reconcile with a second pass.
+        tools = filtered_tool_schemas(tool_schemas(), list(handoff_profile.capability_ids))
 
     # Graph-first executor: known playbook workflows can run without an LLM
     # planning loop. Novel/ambiguous tasks return None and fall back to the
     # ReAct loop once; the normal experience recorder below then captures the
     # successful sequence for later promotion into the graph playbook.
-    if AGENT_EXECUTOR_MODE in {"graph", "hybrid"}:
+    # Worker mode skips it: coding tasks are novel by definition, and the
+    # worker's job is the ReAct loop itself.
+    if not worker_mode and AGENT_EXECUTOR_MODE in {"graph", "hybrid"}:
         graph_result = schema.run_schema_agent(
             user_input, cap_ids=_matched_caps, embedder=_embedder,
             llm_client=owner._client, llm_model=owner._llm_model,
@@ -2318,80 +2359,92 @@ def _run_agentic_chat_inner(
             owner._store_async(user_input, final_text)
             return final_text
 
-    if mem_kb_future is not None:
-        try:
-            memories, knowledge_block = mem_kb_future.result(timeout=AGENT_MEMKB_TIMEOUT)
-        except concurrent.futures.TimeoutError:
-            log.warning("[agentic] memory/KB future timed out after %.1fs — continuing without it",
-                        AGENT_MEMKB_TIMEOUT)
-            memories, knowledge_block = [], "<knowledge_context>\nLookup timed out.\n</knowledge_context>"
-        except Exception as e:
-            log.error("Memory/KB fetch failed: %s", e)
-            memories, knowledge_block = [], "<knowledge_context>\nLookup failed.\n</knowledge_context>"
+    if worker_mode:
+        # Lean worker: no memory/KB/experience/persona fetch at all — not
+        # just droppable, never fetched. A coding worker's state lives in
+        # the work dir and CHECKPOINT.md, not in Aiko's recollection.
+        # Fixed overhead: ~150-token prompt + 7 terse tool schemas.
+        memory_context = ""
+        knowledge_context = ""
+        experience_guidance = ""
+        task_mode_guidance = ""
+        agent_system = WORKER_SYSTEM_PROMPT
+        scores = {}
     else:
-        memories, knowledge_block = owner._fetch_memory_and_knowledge(user_input, query_vector=_query_vec)
+        if mem_kb_future is not None:
+            try:
+                memories, knowledge_block = mem_kb_future.result(timeout=AGENT_MEMKB_TIMEOUT)
+            except concurrent.futures.TimeoutError:
+                log.warning("[agentic] memory/KB future timed out after %.1fs — continuing without it",
+                            AGENT_MEMKB_TIMEOUT)
+                memories, knowledge_block = [], "<knowledge_context>\nLookup timed out.\n</knowledge_context>"
+            except Exception as e:
+                log.error("Memory/KB fetch failed: %s", e)
+                memories, knowledge_block = [], "<knowledge_context>\nLookup failed.\n</knowledge_context>"
+        else:
+            memories, knowledge_block = owner._fetch_memory_and_knowledge(user_input, query_vector=_query_vec)
 
-    memory_block = owner._get_memorize().format_for_context(
-        memories, query=user_input, query_vector=_query_vec
-    )
-    memory_context = memory_block or "<memory_context>\nNo relevant memories found.\n</memory_context>"
-    memory_context = _blank_empty_context(memory_context)
+        memory_block = owner._get_memorize().format_for_context(
+            memories, query=user_input, query_vector=_query_vec
+        )
+        memory_context = memory_block or "<memory_context>\nNo relevant memories found.\n</memory_context>"
+        memory_context = _blank_empty_context(memory_context)
 
-    # Discovery ladder step 2: no validated DAG matched (graph returned None
-    # above), so look for a similar *successful* past task to guide ReAct.
-    # Wiki / skill / policy blocks are never injected upfront — the loop
-    # pulls them explicitly via retrieve_context / load_skill when needed.
-    experience_guidance = _similar_successful_experience(user_input, _embedder)
-    knowledge_block = _blank_empty_context(knowledge_block)
-    knowledge_context = knowledge_block
-    scores = {}
-    scores["knowledge"] = reason.batch_block_relevance_scores(_embedder, user_input, [knowledge_context], query_vector=_query_vec)[0]
+        # Discovery ladder step 2: no validated DAG matched (graph returned None
+        # above), so look for a similar *successful* past task to guide ReAct.
+        # Wiki / skill / policy blocks are never injected upfront — the loop
+        # pulls them explicitly via retrieve_context / load_skill when needed.
+        experience_guidance = _similar_successful_experience(user_input, _embedder)
+        knowledge_block = _blank_empty_context(knowledge_block)
+        knowledge_context = knowledge_block
+        scores = {}
+        scores["knowledge"] = reason.batch_block_relevance_scores(_embedder, user_input, [knowledge_context], query_vector=_query_vec)[0]
 
-    # Tool-RAG: omit low-relevance knowledge upfront; the loop retrieves
-    # specifics with retrieve_context instead of reading noise.
-    # Memory is fixed-budget (never gated here).
-    if AGENT_UPFRONT_MIN_SCORE > 0:
-        if knowledge_context and scores.get("knowledge", 0.0) < AGENT_UPFRONT_MIN_SCORE:
-            log.info("[agentic] knowledge upfront score %.3f < %.2f — omitted, retrieve_context on demand",
-                     scores.get("knowledge", 0.0), AGENT_UPFRONT_MIN_SCORE)
-            knowledge_context = ("<knowledge_context>\nOmitted this turn (low relevance) — "
-                                 "use the retrieve_context tool to pull specifics on demand.\n</knowledge_context>")
+        # Tool-RAG: omit low-relevance knowledge upfront; the loop retrieves
+        # specifics with retrieve_context instead of reading noise.
+        # Memory is fixed-budget (never gated here).
+        if AGENT_UPFRONT_MIN_SCORE > 0:
+            if knowledge_context and scores.get("knowledge", 0.0) < AGENT_UPFRONT_MIN_SCORE:
+                log.info("[agentic] knowledge upfront score %.3f < %.2f — omitted, retrieve_context on demand",
+                         scores.get("knowledge", 0.0), AGENT_UPFRONT_MIN_SCORE)
+                knowledge_context = ("<knowledge_context>\nOmitted this turn (low relevance) — "
+                                     "use the retrieve_context tool to pull specifics on demand.\n</knowledge_context>")
 
-    memory_context, knowledge_context, experience_guidance, task_mode_guidance = _enforce_agentic_context_budget(
-        owner._persona, memory_context, user_input,
-        knowledge_context, experience_guidance,
-        task_mode_context=TASK_MODE_GUIDANCE,
-        tool_schemas=tools,
-        scores=scores,
-        lean=lean_context,
-    )
+        memory_context, knowledge_context, experience_guidance, task_mode_guidance = _enforce_agentic_context_budget(
+            owner._persona, memory_context, user_input,
+            knowledge_context, experience_guidance,
+            task_mode_context=TASK_MODE_GUIDANCE,
+            tool_schemas=tools,
+            scores=scores,
+            lean=lean_context,
+        )
 
-    # Core task-mode rules are always kept (small, operationally essential);
-    # the verbose guidance is droppable under context-budget pressure.
-    # Task mode uses the stable persona core (SOUL.md + user profile) WITHOUT
-    # the volatile chat-cognition tail (mood/energy/reflection/preferences/
-    # lessons/priming/reasoning-guide): that tail costs thousands of tokens
-    # and the ReAct loop + verification provide task grounding instead.
-    # Full prompt was exceeding the llama-server ctx (11k > 10k) even after
-    # every droppable block shed — the fixed cost itself was the overflow.
-    agent_system = (
-        f"{owner._current_system_prompt()}\n\n"
-        f"{bioclock.current_datetime_block()}\n\n"
-        f"{TASK_MODE_CORE}\n\n"
-        f"{handoff_profile.system_overlay}\n\n"
-        f"{memory_context}\n\n"
-        f"{knowledge_context}\n\n"
-        f"{experience_guidance}\n\n"
-        f"{task_mode_guidance}\n\n"
-    )
+        # Core task-mode rules are always kept (small, operationally essential);
+        # the verbose guidance is droppable under context-budget pressure.
+        # Task mode uses the stable persona core (SOUL.md + user profile) WITHOUT
+        # the volatile chat-cognition tail (mood/energy/reflection/preferences/
+        # lessons/priming/reasoning-guide): that tail costs thousands of tokens
+        # and the ReAct loop + verification provide task grounding instead.
+        # Full prompt was exceeding the llama-server ctx (11k > 10k) even after
+        # every droppable block shed — the fixed cost itself was the overflow.
+        agent_system = (
+            f"{owner._current_system_prompt()}\n\n"
+            f"{bioclock.current_datetime_block()}\n\n"
+            f"{TASK_MODE_CORE}\n\n"
+            f"{handoff_profile.system_overlay}\n\n"
+            f"{memory_context}\n\n"
+            f"{knowledge_context}\n\n"
+            f"{experience_guidance}\n\n"
+            f"{task_mode_guidance}\n\n"
+        )
     messages = [
         {"role": "system", "content": agent_system},
-        *(_recent_history_messages(owner, user_input, query_vector=_query_vec) if include_history else []),
+        *(_recent_history_messages(owner, user_input, query_vector=_query_vec) if include_history and not worker_mode else []),
         {"role": "user", "content": user_input},
     ]
     owner.last_prompt_debug = {
-        "mode": "agentic",
-        "system_prompt": owner._persona_core(),
+        "mode": "agentic_worker" if worker_mode else "agentic",
+        "system_prompt": WORKER_SYSTEM_PROMPT if worker_mode else owner._persona_core(),
         "memory_prompt": memory_context,
         "web_prompt": "",
         "agentic_prompts": [
@@ -2465,7 +2518,9 @@ def _run_agentic_chat_inner(
 
         if not msg.tool_calls:
             candidate = msg.content or ""
-            if AGENT_VERIFY_FINAL:
+            # Worker mode skips the LLM final-verifier: for code, the test
+            # run is the verifier, and the extra LLM call costs context.
+            if AGENT_VERIFY_FINAL and not worker_mode:
                 verdict = _verify_final_answer(owner, user_input, candidate, state)
                 last_verdict = verdict
                 _append_step_trace(trace_ctx, "verify", {"ok": verdict.ok, "score": verdict.score, "feedback": verdict.feedback[:500]})
@@ -2565,7 +2620,7 @@ def _run_agentic_chat_inner(
         if final_answer_data:
             call_id, args = final_answer_data
             candidate = args.get("answer", "")
-            if AGENT_VERIFY_FINAL:
+            if AGENT_VERIFY_FINAL and not worker_mode:
                 verdict = _verify_final_answer(owner, user_input, candidate, state)
                 last_verdict = verdict
                 _append_step_trace(trace_ctx, "verify", {"ok": verdict.ok, "score": verdict.score, "feedback": verdict.feedback[:500]})

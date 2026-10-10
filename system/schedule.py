@@ -848,6 +848,7 @@ def schedule_job_record(
     idle_seconds: int | str | None = None,
     failure_note_dir: str | None = None,
     lean_context: bool | None = None,
+    worker_mode: bool | None = None,
     user_id: str | None = None,
     dedupe: bool = True,
 ) -> dict:
@@ -940,6 +941,7 @@ def schedule_job_record(
         "idle_seconds": normalized_idle_seconds,
         "failure_note_dir": failure_note_dir,
         "lean_context": lean_context,
+        "worker_mode": worker_mode,
     }
     # Serialize the read-check-append-write across processes sharing this
     # user's schedule (same pattern as delete_schedule_record and
@@ -1094,6 +1096,9 @@ def update_schedule_record(job_id: str, updates: dict[str, Any], user_id: str | 
         if "lean_context" in updates:
             value = updates["lean_context"]
             updated["lean_context"] = None if value is None else bool(value)
+        if "worker_mode" in updates:
+            value = updates["worker_mode"]
+            updated["worker_mode"] = None if value is None else bool(value)
         if updated.get("action") == "tool" and not updated.get("tool_call"):
             raise ValueError("action=tool requires tool_call")
         if updated.get("action") == "chain" and not updated.get("tool_chain"):
@@ -1804,6 +1809,7 @@ class DueJob:
     # the prompt. None means "not specified" -> lean; False opts a job back
     # into the full memory/context budget.
     lean_context: bool | None = None
+    worker_mode: bool | None = None
 
 
 # ── system job timing ─────────────────────────────────────────────────────────
@@ -2683,6 +2689,7 @@ class ScheduleRunner:
                             idle_seconds=job.get("idle_seconds"),
                             failure_note_dir=job.get("failure_note_dir"),
                             lean_context=job.get("lean_context"),
+                            worker_mode=job.get("worker_mode"),
                         ),
                         tz_name,
                     ))

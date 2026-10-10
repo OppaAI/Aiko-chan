@@ -16,6 +16,10 @@ This module owns the scheduler side of that loop:
   turns into real work when the user has actually been away. Each fire runs
   through Aiko's normal agentic loop (``think.handle_scheduled_job``) with the
   worker instructions below passed as the job's ``skill``.
+- The tick runs in ``worker_mode``: a lean coding-worker profile (minimal
+  system prompt, coding tools only, no memory/KB/persona fetch). Fixed
+  overhead drops from ~4-6k tokens to ~1k so a 10k/16k window holds real
+  think-act-observe cycles instead of overhead.
 - The worker itself is stateless across ticks: progress lives in checkpoint
   files inside the Playground repo, so a tick always resumes the active goal
   instead of starting over.
@@ -130,6 +134,8 @@ def ensure_playground_job(timezone: str | None = None, user_id: str | None = Non
             drift["failure_note_dir"] = desired_note_dir
         if job.get("lean_context") is not True:
             drift["lean_context"] = True
+        if job.get("worker_mode") is not True:
+            drift["worker_mode"] = True
         if not drift:
             return job
         updated = update_schedule_record(job["id"], drift, user_id=user_id)
@@ -155,6 +161,7 @@ def ensure_playground_job(timezone: str | None = None, user_id: str | None = Non
         skill=desired_skill,
         failure_note_dir=desired_note_dir,
         lean_context=True,
+        worker_mode=True,
         user_id=user_id,
     )
     log.info("Playground: seeded idle-build job %s (every %ds, requires %ds idle).",

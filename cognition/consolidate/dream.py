@@ -420,6 +420,38 @@ def _push_post_and_image(
         log.error(f"Ref update failed {update_resp.status_code}: {update_resp.text[:300]}")
         return False
 
+def _distill_thoughts(thoughts: list[dict]) -> str:
+    """Distill a day's inner-speech entries into a short first-person
+    undercurrent paragraph (3-5 sentences) for the dream journal.
+
+    The old behavior appended up to 40 raw entries as a bullet list, which
+    made journal entries very long. A distillation keeps the midnight join's
+    purpose (unprocessed experience becomes consolidated memory) without
+    the raw dump. Falls back to a truncated short list if the LLM call
+    fails, so length stays bounded either way.
+    """
+    if not thoughts:
+        return ""
+    try:
+        _lines = [f"- [{t.get('kind', 'reflection')}] {t.get('text', '')}".strip()
+                  for t in thoughts]
+        distilled = _llm_chat(
+            system=("You distill private inner thoughts into a short, poetic "
+                    "first-person undercurrent — 3 to 5 sentences, no bullet "
+                    "list, no quoted entries. Capture the emotional themes, "
+                    "not the details."),
+            user="Today's unspoken thoughts:\n" + "\n".join(_lines),
+            max_tokens=220,
+            temperature=0.7,
+        ).strip()
+        if distilled:
+            return distilled
+    except Exception as e:
+        log.debug("dream: thought distillation failed: %s", e)
+    # Fallback: short truncated list, still bounded.
+    _short = [f"- {t.get('text', '')[:150]}".strip() for t in thoughts[:8]]
+    return "Fragments: " + " / ".join(_short)
+
 def dream_and_post(
     prose:           str,
     date:            datetime,
@@ -469,14 +501,15 @@ def dream_and_post(
         ).isoformat()
         _thoughts = _store.unconsolidated_since(_day_start)
         if _thoughts:
-            _used = _thoughts[:40]
-            _lines = [
-                f"- [{t.get('kind', 'reflection')}] {t.get('text', '')}".strip()
-                for t in _used
-            ]
-            prose = prose + "\n\nMy private thoughts today (never spoken aloud):\n" + "\n".join(_lines)
-            # Mark only the thoughts actually folded into the dream.
-            inner_ids = [t["id"] for t in _used if t.get("id")]
+            # Distill the most recent entries into a short paragraph — the old
+            # behavior dumped up to 40 raw entries and made the journal long.
+            # All of today's thoughts are marked consolidated: the distillation
+            # is the day's summary, and the day-boundary query would otherwise
+            # orphan the older ones forever.
+            _distilled = _distill_thoughts(_thoughts[-12:])
+            if _distilled:
+                prose = prose + "\n\nMy private thoughts today (never spoken aloud):\n" + _distilled
+            inner_ids = [t["id"] for t in _thoughts if t.get("id")]
     except Exception as e:
         log.debug("dream: inner-speech join failed: %s", e)
 

@@ -55,3 +55,16 @@ def test_distill_empty_llm_response_falls_back():
     ):
         out = _distill_thoughts(_thoughts(5))
     assert out.startswith("Fragments:")
+
+
+def test_distill_fallback_keeps_newest():
+    # The caller passes the newest 12; the fallback must keep the newest
+    # 8 of those, not the oldest 8.
+    with patch(
+        "cognition.consolidate.dream._llm_chat",
+        side_effect=RuntimeError("llm down"),
+    ):
+        out = _distill_thoughts(_thoughts(12))
+    assert "thought number 11" in out
+    assert "thought number 4" in out
+    assert "thought number 3" not in out

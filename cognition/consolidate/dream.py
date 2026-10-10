@@ -12,7 +12,7 @@ import os
 import re
 import textwrap
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -448,8 +448,9 @@ def _distill_thoughts(thoughts: list[dict]) -> str:
             return distilled
     except Exception as e:
         log.debug("dream: thought distillation failed: %s", e)
-    # Fallback: short truncated list, still bounded.
-    _short = [f"- {t.get('text', '')[:150]}".strip() for t in thoughts[:8]]
+    # Fallback: short truncated list, still bounded. Newest eight — the
+    # caller passes the newest 12, so [:8] would drop the freshest four.
+    _short = [f"- {t.get('text', '')[:150]}".strip() for t in thoughts[-8:]]
     return "Fragments: " + " / ".join(_short)
 
 def dream_and_post(
@@ -495,11 +496,17 @@ def dream_and_post(
         _store = InnerSpeechStore(user_id=current_user_id())
         # Day start in UTC: rows store UTC ISO text, so the lexical
         # comparison needs a UTC boundary, not local midnight.
-        _day_start = (
+        _day_start_dt = (
             date.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
             if date.tzinfo else date.replace(hour=0, minute=0, second=0, microsecond=0)
-        ).isoformat()
+        )
+        _day_start = _day_start_dt.isoformat()
+        _day_end = (_day_start_dt + timedelta(days=1)).isoformat()
         _thoughts = _store.unconsolidated_since(_day_start)
+        # Upper-bound to the target UTC day: the store query has no end
+        # boundary, so a late-running reflection could otherwise sweep in
+        # (and prematurely consolidate) thoughts belonging to the next day.
+        _thoughts = [t for t in _thoughts if t.get("created_at", "") < _day_end]
         if _thoughts:
             # Distill the most recent entries into a short paragraph — the old
             # behavior dumped up to 40 raw entries and made the journal long.

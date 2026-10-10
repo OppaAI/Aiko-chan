@@ -64,8 +64,10 @@ def test_estimator_uses_conservative_divisor():
     assert int(_const("AGENT_TOKEN_ESTIMATE_DIVISOR")) == 3
 
 
-def test_schedule_record_accepts_worker_mode():
-    from system.schedule import schedule_job_record
+def test_schedule_record_accepts_worker_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("SCHEDULE_PATH", str(tmp_path / "schedule.json"))
+    from system.schedule import schedule_job_record, _invalidate_cache
+    _invalidate_cache()
 
     rec = schedule_job_record(
         "t", "t", "09:00", action="agentic", worker_mode=True, dedupe=False,
@@ -82,8 +84,10 @@ def test_duejob_carries_worker_mode():
     assert j2.worker_mode is None
 
 
-def test_update_path_accepts_worker_mode():
-    from system.schedule import schedule_job_record, update_schedule_record
+def test_update_path_accepts_worker_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("SCHEDULE_PATH", str(tmp_path / "schedule.json"))
+    from system.schedule import schedule_job_record, update_schedule_record, _invalidate_cache
+    _invalidate_cache()
 
     rec = schedule_job_record(
         "t", "t", "09:00", action="agentic", dedupe=False,

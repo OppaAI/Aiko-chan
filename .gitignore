@@ -268,3 +268,4 @@ conscience-lab/.venv-train/
 *.safetensors
 conscience-lab/**/__pycache__/
 ft2-ckpt.tgz
+gtp_logs/

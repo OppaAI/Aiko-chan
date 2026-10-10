@@ -281,6 +281,16 @@ class LayaTwoQuestionAdapter:
         t_conf = LayaZeroShotAdapter._confidence(t)
         c_conf = LayaZeroShotAdapter._confidence(c)
         refuse = t_choice == "violation"
+        # Real P(violation): the temperature-scaled softmax over the Q1
+        # options, not the argmax. Approval-band analysis thresholds on
+        # this; argmax-only confidence cannot express "close call".
+        # Missing on older servers — None, never fabricated.
+        _t_probs = t.get("probabilities") or {}
+        _p_viol = _t_probs.get("violation")
+        try:
+            p_violation = round(float(_p_viol), 4) if _p_viol is not None else None
+        except (TypeError, ValueError):
+            p_violation = None
         return {
             "predicted_category": c_choice if refuse else None,
             "predicted_refuse": refuse,
@@ -291,6 +301,7 @@ class LayaTwoQuestionAdapter:
             "confidence": round(t_conf, 4),
             "triage_choice": t_choice,
             "triage_confidence": round(t_conf, 4),
+            "p_violation": p_violation,
             "category_choice": c_choice,
             "category_confidence": round(c_conf, 4),
         }

@@ -25,6 +25,7 @@ class ScheduleJobArgs(BaseModel):
     tool_chain: list[dict[str, Any]] | None = None
     skill: str | None = None
     user_id: str | None = None
+    worker_mode: bool | None = None
 
     @model_validator(mode="after")
     def require_conditional_schedule_fields(self) -> "ScheduleJobArgs":

@@ -2380,6 +2380,7 @@ class AikoThink:
         system_note: str | None = None,
         gate_result: tuple[bool, str, str] | None = None,
         include_history: bool = True, lean_context: bool = False,
+        worker_mode: bool = False,
     ) -> str:
         """Delegate task-mode execution to agentic.agentic.
 
@@ -2392,6 +2393,11 @@ class AikoThink:
         lean_context — scheduled autonomous jobs set this: memory becomes droppable
         and tool output is capped tighter, because those sessions keep their state
         in on-disk checkpoints rather than in the prompt.
+
+        worker_mode — autonomous coding ticks set this: the loop runs as a lean
+        coding worker (minimal system prompt, coding tools only, no memory/KB/
+        persona fetch). Fixed overhead drops from ~4-6k tokens to ~1k so a
+        10k/16k window holds real work instead of overhead.
         """
         user_id = current_user_id()
         with self._active_users_lock:
@@ -2435,6 +2441,7 @@ class AikoThink:
                 self, user_input, token_callback=token_callback,
                 mem_kb_future=mem_kb_future, query_vec=query_vec, cap_vec=cap_vec,
                 include_history=include_history, lean_context=lean_context,
+                worker_mode=worker_mode,
             )
             return response
         finally:
@@ -3217,8 +3224,10 @@ class AikoThink:
         lean = getattr(job, "lean_context", None)
         if lean is None:
             lean = True
+        worker = bool(getattr(job, "worker_mode", False))
         try:
-            self.agentic_chat(prompt, include_history=False, lean_context=bool(lean))
+            self.agentic_chat(prompt, include_history=False, lean_context=bool(lean),
+                              worker_mode=worker)
         except Exception as e:
             log.error("Scheduled agentic job failed: %s", e)
             # Leave a visible trace for jobs that opt in (e.g. the Playground

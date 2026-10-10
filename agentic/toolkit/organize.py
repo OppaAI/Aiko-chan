@@ -43,12 +43,17 @@ def schedule_job(
     tool_chain: list | None = None,
     skill: str | None = None,
     user_id: str | None = None,
+    worker_mode: bool | None = None,
 ) -> str:
     """Schedule a local recurring job while Aiko is running.
 
     action="chain" + tool_chain runs a compiled tool/condition chain
     mechanically (no LLM per firing) — see
     agentic/workflows/common/chain.py for the spec.
+
+    worker_mode=True runs action="agentic" jobs as a lean coding worker
+    (minimal prompt, coding tools only, no memory/RAG fetch) — for
+    autonomous coding ticks on small context windows.
     """
     try:
         job = schedule_job_record(
@@ -64,6 +69,7 @@ def schedule_job(
             tool_chain=tool_chain,
             skill=skill,
             user_id=user_id,
+            worker_mode=worker_mode,
         )
         # Notify the running scheduler so it picks up the new job immediately
         from system.schedule import notify_scheduler_new_job

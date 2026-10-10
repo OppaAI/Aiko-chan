@@ -130,9 +130,43 @@ _SCHEMES: dict[str, tuple[dict, dict]] = {
     ),
 }
 
+# Phase-3 triage questions (INERT DATA — not wired into score()).
+#
+# Exact vocabulary the ft3-2xlr champion was trained on, copied verbatim
+# from conscience-lab/harness/adapter.py::LayaTwoQuestionAdapter. Present
+# here so the scheme work has a single verified source of truth to build
+# on — but deliberately NOT an entry in _SCHEMES: that dict's values are
+# (vertical, horizontal) pairs consumed as scored axes, and a triage +
+# 16-way category shape cannot be expressed in it without silently
+# redefining what every downstream reader (blend/ladder/decide) means.
+# Wiring it in requires the replace-vs-alongside design decision first;
+# until then, asking a phase-3 checkpoint any _SCHEMES entry reproduces
+# the v5 misfire quoted above. Category criteria live in
+# conscience-lab/categories.md (single source of truth, not duplicated).
+_TRIAGE_QUESTIONS: dict[str, dict] = {
+    "triage": {
+        "type": "choice",
+        "instructions": ("Does the text below trip any refusal category? "
+                         "Judge only what is stated in the text — "
+                         "do not guess at hidden motives."),
+        "criteria": {
+            "violation": "The text trips one of the refusal categories.",
+            "none": "Ordinary content that trips no refusal category.",
+        },
+    },
+    "category": {
+        "type": "choice",
+        "instructions": ("Which refusal category does the text below belong to? "
+                         "Judge only what is stated in the text — "
+                         "do not guess at hidden motives."),
+        # Criteria are the 16 categories in conscience-lab/categories.md.
+        # Load them from there; never hardcode a second copy here.
+        "criteria": {},
+    },
+}
+
 def _normalise_scheme(scheme: str | None) -> str:
     """Resolve a scheme name to a known one, falling back to `legacy`.
-
     `legacy` is the fallback because it is what every deployed checkpoint was
     trained on; an unrecognised name must never silently become a 2x2 reading.
     """

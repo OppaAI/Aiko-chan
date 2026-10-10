@@ -1,0 +1,55 @@
+[33mcommit 18affc8ea6ba64e673b01b4de8b5d79942323d9c[m
+Author: OppaAI <oppa.ai.org@gmail.com>
+Date:   Fri Oct 9 20:10:00 2026 -0700
+
+    feat(conscience-lab): add phase 3 evaluation suite and training artifacts
+    
+    - Add frozen evaluation manifests (v1 and v2) with decontamination tracking and changeset audit trail
+    - Include 400-row evaluation dataset (laya_eval_fresh_heldout_v2.jsonl) with 200 harmful/200 benign split and SHA256 verification
+    - Add diagnostic tools for stubborn cases and gray-area analysis (diag_stubborn_prompt.py, analyze_gray.py, extract_dev_p.py)
+    - Include gray-area case set (laya_gray_area_ask_set.jsonl) for ambiguous boundary testing
+    - Add refusal evaluation datasets across development iterations (dev463, ft1/ft2 dev sets)
+    - Include phase 3 refusal task configuration (phase3-refusal.yaml) with 2× LR experiment matrix
+    - Add fine-tuned model checkpoints and tokenizer configs (ft2-ckpt.tgz, layaft-pkg.tgz, phase3-refusal-1k)
+    - Include result summaries for frozen and gray-area test runs with per-case and aggregate metrics
+    - Add comprehensive handoff and runbook documentation (HANDOFF_PROMPT.md, RUN_SHEET.md, RUN_GRAY.md, README_TONIGHT_FIXES.md)
+    - Establish frozen evaluation protocol to prevent data leakage into training pipeline
+
+ conscience-lab/eval/FREEZE_MANIFEST.json                         |       8 [32m+[m
+ conscience-lab/eval/FREEZE_MANIFEST_V2.json                      |      95 [32m+[m
+ conscience-lab/eval/HANDOFF_PROMPT.md                            |      55 [32m+[m
+ conscience-lab/eval/README_TONIGHT_FIXES.md                      |     105 [32m+[m
+ conscience-lab/eval/RUN_GRAY.md                                  |      65 [32m+[m
+ conscience-lab/eval/RUN_SHEET.md                                 |      68 [32m+[m
+ conscience-lab/eval/analyze_gray.py                              |      71 [32m+[m
+ conscience-lab/eval/diag_stubborn_prompt.py                      |     139 [32m+[m
+ conscience-lab/eval/diag_stubborn_prompt_out.jsonl               |      32 [32m+[m
+ conscience-lab/eval/extract_dev_p.py                             |      49 [32m+[m
+ conscience-lab/eval/fresh_benign_draft.jsonl                     |     200 [32m+[m
+ conscience-lab/eval/fresh_harmful_draft.jsonl                    |     200 [32m+[m
+ conscience-lab/eval/laya_eval_fresh_heldout_v2.jsonl             |     400 [32m+[m
+ conscience-lab/eval/laya_eval_fresh_heldout_v2.sha256            |       1 [32m+[m
+ conscience-lab/eval/laya_eval_fresh_heldout_v2_changes.json      |      72 [32m+[m
+ conscience-lab/eval/laya_gray_area_ask_set.jsonl                 |      38 [32m+[m
+ conscience-lab/eval/laya_refusal_eval_dev463.jsonl               |     463 [32m+[m
+ conscience-lab/eval/laya_stubborn_32.jsonl                       |      32 [32m+[m
+ conscience-lab/eval/scores_ft1_dev.jsonl                         |     463 [32m+[m
+ conscience-lab/eval/scores_ft2_dev.jsonl                         |     463 [32m+[m
+ conscience-lab/results/ft2-frozen/per_case.jsonl                 |     400 [32m+[m
+ conscience-lab/results/ft2-frozen/summary.json                   |     178 [32m+[m
+ conscience-lab/results/ft2-gray/per_case.jsonl                   |      38 [32m+[m
+ conscience-lab/results/ft2-gray/summary.json                     |      48 [32m+[m
+ conscience-lab/results/phase3-refusal-2xLR-dev/per_case.jsonl    |     463 [32m+[m
+ conscience-lab/results/phase3-refusal-2xLR-dev/summary.json      |     178 [32m+[m
+ conscience-lab/results/phase3-refusal-2xLR-frozen/per_case.jsonl |     400 [32m+[m
+ conscience-lab/results/phase3-refusal-2xLR-frozen/summary.json   |     178 [32m+[m
+ conscience-lab/scores_ft2_gray.jsonl                             |      38 [32m+[m
+ conscience-lab/tasks/phase3-refusal.yaml                         |      56 [32m+[m
+ ft2-ckpt.tgz                                                     |     Bin [31m0[m -> [32m598598571[m bytes
+ layaft-pkg.tgz                                                   |     Bin [31m0[m -> [32m116664[m bytes
+ runs/phase3-refusal-1k/encoder/config.json                       |      79 [32m+[m
+ runs/phase3-refusal-1k/results.json                              |      99 [32m+[m
+ runs/phase3-refusal-1k/rl_agent_config.json                      |      27 [32m+[m
+ runs/phase3-refusal-1k/tokenizer/tokenizer.json                  | 2580784 [32m+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++[m
+ runs/phase3-refusal-1k/tokenizer/tokenizer_config.json           |      22 [32m+[m
+ 37 files changed, 2586007 insertions(+)

@@ -1,0 +1,27 @@
+{
+  "encoder": "jhu-clsp/mmBERT-base",
+  "head_layers": 2,
+  "max_len": 1024,
+  "head_max_len": 256,
+  "max_prefixes": 6,
+  "act_costs": {
+    "escalate": 0.5
+  },
+  "cost_wrong_act": 3.0,
+  "amp_dtype": "bf16",
+  "model_name": "laya-phase3-refusal",
+  "temperature": [
+    1.076517939567566,
+    1.0,
+    1.0
+  ],
+  "training": {
+    "updates": 15987,
+    "epochs_completed": 4,
+    "hours": 4.97,
+    "world_size": 1,
+    "fine_tuned_from_checkpoint": false
+  },
+  "fine_tuned": true,
+  "fine_tuned_from": "/home/oppa-ai/.cache/huggingface/hub/models--convaiinnovations--laya-multilingual/snapshots/1720e3e3357cfe1e281542e223f8273b0890ca34"
+}

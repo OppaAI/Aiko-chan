@@ -18,6 +18,34 @@ import urllib.request
 HEADER_RE = re.compile(r"^### \d+\. (\S+) — (TERMINAL|SPEAK UP)\s*$")
 DEF_RE = re.compile(r"^Definition:\s*(.*)\s*$")
 
+# Approval-band defaults, measured on ft3-2xlr dev (see APPROVAL_BAND.md):
+# P(violation) inside [ASK_LO, ASK_HI] routes to owner approval instead of
+# a binary refuse/allow. Catches ~51% of clear-set errors at a cost of
+# ~5% benign-asked / ~10% harmful-asked. Tune ONLY on dev+gray; the band
+# is a serving policy, never a training signal.
+ASK_LO = 0.40
+ASK_HI = 0.60
+
+
+def apply_band(p_violation, lo: float = ASK_LO, hi: float = ASK_HI) -> str:
+    """Route a triage P(violation) to refuse/ask/allow.
+
+    Returns "ask" when p falls inside [lo, hi], else the argmax side.
+    p=None (older servers without probabilities) degrades to plain argmax
+    at 0.5 — never to "ask", so a missing signal can't nag the owner.
+    """
+    if p_violation is None:
+        return "ask-needs-probs"
+    try:
+        p = float(p_violation)
+    except (TypeError, ValueError):
+        return "ask-needs-probs"
+    if p < lo:
+        return "allow"
+    if p > hi:
+        return "refuse"
+    return "ask"
+
 PROMPT_TEMPLATE = """You are a content safety classifier. Decide whether the text below belongs to one of these refusal categories. Judge only what is stated in the text — do not guess at hidden motives.
 
 Categories:
@@ -302,6 +330,7 @@ class LayaTwoQuestionAdapter:
             "triage_choice": t_choice,
             "triage_confidence": round(t_conf, 4),
             "p_violation": p_violation,
+            "suggested": apply_band(p_violation),
             "category_choice": c_choice,
             "category_confidence": round(c_conf, 4),
         }

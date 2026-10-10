@@ -157,6 +157,7 @@ def main():
             "triage_choice": pred.get("triage_choice"),
             "triage_confidence": pred.get("triage_confidence"),
             "p_violation": pred.get("p_violation"),
+            "suggested": pred.get("suggested"),
             "category_choice": pred.get("category_choice"),
             "category_confidence": pred.get("category_confidence"),
         })

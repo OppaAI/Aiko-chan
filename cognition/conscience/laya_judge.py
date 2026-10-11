@@ -26,10 +26,13 @@ import json
 import logging
 import math
 import os
+import random
+import re
 import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from .schema import Party
@@ -218,6 +221,48 @@ BAND_LO = _finite_or(BAND_LO, 0.40)
 BAND_HI = _finite_or(BAND_HI, 0.60)
 
 
+# ── category criteria (runtime-loaded) ────────────────────────────────────
+# The Q2 category question needs the 16 refusal-category criteria. They live
+# in conscience-lab/categories.md -- the single source of truth, edited by
+# Oppa's red pen -- and are parsed here at runtime, never hardcoded. (Parser
+# mirrors conscience-lab/harness/adapter.py::load_categories.)
+_CAT_HEADER_RE = re.compile(r"^### \d+\. (\S+) — (TERMINAL|SPEAK UP)\s*$")
+_CAT_DEF_RE = re.compile(r"^Definition:\s*(.*)\s*$")
+
+_category_criteria_cache: dict[str, str] | None = None
+
+
+def _category_criteria() -> dict[str, str]:
+    """name → definition for the 16 refusal categories."""
+    global _category_criteria_cache
+    if _category_criteria_cache is None:
+        path = Path(__file__).resolve().parents[2] / "conscience-lab" / "categories.md"
+        cats: dict[str, str] = {}
+        cur: str | None = None
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                m = _CAT_HEADER_RE.match(line)
+                if m:
+                    cur = m.group(1)
+                    cats[cur] = ""
+                    continue
+                m = _CAT_DEF_RE.match(line)
+                if m and cur is not None and not cats[cur]:
+                    cats[cur] = m.group(1)
+        assert len(cats) == 16, f"expected 16 categories, got {len(cats)}"
+        assert all(cats.values()), "missing category definition"
+        _category_criteria_cache = cats
+    return _category_criteria_cache
+
+
+# Categories that bypass the approval band straight to REFUSE, before the
+# band is even consulted (APPROVAL_BAND.md consumer contract point 5).
+# Deliberately NOT every TERMINAL-handling category from categories.md --
+# the band was measured and validated with only these two excluded, and
+# widening the bypass is a policy change, not a bug fix.
+_TERMINAL_BYPASS = frozenset({"csam", "self-harm"})
+
+
 def apply_band(p: float | None, lo: float = BAND_LO, hi: float = BAND_HI) -> str:
     """refuse / ask / allow from P(violation).
 
@@ -401,9 +446,14 @@ class LayaJudge:
     ) -> tuple[float, float, float, list[str], list[str]] | None:
         """Triage verdict for the Phase-3 champion + approval band.
 
-        Asks ONLY the triage question (band on triage only, never
-        category-gated). Returns the same (v, h, confidence, reasons, cited)
-        tuple so blend() and everything downstream are unchanged:
+        Asks triage + category in one call (mirroring the harness). The
+        terminal-category bypass runs BEFORE the band: csam/self-harm hard-
+        refuse outright -- never escalate, never allow, no approval override
+        (APPROVAL_BAND.md point 5). Fail-closed on head disagreement: a
+        terminal category from Q2 refuses even if triage scored allow.
+
+        Otherwise returns the same (v, h, confidence, reasons, cited) tuple
+        so blend() and everything downstream are unchanged:
           refuse -> (-1, -1)  # decide() check #1 → REFUSE
           allow  -> (+1, +1)  # decide() check #4 → ALLOW
           ask    -> (0, 0) + last_uncertain=True → decide() check #3 → ESCALATE
@@ -412,39 +462,55 @@ class LayaJudge:
         `ask-needs-probs` (server without logprobs) falls back to the binary
         choice and does NOT set last_uncertain -- a missing signal must not
         nag the owner.
-
-        Known gap (follow-up): the ship doc's CSAM/self-harm band bypass needs
-        the Q2 category answer, which this single-question path does not ask.
-        An ask on those categories currently escalates to the owner instead of
-        refusing outright -- fail-visible, never fail-open.
         """
-        payload: dict[str, Any] = {"state": state, "questions": {"triage": _TRIAGE_Q}}
+        criteria = _category_criteria()
+        order = list(criteria)
+        random.Random().shuffle(order)  # match eval's position-bias control
+        questions: dict[str, Any] = {
+            "triage": _TRIAGE_Q,
+            "category": {
+                "type": "choice",
+                "instructions": _TRIAGE_QUESTIONS["category"]["instructions"],
+                "criteria": {name: criteria[name] for name in order},
+            },
+        }
+        payload: dict[str, Any] = {"state": state, "questions": questions}
         if self._model:
             payload["model"] = self._model
         answers = self._post(payload)
         if answers is None:
             return None
         t = answers.get("triage") or {}
-        choice = t.get("choice")
-        if choice not in ("violation", "none"):
-            log.debug("[ccc] laya triage returned unexpected choice: %r", choice)
+        c = answers.get("category") or {}
+        t_choice = t.get("choice")
+        if t_choice not in ("violation", "none"):
+            log.debug("[ccc] laya triage returned unexpected choice: %r", t_choice)
             return None
+        c_choice = c.get("choice")
         probs = t.get("probabilities") or {}
         raw = probs.get("violation")
         p = float(raw) if isinstance(raw, (int, float)) else None
-        decision = apply_band(p)
-        self.last_scheme = "triage"
-        self.last_bands = {"triage": choice}
-        self.last_p_violation = p
-        self.last_band_decision = decision
-        self.last_negative = {}
-        self.last_confidence = {"triage": _band_confidence(t)}
         conf = _band_confidence(t)
-        reasons = [f"conscience-laya-triage: {choice} p_violation={p} band={decision}"]
+        self.last_scheme = "triage"
+        self.last_bands = {"triage": t_choice, "category": c_choice}
+        self.last_p_violation = p
+        self.last_negative = {}
+        self.last_confidence = {"triage": conf}
         cited = _norm_ids(canon_block)
+        if c_choice in _TERMINAL_BYPASS:
+            # Hard refuse before the band: no escalation, no approval
+            # override, even on head disagreement (fail closed).
+            self.last_band_decision = "refuse-terminal"
+            self.last_uncertain = False
+            reasons = [f"conscience-laya-triage: terminal category {c_choice}"]
+            self.reset()
+            return -1.0, -1.0, conf, reasons, cited
+        decision = apply_band(p)
+        self.last_band_decision = decision
+        reasons = [f"conscience-laya-triage: {t_choice} p_violation={p} band={decision}"]
         if decision == "ask-needs-probs":
             self.last_uncertain = False
-            v = h = -1.0 if choice == "violation" else 1.0
+            v = h = -1.0 if t_choice == "violation" else 1.0
         elif decision == "ask":
             self.last_uncertain = True
             v = h = 0.0

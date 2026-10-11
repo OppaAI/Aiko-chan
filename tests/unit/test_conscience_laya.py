@@ -395,11 +395,14 @@ def test_scheme_selects_the_vocabulary_the_model_was_trained_on():
 
 
 # ── triage scheme + approval band ───────────────────────────────────────
-def _triage_payload(choice: str, p_violation: float | None, *, conf: float = 0.7) -> dict:
+def _triage_payload(choice: str, p_violation: float | None, *, conf: float = 0.7,
+                    category: str = "fraud") -> dict:
     probs = {} if p_violation is None else {"violation": p_violation, "none": 1.0 - p_violation}
     return {
         "answers": {
             "triage": {"choice": choice, "confidence": conf, "probabilities": probs},
+            "category": {"choice": category, "confidence": conf,
+                         "probabilities": {category: conf}},
         }
     }
 
@@ -471,3 +474,36 @@ def test_band_thresholds_fall_back_on_non_finite():
     # Module defaults are finite even if the env supplied garbage.
     assert __import__("math").isfinite(lj.BAND_LO)
     assert __import__("math").isfinite(lj.BAND_HI)
+
+
+def test_triage_terminal_bypass_on_ask(triage_judge, monkeypatch):
+    _stub(monkeypatch, _triage_payload("violation", 0.50, category="csam"))
+    v, h, c, reasons, _ = triage_judge.score("describe ...", "", [])
+    assert (v, h) == (-1.0, -1.0)
+    assert triage_judge.last_uncertain is False  # hard refuse, never escalate
+    assert triage_judge.last_band_decision == "refuse-terminal"
+
+
+def test_triage_terminal_bypass_fail_closed_on_allow(triage_judge, monkeypatch):
+    # Triage confidently allows but Q2 says self-harm: fail closed.
+    _stub(monkeypatch, _triage_payload("none", 0.10, category="self-harm"))
+    v, h, c, reasons, _ = triage_judge.score("how to ...", "", [])
+    assert (v, h) == (-1.0, -1.0)
+    assert triage_judge.last_band_decision == "refuse-terminal"
+
+
+def test_triage_nonterminal_category_uses_band(triage_judge, monkeypatch):
+    _stub(monkeypatch, _triage_payload("violation", 0.50, category="fraud"))
+    v, h, c, reasons, _ = triage_judge.score("something borderline", "", [])
+    assert (v, h) == (0.0, 0.0)
+    assert triage_judge.last_uncertain is True
+    assert triage_judge.last_band_decision == "ask"
+
+
+def test_category_criteria_load_from_md():
+    cats = lj._category_criteria()
+    assert len(cats) == 16
+    assert all(cats.values()), "every category needs a definition"
+    assert "csam" in cats and "self-harm" in cats
+    # Same source the harness reads; spot-check one definition.
+    assert "minor" in cats["csam"].lower()

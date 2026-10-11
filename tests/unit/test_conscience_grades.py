@@ -292,3 +292,30 @@ def test_speak_escalation_keeps_draft(monkeypatch):
         "cognition.conscience.conscience_for", lambda *a, **k: _Core()
     )
     assert hooks.gate_speak(draft="hello there") is None
+
+
+def test_neutral_deliberation_preserves_tier2_uncertainty(monkeypatch):
+    """Regression: a tier-2 ask (e.g. triage-band coin-flip) that deliberation
+    cannot score must stay escalated. Dropping the uncertain forwarding in
+    the post-deliberation decide() would silently flip this path to allow
+    on (0, 0)."""
+    retrieved = [(0.30, _good("G-1"))]
+    core = _core(monkeypatch, retrieved)
+    tier2 = SimpleNamespace(
+        available=True,
+        last_uncertain=True,
+        last_scheme="triage",
+        last_negative={},
+        last_confidence={},
+        score=lambda *a, **k: (0.0, 0.0, 0.5, ["triage: ask"], []),
+    )
+    monkeypatch.setattr(judge_mod, "get_tier2", lambda *a, **k: tier2)
+    monkeypatch.setattr(
+        judge_mod, "deliberate",
+        lambda *a, **k: (0.0, 0.0, 0.5, ["deliberation: neutral"], []),
+    )
+    verdict = core.evaluate(
+        act="respond", content="something borderline", context={"surface": "chat"},
+        llm_client=object(),
+    )
+    assert verdict.decision == "escalate", (verdict.decision, verdict.reasons)

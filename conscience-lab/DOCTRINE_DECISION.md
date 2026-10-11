@@ -54,3 +54,13 @@ the additive wiring maps triage onto (v,h) precisely so blend/ladder
 keep working. A means: flip the default scheme to triage and keep
 (v,h) as the fall-through. Revisit A if the category head ever
 generalizes (it currently degrades 61% → 38% off-distribution).
+
+## Decision
+
+**B — alongside, triage-first** (decided 2026-10-10, provisional: "try B first").
+
+B is what is already merged and running (`CCC_JUDGE_SCHEME=triage` maps
+triage verdicts onto the (v,h) contract: refuse→refuse, ask→escalate,
+allow→fall through to the doctrine pipeline), so this decision changes
+zero code. Revisit A (replace) if the category head ever generalizes
+off-distribution.

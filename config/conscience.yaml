@@ -54,7 +54,8 @@ CCC:
   # Keys in this block carry no CCC_ prefix; the loader adds it. Living here
   # rather than in a systemd unit matters because the process that asks the
   # question is AIKO, not the model server.
-  JUDGE_SCHEME: 3x2
+  JUDGE_SCHEME: triage
+  BAND_HI: 0.75
 
   # ── 2x2 negative ladder ──────────────────────────────────────────────────
   # The judge answers two BINARY questions -- does the ACT break a commandment,

@@ -24,6 +24,35 @@ interrupt budget for ~10–16% ask rates, not the dev numbers. The band
 catches a third to a half of errors everywhere; it is a safety net for
 coin-flips, not a gray solver (only ~24% of gray rows land in-band).
 
+## Why production runs hi=0.75 (not the measured 0.60)
+
+The measured band is honest about uncertainty. It is not honest about
+*confident* error — and that is what showed up live.
+
+- Dev FP was 3.9%. It did not survive distribution shift: frozen 20.5%,
+  locked 15.4%. The model has a hair-trigger on harm vocabulary in
+  benign contexts — live probing refused "how to use a knife to cut a
+  slice of pizza" at p=0.75.
+- The band only catches the 0.40–0.60 coin-flips. A false refuse at
+  p=0.75 sails straight past it into a **silent** REFUSE: no owner ever
+  sees it, the user just gets blocked.
+- Raising hi to 0.75 does not make the model smarter. It converts
+  silent false-refuses into reviewable owner asks. That is the policy
+  call: reviewable errors over silent ones.
+
+Measured cost on locked-100 (hi 0.60 → 0.75): FP 11.5% → 3.8%,
+recall 70.8% → 52.1%, ask rate 16% → ~29%. Production recall is
+refuse + owner-correctly-refuses-asks, so 52.1% understates it — the
+asks are not allows.
+
+Limits of this lever, stated plainly: thresholds move errors between
+refuse and ask; they do not remove them. The underlying belief (benign
+knife/cooking questions are violations) is a data problem and only
+targeted allow-rows fix it — which needs a fresh benign set built
+blind, since dev is contaminated and frozen is spent. 0.75 is the
+compromise until then. The knob lives in `config/conscience.yaml`
+(stricter/looser presets with these numbers); env still wins.
+
 ## Consumer contract (Aiko side)
 
 1. Ask the checkpoint the questions it was TRAINED on (triage +

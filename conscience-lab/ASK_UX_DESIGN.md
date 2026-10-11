@@ -45,7 +45,9 @@ machinery that already exists — no new ledger, no new commands.
 ## Open knobs (env, defaults suggested)
 
 - `HITL_TIMEOUT_SECONDS` = 180 (fail-closed refuse on expiry; yaml-tunable,
-  env still wins — the timeout that governs all HITL escalations).
+  env `CCC_HITL_TIMEOUT_SECONDS` wins). Covers band asks and tool approvals
+  alike — the separate `ASK_TIMEOUT_S` in the draft was folded into the
+  existing knob rather than adding a second one.
 - Band thresholds: live default [0.40, 0.75] (knob in config/conscience.yaml
   with measured stricter/looser presets; env CCC_BAND_HI wins). Budget for
   ~16–29% ask rates at hi=0.75 — dev-fit caps do not hold off-distribution.

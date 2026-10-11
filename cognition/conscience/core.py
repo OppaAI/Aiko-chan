@@ -313,7 +313,16 @@ class ConscienceCircuitCore:
                     confidence = judge_mod.calibrate(d_c, evidence)
                     reasons = list(dict.fromkeys([*d_reasons, *reasons]))[:5]
                     cited = list(dict.fromkeys([*d_cited, *cited]))[:10]
-                    decision, why = decide(vertical, horizontal, confidence)
+                    # Preserve a still-unresolved doubt: if deliberation did
+                    # not score the act either (neutral axes), the L2
+                    # uncertainty -- e.g. a triage-band ask -- must survive to
+                    # the final verdict instead of collapsing to ALLOW on
+                    # (0, 0). A deliberation that DID score keeps its
+                    # resolution; only the unscored case stays escalated.
+                    decision, why = decide(
+                        vertical, horizontal, confidence,
+                        uncertain=tier2_uncertain and not d_v and not d_h,
+                    )
                     layers.append("deliberate")
                     gate = GATE_DELIBERATE
                 else:

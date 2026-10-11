@@ -4206,64 +4206,75 @@ class AikoMemorize:
         # materialize it. No backend open yet + guest identity → no-op.
         if self._mem_backend is None and (user_id or self.get_user_id()) == "guest":
             return {"pruned": 0, "skipped": "guest (no store open)"}
-        user_id = self._resolve_user_id(user_id)
-        source = [_all_mems] if _all_mems is not None else self._iter_memory_batches(user_id)
+        # Serialize against switch_user (same lock order: this lock
+        # first, _db_lock inside — never the reverse, so no ABBA
+        # deadlock). A concurrent switch waits here instead of closing
+        # the backend mid-scan (sqlite3.ProgrammingError on a closed
+        # connection). The except below is belt-and-suspenders.
+        with self._user_switch_lock:
+            try:
+                user_id = self._resolve_user_id(user_id)
+                source = [_all_mems] if _all_mems is not None else self._iter_memory_batches(user_id)
 
-        # Lineage set once per cleanup(), not per batch: the supersedes
-        # table scan is full-table and batches otherwise repeat it.
-        lineage_ids: set[str] = set()
-        try:
-            with self._mem._db_lock:
-                rows = self._conn.execute(
-                    "SELECT supersedes_id FROM memories WHERE supersedes_id IS NOT NULL AND supersedes_id != ''"
-                ).fetchall()
-            lineage_ids = {str(r["supersedes_id"]) for r in rows if r["supersedes_id"]}
-        except Exception:
-            lineage_ids = set()
-
-        kept = 0
-        deleted: list[str] = []
-        failed: list[dict] = []
-        dry_candidates: list[dict] = []
-        saw_any = False
-
-        for batch in source:
-            if not batch:
-                continue
-            saw_any = True
-            batch_kept, candidates = self._cleanup_candidates(
-                batch,
-                user_id=user_id,
-                _pinned_ids=_pinned_ids,
-                _lineage_ids=lineage_ids,
-            )
-            kept += batch_kept
-
-            if dry_run:
-                dry_candidates.extend(candidates)
-                continue
-
-            for c in candidates:
+                # Lineage set once per cleanup(), not per batch: the supersedes
+                # table scan is full-table and batches otherwise repeat it.
+                lineage_ids: set[str] = set()
                 try:
-                    self._mem.delete(memory_id=c["id"])
-                    deleted.append(c["id"])
-                except Exception as e:
-                    failed.append({"id": c["id"], "error": str(e)})
+                    with self._mem._db_lock:
+                        rows = self._conn.execute(
+                            "SELECT supersedes_id FROM memories WHERE supersedes_id IS NOT NULL AND supersedes_id != ''"
+                        ).fetchall()
+                    lineage_ids = {str(r["supersedes_id"]) for r in rows if r["supersedes_id"]}
+                except Exception:
+                    lineage_ids = set()
 
-        if not saw_any:
-            return {"deleted": 0, "kept": 0, "failed": 0}
+                kept = 0
+                deleted: list[str] = []
+                failed: list[dict] = []
+                dry_candidates: list[dict] = []
+                saw_any = False
 
-        if dry_run:
-            dry_candidates.sort(key=lambda x: x["weighted_score"])
-            log.info(f"Dry run: {len(dry_candidates)} candidates for deletion, {kept} kept.")
-            return {"deleted": 0, "kept": kept, "failed": 0, "candidates": dry_candidates}
+                for batch in source:
+                    if not batch:
+                        continue
+                    saw_any = True
+                    batch_kept, candidates = self._cleanup_candidates(
+                        batch,
+                        user_id=user_id,
+                        _pinned_ids=_pinned_ids,
+                        _lineage_ids=lineage_ids,
+                    )
+                    kept += batch_kept
 
-        if deleted:
-            self._clear_search_cache()
-            self.optimize()
+                    if dry_run:
+                        dry_candidates.extend(candidates)
+                        continue
 
-        log.info(f"Cleanup: deleted={len(deleted)}, kept={kept}, failed={len(failed)}")
-        return {"deleted": len(deleted), "kept": kept, "failed": len(failed)}
+                    for c in candidates:
+                        try:
+                            self._mem.delete(memory_id=c["id"])
+                            deleted.append(c["id"])
+                        except Exception as e:
+                            failed.append({"id": c["id"], "error": str(e)})
+
+                if not saw_any:
+                    return {"deleted": 0, "kept": 0, "failed": 0}
+
+                if dry_run:
+                    dry_candidates.sort(key=lambda x: x["weighted_score"])
+                    log.info(f"Dry run: {len(dry_candidates)} candidates for deletion, {kept} kept.")
+                    return {"deleted": 0, "kept": kept, "failed": 0, "candidates": dry_candidates}
+
+                if deleted:
+                    self._clear_search_cache()
+                    self.optimize()
+
+                log.info(f"Cleanup: deleted={len(deleted)}, kept={kept}, failed={len(failed)}")
+                return {"deleted": len(deleted), "kept": kept, "failed": len(failed)}
+            except sqlite3.Error as e:
+                log.warning("cleanup: store error mid-scan (%s) — aborting this pass with partial counts.", e)
+                return {"deleted": len(deleted), "kept": kept,
+                        "failed": failed, "aborted": True}
 
     def _iter_memory_batches(self, user_id: str, batch_size: int = MEMORY_LIFECYCLE_BATCH_SIZE):
         """Yield lifecycle scan batches without retaining the full table."""

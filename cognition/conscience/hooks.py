@@ -378,6 +378,30 @@ def gate_tool(*, name: str, args: dict, llm_client=None, embedder=None, social_p
             embedder=embedder,
             surface="agentic",
         )
+        # Ask-UX: a triage band ask on a social post tool never waits for
+        # the owner — nobody watches a poll cycle. Skip publishing; the
+        # ledger row stays pending for async review (the timeout resolves
+        # it to refuse). Anything else keeps the existing behavior.
+        # getattr: tests stub the verdict with SimpleNamespace.
+        if (verdict.decision == ESCALATE
+                and getattr(verdict, "p_violation", None) is not None
+                and (name in social or name.startswith("post_"))):
+            log.info("[ccc-hooks] social band-ask skip: tool=%s p_violation=%.2f",
+                     name, verdict.p_violation)
+            return {
+                "status": "conscience_skip",
+                "tool": name,
+                "decision": "escalate",
+                "gate": verdict.gate,
+                "reasons": [
+                    f"triage band ask P(violation)={verdict.p_violation:.2f} — "
+                    "not published; escalation "
+                    f"{verdict.escalation_id} left for owner review",
+                ],
+                "escalation_id": verdict.escalation_id,
+                "p_violation": verdict.p_violation,
+                "as_trace": verdict.as_trace(),
+            }
         if verdict.decision in (REFUSE, ESCALATE) or (
             verdict.decision == CAUTION
             and (verdict.gate in (GATE_MB_VALENCE, GATE_ERROR) or getattr(verdict, "fail_mode", ""))

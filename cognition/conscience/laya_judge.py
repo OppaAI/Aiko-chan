@@ -509,7 +509,8 @@ class LayaJudge:
             return -1.0, -1.0, conf, reasons, cited
         decision = apply_band(p)
         self.last_band_decision = decision
-        reasons = [f"conscience-laya-triage: {t_choice} p_violation={p} band={decision}"]
+        reasons = [f"conscience-laya-triage: {t_choice} p_violation={p} band={decision}"
+                   + (f" category={c_choice}" if c_choice else "")]
         if decision == "ask-needs-probs":
             self.last_uncertain = False
             v = h = -1.0 if t_choice == "violation" else 1.0

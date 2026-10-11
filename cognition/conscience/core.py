@@ -248,6 +248,7 @@ class ConscienceCircuitCore:
         lexical = judge_mod.LexicalJudge.score(retrieved, parties)
         slm_result = None
         tier2_uncertain = False
+        band_info: dict = {}
         if tier2 is not None:
             slm_result = tier2.score(self._situation(act, text, ctx), canon_block, parties)
             # `uncertain` ("a neighbour may be affected but I cannot score it")
@@ -255,6 +256,14 @@ class ConscienceCircuitCore:
             # "no moral signal" and ALLOWS -- the single defect that let 47% of
             # clearly-wrong content through.
             tier2_uncertain = bool(getattr(tier2, "last_uncertain", False))
+            # Triage band signal for the ask-UX: P(violation) + suggested
+            # category ride on the verdict so the gate, the owner notice,
+            # and the ledger never have to parse reason strings.
+            if getattr(tier2, "last_scheme", "legacy") == "triage":
+                band_info = {
+                    "p_violation": getattr(tier2, "last_p_violation", None),
+                    "category": (getattr(tier2, "last_bands", {}) or {}).get("category") or "",
+                }
 
         vertical, horizontal, confidence, reasons, cited = judge_mod.blend(slm_result, lexical)
         evidence = judge_mod.LexicalJudge.evidence_weight(retrieved)
@@ -381,6 +390,13 @@ class ConscienceCircuitCore:
             layered.pastoral_note = self._note_for(layered, retrieved)
 
         merged = fuse(base, layered)
+
+        # Attach the triage band signal (if the champion scored this turn)
+        # so the gate reason, the owner notice, and the ledger all carry
+        # P(violation) + category without parsing reason strings.
+        if band_info.get("p_violation") is not None:
+            merged.p_violation = band_info["p_violation"]
+            merged.suggested_category = band_info.get("category", "")
 
         # ── L4 hitl ───────────────────────────────────────────────────────
         if merged.decision == ESCALATE:
@@ -543,6 +559,14 @@ class ConscienceCircuitCore:
     def _open_escalation(self, verdict: Verdict, content: str) -> None:
         verdict.escalation_id = verdict.escalation_id or uuid.uuid4().hex[:12]
         summary = verdict.reasons[0] if verdict.reasons else "unresolved moral question"
+        # Ask-UX: for triage band asks the owner gets situation + P(violation)
+        # + suggested category, not just the verdict string.
+        if verdict.p_violation is not None:
+            detail = f"P(violation)={verdict.p_violation:.2f}"
+            if verdict.suggested_category:
+                detail += f", category={verdict.suggested_category}"
+            situation = " ".join((content or "").split())[:200]
+            summary = f"{situation} [{detail}]" if situation else f"[{detail}] {summary[:120]}"
         try:
             from system.notice import get_notice_bus
             get_notice_bus(self._user_id).push(

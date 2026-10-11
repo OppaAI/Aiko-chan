@@ -1218,7 +1218,9 @@ def _tool_gate_result(name: str, args: dict, blocked: dict) -> ToolResult:
         args=args,
         content=json.dumps({key: value for key, value in blocked.items() if key != "as_trace"}, ensure_ascii=False),
         error_type=(
-            "conscience_refuse"
+            "conscience_skip"
+            if blocked.get("status") == "conscience_skip"
+            else "conscience_refuse"
             if decision == "refuse"
             else "needs_approval"
             if decision == "escalate"

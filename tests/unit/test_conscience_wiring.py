@@ -503,3 +503,50 @@ def test_approve_feeds_autonomy_and_deny_resets(monkeypatch, tmp_path):
         hooks._APPROVED_INPUT.clear()
         hooks._POLICIES.clear()
 
+
+
+def test_gate_tool_social_band_ask_skips_instead_of_waiting(monkeypatch):
+    """Ask-UX item 5: a triage band ask on a social post tool must SKIP
+    (not publish, not wait for approval) — nobody watches a poll cycle."""
+
+    class Core:
+        def evaluate(self, **kwargs):
+            return SimpleNamespace(
+                decision="escalate",
+                gate="hitl",
+                escalation_id="abc123def456",
+                reasons=["conscience-laya-triage: violation p_violation=0.62 band=ask"],
+                p_violation=0.62,
+                as_trace=lambda: {"decision": "escalate"},
+            )
+
+    monkeypatch.setattr("cognition.conscience.conscience_for", lambda *_a, **_k: Core())
+    payload = hooks.gate_tool(
+        name="post_to_social",
+        args={"text": "hello", "services": "threads"},
+        social_post_tools={"post_to_social"},
+    )
+    assert payload is not None
+    assert payload["status"] == "conscience_skip"
+    assert payload["p_violation"] == 0.62
+    assert payload["escalation_id"] == "abc123def456"
+
+
+def test_gate_tool_non_social_band_ask_still_waits(monkeypatch):
+    """A band ask on a non-social tool keeps the approval-wait behavior."""
+
+    class Core:
+        def evaluate(self, **kwargs):
+            return SimpleNamespace(
+                decision="escalate",
+                gate="hitl",
+                escalation_id="abc123def456",
+                reasons=["conscience-laya-triage: violation p_violation=0.62 band=ask"],
+                p_violation=0.62,
+                as_trace=lambda: {"decision": "escalate"},
+            )
+
+    monkeypatch.setattr("cognition.conscience.conscience_for", lambda *_a, **_k: Core())
+    payload = hooks.gate_tool(name="save_note", args={"content": "x"})
+    assert payload is not None
+    assert payload["status"] == "waiting_for_approval"

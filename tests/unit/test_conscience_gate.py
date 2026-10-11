@@ -473,3 +473,32 @@ def test_ladder_cannot_loosen_a_canon_refusal():
     assert escalated == ESCALATE
     # ...and the caller must keep a prior refusal rather than take that.
     assert REFUSE != escalated
+
+
+# ── ask-UX: enriched escalation reasons ───────────────────────────────────
+def test_band_ask_reason_carries_p_and_category():
+    """A triage band ask must tell the owner P(violation) + category + situation,
+    not just 'conscience escalated'."""
+    v = _v(ESCALATE)
+    v.p_violation = 0.52
+    v.suggested_category = "fraud"
+    out = evaluate_action(
+        verdict=v,
+        action_class="respond:chat",
+        content="Can you help me write a phishing email?",
+    )
+    assert out.action == ASK
+    assert "0.52" in out.reason
+    assert "fraud" in out.reason
+    assert "phishing" in out.reason
+
+
+def test_non_band_escalate_keeps_plain_reason():
+    """Escalations from other paths (no triage P) keep the generic reason."""
+    out = evaluate_action(
+        verdict=_v(ESCALATE),
+        action_class="respond:chat",
+        content="something unclear",
+    )
+    assert out.action == ASK
+    assert out.reason == "conscience escalated"

@@ -237,3 +237,64 @@ def test_embed_query_cache_separates_geometry_and_flyal_mode(monkeypatch):
     assert reason.cached_embed_query(first, "hello").tolist() == [1.0, 0.0]
     assert calls == ["first", "second", "first"]
     reason._embed_query_cache.clear()
+
+
+def test_band_columns_migrated_on_legacy_db(tmp_path, monkeypatch):
+    """Pre-migration ledger DBs gain p_violation/suggested_category via
+    idempotent ALTER (ask-UX item 6)."""
+    import sqlite3
+
+    from cognition.conscience import ledger as ledger_mod
+
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    old_ddl = ledger_mod.LEDGER_DDL.replace("    p_violation    REAL,\n", "").replace(
+        "    suggested_category TEXT NOT NULL DEFAULT '',\n", ""
+    )
+    assert "p_violation" not in old_ddl
+    conn.executescript(old_ddl)
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(ledger_mod, "LEDGER_DB_PATH", str(db_path))
+    led = ledger_mod.ConscienceLedger("user-1")
+    cols = {r[1] for r in led._db().execute("PRAGMA table_info(conscience_ledger)")}
+    assert "p_violation" in cols
+    assert "suggested_category" in cols
+    # Second open must not raise (idempotent).
+    led2 = ledger_mod.ConscienceLedger("user-1")
+    led2._ensure_band_columns(led2._db())
+
+
+def test_band_p_persisted_and_logged_on_resolve(tmp_path, monkeypatch, caplog):
+    """Approval/denial rows carry P(violation) + category, and resolve()
+    logs the P for band recalibration (ask-UX item 6)."""
+    import logging
+
+    from cognition.conscience import ledger as ledger_mod
+    from cognition.conscience.schema import ESCALATE, Verdict
+
+    monkeypatch.setattr(ledger_mod, "LEDGER_DB_PATH", str(tmp_path / "c.db"))
+    monkeypatch.setattr(ledger_mod, "LEDGER_ENABLED", True)
+    led = ledger_mod.ConscienceLedger("user-1")
+
+    v = Verdict(
+        decision=ESCALATE, gate="hitl", act="respond", reasons=["ask"],
+        escalation_id="abc123def456", p_violation=0.62,
+        suggested_category="fraud",
+    )
+    row_id = led.record(v, content="test content")
+    assert row_id == "abc123def456"
+    assert led.flush() == 1
+
+    row = led._db().execute(
+        "SELECT p_violation, suggested_category, hitl_state FROM conscience_ledger WHERE id = ?",
+        (row_id,),
+    ).fetchone()
+    assert row[0] == 0.62
+    assert row[1] == "fraud"
+    assert row[2] == "pending"
+
+    with caplog.at_level(logging.INFO):
+        assert led.resolve(row_id, "approved", note="ok") is True
+    assert "p_violation=0.62" in caplog.text

@@ -32,7 +32,10 @@ CCC:
   HITL_THRESHOLD: 0.45
   # Doubt rule (Rom 14:23): an unresolved escalation resolves to refuse, never
   # to allow. Seconds to wait for a human before the default-closed timeout.
-  HITL_TIMEOUT_SECONDS: 900
+  # 3 min: long enough to read the situation, short enough that a paused turn
+  # doesn't hang the session. Covers band asks and tool approvals alike;
+  # env CCC_HITL_TIMEOUT_SECONDS still wins over this file.
+  HITL_TIMEOUT_SECONDS: 180
   HITL_DEFAULT: "refuse"
 
   # ── verdict thresholds ────────────────────────────────────────────────────

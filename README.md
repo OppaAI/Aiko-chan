@@ -156,6 +156,7 @@ flowchart TD
 | Web search | local SearXNG instance through `agentic/toolkit/research.py` |
 | TTS | MioTTS 0.4B via llama.cpp server, external MioCodec synthesizer server |
 | ASR | SenseVoice via sherpa-onnx with Silero VAD and ERes2Net Speaker verification |
+| Conscience judge | Laya SLM served by the ggmlc-built `laya serve` binary (`/v1/decide`; see below) |
 | Reflection publishing | optional GitHub REST API + Hugo markdown |
 | Agentic task mode | `agentic/agentic.py` ReAct loop + `agentic/toolkit/tools.py` facade + `agentic/toolkit/` modules |
 | Skills | `agentic/skillsets/*.md` workflow registry loaded by `agentic/skills.py` |
@@ -168,6 +169,19 @@ flowchart TD
 ## Quickstart
 
 **Prerequisites:** Python 3.12, [uv](https://astral.sh/uv), CUDA 12.6, Docker + Compose, a llama.cpp/OpenAI-compatible local LLM server, and a pulled/served chat model (3B+ recommended).
+
+### Laya conscience server (ggmlc)
+
+The conscience layer's Laya judge does not run on stock llama.cpp — it needs the `laya serve` binary built from [ggmlc](https://github.com/monatis/ggmlc) (compiles the PyTorch Laya model to GGUF and serves `/v1/decide`):
+
+```bash
+git clone https://github.com/monatis/ggmlc.git
+cd ggmlc
+# Follow the repo's Installation & Building docs (Python package + CMake
+# native runtime, CUDA backend for Jetson), then build the laya serve binary.
+```
+
+Deployed layout (Jetson Orin): binary at `~/laya-bin/laya-sm86`, model at `models/laya/conscience-phase3-ft3-q8_0.gguf`, serving `/v1/decide`.
 
 > Full installation walkthrough → **[docs/INSTALL.md](docs/INSTALL.md)**
 

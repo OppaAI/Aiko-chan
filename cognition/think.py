@@ -73,6 +73,7 @@ from agentic.agentic  import run_agentic_chat
 from agentic.wiki import wiki_knowledge_context_for
 from cognition.knowledge import knowledge_context_for
 from cognition import CONTEXT_POOL
+from cognition.recall_budget import fit_block as _fit_recall_block
 from system.log      import get_logger
 from system.schedule import DueJob, schedule_job_record, list_schedule_records, cancel_schedule_record
 from system.userspace import current_user_id, current_display_name, user_profile_path
@@ -2738,9 +2739,9 @@ class AikoThink:
                 core_system, volatile_system = _recall_core_system, _recall_volatile_system
             if not skip_memory:
                 if persona_block:
-                    volatile_system = f"{volatile_system}\n\n{persona_block}"
+                    volatile_system = f"{volatile_system}\n\n{_fit_recall_block(persona_block, 'persona')}"
                 if memory_block:
-                    volatile_system = f"{volatile_system}\n\n{memory_block}"
+                    volatile_system = f"{volatile_system}\n\n{_fit_recall_block(memory_block, 'memory')}"
                 if situation_block:
                     volatile_system = f"{volatile_system}\n\n{situation_block}"
                 if metacognitive_block:
@@ -2774,16 +2775,28 @@ class AikoThink:
                     or _needs_learned_knowledge(raw_input, memories, knowledge_block)
                 )
                 if _kb_inject:
-                    volatile_system = f"{volatile_system}\n\n{_kb_clean}"
+                    volatile_system = f"{volatile_system}\n\n{_fit_recall_block(_kb_clean, 'knowledge')}"
                 # Codebase RAG — pre-fetched concurrently above under the
                 # same keyword gate and args; inject as before.
                 if not skip_memory and _code_block and "No matching codebase" not in _code_block:
-                    volatile_system = f"{volatile_system}\n\n{_code_block}"
+                    volatile_system = f"{volatile_system}\n\n{_fit_recall_block(_code_block, 'codebase')}"
 
             # Wiki RAG — pre-fetched concurrently above under the same gate
             # and args; inject as before.
             if not skip_memory and _wiki_block and _blank_empty_knowledge(_wiki_block):
-                volatile_system = f"{volatile_system}\n\n{_wiki_block}"
+                volatile_system = f"{volatile_system}\n\n{_fit_recall_block(_wiki_block, 'wiki')}"
+
+            # Lorebook (World Info): keyword-triggered static lore. Cheap
+            # file reads, no vector search — fetched inline, capped like
+            # every other recall source.
+            if not skip_memory:
+                try:
+                    from cognition.knowledge.lorebook import lorebook_context_for
+                    _lore_block = lorebook_context_for(raw_input)
+                    if _lore_block:
+                        volatile_system = f"{volatile_system}\n\n{_fit_recall_block(_lore_block, 'lorebook')}"
+                except Exception as e:
+                    log.debug("lorebook inject failed: %s", e)
 
             net_context = ""
             if (

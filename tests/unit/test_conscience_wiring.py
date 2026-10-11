@@ -259,6 +259,8 @@ def test_ccc_approval_resumes_persisted_call_once(monkeypatch, tmp_path):
     resolutions = iter([True, False])
     core = SimpleNamespace(resolve_escalation=lambda *args, **kwargs: next(resolutions))
     monkeypatch.setattr("cognition.conscience.conscience_for", lambda *_args, **_kwargs: core)
+    # Approvals are admin-gated: run this flow as an admin.
+    monkeypatch.setenv("AIKO_ADMIN_IDS", "user-1")
     owner = SimpleNamespace(_user_id="user-1", _client=None, _llm_model="current-model", _memorize=None)
 
     reply = hooks.resolve_ccc_approval("approve ccc-abcdef123456", user_id="user-1", owner=owner)
@@ -268,6 +270,21 @@ def test_ccc_approval_resumes_persisted_call_once(monkeypatch, tmp_path):
     assert "don't have an open question" in duplicate
     assert calls == [{"value": "original"}]
     assert not pending_path.exists()
+
+
+def test_ccc_approval_refused_for_plain_user(monkeypatch, tmp_path):
+    calls = []
+    pending_path = _persist_escalated_call(monkeypatch, tmp_path, calls)
+    core = SimpleNamespace(resolve_escalation=lambda *args, **kwargs: True)
+    monkeypatch.setattr("cognition.conscience.conscience_for", lambda *_args, **_kwargs: core)
+    monkeypatch.delenv("AIKO_ADMIN_IDS", raising=False)
+    owner = SimpleNamespace(_user_id="user-1", _client=None, _llm_model="current-model", _memorize=None)
+
+    reply = hooks.resolve_ccc_approval("approve ccc-abcdef123456", user_id="user-1", owner=owner)
+
+    assert "Only an admin" in reply
+    assert calls == []
+    assert pending_path.exists()
 
 
 def test_ccc_denial_removes_persisted_call(monkeypatch, tmp_path):
@@ -407,3 +424,82 @@ def test_streaming_waits_for_final_gate_and_emits_only_replacement(monkeypatch):
         ("feed", "refusal replacement"),
         ("stop",),
     ]
+
+
+def test_approve_auto_continues_chat_request(monkeypatch, tmp_path):
+    from cognition.conscience import hooks
+    monkeypatch.setenv("AIKO_ADMIN_IDS", "user-1")
+    hooks._APPROVED_INPUT.clear()
+    hooks._APPROVED_ONCE.clear()
+    try:
+        resolutions = iter([True])
+        core = SimpleNamespace(resolve_escalation=lambda *args, **kwargs: next(resolutions))
+        monkeypatch.setattr("cognition.conscience.conscience_for", lambda *_args, **_kwargs: core)
+        monkeypatch.setattr("agentic.agentic._resume_ccc_approval", lambda *_a, **_k: None)
+        hooks._APPROVED_INPUT["abcdef123456"] = ("compose my letter", 1e18)
+        calls = []
+        owner = SimpleNamespace(chat=lambda text, **kw: calls.append(text) or "Dear X, ...")
+        reply = hooks.resolve_ccc_approval("approve ccc-abcdef123456", user_id="user-1", owner=owner)
+        assert reply == "Dear X, ..."
+        assert calls == ["compose my letter"]
+        # bypass registered for the nested turn (mock chat doesn't run the
+        # gate, so it stays pending here; production consumes it on use).
+        import time as _time
+        assert [k for k, (_, exp) in hooks._APPROVED_ONCE.items() if exp > _time.monotonic()]
+    finally:
+        hooks._APPROVED_INPUT.clear()
+        hooks._APPROVED_ONCE.clear()
+
+
+def test_approved_digest_bypasses_escalate_once(monkeypatch):
+    from cognition.conscience import hooks
+    from cognition.conscience.schema import ESCALATE, Verdict
+    hooks._APPROVED_ONCE.clear()
+    try:
+        import time as _time
+        hooks._APPROVED_ONCE[hooks._approved_digest("borderline request")] = (
+            "borderline request", _time.monotonic() + 600)
+        v = Verdict(decision=ESCALATE, gate="hitl", act="respond",
+                    reasons=["unsure"], escalation_id="abc123")
+        fake = SimpleNamespace(evaluate=lambda **kw: v)
+        monkeypatch.setattr("cognition.conscience.conscience_for", lambda *_a, **_k: fake)
+        decision, reply, note = hooks.gate_respond(
+            user_input="borderline request", user_id="u")
+        assert decision == "allow", (decision, reply)
+        assert not hooks._APPROVED_ONCE  # consumed
+    finally:
+        hooks._APPROVED_ONCE.clear()
+
+
+def test_approve_feeds_autonomy_and_deny_resets(monkeypatch, tmp_path):
+    from cognition.conscience import hooks
+    recorded = []
+
+    class FakePolicy:
+        def record_approval(self, cls, **kw):
+            recorded.append(("approval", cls))
+        def record_refusal(self, cls, **kw):
+            recorded.append(("refusal", cls))
+        def permission(self, cls, **kw):
+            return {"action": "ask"}
+
+    monkeypatch.setenv("AIKO_ADMIN_IDS", "user-1")
+    monkeypatch.setattr("cognition.conscience.autonomy.policy_for", lambda *_a, **_k: FakePolicy())
+    hooks._APPROVED_INPUT.clear()
+    hooks._POLICIES.clear()
+    try:
+        core = SimpleNamespace(resolve_escalation=lambda *a, **k: True)
+        monkeypatch.setattr("cognition.conscience.conscience_for", lambda *_a, **_k: core)
+        monkeypatch.setattr("agentic.agentic._resume_ccc_approval", lambda *_a, **_k: None)
+        hooks._APPROVED_INPUT["abc123"] = ("do the thing", 1e18)
+        owner = SimpleNamespace(chat=lambda text, **kw: "done")
+        hooks.resolve_ccc_approval("approve ccc-abc123", user_id="user-1", owner=owner)
+        hooks._APPROVED_INPUT["def456"] = ("do the other thing", 1e18)
+        hooks.resolve_ccc_approval("deny ccc-def456", user_id="user-1", owner=owner)
+        kinds = [kind for kind, _ in recorded]
+        assert "approval" in kinds and "refusal" in kinds
+        assert all(cls.startswith("chat-ask:") for _, cls in recorded)
+    finally:
+        hooks._APPROVED_INPUT.clear()
+        hooks._POLICIES.clear()
+

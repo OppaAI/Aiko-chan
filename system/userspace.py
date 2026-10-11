@@ -261,6 +261,65 @@ def resolve_owner_user_id() -> str | None:
     return candidates[0] if len(candidates) == 1 else None
 
 
+# ── roles ─────────────────────────────────────────────────────────────────
+# Three tiers: creator (the machine owner — OppaAI) > admin > user.
+# Only creator and admin may approve escalations (conscience ask-band,
+# tool approvals). Plain users can request and can deny (fail-closed),
+# but never approve — otherwise anyone could green-light their own
+# harmful request and the approval flow would be theater.
+CREATOR_ROLE = "creator"
+ADMIN_ROLE = "admin"
+USER_ROLE = "user"
+
+
+def _admin_user_ids() -> set[str]:
+    """User ids granted the admin role.
+
+    Two sources, unioned (either confers admin):
+      - AIKO_ADMIN_IDS env (comma-separated) — ops override, highest precedence.
+      - USER_SPACE_ROOT/.roles.json — {"admins": ["uid", ...]}, managed by the
+        machine owner alongside the user dirs.
+
+    Deliberately NOT the per-user profile (USER.md): profiles are
+    user-editable, including via chat ("remember that I..."), so a role
+    stored there would be self-grantable privilege escalation. The roles
+    file lives outside any user-writable profile tree, next to it.
+    """
+    ids = {u.strip() for u in os.getenv("AIKO_ADMIN_IDS", "").split(",") if u.strip()}
+    try:
+        from pathlib import Path as _Path
+
+        roles_file = _Path(_user_state_root_value()).expanduser() / ".roles.json"
+        if roles_file.is_file():
+            import json as _json
+
+            data = _json.loads(roles_file.read_text(encoding="utf-8"))
+            admins = data.get("admins", []) if isinstance(data, dict) else []
+            ids.update(str(u).strip() for u in admins if str(u).strip())
+    except Exception:
+        pass
+    return ids
+
+
+def user_role(user_id: str | None) -> str:
+    """Role for a user id: creator (machine owner), admin (listed), else user."""
+    if not user_id or user_id == _DEFAULT_USER_ID:
+        return USER_ROLE
+    try:
+        if user_id == resolve_owner_user_id():
+            return CREATOR_ROLE
+    except Exception:
+        pass
+    if user_id in _admin_user_ids():
+        return ADMIN_ROLE
+    return USER_ROLE
+
+
+def can_approve(user_id: str | None) -> bool:
+    """True when this identity may approve escalations (creator or admin)."""
+    return user_role(user_id) in (CREATOR_ROLE, ADMIN_ROLE)
+
+
 def user_workspace_root(user_id: str | None = None) -> Path:
     """Workspace root isolated by user unless WORKSPACE_ROOT explicitly overrides."""
     if os.getenv("WORKSPACE_ROOT"):

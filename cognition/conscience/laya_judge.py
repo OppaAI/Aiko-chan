@@ -385,6 +385,12 @@ class LayaJudge:
         Never raises: an unreachable or malformed endpoint returns None so the
         ladder continues on the lexical judge.
         """
+        # Per-call state is reset up front: every early return below must
+        # leave clean attributes, otherwise a failed call would leak the
+        # previous turn's band decision / uncertainty into this verdict.
+        self.last_uncertain = False
+        self.last_p_violation = None
+        self.last_band_decision = ""
         if not self.available:
             return None
         canon_block = filter_canon_block(canon_block, situation, canon=self._canon)
@@ -509,7 +515,8 @@ class LayaJudge:
             return -1.0, -1.0, conf, reasons, cited
         decision = apply_band(p)
         self.last_band_decision = decision
-        reasons = [f"conscience-laya-triage: {t_choice} p_violation={p} band={decision}"]
+        reasons = [f"conscience-laya-triage: {t_choice} p_violation={p} band={decision}"
+                   + (f" category={c_choice}" if c_choice else "")]
         if decision == "ask-needs-probs":
             self.last_uncertain = False
             v = h = -1.0 if t_choice == "violation" else 1.0

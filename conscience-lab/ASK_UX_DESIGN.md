@@ -54,10 +54,23 @@ machinery that already exists — no new ledger, no new commands.
 
 ## Integration checklist
 
-- [ ] Gate ASK reason carries situation + P + category.
-- [ ] Notice bus covers band-ask (same inbox as tool approvals).
-- [ ] Approve/deny handlers accept band escalation ids (same
-        `ccc-<id>` namespace — no new id space).
-- [ ] Timeout path defaults to refuse + logs.
-- [ ] Social pollers map ask → skip+log (no publish, no owner wait).
-- [ ] Approval/denial + P logged per decision (feeds band recalibration).
+- [x] Gate ASK reason carries situation + P + category (`gate.py`, from
+      `Verdict.p_violation` / `suggested_category`; plain "conscience
+      escalated" otherwise).
+- [x] Notice bus covers band-ask (same inbox as tool approvals) —
+      `_open_escalation` already pushed to the single notice bus; the
+      message is now enriched with situation + P + category.
+- [x] Approve/deny handlers accept band escalation ids (same
+        `ccc-<id>` namespace — no new id space). Pre-existing
+        `resolve_ccc_approval` machinery; band ids match the format.
+- [x] Timeout path defaults to refuse + logs (`ledger.expire_stale`,
+      swept opportunistically in `_record`; `HITL_TIMEOUT_SECONDS`=180).
+- [x] Social pollers map ask → skip+log (no publish, no owner wait) —
+      `gate_tool` returns `conscience_skip` for triage band asks on
+      social post tools; the ledger row stays pending for async review.
+- [x] Approval/denial + P logged per decision (feeds band recalibration) —
+      `p_violation` / `suggested_category` columns on the ledger
+      (idempotent migration for existing DBs); `resolve()` logs the P.
+
+Implemented 2026-10-11. Items 2–4 were verified pre-existing;
+items 1, 5, 6 are new in this change.

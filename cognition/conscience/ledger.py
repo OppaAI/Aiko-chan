@@ -83,10 +83,43 @@ class ConscienceLedger:
 
     def _db(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = initialize_store_db(
+            conn = initialize_store_db(
                 LEDGER_DB_PATH, LEDGER_DDL, user_id=self._user_id, vector=False,
             )
+            # Only retain the connection once both band columns exist; on a
+            # failed migration the next call retries instead of inserting
+            # into a missing column forever.
+            if self._ensure_band_columns(conn):
+                self._conn = conn
+            else:
+                conn.close()
+                raise sqlite3.OperationalError(
+                    "conscience ledger band-column migration failed; will retry"
+                )
         return self._conn
+
+    @staticmethod
+    def _ensure_band_columns(conn: sqlite3.Connection) -> bool:
+        """Idempotent migration for the triage band signal columns (ask-UX).
+
+        Fresh DBs get them from LEDGER_DDL; existing DBs are ALTERed once.
+        Returns True when both columns exist; False leaves the connection
+        unretained so the next _db() retries the migration.
+        """
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(conscience_ledger)")}
+            if "p_violation" not in cols:
+                conn.execute("ALTER TABLE conscience_ledger ADD COLUMN p_violation REAL")
+            if "suggested_category" not in cols:
+                conn.execute(
+                    "ALTER TABLE conscience_ledger "
+                    "ADD COLUMN suggested_category TEXT NOT NULL DEFAULT ''"
+                )
+            conn.commit()
+            return True
+        except Exception as exc:
+            log.debug("[ccc] ledger band-column migration skipped: %s", exc)
+            return False
 
     def close(self) -> None:
         with self._lock:
@@ -117,8 +150,9 @@ class ConscienceLedger:
                         id, user_id, created_at, act, surface, content_sha, content,
                         decision, gate, vertical, horizontal, confidence,
                         reasons, norms, rule_ids, parties, constraint_txt,
-                        canon_version, layers_run, latency_ms, fail_mode, hitl_state
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        canon_version, layers_run, latency_ms, fail_mode, hitl_state,
+                        p_violation, suggested_category
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     batch,
                 )
@@ -174,6 +208,7 @@ class ConscienceLedger:
                         row["constraint"], row["canon_version"],
                         json.dumps(row["layers_run"], ensure_ascii=False),
                         row["latency_ms"], row["fail_mode"], hitl_state,
+                        row["p_violation"], row["suggested_category"],
                     )
                 )
         except Exception as exc:
@@ -200,7 +235,25 @@ class ConscienceLedger:
                     (state, _utc_now(), note[:500], escalation_id, self._user_id, HITL_PENDING),
                 )
                 self._db().commit()
-                return bool(cur.rowcount)
+                ok = bool(cur.rowcount)
+                if ok:
+                    # Ask-UX: log the P(violation) with the decision so the
+                    # band can be recalibrated from owner judgments later.
+                    try:
+                        row = self._db().execute(
+                            "SELECT p_violation, suggested_category FROM conscience_ledger"
+                            " WHERE id = ? AND user_id = ?",
+                            (escalation_id, self._user_id),
+                        ).fetchone()
+                        if row is not None and row[0] is not None:
+                            log.info(
+                                "[ccc] escalation %s -> %s (p_violation=%.2f%s)",
+                                escalation_id, state, row[0],
+                                f", category={row[1]}" if row[1] else "",
+                            )
+                    except Exception:
+                        log.debug("[ccc] escalation p_violation lookup skipped")
+                return ok
         except Exception as exc:
             log.warning("[ccc] ledger resolve failed: %s", exc)
             return False

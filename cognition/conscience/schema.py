@@ -272,6 +272,13 @@ class Verdict:
     layers_run: list[str] = field(default_factory=list)
     latency_ms: int = 0
     fail_mode: str = ""           # set when the circuit itself errored
+    # ── triage band info (ask-UX) ─────────────────────────────────────
+    # Set when the Phase-3 champion scored this turn in triage scheme:
+    # P(violation) and the suggested Q2 category. Lets the gate, the
+    # owner notice, and the ledger carry the band signal without parsing
+    # reason strings. None/"" when another scheme (or no judge) scored.
+    p_violation: float | None = None
+    suggested_category: str = ""
 
     # ── predicates ────────────────────────────────────────────────────────
     @property
@@ -337,6 +344,8 @@ class Verdict:
             "layers_run": list(self.layers_run),
             "latency_ms": self.latency_ms,
             "fail_mode": self.fail_mode,
+            "p_violation": self.p_violation,
+            "suggested_category": self.suggested_category,
         }
 
 
@@ -449,6 +458,9 @@ CREATE TABLE IF NOT EXISTS conscience_ledger (
     layers_run     TEXT NOT NULL DEFAULT '[]',
     latency_ms     INTEGER NOT NULL DEFAULT 0,
     fail_mode      TEXT NOT NULL DEFAULT '',
+    -- triage band signal, for the ask-UX and band recalibration
+    p_violation    REAL,
+    suggested_category TEXT NOT NULL DEFAULT '',
     -- human-in-the-loop resolution, filled in later
     hitl_state     TEXT NOT NULL DEFAULT '',      -- pending|approved|denied|timeout
     hitl_at        TEXT,

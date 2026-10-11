@@ -186,7 +186,19 @@ def evaluate_action(
         # The conscience already asked a human. Standing permission is
         # explicitly not allowed to override that -- that is the boundary that
         # keeps approval habits from editing the moral layer.
-        return GateOutcome(action=ASK, reason="conscience escalated", verdict=verdict)
+        # Ask-UX: for triage band asks the reason carries situation +
+        # P(violation) + suggested category for owner context.
+        # getattr: some callers stub the verdict in tests.
+        reason = "conscience escalated"
+        _p = getattr(verdict, "p_violation", None)
+        if _p is not None:
+            detail = f"P(violation)={_p:.2f}"
+            _cat = getattr(verdict, "suggested_category", "")
+            if _cat:
+                detail += f", category={_cat}"
+            snippet = " ".join((content or "").split())[:160]
+            reason = f"conscience ask [{detail}]" + (f": {snippet}" if snippet else "")
+        return GateOutcome(action=ASK, reason=reason, verdict=verdict)
 
     if verdict.decision == CAUTION:
         return GateOutcome(action=ACT_NOTIFY, reason="conscience caution", verdict=verdict)

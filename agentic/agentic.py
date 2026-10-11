@@ -1218,7 +1218,9 @@ def _tool_gate_result(name: str, args: dict, blocked: dict) -> ToolResult:
         args=args,
         content=json.dumps({key: value for key, value in blocked.items() if key != "as_trace"}, ensure_ascii=False),
         error_type=(
-            "conscience_refuse"
+            "conscience_skip"
+            if blocked.get("status") == "conscience_skip"
+            else "conscience_refuse"
             if decision == "refuse"
             else "needs_approval"
             if decision == "escalate"
@@ -1338,7 +1340,11 @@ def execute_tool_with_policy(name: str, args: dict, state: TaskState, owner=None
         blocked = _gate_tool_call(name, args, owner=owner or ctx)
         if blocked is not None:
             escalation_id = blocked.get("escalation_id")
-            if blocked.get("decision") == "escalate" and escalation_id:
+            # conscience_skip (social band-ask) must never enter the
+            # approval-resume path: the owner approving later would
+            # resurrect a post this branch deliberately skipped.
+            if (blocked.get("decision") == "escalate" and escalation_id
+                    and blocked.get("status") != "conscience_skip"):
                 try:
                     _persist_ccc_approval(ctx, str(escalation_id), name, args, state)
                 except Exception as exc:

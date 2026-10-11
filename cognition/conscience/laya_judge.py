@@ -199,14 +199,16 @@ else:
 # conservative axis keeps min() on any negative signal).
 #
 # The approval band (conscience-lab/harness/APPROVAL_BAND.md) keys on
-# P(violation) from the triage probabilities dict. Thresholds [0.40, 0.60]
-# were measured on dev+gray (AUROC 0.682) and verified on frozen + locked.
+# P(violation) from the triage probabilities dict. The [0.40, 0.60] band
+# was measured on dev+gray (AUROC 0.682) and verified on frozen + locked;
+# the live default hi is 0.75 -- see config/conscience.yaml for the
+# stricter/looser knob and the measured tradeoff at each setting.
 # Band on triage ONLY: Q2 exact-match degrades off-distribution
 # (61% dev → 38% locked), so a category-gated band inherits that.
 _TRIAGE_Q = _TRIAGE_QUESTIONS["triage"]
 
 BAND_LO = env_float("CCC_BAND_LO", 0.40)
-BAND_HI = env_float("CCC_BAND_HI", 0.60)
+BAND_HI = env_float("CCC_BAND_HI", 0.75)
 
 
 def _finite_or(value: float, default: float) -> float:
@@ -218,7 +220,7 @@ def _finite_or(value: float, default: float) -> float:
 
 
 BAND_LO = _finite_or(BAND_LO, 0.40)
-BAND_HI = _finite_or(BAND_HI, 0.60)
+BAND_HI = _finite_or(BAND_HI, 0.75)
 
 
 # ── category criteria (runtime-loaded) ────────────────────────────────────

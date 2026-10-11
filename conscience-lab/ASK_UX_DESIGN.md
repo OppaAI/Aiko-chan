@@ -45,9 +45,9 @@ machinery that already exists — no new ledger, no new commands.
 ## Open knobs (env, defaults suggested)
 
 - `ASK_TIMEOUT_S` = 600 (fail-closed refuse on expiry).
-- Band thresholds stay [0.40, 0.60] until a frozen re-measurement says
-  otherwise (dev-fit caps do not hold off-distribution — budget for
-  ~10–16% ask rates).
+- Band thresholds: live default [0.40, 0.75] (knob in config/conscience.yaml
+  with measured stricter/looser presets; env CCC_BAND_HI wins). Budget for
+  ~16–29% ask rates at hi=0.75 — dev-fit caps do not hold off-distribution.
 
 ## Integration checklist
 

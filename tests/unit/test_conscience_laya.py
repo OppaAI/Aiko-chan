@@ -44,6 +44,11 @@ def _payload(v: str, h: str, *, cv: float = 0.7, ch: float = 0.7) -> dict:
 
 @pytest.fixture
 def judge(monkeypatch):
+    # Pin the legacy scheme: module default follows ambient config
+    # (conscience.yaml JUDGE_SCHEME), which would reroute these
+    # mapping tests down the triage path. Triage tests pin it back
+    # locally (see below).
+    monkeypatch.setattr(lj, "JUDGE_SCHEME", "legacy")
     j = lj.LayaJudge(base_url="http://laya.invalid:8093")
     return j
 
@@ -419,12 +424,14 @@ def test_triage_scheme_name_resolves():
 
 
 def test_apply_band_thresholds():
-    assert lj.apply_band(0.90) == "refuse"
-    assert lj.apply_band(0.60) == "refuse"   # hi edge inclusive
-    assert lj.apply_band(0.50) == "ask"
-    assert lj.apply_band(0.40) == "ask"      # lo edge inclusive
-    assert lj.apply_band(0.10) == "allow"
-    assert lj.apply_band(None) == "ask-needs-probs"
+    # Explicit thresholds: module defaults follow ambient config
+    # (conscience.yaml BAND_HI), so never assert on defaults here.
+    assert lj.apply_band(0.90, lo=0.40, hi=0.60) == "refuse"
+    assert lj.apply_band(0.60, lo=0.40, hi=0.60) == "refuse"   # hi edge inclusive
+    assert lj.apply_band(0.50, lo=0.40, hi=0.60) == "ask"
+    assert lj.apply_band(0.40, lo=0.40, hi=0.60) == "ask"      # lo edge inclusive
+    assert lj.apply_band(0.10, lo=0.40, hi=0.60) == "allow"
+    assert lj.apply_band(None, lo=0.40, hi=0.60) == "ask-needs-probs"
 
 
 def test_triage_ask_sets_uncertain(triage_judge, monkeypatch):

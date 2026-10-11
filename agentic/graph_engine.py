@@ -1445,7 +1445,8 @@ def plan_from_master(user_input: str, cap_ids: list[str] | None = None, embedder
                 nodes=registered_graph.nodes,
                 source=registered_graph.source,
                 reducers=registered_graph.reducers,
-                _extras={**extras, "max_workers": plan.get("max_workers") or 2},
+                _extras={**extras, "max_workers": plan.get("max_workers") or 2,
+                         "source_experience_id": plan.get("source_experience_id")},
             )
             return registered_graph
 
@@ -1462,7 +1463,8 @@ def plan_from_master(user_input: str, cap_ids: list[str] | None = None, embedder
                 nodes=built.nodes,
                 source=built.source,
                 reducers=built.reducers,
-                _extras={**extras, "max_workers": plan.get("max_workers") or 2},
+                _extras={**extras, "max_workers": plan.get("max_workers") or 2,
+                         "source_experience_id": plan.get("source_experience_id")},
             )
         except Exception as exc:
             log.warning(
@@ -2619,6 +2621,132 @@ def practice_sweep() -> str:
     """Promote frequently-used experiences into playbook DAGs (one sweep)."""
     promoted = maybe_autopromote_experiences()
     return json.dumps({"promoted": promoted, "count": len(promoted)}, ensure_ascii=False, indent=2)
+
+
+def append_playbook_from_experience(
+    goal: str,
+    steps: list[dict],
+    source_experience_id: str | None = None,
+) -> tuple[Path, str]:
+    """Append a practice-derived plan to the playbook file.
+
+    Nodes are built from the step dicts ({tool, args}); the plan carries
+    trigger tokens from the goal plus the source experience id so
+    plan_from_master() can match it later and run_schema_agent() can
+    attribute successful runs back to the experience. Returns the
+    playbook path and the new plan id.
+    """
+    plan_id = f"exp-{uuid.uuid4().hex[:8]}"
+    nodes = []
+    for i, s in enumerate(steps or []):
+        if not isinstance(s, dict) or not s.get("tool"):
+            continue
+        nodes.append({
+            "id": f"{plan_id}-n{i}",
+            "tool": str(s["tool"]),
+            "args": dict(s.get("args") or {}),
+        })
+    triggers = sorted({t for t in re.findall(r"[a-z0-9]+", (goal or "").lower()) if len(t) > 2})
+    plan = {
+        "id": plan_id,
+        "name": (goal or plan_id)[:60],
+        "goal": goal,
+        "nodes": nodes,
+        "triggers": triggers,
+        "source_experience_id": source_experience_id,
+    }
+    path = _playbook_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+        if not isinstance(data, list):
+            data = []
+    except Exception:
+        data = []
+    data.append(plan)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path, plan_id
+
+
+def maybe_autopromote_experiences(user_id: str | None = None) -> list[dict]:
+    """Promote frequently-used verified experiences into playbook DAGs.
+
+    Kill switch: AIKO_PRACTICE_AUTOPROMOTE_ENABLED=0 disables. Threshold:
+    AIKO_PRACTICE_AUTOPROMOTE_USES (default 3). Only verified-ok rows
+    (outcome "ok") at/above the use threshold and not already promoted
+    are eligible; each promotion stamps promoted_playbook_id so repeat
+    sweeps are no-ops. Returns [{"experience_id", "playbook_id"}].
+    """
+    import os as _os
+
+    if _os.getenv("AIKO_PRACTICE_AUTOPROMOTE_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return []
+    try:
+        threshold = int(_os.getenv("AIKO_PRACTICE_AUTOPROMOTE_USES", "3") or 3)
+    except (TypeError, ValueError):
+        threshold = 3
+    from system.userspace import current_user_id as _current_uid
+    uid = user_id or _current_uid()
+    try:
+        from agentic.experience import connect as _connect
+        from agentic.experience.schema import ensure_experience_schema_migrated as _migrate
+    except Exception as exc:
+        log.debug("autopromote: experience store unavailable: %s", exc)
+        return []
+    promoted = []
+    try:
+        conn = _connect(uid)
+    except Exception as exc:
+        log.debug("autopromote: connect failed: %s", exc)
+        return []
+    try:
+        _migrate(conn)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(experiences)").fetchall()}
+        if "promoted_playbook_id" not in cols:
+            conn.execute("ALTER TABLE experiences ADD COLUMN promoted_playbook_id TEXT")
+            conn.commit()
+        rows = conn.execute(
+            "SELECT id, goal, steps_json FROM experiences "
+            "WHERE user_id = ? AND outcome = 'ok' AND use_count >= ? "
+            "AND (promoted_playbook_id IS NULL OR promoted_playbook_id = '')",
+            (uid, threshold),
+        ).fetchall()
+        for row in rows:
+            exp_id = row["id"] if isinstance(row, dict) else row[0]
+            goal = row["goal"] if isinstance(row, dict) else row[1]
+            steps_json = row["steps_json"] if isinstance(row, dict) else row[2]
+            try:
+                steps = json.loads(steps_json or "[]")
+            except Exception:
+                steps = []
+            node_steps = []
+            for s in steps if isinstance(steps, list) else []:
+                if not isinstance(s, dict) or not s.get("tool"):
+                    continue
+                node_steps.append({"tool": str(s["tool"]),
+                                   "args": dict(s.get("args") or s.get("args_preview") or {})})
+            try:
+                _, plan_id = append_playbook_from_experience(
+                    goal, node_steps, source_experience_id=exp_id)
+            except Exception as exc:
+                log.debug("autopromote: append failed for %s: %s", exp_id, exc)
+                continue
+            try:
+                conn.execute("UPDATE experiences SET promoted_playbook_id = ? WHERE id = ? AND user_id = ?",
+                             (plan_id, exp_id, uid))
+                conn.commit()
+            except Exception as exc:
+                log.debug("autopromote: stamp failed for %s: %s", exp_id, exc)
+                continue
+            promoted.append({"experience_id": exp_id, "playbook_id": plan_id})
+    except Exception as exc:
+        log.debug("autopromote sweep failed: %s", exc)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return promoted
 
 
 register_tool_schema(

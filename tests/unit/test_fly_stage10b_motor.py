@@ -337,7 +337,7 @@ def test_dn_vigor_clamps_raw_state_and_falls_back_on_read_error(uid, monkeypatch
 
 def test_scoring_records_and_drives_only_for_stateful_user(uid, shadow_mode,
                                                            monkeypatch):
-    votes = {"mb": 0.0, "cx": 0.0, "dn": 0.0, "gf": 0.0, "cx_drive": 0.0}
+    votes = {"mb": 0.0, "cx": 0.0, "dn": 0.0, "gf": 0.0, "cx_drive": 0.0, "inner": 0.0}
     monkeypatch.setattr(action_select, "_votes_for", lambda *args, **kwargs: votes)
     seen = []
     monkeypatch.setattr(body, "on_scored", lambda rec, **kw: seen.append(("record", kw)))
@@ -390,7 +390,7 @@ def test_body_drive_reuses_only_the_current_scored_record(uid, live_mode, monkey
     monkeypatch.setenv("MEMORY_FLYDN_MODE", "live")
     monkeypatch.setattr(action_select, "_votes_for", lambda *args, **kwargs:
                         {"mb": 0.0, "cx": 0.0, "dn": 0.0, "gf": 0.0,
-                         "cx_drive": 0.0})
+                         "cx_drive": 0.0, "inner": 0.0})
     calls = []
 
     def drive(**kwargs):
@@ -418,7 +418,7 @@ def test_scored_packet_does_not_advance_body_pipeline(uid, live_mode, monkeypatc
     monkeypatch.setenv("MEMORY_FLYDN_MODE", "live")
     monkeypatch.setattr(action_select, "_votes_for", lambda *args, **kwargs:
                         {"mb": 0.0, "cx": 0.0, "dn": 0.0, "gf": 0.0,
-                         "cx_drive": 0.0})
+                         "cx_drive": 0.0, "inner": 0.0})
     _neural(uid)
     original_drive = body.drive
     calls = []

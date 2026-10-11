@@ -43,6 +43,11 @@ def test_real_catalog_if_present():
     path = (os.getenv("AIKO_FLY_CATALOG_PATH", "") or "").strip()
     if not path:
         pytest.skip("no catalog configured")
+    if not os.path.exists(path):
+        # Config default (interface.yaml) points at the gitignored 400MB
+        # build artifact, which only exists where it was built. Absence is
+        # a skip, not a failure.
+        pytest.skip(f"catalog artifact absent: {path}")
     cat = ConnectomeCatalog.from_path(path)  # checksum verified on load
     s = cat.summary()
     assert s["nodes"] > 100000 and s["edges"] > 1000000

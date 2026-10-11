@@ -259,7 +259,10 @@ class ConscienceCircuitCore:
             # Triage band signal for the ask-UX: P(violation) + suggested
             # category ride on the verdict so the gate, the owner notice,
             # and the ledger never have to parse reason strings.
-            if getattr(tier2, "last_scheme", "legacy") == "triage":
+            # Only after a successful score: on failure the judge's
+            # per-call attributes retain the previous turn's values, and
+            # attaching those would mislabel this verdict.
+            if slm_result is not None and getattr(tier2, "last_scheme", "legacy") == "triage":
                 band_info = {
                     "p_violation": getattr(tier2, "last_p_violation", None),
                     "category": (getattr(tier2, "last_bands", {}) or {}).get("category") or "",
@@ -565,7 +568,10 @@ class ConscienceCircuitCore:
             detail = f"P(violation)={verdict.p_violation:.2f}"
             if verdict.suggested_category:
                 detail += f", category={verdict.suggested_category}"
-            situation = " ".join((content or "").split())[:200]
+            # Reserve room for [detail] inside the 160-char notice budget so
+            # a long situation can't truncate the probability/category away.
+            budget = max(0, 160 - len(detail) - 3)  # "[", "]", and the space
+            situation = " ".join((content or "").split())[:budget]
             summary = f"{situation} [{detail}]" if situation else f"[{detail}] {summary[:120]}"
         try:
             from system.notice import get_notice_bus

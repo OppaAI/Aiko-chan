@@ -550,3 +550,38 @@ def test_gate_tool_non_social_band_ask_still_waits(monkeypatch):
     payload = hooks.gate_tool(name="save_note", args={"content": "x"})
     assert payload is not None
     assert payload["status"] == "waiting_for_approval"
+
+
+def test_execute_tool_with_policy_does_not_persist_conscience_skip(monkeypatch):
+    """CodeRabbit: a conscience_skip payload must not enter the approval-
+    resume path — an owner approval must not resurrect a skipped post."""
+    persisted = []
+
+    monkeypatch.setattr(agentic, "_preference_requires_approval", lambda _name: False)
+    monkeypatch.setattr(
+        agentic,
+        "_gate_tool_call",
+        lambda *args, **kwargs: {
+            "status": "conscience_skip",
+            "tool": "post_to_social",
+            "decision": "escalate",
+            "gate": "hitl",
+            "escalation_id": "skip12345678",
+            "p_violation": 0.62,
+            "as_trace": {"decision": "escalate"},
+        },
+    )
+    monkeypatch.setattr(
+        agentic, "_persist_ccc_approval", lambda *a, **k: persisted.append(a)
+    )
+    state = TaskState(goal="skip safely")
+
+    result = execute_tool_with_policy(
+        "ccc_skip_test",
+        {},
+        state,
+        ctx=AgentContext(user_id="user-1"),
+        guards=[],
+    )
+    assert result.error_type == "conscience_skip"
+    assert persisted == []

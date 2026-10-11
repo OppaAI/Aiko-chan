@@ -514,3 +514,22 @@ def test_category_criteria_load_from_md():
     assert "csam" in cats and "self-harm" in cats
     # Same source the harness reads; spot-check one definition.
     assert "minor" in cats["csam"].lower()
+
+
+# ── CodeRabbit: judge resets per-call state on failed score ───────────────
+def test_failed_score_clears_stale_band_state():
+    """A failed score() must not leak the previous turn's p_violation /
+    uncertainty into this verdict's band data."""
+    from cognition.conscience.laya_judge import LayaJudge
+
+    judge = LayaJudge.__new__(LayaJudge)
+    judge._base_url = ""  # unavailable
+    judge._consecutive_failures = 0
+    # Simulate stale state from a prior successful call.
+    judge.last_uncertain = True
+    judge.last_p_violation = 0.9
+    judge.last_band_decision = "ask"
+    assert judge.score("anything") is None
+    assert judge.last_uncertain is False
+    assert judge.last_p_violation is None
+    assert judge.last_band_decision == ""

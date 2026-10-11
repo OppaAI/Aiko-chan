@@ -298,3 +298,31 @@ def test_band_p_persisted_and_logged_on_resolve(tmp_path, monkeypatch, caplog):
     with caplog.at_level(logging.INFO):
         assert led.resolve(row_id, "approved", note="ok") is True
     assert "p_violation=0.62" in caplog.text
+
+
+def test_open_escalation_preserves_detail_with_long_situation(monkeypatch):
+    """CodeRabbit: a long situation must not truncate the [P(violation),
+    category] detail out of the owner notice."""
+    from cognition.conscience.core import ConscienceCircuitCore
+    from cognition.conscience.schema import ESCALATE, Verdict
+
+    pushed = []
+
+    class FakeBus:
+        def push(self, area, brief):
+            pushed.append(brief)
+
+    monkeypatch.setattr(
+        "system.notice.get_notice_bus", lambda user_id: FakeBus()
+    )
+    core = ConscienceCircuitCore.__new__(ConscienceCircuitCore)
+    core._user_id = "user-1"
+    v = Verdict(
+        decision=ESCALATE, gate="hitl", act="respond", reasons=["ask"],
+        escalation_id="abc123def456", p_violation=0.52,
+        suggested_category="fraud",
+    )
+    core._open_escalation(v, "x" * 500)
+    assert pushed, "no notice pushed"
+    assert "P(violation)=0.52" in pushed[0]
+    assert "fraud" in pushed[0]

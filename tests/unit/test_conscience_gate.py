@@ -502,3 +502,20 @@ def test_non_band_escalate_keeps_plain_reason():
     )
     assert out.action == ASK
     assert out.reason == "conscience escalated"
+
+
+# ── CodeRabbit: notice truncation must preserve [P/category] ──────────────
+def test_band_ask_reason_survives_long_content():
+    """Even with very long content, the enriched reason keeps P + category
+    (the notice budget reserves room for [detail])."""
+    v = _v(ESCALATE)
+    v.p_violation = 0.62
+    v.suggested_category = "fraud"
+    out = evaluate_action(
+        verdict=v,
+        action_class="respond:chat",
+        content="x" * 500,
+    )
+    assert out.action == ASK
+    assert "0.62" in out.reason
+    assert "fraud" in out.reason

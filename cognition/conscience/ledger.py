@@ -83,19 +83,28 @@ class ConscienceLedger:
 
     def _db(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = initialize_store_db(
+            conn = initialize_store_db(
                 LEDGER_DB_PATH, LEDGER_DDL, user_id=self._user_id, vector=False,
             )
-            self._ensure_band_columns(self._conn)
+            # Only retain the connection once both band columns exist; on a
+            # failed migration the next call retries instead of inserting
+            # into a missing column forever.
+            if self._ensure_band_columns(conn):
+                self._conn = conn
+            else:
+                conn.close()
+                raise sqlite3.OperationalError(
+                    "conscience ledger band-column migration failed; will retry"
+                )
         return self._conn
 
     @staticmethod
-    def _ensure_band_columns(conn: sqlite3.Connection) -> None:
+    def _ensure_band_columns(conn: sqlite3.Connection) -> bool:
         """Idempotent migration for the triage band signal columns (ask-UX).
 
         Fresh DBs get them from LEDGER_DDL; existing DBs are ALTERed once.
-        A broken migration must never break the ledger, so failures are
-        debug-logged and the ledger keeps working without the columns.
+        Returns True when both columns exist; False leaves the connection
+        unretained so the next _db() retries the migration.
         """
         try:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(conscience_ledger)")}
@@ -107,8 +116,10 @@ class ConscienceLedger:
                     "ADD COLUMN suggested_category TEXT NOT NULL DEFAULT ''"
                 )
             conn.commit()
+            return True
         except Exception as exc:
             log.debug("[ccc] ledger band-column migration skipped: %s", exc)
+            return False
 
     def close(self) -> None:
         with self._lock:

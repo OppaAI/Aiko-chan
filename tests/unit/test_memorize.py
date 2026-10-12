@@ -1703,3 +1703,82 @@ class TestCloseDrainDiscipline:
         memo._write_queue.put("DIE")
         real_join(timeout=5.0)
         assert not memo._write_worker.is_alive()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BUG-6 (P1) regression — bounded async write queue
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestWriteQueueBound:
+    """queue_write() must never block the caller's turn nor grow the queue
+    without bound when the background writer stalls: on a full queue the
+    oldest item is dropped with a warning (best-effort write semantics)."""
+
+    def _memo_with_bounded_queue(self, maxsize):
+        memo = AikoMemorize.__new__(AikoMemorize)
+        memo._write_queue = queue.Queue(maxsize=maxsize)
+        memo._user_switch_lock = threading.RLock()
+        return memo
+
+    def test_full_queue_drops_oldest_without_blocking(self, caplog):
+        memo = self._memo_with_bounded_queue(maxsize=4)
+        for i in range(4):
+            memo.queue_write(f"u{i}", f"r{i}", user_id="u1", display_name="Oppa")
+        assert memo._write_queue.qsize() == 4
+        with caplog.at_level("WARNING", logger="cognition.memory.memorize"):
+            # Run in a thread: on the old unbounded-queue code this put()
+            # would block forever — the test must fail, not hang.
+            t = threading.Thread(
+                target=memo.queue_write,
+                args=("u-new", "r-new"),
+                kwargs={"user_id": "u1", "display_name": "Oppa"},
+                daemon=True,
+            )
+            t.start()
+            t.join(timeout=10)
+            assert not t.is_alive(), "queue_write blocked on a full queue"
+        assert memo._write_queue.qsize() == 4
+        assert any("write queue full" in r.message for r in caplog.records)
+        texts = []
+        while True:
+            try:
+                item = memo._write_queue.get_nowait()
+            except queue.Empty:
+                break
+            texts.append(item[0])
+            memo._write_queue.task_done()
+        assert "u0" not in texts  # oldest dropped
+        assert "u-new" in texts  # newest kept
+
+    def test_healthy_worker_drains_all_writes(self):
+        # Bound comfortably above the burst size: a keeping-up worker must
+        # never trigger a drop.
+        memo = self._memo_with_bounded_queue(maxsize=16)
+        landed = []
+
+        def fake_loop():
+            while True:
+                item = memo._write_queue.get()
+                try:
+                    if item is None:
+                        return
+                    landed.append(item[0])
+                finally:
+                    memo._write_queue.task_done()
+
+        worker = threading.Thread(target=fake_loop, daemon=True)
+        worker.start()
+        for i in range(10):
+            memo.queue_write(f"u{i}", f"r{i}", user_id="u1", display_name="Oppa")
+        assert memo.wait_for_writes(timeout=10)
+        assert landed == [f"u{i}" for i in range(10)]  # all landed, none dropped
+        memo._write_queue.put_nowait(None)
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+
+    def test_queue_bound_constant_is_sane(self):
+        from cognition.memory.memorize import MEMORY_WRITE_QUEUE_MAXSIZE
+
+        # Several minutes of active chatting at ~1 turn / 20-30s; each item
+        # is a few KB. Not absurd in either direction.
+        assert 8 <= MEMORY_WRITE_QUEUE_MAXSIZE <= 4096

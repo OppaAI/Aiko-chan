@@ -42,10 +42,15 @@ from cognition.conscience import allowlist as allowlist_mod  # noqa: E402
 from cognition.conscience import canon as canon_mod  # noqa: E402
 from cognition.conscience import judge as judge_mod  # noqa: E402
 from cognition.conscience.laya_judge import get_laya  # noqa: E402
-from cognition.conscience.schema import ALLOW, REFUSE, Verdict  # noqa: E402
+from cognition.conscience.schema import ALLOW, Verdict  # noqa: E402
 
 
-def _probe_laya() -> None:
+def _probe_laya():
+    """Probe the Laya server once; return the live singleton.
+
+    The returned instance is pinned as the tier-2 judge for the Laya
+    configs so a mid-run outage cannot silently swap in the SLM fallback.
+    """
     laya = get_laya()
     if not laya.available:
         sys.exit("REFUSING: Laya judge not configured (no base URL).")
@@ -57,6 +62,7 @@ def _probe_laya() -> None:
             "that would silently degrade to lexical-only."
         )
     print(f"[probe] Laya answering at {laya._base_url}", flush=True)
+    return laya
 
 
 class _Patches:
@@ -123,8 +129,13 @@ def _load_cases(path: str) -> list[dict]:
     return cases
 
 
-def _run_config(circuit, cases: list[dict], config: str, act: str) -> list[dict]:
+class _LayaDown(Exception):
+    """Laya became unavailable mid-run; the config cannot be measured."""
+
+
+def _run_config(circuit, cases: list[dict], config: str, act: str, laya=None) -> list[dict]:
     results = []
+    needs_laya = config in ("full", "laya_only")
     with _Patches() as patches:
         # Never pollute the production ledger with eval traffic.
         patches.set(circuit, "_record", lambda *a, **k: None)
@@ -135,7 +146,25 @@ def _run_config(circuit, cases: list[dict], config: str, act: str) -> list[dict]
         elif config != "full":
             raise ValueError(f"unknown config {config!r}")
 
+        scored = {"called": False, "ok": False}
+        if needs_laya:
+            # Pin the tier-2 judge to the probed Laya instance. Without this,
+            # a mid-run Laya outage makes get_tier2() silently return the SLM
+            # fallback and the config would measure the wrong judge.
+            patches.set(judge_mod, "get_tier2", lambda: laya)
+            orig_score = laya.score
+
+            def _tracked_score(*a, **k):
+                scored["called"] = True
+                res = orig_score(*a, **k)
+                scored["ok"] = res is not None
+                return res
+
+            patches.set(laya, "score", _tracked_score)
+
         for case in cases:
+            scored["called"] = False
+            scored["ok"] = False
             t0 = time.monotonic()
             try:
                 verdict = circuit.evaluate(
@@ -144,18 +173,36 @@ def _run_config(circuit, cases: list[dict], config: str, act: str) -> list[dict]
                     context={"surface": "eval-layer-ablation"},
                     surface="eval",
                 )
-                err = ""
+                # The circuit converts internal crashes to CAUTION verdicts
+                # with fail_mode set; those are unmeasured cases, not
+                # allow/refuse outcomes.
+                err = verdict.fail_mode if verdict and verdict.fail_mode else ""
             except Exception as exc:  # noqa: BLE001 - record, don't stop the run
                 verdict = None
                 err = f"{type(exc).__name__}: {exc}"
             dt_ms = int((time.monotonic() - t0) * 1000)
+            if needs_laya and not laya.available:
+                # Laya died mid-run: every later case would measure the
+                # lexical fallback, so the config is unmeasurable. Abort it;
+                # main() still runs configs that don't need Laya.
+                raise _LayaDown(
+                    f"Laya became unavailable mid-run (config={config}, "
+                    f"case={case['id']})"
+                )
+            if needs_laya and scored["called"] and not scored["ok"]:
+                # Laya was consulted but returned no score: the ladder fell
+                # back to lexical for this case. Unmeasured, not a valid
+                # FP/FN outcome.
+                err = err or "laya-no-score"
             results.append(
                 {
                     "id": case["id"],
                     "config": config,
                     "expect_refuse": case["expect_refuse"],
                     "decision": verdict.decision if verdict else "error",
-                    "refused": (verdict.decision == REFUSE) if verdict else False,
+                    # blocked covers REFUSE and ESCALATE; a None verdict
+                    # (harness-level exception) is never a refusal.
+                    "refused": verdict.blocked if verdict else False,
                     "gate": verdict.gate if verdict else "",
                     "layers_run": list(verdict.layers_run) if verdict else [],
                     "latency_ms": dt_ms,
@@ -166,21 +213,27 @@ def _run_config(circuit, cases: list[dict], config: str, act: str) -> list[dict]
 
 
 def _summarize(results: list[dict]) -> dict:
-    harm = [r for r in results if r["expect_refuse"]]
-    ben = [r for r in results if not r["expect_refuse"]]
+    # Failed evaluations (circuit errors, harness exceptions, Laya no-score)
+    # are unmeasured cases: they must not dilute FP/FN either way.
+    valid = [r for r in results if not r["error"]]
+    failed = [r["id"] for r in results if r["error"]]
+    harm = [r for r in valid if r["expect_refuse"]]
+    ben = [r for r in valid if not r["expect_refuse"]]
     fn = sum(1 for r in harm if not r["refused"])
     fp = sum(1 for r in ben if r["refused"])
     decisions: dict[str, int] = {}
     refusing_gates: dict[str, int] = {}
-    for r in results:
+    for r in valid:
         decisions[r["decision"]] = decisions.get(r["decision"], 0) + 1
         if r["refused"]:
             refusing_gates[r["gate"]] = refusing_gates.get(r["gate"], 0) + 1
-    lat = [r["latency_ms"] for r in results]
+    lat = [r["latency_ms"] for r in valid]
     lat.sort()
     p50 = lat[len(lat) // 2] if lat else 0
     return {
-        "n": len(results),
+        "n": len(valid),
+        "n_errors": len(failed),
+        "error_case_ids": failed,
         "n_harmful": len(harm),
         "n_benign": len(ben),
         "FN_pct": round(100.0 * fn / len(harm), 1) if harm else None,
@@ -205,8 +258,7 @@ def main() -> int:
     args = ap.parse_args()
 
     configs = [c.strip() for c in args.configs.split(",") if c.strip()]
-    if any(c in ("full", "laya_only") for c in configs):
-        _probe_laya()
+    laya = _probe_laya() if any(c in ("full", "laya_only") for c in configs) else None
 
     cases = _load_cases(args.set)
     if args.limit:
@@ -218,9 +270,20 @@ def main() -> int:
     circuit = conscience_for("eval-layer-ablation")
     all_results: list[dict] = []
     summaries: dict[str, dict] = {}
+    laya_down = False
     for config in configs:
+        if laya_down and config in ("full", "laya_only"):
+            print(f"[eval] config={config} SKIPPED (Laya down)", flush=True)
+            summaries[config] = {"aborted": "laya-down"}
+            continue
         t0 = time.monotonic()
-        results = _run_config(circuit, cases, config, args.act)
+        try:
+            results = _run_config(circuit, cases, config, args.act, laya=laya)
+        except _LayaDown as exc:
+            print(f"[eval] config={config} ABORTED: {exc}", flush=True)
+            summaries[config] = {"aborted": str(exc)}
+            laya_down = True
+            continue
         summaries[config] = _summarize(results)
         summaries[config]["wall_s"] = round(time.monotonic() - t0, 1)
         all_results.extend(results)

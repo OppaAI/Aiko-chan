@@ -4178,27 +4178,22 @@ class AikoThink:
         except Exception:
             return {}
 
-    def _hold_position(self, held: dict) -> int | None:
-        """History index just after the held turn's user message, resolved
-        via its stable token under the history lock. None when the anchor
-        is gone (trimmed) — callers fail closed."""
-        token = held.get("hold_token")
-        if not token:
-            return None
-        with self._history_lock:
-            for i, m in enumerate(self._history):
-                if isinstance(m, dict) and m.get("_hold_token") == token:
-                    return i + 1
-        return None
-
     def _commit_held_output(self, held: dict) -> None:
         """Commit an approved held turn: insert the text just after its user
-        message and queue the memory write. Raises when the anchor is gone
+        message and queue the memory write. Token resolve and insert happen
+        under a single lock acquisition (no TOCTOU gap where a concurrent
+        trim could shift the position). Raises when the anchor is gone
         (trimmed) so the caller fails closed instead of misplacing it."""
-        idx = self._hold_position(held)
-        if idx is None:
-            raise ValueError("held-output anchor missing (trimmed?)")
+        token = held.get("hold_token")
         with self._history_lock:
+            idx = None
+            if token:
+                for i, m in enumerate(self._history):
+                    if isinstance(m, dict) and m.get("_hold_token") == token:
+                        idx = i + 1
+                        break
+            if idx is None:
+                raise ValueError("held-output anchor missing (trimmed?)")
             self._history.insert(idx, {"role": "assistant", "content": held["held_text"]})
         if held.get("store_turn"):
             self._store_async(held.get("user_input") or "", held["held_text"])
@@ -4206,14 +4201,19 @@ class AikoThink:
 
     def _purge_held_output(self, held: dict, marker: str) -> None:
         """Purge a declined/expired held turn: a withheld marker takes the
-        turn's slot; nothing is stored to memory. Skips silently when the
-        anchor is gone — nothing to mark."""
-        idx = self._hold_position(held)
-        if idx is None:
-            # Fall back to the recorded numeric position for holds that
-            # predate token anchoring (or when stamping failed).
-            idx = max(0, min(held.get("history_len", 0), len(self._history)))
+        turn's slot; nothing is stored to memory. Resolve and insert are
+        atomic under the history lock. Falls back to the recorded numeric
+        position for holds that predate token anchoring."""
+        token = held.get("hold_token")
         with self._history_lock:
+            idx = None
+            if token:
+                for i, m in enumerate(self._history):
+                    if isinstance(m, dict) and m.get("_hold_token") == token:
+                        idx = i + 1
+                        break
+            if idx is None:
+                idx = max(0, min(held.get("history_len", 0), len(self._history)))
             self._history.insert(idx, {"role": "assistant", "content": marker})
         log.info("[think] held output purged; marker at position %d", idx)
 

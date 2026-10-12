@@ -214,10 +214,12 @@ def _complete_held_output(owner, user_id: str | None, escalation_id: str,
                            approved: bool, held: dict) -> str:
     """Complete a held streamed-turn output after the human's decision.
 
-    Commit (approve): the held text enters history at its recorded position
-    and is stored to memory — but only when the content hash still matches,
-    the user matches, and no newer turn has superseded it. Anything else
-    fails closed to purge.
+    Commit (approve): the held text enters history at its token-anchored
+    position and is stored to memory — but only when the content hash still
+    matches. Anything else fails closed to purge. An admin may approve
+    another user's held turn (oversight); the commit preserves the held
+    user's identity. Non-admin approvers are already blocked by can_approve
+    in resolve_ccc_approval.
     Purge (deny/expired/superseded/mismatch): a withheld marker takes the
     turn's history slot; nothing is stored to memory.
     """
@@ -228,8 +230,6 @@ def _complete_held_output(owner, user_id: str | None, escalation_id: str,
         reason = "that question already expired, so I left it out of the record"
     elif not approved:
         reason = "withheld from the record as you asked"
-    elif held.get("user_id") != user_id:
-        reason = "the approval came from a different user than the held turn"
     elif _held_content_hash(held.get("held_text") or "") != held.get("content_hash"):
         reason = "the held text changed since it was flagged"
     else:
@@ -276,6 +276,34 @@ def resolve_ccc_approval(user_input: str, user_id: str | None = None, owner=None
                     "An admin can approve it instead.")
     try:
         from cognition.conscience import conscience_for
+
+        # Held-output escalations (streamed turn held for accept/decline) are
+        # checked FIRST, against the HELD USER's ledger — the escalation was
+        # opened on their turn, so the approver's own ledger won't have it.
+        # An admin may approve another user's held turn (oversight); the
+        # commit preserves the held user's identity for history/memory.
+        held_peek = peek_held_output(escalation_id)
+        if held_peek is not None or is_expired_hold(escalation_id):
+            if is_expired_hold(escalation_id):
+                # Swept before the decision arrived: the marker is already in
+                # history; answer honestly instead of "going ahead".
+                log.info("[ccc-hooks] late decision for expired hold %s", escalation_id)
+                return ("That question already expired, so I left it out of "
+                        "the record.")
+            held_uid = held_peek.get("user_id")
+            resolved = conscience_for(held_uid).resolve_escalation(
+                escalation_id,
+                approved,
+                note=f"via chat: {verb} (approver {user_id})",
+            )
+            if not resolved:
+                return f"I don't have an open question with id {escalation_id}."
+            # One-shot: pop here so a replayed approval finds nothing to commit.
+            held = pop_held_output(escalation_id)
+            if held is not None:
+                return _complete_held_output(owner, user_id, escalation_id, approved, held)
+            return "Noted."
+
         resolved = conscience_for(user_id).resolve_escalation(
             escalation_id,
             approved,
@@ -283,19 +311,6 @@ def resolve_ccc_approval(user_input: str, user_id: str | None = None, owner=None
         )
         if not resolved:
             return f"I don't have an open question with id {escalation_id}."
-
-        # Held-output escalations (streamed turn held for accept/decline):
-        # complete before the tool-resume path. One-shot: the hold is popped
-        # here, so a replayed approval finds nothing to commit.
-        if is_expired_hold(escalation_id):
-            # Swept before the decision arrived: the marker is already in
-            # history; answer honestly instead of "going ahead".
-            log.info("[ccc-hooks] late decision for expired hold %s", escalation_id)
-            return ("That question already expired, so I left it out of "
-                    "the record.")
-        held = pop_held_output(escalation_id)
-        if held is not None:
-            return _complete_held_output(owner, user_id, escalation_id, approved, held)
 
         # Tool escalations carry a separate persisted invocation.  Keep this
         # path distinct from agentic run approvals so ccc-<id> cannot be

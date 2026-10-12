@@ -131,26 +131,28 @@ class _Owner:
         self._history_lock = self._threading.Lock()
         self.stored = []
 
-    def _hold_position(self, held):
+    def _commit_held_output(self, held):
         token = held.get("hold_token")
         with self._history_lock:
+            idx = None
             for i, m in enumerate(self._history):
                 if m.get("_hold_token") == token:
-                    return i + 1
-        return None
-
-    def _commit_held_output(self, held):
-        idx = self._hold_position(held)
-        if idx is None:
-            raise ValueError("anchor missing")
-        with self._history_lock:
+                    idx = i + 1
+                    break
+            if idx is None:
+                raise ValueError("anchor missing")
             self._history.insert(idx, {"role": "assistant", "content": held["held_text"]})
 
     def _purge_held_output(self, held, marker):
-        idx = self._hold_position(held)
-        if idx is None:
-            idx = len(self._history)
+        token = held.get("hold_token")
         with self._history_lock:
+            idx = None
+            for i, m in enumerate(self._history):
+                if m.get("_hold_token") == token:
+                    idx = i + 1
+                    break
+            if idx is None:
+                idx = len(self._history)
             self._history.insert(idx, {"role": "assistant", "content": marker})
 
     def _store_async(self, user_input, response_text):
@@ -193,12 +195,14 @@ def test_tampered_text_purges_even_on_approve():
     assert owner._history[1]["content"].startswith("[withheld")
 
 
-def test_wrong_user_purges_even_on_approve():
+def test_admin_may_approve_another_users_hold():
+    # Oversight model: an admin approving another user's held turn commits
+    # it (the can_approve gate already blocks non-admin approvers).
     owner = _Owner()
     held = _hold(text="the answer", user_id="someone-else")
-    msg = hooks._complete_held_output(owner, "u1", "e1", True, held)
-    assert owner._history[1]["content"].startswith("[withheld")
-    assert "different user" in msg
+    msg = hooks._complete_held_output(owner, "admin-u1", "e1", True, held)
+    assert owner._history[1]["content"] == "the answer"
+    assert "record" in msg
 
 
 def test_completion_never_raises_without_owner():
@@ -233,6 +237,32 @@ def test_commit_lands_after_token_anchor_despite_growth():
     # Inserted right after the ORIGINAL user message (index 1), not at end.
     assert owner._history[1] == {"role": "assistant", "content": "the answer"}
     assert owner._history[0]["content"] == "hi"
+
+
+def test_resolve_uses_held_users_ledger(monkeypatch):
+    # An admin approving another user's held turn resolves the escalation
+    # against the HELD USER's ledger (where it was opened), not the
+    # approver's.
+    import cognition.conscience.hooks as hooks_mod
+    _hold("abc123", text="hello", user_id="user-a")
+    resolved_for = {}
+
+    class FakeCore:
+        def __init__(self, uid):
+            self.uid = uid
+        def resolve_escalation(self, eid, approved, note=""):
+            resolved_for["uid"] = self.uid
+            resolved_for["eid"] = eid
+            return True
+
+    monkeypatch.setattr("cognition.conscience.conscience_for", lambda uid=None: FakeCore(uid))
+    monkeypatch.setattr("system.userspace.can_approve", lambda uid: True)
+
+    owner = _Owner()
+    msg = hooks_mod.resolve_ccc_approval("approve ccc-abc123", user_id="admin-b", owner=owner)
+    assert resolved_for["uid"] == "user-a"
+    assert resolved_for["eid"] == "abc123"
+    assert "record" in msg
 
 
 def test_commit_fails_closed_when_anchor_trimmed():

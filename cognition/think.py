@@ -963,7 +963,11 @@ def _format_system_notices(system_note: str | None) -> str:
 
 class AikoThink:
     def __init__(self) -> None:
-        self._client    = OpenAI(base_url=LLM_BASE_URL, api_key=os.getenv("LLM_API_KEY", "") or "not-needed")
+        self._client    = OpenAI(base_url=LLM_BASE_URL,
+                               api_key=os.getenv("LLM_API_KEY", "") or "not-needed",
+                               timeout=LLM_TIMEOUT)  # backstop: any completions call
+                                                     # that forgets a per-call timeout
+                                                     # gets LLM_TIMEOUT, not the SDK's 600s
         self._llm_model = LLM_MODEL
         self._router_model = ROUTER_MODEL
         self._memorize  = None    # injected later via set_memorize() — see system/wakeup.py

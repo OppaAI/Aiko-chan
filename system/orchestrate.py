@@ -1366,7 +1366,6 @@ def run_session(ui, args) -> None:
         if listen is not None:
             listen.stop_barge_in_monitor()
         think.wait_for_memory()
-        _brain_trace.shutdown()
 
     # ── main loop ─────────────────────────────────────────────────────────────
 

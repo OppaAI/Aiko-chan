@@ -375,16 +375,6 @@ def reset() -> None:
         _steps.clear()
 
 
-def flush() -> None:
-    """No-op kept for API compatibility — records stream through system.log."""
-    return
-
-
-def shutdown() -> None:
-    """No-op kept for API compatibility (called by orchestrate on exit)."""
-    return
-
-
 __all__ = [
     "TRACE_ENABLED",
     "set_ui_sink",
@@ -394,5 +384,4 @@ __all__ = [
     "step",
     "get_recent_steps",
     "reset",
-    "shutdown",
 ]

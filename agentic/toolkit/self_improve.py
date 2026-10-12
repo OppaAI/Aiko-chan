@@ -170,7 +170,11 @@ def _repo_confine_path(jail_path: str) -> Path:
     cleaned = jail_path.strip().lstrip("/\\")                      # strip out leading slash symbol
     path = (REPO_ROOT / cleaned).resolve()                         # add repo path in front
     if path != REPO_ROOT and REPO_ROOT not in path.parents:        # if resolved path not within repo,
-        raise ValueError(f"path escapes repository: {jail_path}")  # raise error
+        from agentic.toolkit.common import resolve_extra_jail
+        extra = resolve_extra_jail(cleaned)                        # sibling-checkout fallback (Playground)
+        if extra is None:
+            raise ValueError(f"path escapes repository: {jail_path}")  # raise error
+        return extra
     return path                                                    # return the resolved path
 
 

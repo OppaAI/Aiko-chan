@@ -26,8 +26,48 @@ def _repo_confine_path(jail_path: str) -> Path:
     cleaned = jail_path.strip().lstrip("/\\")
     path = (REPO_ROOT / cleaned).resolve()
     if path != REPO_ROOT and REPO_ROOT not in path.parents:
-        raise ValueError(f"Path escapes repository: {jail_path}")
+        from agentic.toolkit.common import resolve_extra_jail
+        extra = resolve_extra_jail(cleaned)
+        if extra is None:
+            raise ValueError(f"Path escapes repository: {jail_path}")
+        return extra
     return path
+
+
+def _display_path(path: Path) -> str:
+    """Repo-relative display path, falling back to extra-root-relative."""
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        pass
+    try:
+        from agentic.toolkit.common import extra_jail_roots
+        for root in extra_jail_roots():
+            try:
+                return str(Path("$WORKER_ROOT") / path.relative_to(root))
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return path.name
+
+
+def _path_parts(path: Path) -> tuple:
+    """Path parts relative to whichever jail root contains it."""
+    try:
+        return path.relative_to(REPO_ROOT).parts
+    except ValueError:
+        pass
+    try:
+        from agentic.toolkit.common import extra_jail_roots
+        for root in extra_jail_roots():
+            try:
+                return path.relative_to(root).parts
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return path.parts
 
 
 @tool(
@@ -47,7 +87,7 @@ def repo_write_file(relative_path: str, content: str) -> str:
         if any(s in low for s in (".env", "secret", "token", "private_key", ".pem", ".key", "credentials")):
             return "[repo write failed: refusing secrets/credentials path]"
         path = _repo_confine_path(relative_path)
-        if any(part in _SKIP_DIRS for part in path.relative_to(REPO_ROOT).parts):
+        if any(part in _SKIP_DIRS for part in _path_parts(path)):
             return "[repo write failed: cannot write to restricted directories]"
         if path.suffix.lower() not in _ALLOWED_WRITE_EXTENSIONS:
             return f"[repo write failed: unsupported file type: {path.suffix}]"
@@ -56,7 +96,7 @@ def repo_write_file(relative_path: str, content: str) -> str:
         path.write_text(content, encoding="utf-8")
         
         return json_block("repo_write_file", {
-            "path": str(path.relative_to(REPO_ROOT)),
+            "path": _display_path(path),
             "bytes_written": len(content),
             "status": "success"
         })
@@ -92,7 +132,7 @@ def repo_replace_text(relative_path: str, old_text: str, new_text: str) -> str:
         path.write_text(updated, encoding="utf-8")
         
         return json_block("repo_replace_text", {
-            "path": str(path.relative_to(REPO_ROOT)),
+            "path": _display_path(path),
             "status": "success"
         })
     except Exception as e:

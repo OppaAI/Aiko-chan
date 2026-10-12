@@ -74,6 +74,58 @@ def json_block(title: str, payload: dict[str, Any]) -> str:
     return f"[{title}]\n" + json.dumps(payload, ensure_ascii=False, indent=2)
 
 
+def extra_jail_roots() -> list[Path]:
+    """Additional repo-tool jail roots beyond the Aiko-chan checkout.
+
+    The Playground (sibling checkout where the idle-build worker works)
+    cannot live inside the repo without breaking its own git history, so
+    the repo_* file tools accept absolute paths under these roots too.
+    Default: ~/Aiko-Playground (same rule as system.playground);
+    override/extend with colon-separated AIKO_WORKER_ROOTS. Only
+    existing directories are admitted; everything else (extensions,
+    secrets, skip-dirs) is enforced exactly as for the repo root.
+    """
+    raw = os.getenv("AIKO_WORKER_ROOTS", "").strip()
+    explicit = [c for c in raw.split(":") if c.strip()]
+    # Default order matters: the canonical checkout first, passwd-home
+    # second. Path.home() follows the passwd DB, which disagrees with $HOME
+    # on multi-checkout dev boxes — never let it shadow the real location.
+    default = ["/home/oppa-ai/Aiko-Playground", str(Path.home() / "Aiko-Playground")]
+    candidates = explicit or default
+    roots = []
+    for c in candidates:
+        try:
+            p = Path(c).expanduser().resolve()
+        except Exception:
+            continue
+        # Admit only real playground checkouts (GOALS.md present): this
+        # keeps the jail tight AND deterministic across machines — a bare
+        # existing dir is not enough to earn file-tool access.
+        if p.is_dir() and (p / "GOALS.md").is_file() and p not in roots:
+            roots.append(p)
+    return roots
+
+
+def resolve_extra_jail(cleaned: str) -> Path | None:
+    """Resolve an absolute path under an extra jail root, else None.
+
+    Callers try their repo root first and fall back here, so relative
+    paths keep their existing meaning and only absolute paths inside an
+    admitted root escape the repo.
+    """
+    stripped = cleaned.strip().lstrip("/\\")
+    if not stripped:
+        return None
+    try:
+        path = Path("/" + stripped).resolve()
+    except Exception:
+        return None
+    for root in extra_jail_roots():
+        if path == root or root in path.parents:
+            return path
+    return None
+
+
 def llm_timeout_seconds(default: float = _DEFAULT_LLM_TIMEOUT) -> float:
     """Per-request timeout for agentic LLM completions (seconds).
 

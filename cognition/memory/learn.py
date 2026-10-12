@@ -140,57 +140,6 @@ IDLE_LEARN_SECONDS = int(os.getenv("IDLE_LEARN_SECONDS", 1800))
 IDLE_LEARNER_CHECK_INTERVAL = float(os.getenv("IDLE_LEARNER_CHECK_INTERVAL", 300))
 
 
-# ── idle-learner curriculum ───────────────────────────────────────────────
-# When conversation history offers no study topic, work through these in
-# order (Oppa's priority). Progress is tracked per user so each topic is
-# learned once; the knowledge.db title check below is the backstop dedup.
-
-_IDLE_CURRICULUM_TOPICS = [
-    "landscape photography",
-    "nature",
-    "wildlife",
-    "astro photography",
-]
-
-_CURRICULUM_PROGRESS_FILE = "idle_learner_curriculum.json"
-
-
-def _curriculum_progress(user_id: str) -> dict:
-    try:
-        path = user_state_path(_CURRICULUM_PROGRESS_FILE, user_id)
-        if path.exists():
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-    except Exception:
-        pass
-    return {"completed": []}
-
-
-def _save_curriculum_progress(user_id: str, completed: list[str]) -> None:
-    try:
-        path = user_state_path(_CURRICULUM_PROGRESS_FILE, user_id)
-        path.write_text(json.dumps({"completed": completed}), encoding="utf-8")
-    except Exception as exc:
-        log.warning("[learner] couldn't save curriculum progress: %s", exc)
-
-
-def _next_curriculum_topic(user_id: str) -> str | None:
-    completed = set(_curriculum_progress(user_id).get("completed", []))
-    for topic in _IDLE_CURRICULUM_TOPICS:
-        if topic not in completed:
-            return topic
-    return None
-
-
-def _mark_curriculum_done(topic: str, user_id: str) -> None:
-    prog = _curriculum_progress(user_id)
-    completed = list(prog.get("completed", []))
-    if topic not in completed:
-        completed.append(topic)
-        _save_curriculum_progress(user_id, completed)
-
-
 def _knowledge_has_doc(title: str, user_id: str) -> bool:
     """True when knowledge.db already holds this self-study doc."""
     try:
@@ -284,24 +233,24 @@ def idle_learner_loop(owner, check_interval: float = IDLE_LEARNER_CHECK_INTERVAL
 
             topic: str | None = None
             topic_title: str | None = None
-            from_curriculum = False
             if candidates:
                 topic = candidates[-1]  # simplistic: look at last user query
                 topic_title = topic.strip()[:80]
             else:
-                # No conversation topics: work through the curriculum in order.
-                topic = _next_curriculum_topic(study_uid)
-                if topic is None:
-                    log.info("[learner] skipped: curriculum complete and no candidate topics.")
+                # No conversation topics: study what she's building. The
+                # old hardcoded curriculum list is gone — topics come from
+                # her active Playground goals, so study always fits her work.
+                goal = _active_playground_goal()
+                if goal is None:
+                    log.info("[learner] skipped: no conversation topics and no active goal.")
                     continue
-                topic_title = topic
-                from_curriculum = True
+                gtitle, gbg = goal
+                topic = f"{gtitle}: {gbg}" if gbg else gtitle
+                topic_title = gtitle
 
             doc_title = f"Self-study: {topic_title}"
             if _knowledge_has_doc(doc_title, study_uid):
                 log.info("[learner] skipped: already in knowledge.db: %r", doc_title)
-                if from_curriculum:
-                    _mark_curriculum_done(topic, study_uid)
                 continue
 
             log.info("[learner] researching topic: %r", topic)
@@ -328,8 +277,6 @@ def idle_learner_loop(owner, check_interval: float = IDLE_LEARNER_CHECK_INTERVAL
             if doc_id is None:
                 log.warning("[learner] knowledge ingest failed for %r", doc_title)
                 continue
-            if from_curriculum:
-                _mark_curriculum_done(topic, study_uid)
             log.info("[learner] learned about %r -> knowledge.db doc %s",
                      topic, doc_id[:8])
         except Exception as e:

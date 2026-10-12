@@ -22,16 +22,22 @@ def user_dir(tmp_path, monkeypatch):
     return d
 
 
-def test_curriculum_order_and_progress(user_dir):
-    assert learn_mod._next_curriculum_topic("u1") == "landscape photography"
-    learn_mod._mark_curriculum_done("landscape photography", "u1")
-    assert learn_mod._next_curriculum_topic("u1") == "nature"
-    # progress persisted
-    data = json.loads((user_dir / "idle_learner_curriculum.json").read_text())
-    assert data["completed"] == ["landscape photography"]
-    for t in ["nature", "wildlife", "astro photography"]:
-        learn_mod._mark_curriculum_done(t, "u1")
-    assert learn_mod._next_curriculum_topic("u1") is None
+def test_goal_fallback_replaces_curriculum(user_dir, tmp_path, monkeypatch):
+    # No conversation path is exercised here — just the goal reader the
+    # idle learner falls back to (hardcoded curriculum list removed).
+    pg = tmp_path / "pg"
+    (pg / "goals").mkdir(parents=True)
+    (pg / "GOALS.md").write_text(
+        "# Goals\n\n| # | Goal | Status |\n"
+        "| 01 | [Test goal one](goals/01-test.md) | todo |\n",
+        encoding="utf-8")
+    (pg / "goals" / "01-test.md").write_text(
+        "# Goal 01\n\n## Background\n\nTest background text here.\n\n## Task\n\nDo it.\n",
+        encoding="utf-8")
+    monkeypatch.setenv("AIKO_PLAYGROUND_DIR", str(pg))
+    title, bg = learn_mod._active_playground_goal()
+    assert title == "Test goal one"
+    assert "Test background" in bg
 
 
 def test_knowledge_dedup_check(user_dir):
@@ -47,8 +53,8 @@ def test_knowledge_dedup_check(user_dir):
         assert learn_mod._knowledge_has_doc("Self-study: nature", "u1") is False
 
 
-def test_curriculum_topic_ingests_to_knowledge_db(user_dir):
-    """End-to-end of the new path: no candidates -> curriculum -> ingest_text."""
+def test_curriculum_topic_ingests_to_knowledge_db(user_dir, tmp_path, monkeypatch):
+    """End-to-end of the new path: no candidates -> Playground goal -> ingest_text."""
     import cognition.memory.learn as L
 
     calls = {}
@@ -57,6 +63,17 @@ def test_curriculum_topic_ingests_to_knowledge_db(user_dir):
         calls.update(title=title, source=source, kind=kind, user_id=user_id,
                      text_len=len(text))
         return "doc-123"
+
+    pg = tmp_path / "pg"
+    (pg / "goals").mkdir(parents=True)
+    (pg / "GOALS.md").write_text(
+        "# Goals\n\n| # | Goal | Status |\n"
+        "| 01 | [Morning voice briefing](goals/01-morning-briefing.md) | todo |\n",
+        encoding="utf-8")
+    (pg / "goals" / "01-morning-briefing.md").write_text(
+        "# Goal 01\n\n## Background\n\nSpoken day-ahead summary.\n\n## Task\n\nDo it.\n",
+        encoding="utf-8")
+    monkeypatch.setenv("AIKO_PLAYGROUND_DIR", str(pg))
 
     fake_owner = mock.MagicMock()
     fake_owner._history = []
@@ -89,13 +106,10 @@ def test_curriculum_topic_ingests_to_knowledge_db(user_dir):
             except StopIteration:
                 pass
 
-    assert calls.get("title") == "Self-study: landscape photography"
+    assert calls.get("title") == "Self-study: Morning voice briefing"
     assert calls.get("source") == "idle_learner"
     assert calls.get("kind") == "self_learned"
     assert calls.get("user_id") == "u1"
-    # curriculum progress recorded
-    data = json.loads((user_dir / "idle_learner_curriculum.json").read_text())
-    assert "landscape photography" in data["completed"]
 
 
 def test_playground_goal_topic_pick(tmp_path, monkeypatch):

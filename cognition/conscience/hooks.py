@@ -48,7 +48,7 @@ def _held_content_hash(text: str) -> str:
 
 def hold_output_for_approval(escalation_id: str, *, held_text: str, sentence_indices: list[int],
                              categories: list[str], user_id: str | None, history_len: int,
-                             user_input: str, store_turn: bool) -> None:
+                             hold_token: str | None, user_input: str, store_turn: bool) -> None:
     """Register a streamed turn's completed text as held for accept/decline."""
     import time as _time
     with _HELD_LOCK:
@@ -59,6 +59,7 @@ def hold_output_for_approval(escalation_id: str, *, held_text: str, sentence_ind
             "categories": list(categories),
             "user_id": user_id,
             "history_len": history_len,
+            "hold_token": hold_token,
             "user_input": user_input,
             "store_turn": store_turn,
             "created_at": _time.monotonic(),
@@ -76,11 +77,12 @@ def pop_held_output(escalation_id: str) -> dict | None:
     import time as _time
     with _HELD_LOCK:
         held = _HELD_OUTPUTS.pop(escalation_id, None)
-    if held is None:
-        return None
-    if _time.monotonic() - held["created_at"] > HELD_OUTPUT_TTL_S:
-        held["expired"] = True
-        log.info("[ccc-hooks] held output %s expired; late decision cannot commit it", escalation_id)
+        if held is not None and \
+                _time.monotonic() - held["created_at"] > HELD_OUTPUT_TTL_S:
+            held["expired"] = True
+            _EXPIRED_HOLD_IDS[escalation_id] = _time.monotonic() + _EXPIRED_TTL_S
+            log.info("[ccc-hooks] held output %s expired; late decision cannot commit it",
+                     escalation_id)
     return held
 
 
@@ -89,19 +91,46 @@ def peek_held_output(escalation_id: str) -> dict | None:
         return _HELD_OUTPUTS.get(escalation_id)
 
 
+# Tombstones for expired holds: escalation_id -> monotonic expiry.
+# Bounds the "already expired" window; pruned opportunistically in
+# sweep_held_outputs.
+_EXPIRED_HOLD_IDS: dict[str, float] = {}
+_EXPIRED_TTL_S = 300.0
+
+
+def is_expired_hold(escalation_id: str) -> bool:
+    """True when a hold for this id expired (late decisions must not commit)."""
+    import time as _time
+    with _HELD_LOCK:
+        exp = _EXPIRED_HOLD_IDS.get(escalation_id)
+        if exp is None:
+            return False
+        if exp < _time.monotonic():
+            del _EXPIRED_HOLD_IDS[escalation_id]
+            return False
+        return True
+
+
 def sweep_held_outputs() -> list[dict]:
     """Drop expired holds. Returns the expired records so the caller can
-    append withheld markers at their recorded history positions."""
+    append withheld markers at their recorded history positions. Expired
+    IDs are tombstoned so a late approval gets an honest "already expired"
+    answer instead of falling through to the tool-resume path."""
     import time as _time
     expired = []
     with _HELD_LOCK:
         now = _time.monotonic()
         for eid in [e for e, h in _HELD_OUTPUTS.items()
                     if now - h["created_at"] > HELD_OUTPUT_TTL_S]:
-            expired.append(_HELD_OUTPUTS.pop(eid))
-    for h in expired:
+            expired.append((eid, _HELD_OUTPUTS.pop(eid)))
+        for eid, _h in expired:
+            _EXPIRED_HOLD_IDS[eid] = now + _EXPIRED_TTL_S
+        # Opportunistic prune of stale tombstones.
+        for eid in [e for e, exp in _EXPIRED_HOLD_IDS.items() if exp < now]:
+            del _EXPIRED_HOLD_IDS[eid]
+    for _eid, h in expired:
         log.info("[ccc-hooks] held output expired without decision; purged")
-    return expired
+    return [h for _eid, h in expired]
 
 
 def push_turn_ask_notice(user_id: str | None, escalation_id: str, summary: str) -> None:
@@ -212,7 +241,14 @@ def _complete_held_output(owner, user_id: str | None, escalation_id: str,
             log.warning("[ccc-hooks] held output %s: no owner history to complete", escalation_id)
             return "Noted — I've left that out of the record." if not commit else "Noted."
         if commit:
-            owner._commit_held_output(held)
+            try:
+                owner._commit_held_output(held)
+            except ValueError as exc:
+                # Anchor trimmed away: the turn's context is gone; the
+                # approved text has nowhere safe to land. Fail closed.
+                log.info("[ccc-hooks] held output %s superseded (%s); purged", escalation_id, exc)
+                return ("That one's already moved on — I've left it out of "
+                        "the record.")
             return "Alright — that's in the record now."
         owner._purge_held_output(held, WITHHELD)
         return f"Noted — {reason}."
@@ -251,6 +287,12 @@ def resolve_ccc_approval(user_input: str, user_id: str | None = None, owner=None
         # Held-output escalations (streamed turn held for accept/decline):
         # complete before the tool-resume path. One-shot: the hold is popped
         # here, so a replayed approval finds nothing to commit.
+        if is_expired_hold(escalation_id):
+            # Swept before the decision arrived: the marker is already in
+            # history; answer honestly instead of "going ahead".
+            log.info("[ccc-hooks] late decision for expired hold %s", escalation_id)
+            return ("That question already expired, so I left it out of "
+                    "the record.")
         held = pop_held_output(escalation_id)
         if held is not None:
             return _complete_held_output(owner, user_id, escalation_id, approved, held)

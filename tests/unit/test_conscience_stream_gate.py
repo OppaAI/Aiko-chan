@@ -86,7 +86,8 @@ def _clean_registry():
 
 def _hold(eid="e1", text="held text here", **kw):
     d = dict(held_text=text, sentence_indices=[0], categories=["x"],
-             user_id="u1", history_len=3, user_input="hi", store_turn=True)
+             user_id="u1", history_len=3, hold_token="tok123",
+             user_input="hi", store_turn=True)
     d.update(kw)
     hooks.hold_output_for_approval(eid, **d)
     return hooks.peek_held_output(eid)
@@ -123,17 +124,34 @@ def test_push_turn_ask_notice_no_crash():
 # ── completion: commit vs purge ──────────────────────────────────────────────
 
 class _Owner:
+    import threading as _threading
+
     def __init__(self):
-        self._history = [{"role": "user", "content": "hi"}]
+        self._history = [{"role": "user", "content": "hi", "_hold_token": "tok123"}]
+        self._history_lock = self._threading.Lock()
         self.stored = []
 
+    def _hold_position(self, held):
+        token = held.get("hold_token")
+        with self._history_lock:
+            for i, m in enumerate(self._history):
+                if m.get("_hold_token") == token:
+                    return i + 1
+        return None
+
     def _commit_held_output(self, held):
-        self._history.insert(held["history_len"],
-                             {"role": "assistant", "content": held["held_text"]})
+        idx = self._hold_position(held)
+        if idx is None:
+            raise ValueError("anchor missing")
+        with self._history_lock:
+            self._history.insert(idx, {"role": "assistant", "content": held["held_text"]})
 
     def _purge_held_output(self, held, marker):
-        self._history.insert(held["history_len"],
-                             {"role": "assistant", "content": marker})
+        idx = self._hold_position(held)
+        if idx is None:
+            idx = len(self._history)
+        with self._history_lock:
+            self._history.insert(idx, {"role": "assistant", "content": marker})
 
     def _store_async(self, user_input, response_text):
         self.stored.append((user_input, response_text))
@@ -187,3 +205,40 @@ def test_completion_never_raises_without_owner():
     held = _hold(text="the answer")
     msg = hooks._complete_held_output(None, "u1", "e1", True, held)
     assert isinstance(msg, str)
+
+
+def test_expired_hold_tombstoned_for_late_approval():
+    _hold("gone")
+    with patch.object(hooks, "HELD_OUTPUT_TTL_S", 0.0):
+        hooks.sweep_held_outputs()
+    assert hooks.is_expired_hold("gone") is True
+    assert hooks.pop_held_output("gone") is None  # already swept
+
+
+def test_pop_expired_tombstones_too():
+    _hold("late")
+    with patch.object(hooks, "HELD_OUTPUT_TTL_S", 0.0):
+        h = hooks.pop_held_output("late")
+    assert h["expired"] is True
+    assert hooks.is_expired_hold("late") is True
+
+
+def test_commit_lands_after_token_anchor_despite_growth():
+    owner = _Owner()
+    # Simulate a newer turn arriving while the hold was pending.
+    owner._history.append({"role": "user", "content": "next question"})
+    owner._history.append({"role": "assistant", "content": "next answer"})
+    held = _hold(text="the answer")
+    hooks._complete_held_output(owner, "u1", "e1", True, held)
+    # Inserted right after the ORIGINAL user message (index 1), not at end.
+    assert owner._history[1] == {"role": "assistant", "content": "the answer"}
+    assert owner._history[0]["content"] == "hi"
+
+
+def test_commit_fails_closed_when_anchor_trimmed():
+    owner = _Owner()
+    owner._history = [{"role": "user", "content": "someone else"}]  # anchor gone
+    held = _hold(text="the answer")
+    msg = hooks._complete_held_output(owner, "u1", "e1", True, held)
+    assert "moved on" in msg
+    assert all(m["content"] != "the answer" for m in owner._history)

@@ -388,7 +388,13 @@ def test_streaming_waits_for_final_gate_and_emits_only_replacement(monkeypatch):
     monkeypatch.setattr(think, "_review_response", lambda *args: None)
     monkeypatch.setattr(think, "_correct_response", lambda _user, value, _review: value)
     monkeypatch.setattr(think, "_get_memorize", lambda: None)
-    monkeypatch.setattr(hooks, "gate_speak", lambda **kwargs: "refusal replacement")
+    from cognition.conscience.schema import Verdict, REFUSE
+    _refuse_v = Verdict(decision=REFUSE, gate="judge", act="speak", reasons=["refused"])
+    monkeypatch.setattr(
+        hooks, "gate_speak",
+        lambda **kwargs: ("refusal replacement", _refuse_v)
+        if kwargs.get("return_verdict") else "refusal replacement",
+    )
 
     speech_events = []
 

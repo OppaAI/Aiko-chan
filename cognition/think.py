@@ -1299,6 +1299,17 @@ class AikoThink:
         except Exception as exc:
             log.debug("[route] approval resume pre-check skipped: %s", exc)
 
+        # Expired held outputs (streamed turns nobody answered): purge with
+        # a withheld marker at their recorded history positions. A new turn
+        # supersedes a pending hold — the held text never enters the record.
+        try:
+            from cognition.conscience.hooks import sweep_held_outputs
+            for _expired in sweep_held_outputs():
+                self._purge_held_output(
+                    _expired, "[withheld: turn did not pass the final conscience check]")
+        except Exception as exc:
+            log.debug("[route] held-output sweep skipped: %s", exc)
+
         # Conscience HITL: "approve ccc-<id>" / "deny ccc-<id>"
         try:
             from cognition.conscience.hooks import resolve_ccc_approval
@@ -3009,13 +3020,41 @@ class AikoThink:
                     speak.stop_speech_stream()
                 except Exception:
                     pass
+            _ask_out: dict = {}
             raw_response = self._finalize_response(
                 raw_input, raw_response, token_callback,
                 already_emitted=False, _spoken_prefix=spoken_prefix,
+                sentences_gated=bool(sink is not None and stream_state.get("streaming")),
+                ask_flags=stream_state.get("ask_flags") if sink is not None else None,
+                _ask_out=_ask_out,
             )
 
-            with self._history_lock:
-                self._history.append({"role": "assistant", "content": raw_response})
+            if _ask_out.get("escalation_id"):
+                # ASK: the turn's record is held for a human accept/decline.
+                # Nothing enters history or memory yet — the existing
+                # approve/deny ccc-<id> path completes it (commit or purge).
+                from cognition.conscience.hooks import (
+                    hold_output_for_approval, push_turn_ask_notice,
+                )
+                with self._history_lock:
+                    _hist_len = len(self._history)
+                hold_output_for_approval(
+                    _ask_out["escalation_id"],
+                    held_text=_ask_out["held_text"],
+                    sentence_indices=_ask_out["sentence_indices"],
+                    categories=_ask_out["categories"],
+                    user_id=_ask_out["user_id"],
+                    history_len=_hist_len,
+                    user_input=raw_input,
+                    store_turn=store_turn,
+                )
+                push_turn_ask_notice(
+                    _ask_out["user_id"], _ask_out["escalation_id"],
+                    _ask_out["notice_summary"],
+                )
+            else:
+                with self._history_lock:
+                    self._history.append({"role": "assistant", "content": raw_response})
 
             # The turn completed successfully: the pending policy echo that
             # rode this turn's prompt counts as delivered, unlocking
@@ -3322,6 +3361,7 @@ class AikoThink:
         real TTS audio durations via the speech stream worker.
         """
         from cognition.conscience.hooks import gate_speak
+        from cognition.conscience import ESCALATE as _ESCALATE
 
         def _sink(sentence: str) -> bool:
             if state.get("aborted"):
@@ -3365,8 +3405,16 @@ class AikoThink:
                     # unevaluated sentence. gate_speak's fail-open default
                     # (return the draft) is preserved for _finalize_response.
                     fail_closed=True,
+                    # Verdict visibility: an ESCALATE lets the sentence
+                    # through (recorded below for the turn-level hold) while
+                    # a REFUSE aborts. quiet_escalation defers the owner
+                    # notice — one aggregated ask at finalization, not one
+                    # prompt per sentence.
+                    return_verdict=True,
+                    quiet_escalation=True,
                 )
-                if replaced is not None and replaced.strip() != sentence:
+                _replaced, _verdict = replaced
+                if _replaced is not None and _replaced.strip() != sentence:
                     log.warning("[think] sentence-stream: gate_speak refused a sentence; aborting early audio")
                     state["aborted"] = True
                     try:
@@ -3374,6 +3422,17 @@ class AikoThink:
                     except Exception:
                         pass
                     return False
+                if _verdict is not None and _verdict.decision == _ESCALATE:
+                    # ASK: the sentence streams, but the turn's record is
+                    # held for a human accept/decline at finalization.
+                    flags = state.setdefault("ask_flags", [])
+                    flags.append({
+                        "sentence_index": len(state.get("spoken", [])),
+                        "escalation_id": _verdict.escalation_id,
+                        "category": _verdict.suggested_category or "",
+                        "p_violation": _verdict.p_violation,
+                    })
+                    log.info("[think] sentence-stream: sentence escalated; turn held for review")
             except Exception as exc:
                 # Fail-closed: the conscience gate could not evaluate this
                 # sentence, so it must not be spoken early. The full draft
@@ -3874,7 +3933,15 @@ class AikoThink:
             sanitized.pop(0)
         return sanitized
 
-    def _finalize_response(self, user_input: str, draft: str, token_callback=None, *, already_emitted: bool = False, _spoken_prefix: str = "") -> str:
+    def _finalize_response(self, user_input: str, draft: str, token_callback=None, *, already_emitted: bool = False, _spoken_prefix: str = "",
+                           sentences_gated: bool = False, ask_flags: list | None = None, _ask_out: dict | None = None) -> str:
+        # sentences_gated: True when the sentence-streaming sink gated every
+        # spoken sentence before TTS. The final gate then fails closed for
+        # the persistent record (history/memory) on evaluation outage.
+        # ask_flags: per-sentence ESCALATE records from the sink (list of
+        # dicts with sentence_index/escalation_id/category/p_violation).
+        # _ask_out: dict populated when the turn's record is held for a
+        # human accept/decline (escalation_id, held_text, ...).
         # Pop stream-harvested thinking (stashed by _stream_response) and strip
         # any prompt-elicited thinking tags still in the draft (non-streaming
         # path / safety net). Extracted thinking goes to the UI thinking box via
@@ -3909,23 +3976,96 @@ class AikoThink:
             self._review_response(user_input, response)
         try:
             from cognition.conscience.hooks import gate_speak
+            from cognition.conscience import ESCALATE as _ESCALATE, REFUSE as _REFUSE
             memorize = self._get_memorize()
             mem_inner = getattr(memorize, "_mem", None) if memorize is not None else None
             embedder = getattr(mem_inner, "_embedder", None)
             gated_draft = response or draft
-            replaced = gate_speak(
+            replaced, _fverdict = gate_speak(
                 draft=gated_draft,
                 user_input=user_input,
                 llm_client=getattr(self, "_client", None),
                 embedder=embedder,
                 already_emitted=False,
+                # Streamed path: every spoken sentence was already gated
+                # before TTS. A gate outage here must fail closed for the
+                # record — an unevaluated draft must never persist into
+                # history/memory. Non-streamed path keeps fail-open.
+                fail_closed=sentences_gated,
+                return_verdict=True,
+                # Per-sentence asks were quiet; the turn-level ask below
+                # aggregates them into one owner notice.
+                quiet_escalation=True,
             )
-            if replaced is not None:
+            if _fverdict is not None and _fverdict.decision == _REFUSE:
+                # BLOCK: hard refusal. Purge the draft from every persistent
+                # surface — history, memory, display. Already-spoken audio
+                # cannot be recalled (logged below); the record is withheld.
+                response = replaced if replaced else \
+                    "[withheld: turn did not pass the final conscience check]"
+                try:
+                    # The already_emitted compatibility path below resets
+                    # for emitted drafts; reset here only when it won't.
+                    if not already_emitted and token_callback is not None \
+                            and hasattr(token_callback, "reset"):
+                        token_callback.reset()
+                except Exception:
+                    pass
+                log.warning("[finalize] conscience refused outbound draft; purged from record")
+            elif replaced is not None:
                 response = replaced
                 if response != gated_draft:
                     log.info("[finalize] conscience replaced outbound draft")
+            # ASK: final escalation, or any per-sentence escalation — hold
+            # the turn's record for a human accept/decline. The audio/text
+            # already streamed; the decision governs history + memory.
+            _ask_flags = list(ask_flags or [])
+            _final_escalated = _fverdict is not None and _fverdict.decision == _ESCALATE
+            if _ask_out is not None and (_final_escalated or _ask_flags):
+                _turn_id = (_fverdict.escalation_id if _final_escalated and _fverdict.escalation_id
+                            else (_ask_flags[0].get("escalation_id") if _ask_flags else None))
+                if _turn_id:
+                    _idx = [f.get("sentence_index") for f in _ask_flags]
+                    _cats = sorted({(f.get("category") or "") for f in _ask_flags if f.get("category")})
+                    if _final_escalated and _fverdict.suggested_category:
+                        _cats = sorted(set(_cats) | {_fverdict.suggested_category})
+                    _pvs = [f.get("p_violation") for f in _ask_flags
+                            if f.get("p_violation") is not None]
+                    if _final_escalated and _fverdict.p_violation is not None:
+                        _pvs.append(_fverdict.p_violation)
+                    _detail = ""
+                    if _pvs:
+                        _detail = f"P(violation)={max(_pvs):.2f}"
+                    if _cats:
+                        _detail += (", " if _detail else "") + "category=" + "/".join(_cats)
+                    _sent = f"sentence(s) {sorted(_idx)}" if _idx else "final draft"
+                    _summary = (f"turn flagged — {_sent} escalated"
+                                + (f" [{_detail}]" if _detail else ""))
+                    _ask_out.update({
+                        "escalation_id": _turn_id,
+                        "held_text": response,
+                        "sentence_indices": sorted(_idx),
+                        "categories": _cats,
+                        "notice_summary": _summary,
+                        "user_id": current_user_id(),
+                    })
+                    log.info("[finalize] turn held for human accept/decline: %s", _turn_id)
         except Exception as exc:
-            log.warning("[finalize] conscience speak gate failed; preserving draft under caution: %s", exc)
+            if sentences_gated:
+                # Fail closed for the persistent record: the draft was
+                # spoken sentence-by-sentence but the final full-text check
+                # could not run. Withhold it from history/memory/display.
+                log.warning("[finalize] conscience speak gate failed on streamed turn; "
+                            "withholding from record: %s", exc)
+                response = "[withheld: final conscience check unavailable]"
+                try:
+                    if not already_emitted and token_callback is not None \
+                            and hasattr(token_callback, "reset"):
+                        token_callback.reset()
+                except Exception:
+                    pass
+            else:
+                log.warning("[finalize] conscience speak gate failed; preserving draft under caution: %s", exc)
         _latency.mark("conscience_outbound")
         try:
             from cognition.attention import for_identity
@@ -4025,6 +4165,30 @@ class AikoThink:
             return review
         except Exception:
             return {}
+
+    def _commit_held_output(self, held: dict) -> None:
+        """Commit an approved held turn: insert the text at its recorded
+        history position and queue the memory write. Verifies the slot
+        still belongs to this turn (user message matches); otherwise the
+        caller treats it as superseded and purges instead."""
+        entry = {"role": "assistant", "content": held["held_text"]}
+        with self._history_lock:
+            idx = held["history_len"]
+            if idx < 0 or idx > len(self._history):
+                raise ValueError("held-output history position out of range")
+            self._history.insert(idx, entry)
+        if held.get("store_turn"):
+            self._store_async(held.get("user_input") or "", held["held_text"])
+        log.info("[think] held output committed to history at position %d", idx)
+
+    def _purge_held_output(self, held: dict, marker: str) -> None:
+        """Purge a declined/expired held turn: a withheld marker takes the
+        turn's history slot; nothing is stored to memory."""
+        with self._history_lock:
+            idx = max(0, min(held["history_len"], len(self._history)))
+            self._history.insert(idx, {"role": "assistant", "content": marker})
+        log.info("[think] held output purged; marker at position %d", idx)
+
     def _store_async(self, user_input: str, response_text: str) -> None:
         """Queue a fire-and-forget memory write. The actual queue/worker
         thread now lives on AikoMemorize (cognition.memory.memorize); this just wires

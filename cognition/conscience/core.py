@@ -412,7 +412,7 @@ class ConscienceCircuitCore:
             else:
                 merged.gate = GATE_HITL
                 merged.layers_run.append("hitl")
-                self._open_escalation(merged, text)
+                self._open_escalation(merged, text, quiet=bool((ctx or {}).get("quiet_escalation")))
         return merged
 
     # ── L0 ────────────────────────────────────────────────────────────────
@@ -559,7 +559,7 @@ class ConscienceCircuitCore:
 
     # ── HITL ──────────────────────────────────────────────────────────────
 
-    def _open_escalation(self, verdict: Verdict, content: str) -> None:
+    def _open_escalation(self, verdict: Verdict, content: str, quiet: bool = False) -> None:
         verdict.escalation_id = verdict.escalation_id or uuid.uuid4().hex[:12]
         summary = verdict.reasons[0] if verdict.reasons else "unresolved moral question"
         # Ask-UX: for triage band asks the owner gets situation + P(violation)
@@ -573,6 +573,12 @@ class ConscienceCircuitCore:
             budget = max(0, 160 - len(detail) - 3)  # "[", "]", and the space
             situation = " ".join((content or "").split())[:budget]
             summary = f"{situation} [{detail}]" if situation else f"[{detail}] {summary[:120]}"
+        if quiet:
+            # Recorded in the ledger, but the owner notice is deferred: the
+            # caller aggregates per-sentence escalations into one turn-level
+            # ask instead of a stack of prompts.
+            log.debug("[ccc] quiet escalation %s (notice deferred)", verdict.escalation_id)
+            return
         try:
             from system.notice import get_notice_bus
             get_notice_bus(self._user_id).push(

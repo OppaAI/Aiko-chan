@@ -71,7 +71,7 @@ def _resolve_seeds(catalog: ConnectomeCatalog, seed_types: tuple[str, ...]) -> l
     return matched[:seed_limit]
 
 
-def _configured_catalog() -> "ConnectomeCatalog | SqliteCatalog | None":
+def _configured_catalog(path: str | None = None) -> "ConnectomeCatalog | SqliteCatalog | None":
     """Load the connectome, preferring the indexed SQLite build.
 
     ``AIKO_FLY_CATALOG_PATH`` points at the canonical JSON; when a
@@ -79,9 +79,16 @@ def _configured_catalog() -> "ConnectomeCatalog | SqliteCatalog | None":
     tools/build_catalog_sqlite.py), the SQLite backend is used instead —
     hot cells in RAM, cold graph on disk, no 1GB parse spike. The JSON
     path remains the fallback (dev machines, tests).
+
+    ``path``, when given, overrides the env var for callers that need a
+    local default (e.g. the Studio API's bundled fallback) without writing
+    ``os.environ`` — which is process-global and thread-unsafe to mutate at
+    request time, and would otherwise permanently change catalog resolution
+    for every other caller (wakeup warmup thread, observe(), ...).
     """
     global _catalog, _catalog_path
-    path = (os.getenv("AIKO_FLY_CATALOG_PATH", "") or "").strip()
+    if path is None:
+        path = (os.getenv("AIKO_FLY_CATALOG_PATH", "") or "").strip()
     if not path:
         return None
     resolved = str(Path(path).expanduser().resolve())

@@ -124,3 +124,72 @@ def test_mounted_fly_api_requires_session():
     response = client.get("/studio/fly/api/state")
 
     assert response.status_code == 401
+
+
+class _FakeCatalog:
+    nodes = {}
+
+    def summary(self):
+        return {"edges": 0}
+
+    source = "fake"
+    version = "fake"
+    checksum = "fake"
+
+
+def _stub_configured_catalog(monkeypatch, seen_paths):
+    import os
+
+    def fake_configured_catalog(path=None):
+        # Mirror the real function: an explicit path wins, otherwise the
+        # env var is read (read-only).
+        seen_paths.append(path if path is not None else os.getenv("AIKO_FLY_CATALOG_PATH"))
+        return _FakeCatalog()
+
+    monkeypatch.setattr(
+        "cognition.fly_runtime.service._configured_catalog", fake_configured_catalog
+    )
+
+
+def test_load_catalog_never_writes_environ(monkeypatch):
+    """BUG-5: _load_catalog() must not mutate os.environ. With no env var it
+    passes the bundled default explicitly; both calls behave identically."""
+    import os
+
+    monkeypatch.delenv("AIKO_FLY_CATALOG_PATH", raising=False)
+    monkeypatch.setattr(api, "_CATALOG_LAYOUT", None)
+    monkeypatch.setattr(api, "_CATALOG_SUMMARY", None)
+    seen_paths = []
+    _stub_configured_catalog(monkeypatch, seen_paths)
+
+    before = dict(os.environ)
+    layout1, summary1 = api._load_catalog()
+    # Force the second call through the same code path (not the memo).
+    api._CATALOG_LAYOUT, api._CATALOG_SUMMARY = None, None
+    layout2, summary2 = api._load_catalog()
+
+    assert dict(os.environ) == before
+    assert "AIKO_FLY_CATALOG_PATH" not in os.environ
+    assert len(seen_paths) == 2
+    assert seen_paths[0] == seen_paths[1]
+    assert seen_paths[0] and seen_paths[0].endswith("male-cns-v1.0-w5.json")
+    assert layout1 == layout2 == []
+    assert summary1["total_nodes"] == summary2["total_nodes"] == 0
+
+
+def test_load_catalog_prefers_env_var_read_only(monkeypatch):
+    """With the env var set, its value is passed through; os.environ itself
+    is left untouched."""
+    import os
+
+    monkeypatch.setenv("AIKO_FLY_CATALOG_PATH", "/tmp/custom-catalog.json")
+    monkeypatch.setattr(api, "_CATALOG_LAYOUT", None)
+    monkeypatch.setattr(api, "_CATALOG_SUMMARY", None)
+    seen_paths = []
+    _stub_configured_catalog(monkeypatch, seen_paths)
+
+    before = dict(os.environ)
+    api._load_catalog()
+
+    assert dict(os.environ) == before
+    assert seen_paths == ["/tmp/custom-catalog.json"]

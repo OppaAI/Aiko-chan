@@ -312,10 +312,11 @@ class TestCapabilityPlaybookConsistency:
 
     def test_every_capability_domain_tag_exists_on_tools(self):
         import agentic.toolkit.plan  # noqa: F401 — register note/planning tools
-        try:
-            import agentic.toolkit.it_ops  # noqa: F401
-        except Exception:
-            pass
+        for _mod in ("agentic.toolkit.it_ops", "agentic.workflows.aurora_forecast.graph"):
+            try:
+                __import__(_mod)
+            except Exception:
+                pass
         tags = set(registry.get_tool_domains().values())
         for cid, cap in CAPABILITIES.items():
             if not cap.tool_domains:

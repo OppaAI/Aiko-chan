@@ -81,7 +81,7 @@ _CAPABILITY_TOOL_DOMAINS: dict[str, tuple[str, ...]] = {
     "social": ("social", "email"),
     "it_ops": ("it_ops",),
     "note_taking": ("planning", "note"),
-    "weather": (),
+    "weather": ("weather",),
     "coding": ("coding", "codebase", "repo"),
     "everyday": ("everyday", "scheduling"),
     "multi_agent": ("multi_agent", "research"),

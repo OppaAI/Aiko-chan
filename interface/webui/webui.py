@@ -147,15 +147,14 @@ def _echo_guard_ms() -> int:
 
 
 def _load_stored_display_name(uid: str) -> str:
+    # Shared with the CLI's "What's your name?" answer (system.userspace);
+    # checks the display_name.txt locations plus legacy cli_name.txt, so
+    # the WebUI addresses Oppa as the user instead of as a third person.
     try:
-        from system.userspace import user_state_dir
-        name_file = user_state_dir(uid) / "cli_name.txt"
-        if name_file.exists():
-            stored = name_file.read_text(encoding="utf-8").strip()
-            if stored:
-                return stored
+        from system.userspace import read_stored_display_name
+        return read_stored_display_name(uid)
     except Exception:
-        log.warning("webui: failed to read cli_name.txt")
+        log.warning("webui: failed to read display name")
     return ""
 
 

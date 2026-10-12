@@ -322,38 +322,29 @@ class AikoSimpleCLI:
 
 # ═════════════════════════════════════════════════════════════════════════════
 # CLI-only auth / identity helpers
-# ═════════════════════════════════════════════════════════════════════════════
+def _cli_display_name(args, uid: str | None = None) -> str:
+    """Resolve the CLI display name: --name, stored preference, or prompt.
 
-_CLI_NAME_FILE: Path | None = None
-
-
-def _cli_name_path() -> Path | None:
-    global _CLI_NAME_FILE
-    if _CLI_NAME_FILE is not None:
-        return _CLI_NAME_FILE
-    try:
-        from system.userspace import user_state_dir
-        _CLI_NAME_FILE = user_state_dir() / "cli_name.txt"
-    except Exception:
-        _CLI_NAME_FILE = Path.home() / ".aiko_cli_name.txt"
-    return _CLI_NAME_FILE
-
-
-def _cli_display_name(args) -> str:
-    """Resolve the CLI display name from --name, stored name, or prompt."""
+    The stored preference lives in the single canonical per-user file
+    (system.userspace.display_name_path), shared with the WebUI.
+    """
     if args.name:
         return args.name.strip()
-    name_path = _cli_name_path()
-    if name_path and name_path.exists():
-        stored = name_path.read_text(encoding="utf-8").strip()
+    try:
+        from system.userspace import read_stored_display_name
+        stored = read_stored_display_name(uid)
         if stored:
             return stored
+    except Exception:
+        pass
     try:
         raw = input("  What's your name? ").strip()
         if raw:
-            if name_path:
-                name_path.parent.mkdir(parents=True, exist_ok=True)
-                name_path.write_text(raw, encoding="utf-8")
+            try:
+                from system.userspace import write_stored_display_name
+                write_stored_display_name(raw, uid)
+            except Exception:
+                log.debug("cli: could not persist display name")
             return raw
     except (EOFError, KeyboardInterrupt):
         log.debug("cli: user cancelled name prompt")
@@ -377,14 +368,22 @@ def run_cli(args) -> None:
             print("  Authentication failed — exiting.")
             sys.exit(1)
         os.environ["AIKO_USER_ID"] = gh_user
-        from system.userspace import set_current_display_name
-        set_current_display_name(cli_auth.get_display_name())
-        log.info("CLI session user_id=%s display=%s", gh_user, cli_auth.get_display_name())
+        from system.userspace import set_current_display_name, read_stored_display_name
+        # Preferred name wins in every interface; GitHub login is fallback.
+        display_name = read_stored_display_name(gh_user) or cli_auth.get_display_name()
+        set_current_display_name(display_name)
+        log.info("CLI session user_id=%s display=%s", gh_user, display_name)
     else:
-        display_name = _cli_display_name(args)
+        # Resolve the uid the same way as the session identity so the
+        # display-name file is the single canonical per-user file shared
+        # with the WebUI (not a CLI-only location).
+        from interface.cli.auth import resolve_cli_user_id
+        cli_uid = resolve_cli_user_id() or "guest"
+        os.environ["AIKO_USER_ID"] = cli_uid
+        display_name = _cli_display_name(args, cli_uid)
         from system.userspace import set_current_display_name
         set_current_display_name(display_name)
-        log.info("CLI session display=%s", display_name)
+        log.info("CLI session user_id=%s display=%s", cli_uid, display_name)
 
     ui = AikoSimpleCLI(no_voice=args.text, debug=args.debug)
     ui.trace_enabled = args.trace or args.debug

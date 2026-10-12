@@ -89,7 +89,10 @@ def _record_seconds(seconds: float) -> np.ndarray:
             rlist, _, _ = select.select([proc.stdout], [], [], min(1.0, remaining))
             if not rlist:
                 continue
-            chunk = proc.stdout.read(min(65536, n_bytes - len(raw)))
+            # os.read (not the BufferedReader's read): select() only sees the
+            # OS fd, so a buffered read() could block for bytes already
+            # sitting in Python's buffer or stall waiting for more.
+            chunk = os.read(proc.stdout.fileno(), min(65536, n_bytes - len(raw)))
             if not chunk:
                 break
             raw += chunk

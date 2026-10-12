@@ -102,3 +102,45 @@ def test_record_gives_up_when_mic_silent(monkeypatch, fast, capsys):
     assert proc.terminated
     assert proc.wait_calls >= 1
     assert "no audio in time" in capsys.readouterr().out
+
+
+def test_record_keeps_partial_data_then_hits_deadline(monkeypatch, fast, capsys):
+    """Partial capture then stall: 4 bytes (one float32 sample) arrive, then
+    the mic goes silent with the pipe open. Capture must complete at the
+    deadline with the partial sample preserved — not hang in read()."""
+    import threading
+
+    r, w = os.pipe()
+    os.write(w, b"\x01\x02\x03\x04")  # writer stays open: the stall
+    proc = FakeProc(os.fdopen(r, "rb"))
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: proc)
+    real_monotonic = es.time.monotonic
+    calls = {"n": 0}
+
+    def fake_monotonic():
+        calls["n"] += 1
+        # Allow the deadline computation and the first select+read, then jump
+        # past the deadline so the second iteration gives up.
+        if calls["n"] <= 2:
+            return real_monotonic()
+        return real_monotonic() + 10**6
+
+    monkeypatch.setattr(es.time, "monotonic", fake_monotonic)
+    result = {}
+    t = threading.Thread(
+        target=lambda: result.setdefault("out", es._record_seconds(60.0)),
+        daemon=True,
+    )
+    try:
+        t.start()
+        t.join(timeout=15)
+        assert not t.is_alive(), "_record_seconds hung on a stalled mic"
+    finally:
+        os.close(w)
+
+    out = result["out"]
+    assert len(out) == 1
+    assert out.tobytes() == b"\x01\x02\x03\x04"
+    assert proc.terminated
+    assert proc.wait_calls >= 1
+    assert "no audio in time" in capsys.readouterr().out

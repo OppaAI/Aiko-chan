@@ -413,9 +413,19 @@ class AikoWeb:
 
         try:
             self._loop.run_until_complete(_serve_and_signal())
+        except (SystemExit, Exception):
+            # Uvicorn raises SystemExit (not Exception) on bind failure; it
+            # escapes run_until_complete before _serve_and_signal() resumes,
+            # so without this the 5s _loop_ready wait would always time out.
+            log.exception("[aiko-web] HTTP server exited")
+            raise
         finally:
-            # The loop was never closed before — leaked on every restart.
-            self._loop.close()
+            # Backstop: waiters must never hang the full 5s on a dead server.
+            self._loop_ready.set()
+            # Clear before closing so later _broadcast() calls hit the None
+            # guard instead of submitting to a closed loop.
+            loop, self._loop = self._loop, None
+            loop.close()
 
     async def _ws_handler(self, ws) -> None:
         from interface.webui.auth import sessions, signer, SESSION_MAX_AGE_SECONDS

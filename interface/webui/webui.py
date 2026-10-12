@@ -149,11 +149,25 @@ def _echo_guard_ms() -> int:
 def _load_stored_display_name(uid: str) -> str:
     try:
         from system.userspace import user_state_dir
-        name_file = user_state_dir(uid) / "cli_name.txt"
-        if name_file.exists():
-            stored = name_file.read_text(encoding="utf-8").strip()
-            if stored:
-                return stored
+        candidates = [user_state_dir(uid) / "cli_name.txt"]
+        # The CLI stores the "What's your name?" answer in its own
+        # locations (interface/cli/cli.py::_cli_name_path), which differ
+        # from the per-uid dir above. Check them too, otherwise the WebUI
+        # falls back to the GitHub login and the persona addresses Oppa
+        # as a third person instead of as the user.
+        try:
+            candidates.append(user_state_dir() / "cli_name.txt")
+        except Exception:
+            pass
+        candidates.append(Path.home() / ".aiko_cli_name.txt")
+        for name_file in candidates:
+            try:
+                if name_file.exists():
+                    stored = name_file.read_text(encoding="utf-8").strip()
+                    if stored:
+                        return stored
+            except Exception:
+                continue
     except Exception:
         log.warning("webui: failed to read cli_name.txt")
     return ""

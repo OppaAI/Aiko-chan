@@ -126,7 +126,7 @@ def call_llm(prompt: str) -> str:
     return resp.choices[0].message.content or ""
 
 
-def parse_entries(text: str) -> list[dict]:
+def parse_entries(text: str, month_key: str) -> list[dict]:
     # Tolerate markdown fences around the JSONL.
     text = re.sub(r"^```(?:json)?\s*", "", text.strip())
     text = re.sub(r"\s*```$", "", text)
@@ -151,6 +151,11 @@ def parse_entries(text: str) -> list[dict]:
         entries.append({"keys": keys, "content": content, "enabled": True})
     if not entries:
         raise ValueError("LLM returned no usable lore entries")
+    # The prompt requires at least one entry discoverable by month name.
+    # If the LLM omitted it, attach it to the first entry rather than
+    # saving a month file that can't be found by its month-name trigger.
+    if not any(month_key in (k.lower() for k in e["keys"]) for e in entries):
+        entries[0]["keys"].insert(0, month_key)
     return entries
 
 
@@ -192,7 +197,7 @@ def main() -> None:
         month_label=month_name, history="\n".join(history))
     print(f"gathered {len(history)} history lines for {month_name}; asking LLM…",
           file=sys.stderr)
-    entries = parse_entries(call_llm(prompt))
+    entries = parse_entries(call_llm(prompt), month_name.lower())
     print(f"got {len(entries)} entries", file=sys.stderr)
 
     if args.dry_run:

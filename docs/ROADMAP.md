@@ -259,6 +259,17 @@ Known envelope (Jetson Orin Nano, Sep 2026): ~2 tok/s, ~20 s time-to-first-token
 | Avatar integration on mobile screen | 🔲 Planned |
 | Network resilience — survives Wi-Fi ↔ cellular handoff | 🔲 Planned |
 
+**Desktop companion decision (2026-10-12): NO.**
+
+Tauri desktop shell exists in the repo but is **not a deliverable** for any phase. Rationale:
+
+- WebUI already provides full desktop access from any browser (zero install, auto-updated, works on Linux/macOS/Windows/ChromeOS)
+- Tauri would add native menu/tray integration and offline cache — marginal value vs. WebUI
+- Maintenance cost: separate Rust/Cargo build, signing, notarization, auto-update pipeline
+- Phase 5 budget is mobile-first; desktop can wait until a concrete need appears (e.g. offline-first, hardware integration, system tray presence)
+
+Tauri code stays in the repo (no deletion). Revisit only if a specific desktop-only requirement emerges that WebUI cannot satisfy.
+
 ---
 
 ## Phase 6 — Multimodal 🔲

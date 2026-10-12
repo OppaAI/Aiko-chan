@@ -114,6 +114,12 @@ def test_non_greeting_route_starts_memory_after_intent(monkeypatch):
     events: list[str] = []
 
     monkeypatch.setattr(think, "_route_intent", lambda user_input: events.append("intent") or ("localchat", None))
+    # Pin the attention gate open: global energy state leaks between tests
+    # (a depleted-energy run defers before intent, which is what this test
+    # measures — not what it intends to test).
+    from cognition.attention import EdgeCognitiveState
+    monkeypatch.setattr(EdgeCognitiveState, "should_attempt",
+                        lambda self, user_input, **kw: (True, "test", "proceed"))
 
     class ImmediatePool:
         def submit(self, fn, *args):

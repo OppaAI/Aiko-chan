@@ -60,31 +60,54 @@ def _git(args: list[str]) -> str:
 
 
 def gather_month(year: int, month: int, cap: int = 120) -> list[str]:
-    """Merged PRs first (best summaries), then feature commits. Deduplicated."""
+    """Merged PRs + feature commits, sampled evenly across the whole month.
+
+    Records use committer date (%cd) so displayed dates match the
+    --since/--until selection boundaries. Merge commits carry their PR
+    title (from the commit body) instead of the bare "Merge pull request"
+    subject. When history exceeds the cap, stratified sampling keeps
+    end-of-month changes eligible instead of truncating them.
+    """
     since = f"{year}-{month:02d}-01"
     if month == 12:
         until = f"{year + 1}-01-01"
     else:
         until = f"{year}-{month + 1:02d}-01"
+    # NUL-separated records: hash, committer date, subject, body.
     fmt = ["log", f"--since={since}", f"--until={until}",
-           "--format=%ad %s", "--date=short", "--reverse"]
-    merges = _git(fmt + ["--merges"]).splitlines()
-    feats = _git(fmt + ["--no-merges", "--grep=^feat", "--regexp-ignore-case"]).splitlines()
+           "--format=%H%x00%cd%x00%s%x00%b%x1e", "--date=short"]
+    raw = (_git(fmt + ["--merges"])
+           + _git(fmt + ["--no-merges", "--grep=^feat", "--regexp-ignore-case"]))
     seen: set[str] = set()
-    lines: list[str] = []
-    for line in merges + feats:
-        # Strip the date prefix for dedup; keep full line for the prompt.
-        norm = re.sub(r"^\d{4}-\d{2}-\d{2}\s+", "", line).strip().lower()
-        norm = re.sub(r"^merge pull request #\d+ from \S+ ", "", norm)
+    records: list[tuple[str, str]] = []
+    for chunk in raw.split("\x1e"):
+        parts = chunk.strip().split("\x00")
+        if len(parts) < 4:
+            continue
+        _sha, date, subject, body = (p.strip() for p in parts[:4])
+        # --until is inclusive in git; keep the upper bound exclusive so a
+        # month's history never borrows the next month's first commit.
+        if not (since <= date < until):
+            continue
+        if re.match(r"merge pull request #\d+ from \S+", subject, re.I):
+            # GitHub puts the PR title on the first body line.
+            title = next((ln.strip() for ln in body.splitlines() if ln.strip()), "")
+            display = title or subject
+        else:
+            display = subject
+        norm = display.lower()
         if not norm or norm in seen:
             continue
         # Skip noise: branch sync merges carry no information.
         if re.match(r"merge branch ", norm):
             continue
         seen.add(norm)
-        lines.append(line.strip())
-        if len(lines) >= cap:
-            break
+        records.append((date, display))
+    records.sort(key=lambda r: r[0])  # chronological
+    lines = [f"{d} {t}" for d, t in records]
+    if len(lines) > cap:
+        step = len(lines) / cap
+        lines = [lines[int(i * step)] for i in range(cap)]
     return lines
 
 
@@ -115,7 +138,13 @@ def parse_entries(text: str) -> list[dict]:
         rec = json.loads(line)
         if not isinstance(rec, dict):
             continue
-        keys = [str(k).strip() for k in rec.get("keys", []) if str(k).strip()]
+        # keys must be a list of nonempty strings; a bare string like
+        # "memory" would otherwise splinter into single-character keys.
+        raw_keys = rec.get("keys")
+        if not isinstance(raw_keys, list):
+            continue
+        keys = [k.strip() for k in raw_keys
+                if isinstance(k, str) and k.strip()]
         content = str(rec.get("content", "")).strip()
         if not keys or not content:
             continue
@@ -170,10 +199,29 @@ def main() -> None:
         for e in entries:
             print(json.dumps(e))
         return
+    if args.force and out_path.exists():
+        # --force is an escape hatch for a failed/garbled run of the open
+        # month; closed-month history stays immutable.
+        if _dt.date(year, month, 1) < _dt.date.today().replace(day=1):
+            print(f"WARNING: --force on closed month {label}; "
+                  "history should stay immutable", file=sys.stderr)
     LORE_DIR.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        for e in entries:
-            f.write(json.dumps(e, ensure_ascii=False) + "\n")
+    # Write to a temp file and replace atomically: a failed --force run
+    # must not truncate the existing history.
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=str(LORE_DIR),
+                               prefix=out_path.stem + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            for e in entries:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        os.replace(tmp, out_path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     print(f"wrote {out_path}")
 
 

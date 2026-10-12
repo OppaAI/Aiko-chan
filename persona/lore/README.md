@@ -30,8 +30,10 @@ Workflow (`scripts/write_evolution.py`, runs on Aiko's box with her LLM):
 - Backfill: `python3 scripts/write_evolution.py --month 2026-05`
 - Monthly consolidate (first days of a new month, writes the month
   before): `python3 scripts/write_evolution.py --last-month`
-- Preview without writing: add `--dry-run`. Existing month files refuse
-  to overwrite unless `--force` is given.
+- Preview without writing: add `--dry-run`. `--force` rewrites an existing
+  month file — an escape hatch for a failed or garbled run of the *current*
+  (open) month only (the script warns when used on a closed month).
+  Closed-month history is never rewritten.
 
 The script feeds the month's merged PRs and feature commits to the LLM,
 which picks the historically significant features and changes (not minor

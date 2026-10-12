@@ -1598,24 +1598,23 @@ class AikoThink:
             ],
         ) as ctx:
             embedder = getattr(getattr(memorize, "_mem", None), "_embedder", None)
-            # Batch the retrieval embeds into one HTTP POST: the memory
-            # re-embed (only when the enriched recall query differs from the
-            # route text) and the KB embed. Vectors are bit-identical to the
-            # per-leg calls — same texts, same instructs, same geometry —
-            # only the transport is batched. Either leg falls back to its own
-            # per-leg embed when the batch is unavailable or fails.
+            # Batch the retrieval embeds into one HTTP POST, but only when
+            # both legs actually need a fresh embed of the recall query
+            # (enriched follow-ups). When the route vector is reused the
+            # memory leg needs no embed at all: submit it immediately rather
+            # than blocking it behind the KB embed, and let the KB leg embed
+            # per-leg inside its future as before (its result cache is
+            # checked there before any embed it needs).
             mem_vec = query_for_call
             kb_vec = None
-            if embedder is not None:
-                pairs = []
-                if mem_vec is None:
-                    pairs.append(("memory", recall_query, _QUERY_INSTRUCT))
-                pairs.append(("knowledge", recall_query, KNOWLEDGE_QUERY_INSTRUCT))
+            if mem_vec is None and embedder is not None:
                 try:
-                    vecs = reason.cached_embed_batch(embedder, [(t, i) for _, t, i in pairs])
-                    batched = {name: vec for (name, _, _), vec in zip(pairs, vecs)}
-                    mem_vec = batched.get("memory", mem_vec)
-                    kb_vec = batched.get("knowledge")
+                    vecs = reason.cached_embed_batch(
+                        embedder,
+                        [(recall_query, _QUERY_INSTRUCT),
+                         (recall_query, KNOWLEDGE_QUERY_INSTRUCT)],
+                    )
+                    mem_vec, kb_vec = vecs
                 except Exception as e:
                     log.debug("retrieval embed batch failed, legs embed per-leg: %s", e)
             mem_future = CONTEXT_POOL.submit(memorize.search, recall_query, limit=mem_limit, query_vector=mem_vec)

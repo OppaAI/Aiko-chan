@@ -111,11 +111,11 @@ def cached_embed_batch(embedder, pairs: list[tuple[str, str]]) -> list[np.ndarra
     batched. Returns one float32 vector per pair, in order; each is a private
     copy, matching cached_embed_query's contract.
 
-    Falls back to per-pair cached_embed_query when the embedder has no batch
-    method or the batch POST fails (which also preserves embed_query's
-    400-halve-and-retry for oversized inputs).
+    Falls back to per-pair cached_embed_query when the embedder has no
+    query-semantic batch method or the batch POST fails (which also preserves
+    embed_query's 400-halve-and-retry for oversized inputs).
     """
-    from cognition.memory.vecstore import instruct_query_text
+    from cognition.memory.vecstore import HarrierEmbedder, instruct_query_text
 
     if not pairs:
         return []
@@ -131,15 +131,17 @@ def cached_embed_batch(embedder, pairs: list[tuple[str, str]]) -> list[np.ndarra
             else:
                 miss_idx.append(n)
     if miss_idx:
-        batch = None
-        for name in ("embed_batch", "embed_documents", "embed"):
-            batch = getattr(embedder, name, None)
-            if callable(batch):
-                break
-            batch = None
+        # Batch fast path only for embedders with a query-semantic batch
+        # contract: HarrierEmbedder.embed_batch feeds the same _embed_texts
+        # funnel as embed_query, so pre-prefixed batch input yields identical
+        # vectors. A foreign embed_batch/embed_documents/embed may be
+        # document-semantic — those vectors must never be cached as query
+        # vectors, so anything else falls back to per-pair cached_embed_query
+        # (the Embedder protocol's embed_query).
+        batch = embedder.embed_batch if isinstance(embedder, HarrierEmbedder) else None
         try:
             if batch is None:
-                raise AttributeError("no batch embed method")
+                raise AttributeError("no query-semantic batch method")
             prefixed = [instruct_query_text(pairs[n][0], pairs[n][1]) for n in miss_idx]
             vecs = np.asarray(batch(prefixed), dtype=np.float32)
             if len(vecs) != len(miss_idx):

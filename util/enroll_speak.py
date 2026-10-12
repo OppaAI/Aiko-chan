@@ -25,6 +25,7 @@ Re-running this script overwrites any existing enrollment.
 import argparse
 import json
 import os
+import select
 import subprocess
 import sys
 import time
@@ -75,15 +76,32 @@ def _record_seconds(seconds: float) -> np.ndarray:
     print("  recording now!          ")
 
     proc = subprocess.Popen(_PAREC_CMD, stdout=subprocess.PIPE)
+    # Bound the whole capture: the old read-until-n_bytes loop blocked
+    # forever if parec stalled with the pipe open (no data, no EOF).
+    deadline = time.monotonic() + seconds + 30.0
     try:
         raw = b""
         while len(raw) < n_bytes:
-            chunk = proc.stdout.read(n_bytes - len(raw))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                print("  (stopped: mic produced no audio in time)")
+                break
+            rlist, _, _ = select.select([proc.stdout], [], [], min(1.0, remaining))
+            if not rlist:
+                continue
+            chunk = proc.stdout.read(min(65536, n_bytes - len(raw)))
             if not chunk:
                 break
             raw += chunk
     finally:
+        # Reap the child: terminate() alone leaves a zombie if parec
+        # ignores SIGTERM.
         proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
 
     print("Done recording.")
     return np.frombuffer(raw, dtype=np.float32).copy()

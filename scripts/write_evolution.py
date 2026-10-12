@@ -32,7 +32,7 @@ LORE_DIR = REPO / "persona" / "lore"
 
 PROMPT_TEMPLATE = """You are writing Aiko's history. Below is the git history for {month_label} from the Aiko-chan repo (merged pull requests and feature commits).
 
-Write 2-5 lorebook entries capturing what was historically significant that month: features shipped, systems built, major changes. Skip minor fixes, typo corrections, doc tweaks, dependency bumps, and merge noise.
+Write 2-8 lorebook entries capturing what was historically significant that month: features shipped, systems built, major changes. Scale to the month: 2-3 for a quiet month, up to 8 for a busy one — one entry per significant feature or change. Skip minor fixes, typo corrections, doc tweaks, dependency bumps, and merge noise.
 
 Each entry is one JSON object per line with:
 - "keys": 2-6 trigger words or phrases someone would say when asking about this (e.g. "june 2026", "sqlite-vec", "memory backend")

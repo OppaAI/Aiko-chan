@@ -47,13 +47,15 @@ Aiko may sometimes refuse, delay, or bargain before using a skill for OppaAI whe
 ## Predefined Skillsets
 
 Aiko has full workflow documents under `agentic/skillsets/`. The agentic loop can retrieve the relevant skillset for a task instead of relying only on this index.
+Names marked *(workflow)* live as registered graphs (`agentic/workflows/…`), not skillset files.
 
-- **nature_photo** — process wildlife/nature/astro photo inboxes with safe scan, dry-run ingestion planning, and reports.
+- **nature_photo** *(workflow — no skillset file; photo-inbox work runs through the agentic loop, not `load_skill`)* — process wildlife/nature/astro photo inboxes with safe scan, dry-run ingestion planning, and reports.
 - **self_improve** — inspect, research, plan, and safely improve Aiko's own architecture/code with repository-reading and research tools.
 - **japanese_tutor** — Strict mode, Lingo phone app only (`sources: lingo`). Full lessons/drills with `MISTAKE:/FEEDBACK:/SUGGESTION:/REPLY_JP:/REPLY_EN:/FINISHED:` format when invoked from Lingo. Normal chat uses warm `JAPANESE_CHAT.md` teaching instead — never Strict format.
 - **coding_tutor** — teach programming languages and coding concepts through small runnable examples, exercises, debugging, and documentation-aware explanations.
-- **aurora_forecast** — monitor NOAA/SWPC Kp and aurora forecast data on a schedule, then announce or draft alerts when thresholds are met.
+- **aurora_forecast** *(workflow: `agentic/workflows/aurora_forecast/`)* — monitor NOAA/SWPC Kp and aurora forecast data on a schedule, then announce or draft alerts when thresholds are met.
 - **job_hunt** — search configured job boards for roles around Vancouver, BC by default, with tunable result count, posting age, sources, and nearby cities.
+- **schedule_compiler** — compile an owner's sentence into a mechanical check-then-act tool chain (no LLM per firing); see `skillsets/SCHEDULE_COMPILER.md`.
 
 ## Voice Output
 

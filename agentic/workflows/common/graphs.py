@@ -41,6 +41,8 @@ def _ensure_workflow_graphs_loaded() -> None:
         "agentic.workflows.common.nodes",
         "agentic.workflows.job_hunt.graph",
         "agentic.workflows.aurora_forecast.graph",
+        "agentic.workflows.owner_email.graph",
+        "agentic.workflows.codebase_refresh.graph",
     )
     for mod in modules:
         try:

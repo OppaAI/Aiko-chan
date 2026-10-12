@@ -2621,6 +2621,13 @@ class ScheduleRunner:
         for job in jobs:
             if not job.get("enabled", True):
                 continue
+            if job.get("kind") == "schedule_config":
+                # Config markers (e.g. daily_job_post_social) store editable
+                # knobs for the schedule-graph runner; they are not runnable
+                # jobs. Without this guard the marker self-heals a next_due
+                # below and fires as a duplicate agentic DueJob alongside
+                # the real graph run.
+                continue
             tz_name = bioclock.timezone_name(job.get("timezone"))
             try:
                 due = datetime.fromisoformat(job["next_due"])

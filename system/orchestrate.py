@@ -1627,8 +1627,8 @@ def run_session(ui, args) -> None:
                 ]:
                     ui.add_message('sys', line)
 
-            elif cmd.startswith('/web '):
-                query = user_input[5:].strip()
+            elif cmd == '/web' or cmd.startswith('/web '):
+                query = user_input[4:].strip() if cmd == '/web' else user_input[5:].strip()
                 if not query:
                     ui.add_message('sys', 'Usage: /web <query>')
                 else:

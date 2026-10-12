@@ -78,7 +78,13 @@ _CAPABILITY_TOOL_DOMAINS: dict[str, tuple[str, ...]] = {
     "photo": ("photo", "social"),
     "repo": ("repo", "skills", "reports"),
     "job_hunt": ("jobs", "social"),
-    "social": ("social",),
+    "social": ("social", "email"),
+    "it_ops": ("it_ops",),
+    "note_taking": ("planning", "note"),
+    "weather": (),
+    "coding": ("coding", "codebase", "repo"),
+    "everyday": ("everyday", "scheduling"),
+    "multi_agent": ("multi_agent", "research"),
 }
 
 # Per-capability system overlay injected into the agentic system prompt
@@ -91,6 +97,12 @@ _CAPABILITY_SYSTEM_OVERLAYS: dict[str, str] = {
     "repo": "Inspect repository files before proposing code or architecture changes.",
     "job_hunt": "Prefer job-hunt tools; social posting still requires approval.",
     "social": "Draft/post social content only under explicit request and approval gates.",
+    "it_ops": "Run read-only diagnostics and report findings; propose fixes but never apply them unprompted.",
+    "note_taking": "Persist notes and checklists via save_note/create_checklist; confirm the saved location.",
+    "weather": "Aurora and space-weather outlooks via the aurora_forecast playbook; report visibility plainly.",
+    "coding": "Inspect repository files before proposing changes; show diff previews before applying patches.",
+    "everyday": "Briefings, summaries, and translations; save artifacts to notes and confirm the saved location.",
+    "multi_agent": "Delegate to subagent teams for parallel investigation; combine their findings into one answer.",
 }
 
 # Per-capability turn caps. Omitted / None -> fall back to the global
@@ -102,6 +114,12 @@ _CAPABILITY_MAX_ITER: dict[str, int] = {
     "job_hunt": 6,
     "photo": 6,
     "kb_proposal": 5,
+    "it_ops": 6,
+    "note_taking": 4,
+    "weather": 4,
+    "coding": 8,
+    "everyday": 5,
+    "multi_agent": 8,
 }
 
 _CAPABILITY_RESEARCH_BUDGET: dict[str, int] = {
@@ -111,6 +129,12 @@ _CAPABILITY_RESEARCH_BUDGET: dict[str, int] = {
     "job_hunt": 1,
     "photo": 0,
     "kb_proposal": 1,
+    "it_ops": 0,
+    "note_taking": 0,
+    "weather": 1,
+    "coding": 0,
+    "everyday": 0,
+    "multi_agent": 1,
 }
 
 

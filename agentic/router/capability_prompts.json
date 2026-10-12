@@ -71,6 +71,65 @@
       "send a message via ProtonMail to a contact",
       "check my ProtonMail inbox",
       "search my email for Aiko"
+    ],
+    "it_ops": [
+      "check disk space and show the largest files",
+      "is the system healthy right now",
+      "triage these error logs and tell me what failed",
+      "is port 443 open on this host",
+      "check whether this endpoint is reachable",
+      "why is memory so high, show top processes",
+      "preview a disk cleanup, do not delete anything",
+      "run a system health check and summarize",
+      "diagnose why this service will not start",
+      "check DNS resolution for this hostname"
+    ],
+    "note_taking": [
+      "save this note for later",
+      "jot this down",
+      "take notes on this",
+      "make a checklist for the trip",
+      "create a todo list and save it",
+      "remember this note under projects",
+      "write this down and keep it",
+      "start a checklist with these items"
+    ],
+    "weather": [
+      "is the aurora visible tonight",
+      "aurora forecast for this evening",
+      "what is the kp index right now",
+      "northern lights probability tonight",
+      "any geomagnetic storm coming",
+      "will I be able to see the northern lights"
+    ],
+    "coding": [
+      "explain what this function does",
+      "find this bug and fix it",
+      "refactor this module to be cleaner",
+      "add unit tests for this file",
+      "patch this issue in the repo",
+      "review this diff for problems",
+      "search the codebase for where this is defined",
+      "implement this feature with tests",
+      "why does this code hang, debug it",
+      "run the tests for this change"
+    ],
+    "everyday": [
+      "give me my morning brief",
+      "summarize this text for me",
+      "translate this to Japanese and save it",
+      "what is on my schedule today",
+      "summarize this article in three bullets",
+      "translate this message and keep a copy",
+      "morning summary: schedule, health, weather",
+      "condense these notes"
+    ],
+    "multi_agent": [
+      "research this topic with a team of agents",
+      "get a second opinion from another agent",
+      "run parallel subagents on these questions",
+      "have a team investigate this and combine findings",
+      "delegate this research to a group of agents"
     ]
   }
 }

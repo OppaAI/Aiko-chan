@@ -572,7 +572,7 @@ def _default_playbooks() -> list[dict[str, Any]]:
                 "Break this down into steps and save it",
             ],
             "requires_any": ["save", "note", "checklist", "todo", "list"],
-            "capabilities": ["note_taking", "planning"],
+            "capabilities": ["note_taking"],
             "nodes": [
                 {"id": "checklist", "tool": "create_checklist", "args": {"title": "$title", "items": "$heuristic_items"}},
                 {"id": "save",      "tool": "save_note", "depends_on": ["checklist"],
@@ -606,7 +606,7 @@ def _default_playbooks() -> list[dict[str, Any]]:
             "name": "Sequential prompt chaining — each step builds on the previous",
             "triggers": ["step by step", "in stages", "pipeline", "chain", "sequential"],
             "requires_any": ["chain", "pipeline", "stages", "steps"],
-            "capabilities": ["reports"],
+            "capabilities": ["research"],
             "semantic_triggers": [
                 "break this into sequential steps where each builds on the previous",
                 "run a multi-stage pipeline where output of one feeds the next",
@@ -707,7 +707,7 @@ def _default_playbooks() -> list[dict[str, Any]]:
             "name": "Generate → Evaluate → Refine loop until quality threshold met",
             "triggers": ["refine", "improve", "iterate", "polish", "quality", "perfect", "best version"],
             "requires_any": ["refine", "improve", "iterate", "polish", "quality", "best"],
-            "capabilities": ["reports"],
+            "capabilities": ["research"],
             "semantic_triggers": [
                 "generate a draft, evaluate it, and keep refining until it is excellent",
                 "iterate on this until the quality is as high as possible",
@@ -735,7 +735,7 @@ def _default_playbooks() -> list[dict[str, Any]]:
             "name": "Self-reflection loop — generate, self-critique, revise",
             "triggers": ["reflect", "self-critique", "critique yourself", "review your work", "check your own"],
             "requires_any": ["reflect", "critique", "review", "self"],
-            "capabilities": ["reports"],
+            "capabilities": ["research"],
             "semantic_triggers": [
                 "generate an answer then reflect on its weaknesses and improve it",
                 "self-critique your response and fix any issues you find",
@@ -788,7 +788,7 @@ def _default_playbooks() -> list[dict[str, Any]]:
             "name": "Multi-role collaboration — researcher, analyst, writer, reviewer",
             "triggers": ["collaborate", "team", "multi-agent", "roles", "researcher and writer", "analyst and reviewer"],
             "requires_any": ["collaborate", "team", "roles", "multi-agent"],
-            "capabilities": ["research", "reports"],
+            "capabilities": ["research"],
             "semantic_triggers": [
                 "have multiple agents with different roles work together on this",
                 "simulate a team: researcher, analyst, writer, reviewer",
@@ -1008,7 +1008,7 @@ def _default_playbooks() -> list[dict[str, Any]]:
                 "walk me through this code",
             ],
             "requires_any": ["explain", "how does", "where is", "what does", "code"],
-            "capabilities": ["coding", "codebase", "repo"],
+            "capabilities": ["coding", "repo"],
             "nodes": [
                 {"id": "search", "tool": "codebase_search", "args": {"query": "$prompt", "limit": 5}},
                 {"id": "tree", "tool": "repo_file_tree", "depends_on": ["search"], "args": {"prefix": "", "limit": 30}},

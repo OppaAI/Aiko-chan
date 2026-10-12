@@ -50,6 +50,7 @@ dependencies = [
     "python-shogi>=1.1.1",
     "onnxruntime-gpu>=1.30.0",
     "h11>=0.16.0",
+    "crawl4ai>=0.9.4",
 ]
 
 [project.optional-dependencies]

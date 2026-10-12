@@ -11,6 +11,7 @@ import base64
 import os
 import re
 import textwrap
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -28,11 +29,16 @@ log = get_logger(__name__)
 LLM_MODEL    = os.getenv("LLM_MODEL", "ministral")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:8080/v1")
 _LLM_CLIENT: OpenAI | None = None
+_LLM_CLIENT_LOCK = threading.Lock()
 
 def _get_llm_client() -> OpenAI:
     global _LLM_CLIENT
+    # Double-checked locking: concurrent first calls (schedule + chat
+    # threads) would otherwise each build an OpenAI client + httpx pool.
     if _LLM_CLIENT is None:
-        _LLM_CLIENT = OpenAI(base_url=LLM_BASE_URL, api_key=os.getenv("LLM_API_KEY", "") or "not-needed")
+        with _LLM_CLIENT_LOCK:
+            if _LLM_CLIENT is None:
+                _LLM_CLIENT = OpenAI(base_url=LLM_BASE_URL, api_key=os.getenv("LLM_API_KEY", "") or "not-needed")
     return _LLM_CLIENT
 
 GITHUB_TOKEN      = os.getenv("GITHUB_TOKEN", "")

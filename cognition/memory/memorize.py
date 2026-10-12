@@ -3037,6 +3037,14 @@ class AikoMemorize:
                     self._conn.close()
                 except Exception:
                     pass
+        # Episodic stores were previously leaked here (only switch_user and
+        # LRU eviction closed them): flush + close so no buffered episode
+        # write survives its owner on shutdown.
+        try:
+            if self.episodic is not None:
+                self.episodic.close_all()
+        except Exception as e:
+            log.debug("AikoMemorize.close(): episodic close: %s", e)
 
     # ── read ──────────────────────────────────────────────────────────────────
 

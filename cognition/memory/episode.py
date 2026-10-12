@@ -29,6 +29,7 @@ Public surface:
 from __future__ import annotations
 
 import json
+import math
 import os
 import queue
 import re
@@ -129,7 +130,7 @@ EMC_STAGING_MAX = max(10, env_int("EMC_STAGING_MAX", 200))
 # EMC-2: eviction / buffer drain
 EMC_EVICT_ENABLED = env_bool("EMC_EVICT_ENABLED", "1")
 EMC_EVICT_MIN_CHARS = max(1, env_int("EMC_EVICT_MIN_CHARS", 40))
-EMC_FLUSH_EVERY_TURNS = max(0, env_int("EMC_FLUSH_EVERY_TURNS", 8))
+EMC_FLUSH_EVERY_TURNS = max(0, env_int("EMC_FLUSH_EVERY_TURNS", 4))
 MEMORY_WM_CAPACITY = max(1, env_int("MEMORY_WM_CAPACITY", "7"))
 EMC_FLUSH_ON_STAGING = max(1, env_int("EMC_FLUSH_ON_STAGING", 24))
 
@@ -750,6 +751,11 @@ class EpisodicStore:
         # to evict the oldest rows and make room for new information.
         if staging > MEMORY_WM_CAPACITY:
             should = True
+        # Hard cap: staging must never grow without bound even if every
+        # softer trigger is disabled or misconfigured.
+        if staging >= EMC_STAGING_MAX:
+            log.warning("EMC staging hit hard cap (%d rows) — forcing flush.", staging)
+            should = True
         if not should:
             return 0
         n = self.flush_staging()
@@ -1079,6 +1085,10 @@ class EpisodicStore:
         q = (query or "").strip()
         if not q:
             return []
+        # Skip embedding + search for trivial inputs (greetings, acks),
+        # mirroring the semantic path — a "hi" has no episodic content.
+        if _is_trivial_input(q):
+            return []
 
         # ── recall result cache ───────────────────────────────────────────────
         # Short-TTL per (user, query, limit) cache so every non-greeting turn
@@ -1099,6 +1109,7 @@ class EpisodicStore:
                 self._recall_cache.pop(cache_key, None)
 
         vector = None
+        embed_err: Exception | None = None
         try:
             if query_vector is not None:
                 vector = list(query_vector)
@@ -1112,6 +1123,7 @@ class EpisodicStore:
                 else:
                     vector = list(emb.embed([q]))[0]
         except Exception as e:
+            embed_err = e
             log.debug("EMC search embed failed: %s", e)
 
         fts_query = _sanitize_fts_query(q)
@@ -1119,6 +1131,8 @@ class EpisodicStore:
         with self._lock:
             rank_knn: dict[int, int] = {}
             rank_fts: dict[int, int] = {}
+            knn_err: Exception | None = None
+            fts_err: Exception | None = None
             if vector is not None:
                 try:
                     vec_blob = sqlite_vec.serialize_float32(vector)
@@ -1139,6 +1153,7 @@ class EpisodicStore:
                     ).fetchall()
                     rank_knn = {int(r[0]): i + 1 for i, r in enumerate(knn_rows)}
                 except Exception as e:
+                    knn_err = e
                     log.debug("EMC KNN failed: %s", e)
 
             if fts_query:
@@ -1158,10 +1173,18 @@ class EpisodicStore:
                     ).fetchall()
                     rank_fts = {int(r[0]): i + 1 for i, r in enumerate(fts_rows)}
                 except Exception as e:
+                    fts_err = e
                     log.debug("EMC FTS failed: %s", e)
 
             candidate_ids = set(rank_knn) | set(rank_fts)
             if not candidate_ids:
+                # Audible outage only: clean no-match stays debug-quiet, but
+                # if any backend errored the empty result is a failure, not
+                # an absence — page it so a dead embedder/DB can't hide
+                # behind "no relevant memories" for weeks.
+                if embed_err is not None or knn_err is not None or fts_err is not None:
+                    log.warning("EMC search degraded (embed=%s knn=%s fts=%s) for query %.60s",
+                                embed_err, knn_err, fts_err, q)
                 return []
 
             scores: dict[int, float] = {}
@@ -1189,6 +1212,28 @@ class EpisodicStore:
             ).fetchall()
             by_id = {int(r[0]): r for r in rows}
 
+            # Forgetting curve: fade scores by age unless refreshed by
+            # recall; salience slows the fade. Re-sort on decayed scores
+            # so ancient unrecalled rows yield to fresher ones. Pure
+            # ranking effect — rows are never deleted by this.
+            decayed = {}
+            for eid in ordered:
+                row = by_id.get(eid)
+                if row is None:
+                    continue
+                try:
+                    salience = float(row[6] or 0.0)
+                except (TypeError, ValueError, IndexError):
+                    salience = 0.0
+                try:
+                    recalls = int(row[10] or 0)
+                except (TypeError, ValueError, IndexError):
+                    recalls = 0
+                f = decay_factor(row[1], recalls, salience)
+                decayed[eid] = f
+                scores[eid] = scores.get(eid, 0.0) * f
+            ordered = sorted(ordered, key=lambda i: scores.get(i, 0.0), reverse=True)
+
             results: list[dict] = []
             for eid in ordered:
                 row = by_id.get(eid)
@@ -1215,6 +1260,7 @@ class EpisodicStore:
                     "recall_count": int(row[10] or 0),
                     "cognitive_state": json.loads(row[11]) if row[11] else None,
                     "_recall_score": scores.get(eid, 0.0),
+                    "_decay_factor": decayed.get(eid, 1.0),
                     "_emc": True,
                 })
 

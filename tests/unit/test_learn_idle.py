@@ -96,3 +96,43 @@ def test_curriculum_topic_ingests_to_knowledge_db(user_dir):
     # curriculum progress recorded
     data = json.loads((user_dir / "idle_learner_curriculum.json").read_text())
     assert "landscape photography" in data["completed"]
+
+
+def test_playground_goal_topic_pick(tmp_path, monkeypatch):
+    from cognition.memory import learn as lm
+    pg = tmp_path / "pg"
+    (pg / "goals").mkdir(parents=True)
+    (pg / "GOALS.md").write_text(
+        "# Goals\n\n| # | Goal | Status |\n"
+        "| 01 | [Morning voice briefing](goals/01-morning-briefing.md) | todo |\n"
+        "| 02 | [Done thing](goals/02-done.md) | done |\n",
+        encoding="utf-8")
+    (pg / "goals" / "01-morning-briefing.md").write_text(
+        "# Goal 01\n\n## Background\n\nSpoken day-ahead summary for Oppa.\n\n## Task\n\nDo it.\n",
+        encoding="utf-8")
+    monkeypatch.setenv("AIKO_PLAYGROUND_DIR", str(pg))
+    title, bg = lm._active_playground_goal()
+    assert title == "Morning voice briefing"
+    assert "Spoken day-ahead" in bg
+
+
+def test_playground_goal_none_when_empty(tmp_path, monkeypatch):
+    from cognition.memory import learn as lm
+    pg = tmp_path / "pg"
+    pg.mkdir()
+    (pg / "GOALS.md").write_text("# Goals\n\n| # | Goal | Status |\n", encoding="utf-8")
+    monkeypatch.setenv("AIKO_PLAYGROUND_DIR", str(pg))
+    assert lm._active_playground_goal() is None
+
+
+def test_stop_grace_ignores_fresh_session():
+    from cognition.memory import learn as lm
+    import threading, time
+    m = lm._DeepStudySessionManager()
+    m._stop_event = threading.Event()
+    m._started_at = time.monotonic()
+    m.stop()
+    assert not m._stop_event.is_set(), "fresh session must survive stray stop"
+    m._started_at = time.monotonic() - 3600
+    m.stop()
+    assert m._stop_event.is_set(), "old session must honor stop"

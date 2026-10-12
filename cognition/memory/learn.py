@@ -910,19 +910,60 @@ def deep_studying(
 # *_stop handler signals it to wind down rather than killing the thread,
 # so whatever's been gathered so far still gets distilled and persisted.
 
-def _pick_window_topic(memorize) -> str | None:
-    """Very simple default topic picker for scheduled deep-study windows.
+def _active_playground_goal() -> tuple[str, str] | None:
+    """Top active Playground goal as (title, background-snippet).
 
-    ADAPT THIS: this module deliberately doesn't know GRACE/Aiko's actual
-    curiosity/topic-selection policy, so it just checks for an optional
-    `pending_deep_study_topic` attribute on the memory store (a place your
-    own code — e.g. reflection, or a `/deep-study <topic>` command — could
-    stash a topic ahead of time). If not set, falls back to the
-    `DEEP_STUDY_TOPIC` environment variable. Replace with real topic-selection
-    logic (e.g. pull the least-covered item from GRACE's knowledge graph, or
-    the top item in a backlog) whenever that's ready.
+    Lets scheduled deep-study fit what she's actually building: the goal
+    file's Background section becomes the study topic. Returns None when
+    no active goal parses (empty table, missing files) so callers fall
+    through to the next topic source. Never raises.
     """
-    return getattr(memorize, "pending_deep_study_topic", None) or os.getenv("DEEP_STUDY_TOPIC", "").strip() or None
+    import re as _re
+    try:
+        from system.playground import playground_dir
+        root = playground_dir()
+        table = (root / "GOALS.md").read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    for line in table.splitlines():
+        m = _re.match(r"\|\s*\S+\s*\|\s*\[(.+?)\]\((goals/[^)]+)\)\s*\|\s*(todo|in_progress)\s*\|", line)
+        if not m:
+            continue
+        title, rel = m.group(1).strip(), m.group(2).strip()
+        try:
+            body = (root / rel).read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        bg = ""
+        parts = _re.split(r"^## Background\s*$", body, maxsplit=1, flags=_re.MULTILINE)
+        if len(parts) == 2:
+            bg = " ".join(parts[1].split("**Task**")[0].split())[:200]
+        if title:
+            return title, bg
+    return None
+
+
+def _pick_window_topic(memorize) -> str | None:
+    """Topic picker for scheduled deep-study windows.
+
+    Order: explicit attr (reflection/commands) → env → active Playground
+    goal (so study fits what she's building) → None (caller skips).
+    The Playground step is what makes topics self-chosen instead of
+    hand-fed: whatever she has active becomes what she studies.
+    """
+    explicit = getattr(memorize, "pending_deep_study_topic", None) or os.getenv("DEEP_STUDY_TOPIC", "").strip()
+    if explicit:
+        return explicit
+    try:
+        goal = _active_playground_goal()
+        if goal is not None:
+            title, bg = goal
+            topic = f"{title}: {bg}" if bg else title
+            log.info("[deep_study_window] topic from active Playground goal: %r", topic[:120])
+            return topic
+    except Exception as exc:
+        log.debug("[deep_study_window] playground-goal topic skipped: %s", exc)
+    return None
 
 
 class _DeepStudySessionManager:
@@ -937,6 +978,7 @@ class _DeepStudySessionManager:
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop_event: threading.Event | None = None
+        self._started_at: float = 0.0
 
     def start(self, memorize, client=None, model=None, topic: str | None = None, user_id: str | None = None) -> None:
         """Start a deep study session on a topic in a background thread."""
@@ -980,13 +1022,27 @@ class _DeepStudySessionManager:
         thread = threading.Thread(target=_run, name="aiko-deep-study-window", daemon=True)
         with self._lock:
             self._thread = thread
+            import time as _time
+            self._started_at = _time.monotonic()
         thread.start()
+
+    # Stray stop fires (duplicate records, catch-up bursts after a restart)
+    # used to kill sessions seconds old with 0 iterations. A real window-edge
+    # stop arrives hours after start; anything inside the grace window is
+    # assumed stray and ignored loudly.
+    _MIN_SESSION_S = 600.0
 
     def stop(self, memorize=None) -> None:
         """Signal the active deep study session to stop gracefully."""
         with self._lock:
             stop_event = self._stop_event
+            import time as _time
+            age = _time.monotonic() - (self._started_at or 0.0)
         if stop_event is not None:
+            if age < self._MIN_SESSION_S:
+                log.warning("[deep_study_window] stray stop ignored (session %.0fs old, grace %.0fs).",
+                            age, self._MIN_SESSION_S)
+                return
             log.info("[deep_study_window] stop requested — signaling session to wind down.")
             stop_event.set()
         # Deliberately no join() here — this runs on the scheduler thread,

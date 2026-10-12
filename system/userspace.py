@@ -337,3 +337,67 @@ def user_profile_path(user_id: str | None = None) -> Path:
     if os.getenv("USER_PROFILE_PATH"):
         return Path(os.environ["USER_PROFILE_PATH"]).expanduser().resolve()
     return user_state_path("profile/USER.md", user_id).resolve()
+
+
+def display_name_path(user_id: str | None = None) -> Path:
+    """Canonical display-name file for a user.
+
+    ONE file per user, shared by every interface (CLI, WebUI, ...):
+    <user_state>/<uid>/display_name.txt. It stores the user's preferred
+    name ("Oppa") — the answer to the CLI's "What's your name?" prompt.
+    This is a *preference*, not login: login (OAuth) establishes identity,
+    this file records what Aiko should call them.
+    """
+    return user_state_dir(user_id) / "display_name.txt"
+
+
+def _legacy_display_name_paths(user_id: str | None = None) -> list[Path]:
+    """Pre-unification locations (cli_name.txt era); migration sources only."""
+    paths: list[Path] = []
+    try:
+        if user_id is not None:
+            paths.append(user_state_dir(user_id) / "cli_name.txt")
+        paths.append(user_state_dir() / "cli_name.txt")
+    except Exception:
+        pass
+    paths.append(Path.home() / ".aiko_cli_name.txt")
+    seen: set[Path] = set()
+    return [p for p in paths if not (p in seen or seen.add(p))]
+
+
+def read_stored_display_name(user_id: str | None = None) -> str:
+    """Preferred display name for a user, else ''.
+
+    Reads the single canonical file; on a miss, checks legacy locations
+    once and migrates the value forward so everything converges on the
+    one file.
+    """
+    try:
+        p = display_name_path(user_id)
+        if p.exists():
+            stored = p.read_text(encoding="utf-8").strip()
+            if stored:
+                return stored
+    except Exception:
+        pass
+    for lp in _legacy_display_name_paths(user_id):
+        try:
+            if lp.exists():
+                stored = lp.read_text(encoding="utf-8").strip()
+                if stored:
+                    try:
+                        write_stored_display_name(stored, user_id)
+                    except Exception:
+                        pass
+                    return stored
+        except Exception:
+            continue
+    return ""
+
+
+def write_stored_display_name(name: str, user_id: str | None = None) -> Path:
+    """Store a user's preferred display name in the canonical file."""
+    p = display_name_path(user_id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(name.strip(), encoding="utf-8")
+    return p

@@ -228,8 +228,11 @@ def main() -> None:
     if not history:
         raise SystemExit(f"no git history found for {label}")
     month_name = _dt.date(year, month, 1).strftime("%B %Y")
-    prompt = PROMPT_TEMPLATE.format(
-        month_label=month_name, history="\n".join(history))
+    # Plain replace, not str.format: the template contains literal JSON
+    # braces (and history lines may too), which format() would misparse.
+    prompt = (PROMPT_TEMPLATE
+              .replace("{month_label}", month_name)
+              .replace("{history}", "\n".join(history)))
     print(f"gathered {len(history)} history lines for {month_name}; asking LLM…",
           file=sys.stderr)
     entries = parse_entries(call_llm(prompt), month_name.lower())

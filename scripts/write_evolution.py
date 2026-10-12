@@ -42,7 +42,7 @@ Each entry is one JSON object per line with:
 Rules:
 - Brief and factual. No speculation beyond what the history shows.
 - At least one entry must carry the month name as a key (e.g. "june 2026") so "what happened in June?" finds it.
-- Output ONLY the JSON lines, no markdown fences, no commentary.
+- Output ONLY the JSON — either one object per line, or a JSON array of objects. No markdown fences, no commentary.
 
 Example of one entry (exactly this shape, double quotes, one per line):
 {"keys": ["june 2026", "sqlite-vec"], "content": "June 4, 2026: the memory backend moved from Qdrant to a custom sqlite-vec.", "enabled": true}
@@ -130,15 +130,51 @@ def call_llm(prompt: str) -> str:
     return resp.choices[0].message.content or ""
 
 
-def _parse_line(line: str):
+def _extract_objects(text: str) -> list[str]:
+    """Extract balanced {...} blocks, tolerating pretty-printed JSON.
+
+    A small model may put each field on its own line instead of one
+    object per line; line-based splitting then sees lone "{" lines.
+    Brace matching recovers each object regardless of layout.
+    """
+    objs: list[str] = []
+    depth = 0
+    start = None
+    in_str = False
+    esc = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    objs.append(text[start:i + 1])
+                    start = None
+    return objs
+
+
+def _parse_block(block: str):
     """Parse one candidate entry, tolerating small-model output quirks."""
     try:
-        return json.loads(line)
+        return json.loads(block)
     except json.JSONDecodeError:
         pass
     try:
         # Single-quoted dicts, True/False/None literals.
-        rec = ast.literal_eval(line)
+        rec = ast.literal_eval(block)
         return rec if isinstance(rec, dict) else None
     except (ValueError, SyntaxError, MemoryError, RecursionError):
         return None
@@ -159,13 +195,10 @@ def parse_entries(text: str, month_key: str) -> list[dict]:
         except json.JSONDecodeError:
             pass
     if not recs:
-        for line in s.splitlines():
-            line = line.strip().rstrip(",")
-            if not line.startswith("{"):
-                continue
-            rec = _parse_line(line)
+        for block in _extract_objects(s):
+            rec = _parse_block(block)
             if rec is None:
-                print(f"warning: skipping unparseable entry: {line[:100]}",
+                print(f"warning: skipping unparseable entry: {block[:100]}",
                       file=sys.stderr)
                 continue
             recs.append(rec)

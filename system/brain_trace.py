@@ -316,7 +316,8 @@ def _emit_banner(text: str, color: str = "") -> None:
         try:
             _ui_sink.add_message("sys", _c(color, text) if color else text)
         except Exception:
-            pass
+            # Was a bare `except: pass` — a broken UI sink went unnoticed.
+            _log.debug("brain_trace UI sink failed", exc_info=True)
     _log.info(_strip_ansi(text))
 
 

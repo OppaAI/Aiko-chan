@@ -17,6 +17,10 @@ from __future__ import annotations
 
 import os
 
+from system.log import get_logger
+
+log = get_logger(__name__)
+
 # Common OS trust-store locations (root filesystem, independent of any venv).
 _SYSTEM_BUNDLES = (
     "/etc/ssl/certs/ca-certificates.crt",  # Debian/Ubuntu
@@ -58,7 +62,9 @@ def resolve_ca_bundle(exclude: tuple[str, ...] | list[str] = ()) -> str | None:
 
         candidates.append(certifi.where())
     except Exception:
-        pass
+        # Was a bare `except: pass` — certifi being missing/broken (and the
+        # silent fall back to system bundles) went unnoticed.
+        log.debug("certifi bundle unavailable, using system bundles", exc_info=True)
     candidates.extend(_SYSTEM_BUNDLES)
     for candidate in candidates:
         if not candidate or candidate in excluded:

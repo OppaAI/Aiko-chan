@@ -430,3 +430,6 @@ MEMORY_CROSS_STORE_ENABLED: "1"      # Cross-store knowledge/experience attachme
 MEMORY_STATE_TAGS_ENABLED: "1"       # Local-hour state tags on every write (extra column)
 MEMORY_NEG_RECALL_AVOID: "1"         # Negative memory avoidance filter (extra scoring)
 MEMORY_RECALL_CONTEXT_MATCH_ENABLED: "0"  # Query valence/arousal matching (extra inference)
+
+# Fly catalog path (single source of truth; .env removed)
+AIKO_FLY_CATALOG_PATH: "/home/oppa-ai/Aiko-chan/data/fly_catalog/male-cns-v1.0-w5.json"

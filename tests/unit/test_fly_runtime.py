@@ -156,3 +156,39 @@ def test_service_is_off_without_an_operator_configured_catalog(monkeypatch):
     monkeypatch.delenv("AIKO_FLY_CATALOG_PATH", raising=False)
     monkeypatch.setenv("AIKO_FLY_RUNTIME_MODE", "live")
     assert service.observe("service-user", SensoryObservation("visual", 1.0), seed_types=("visual",)) is None
+
+
+def test_configured_catalog_explicit_path_never_touches_environ(tmp_path, monkeypatch):
+    """BUG-5: an explicit path is honored without reading or writing
+    AIKO_FLY_CATALOG_PATH."""
+    import os
+
+    monkeypatch.delenv("AIKO_FLY_CATALOG_PATH", raising=False)
+    monkeypatch.setattr(service, "_catalog", None)
+    monkeypatch.setattr(service, "_catalog_path", None)
+    seen = {}
+
+    class FakeCatalog:
+        pass
+
+    def fake_from_path(path):
+        seen["path"] = str(path)
+        return FakeCatalog()
+
+    monkeypatch.setattr(service.ConnectomeCatalog, "from_path", fake_from_path)
+    p = tmp_path / "cat.json"
+    p.write_text("{}")
+    before = dict(os.environ)
+    out = service._configured_catalog(path=str(p))
+    assert isinstance(out, FakeCatalog)
+    assert seen["path"] == str(p.resolve())
+    assert dict(os.environ) == before
+    assert "AIKO_FLY_CATALOG_PATH" not in os.environ
+
+
+def test_configured_catalog_no_path_no_env_returns_none(monkeypatch):
+    """Unchanged behavior: no explicit path and no env var -> None."""
+    monkeypatch.delenv("AIKO_FLY_CATALOG_PATH", raising=False)
+    monkeypatch.setattr(service, "_catalog", None)
+    monkeypatch.setattr(service, "_catalog_path", None)
+    assert service._configured_catalog() is None

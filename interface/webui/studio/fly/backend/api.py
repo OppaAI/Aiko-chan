@@ -112,9 +112,15 @@ def _load_catalog() -> tuple[list[dict], dict]:
         from cognition.fly_runtime.layout import compute_layout, group_color
 
         if not os.getenv("AIKO_FLY_CATALOG_PATH"):
+            # Bundled fallback for display purposes only. Never write
+            # os.environ here: it is process-global and thread-unsafe, and
+            # would permanently change catalog resolution for every other
+            # caller (wakeup warmup thread, observe(), ...). The env var
+            # remains a read-only override; the default travels explicitly.
             default_path = Path(__file__).resolve().parents[5] / "data" / "fly_catalog" / "male-cns-v1.0-w5.json"
-            os.environ["AIKO_FLY_CATALOG_PATH"] = str(default_path)
-        catalog = _configured_catalog()
+            catalog = _configured_catalog(path=str(default_path))
+        else:
+            catalog = _configured_catalog()
         if catalog is None:
             raise RuntimeError("Fly catalog is not configured")
 

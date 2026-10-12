@@ -1099,6 +1099,11 @@ class AikoSpeak:
         return False
 
     def stop(self) -> None:
+        # Signal synchronously; heavy teardown joins in the background.
+        # A barge-in must never block the new turn on audio teardown
+        # (the join + playing-flag drain below cost up to ~4s serially).
+        # The audible halt (sd.stop) stays on the calling thread so the
+        # user hears the old audio stop immediately.
         self._stop_flag.set()
         with self._lock:
             self._streaming_active = False
@@ -1106,6 +1111,8 @@ class AikoSpeak:
             self._stream_on_word = None
             stream_queue = self._stream_queue
             self._stream_queue = None
+            stream_thread = self._stream_thread
+            self._stream_thread = None
         if stream_queue is not None:
             stream_queue.put(None)
 
@@ -1120,14 +1127,32 @@ class AikoSpeak:
             except Exception:
                 log.warning("speak: sd.stop() failed in stop_stream")
 
-        if self._stream_thread is not None:
-            if self._stream_thread.is_alive():
-                self._stream_thread.join(timeout=2.0)
-            self._stream_thread = None
+        # Join the dead stream thread and drain a stale playing flag in the
+        # background. The thread object is captured here so a concurrent
+        # start_speech_stream (which installs a new thread) can't confuse
+        # the joiner, and a second stop() finds _stream_thread None —
+        # idempotent, no duplicate joiners.
+        if (stream_thread is not None and stream_thread.is_alive()) or self.is_playing():
+            threading.Thread(
+                target=self._stop_join_bg,
+                args=(stream_thread,),
+                name="aiko-speak-stop-join",
+                daemon=True,
+            ).start()
 
-        deadline = time.monotonic() + 2.0
-        while self.is_playing() and time.monotonic() < deadline:
-            time.sleep(0.02)
+    def _stop_join_bg(self, stream_thread) -> None:
+        """Background half of stop(): join the dead stream thread, then
+        drain a stale playing flag. Bounded exactly like the old serial
+        path (2s + 2s); a wedged backend can't trap anything — this thread
+        just exits."""
+        try:
+            if stream_thread is not None and stream_thread.is_alive():
+                stream_thread.join(timeout=2.0)
+            deadline = time.monotonic() + 2.0
+            while self.is_playing() and time.monotonic() < deadline:
+                time.sleep(0.02)
+        except Exception:
+            pass
 
 
 # ── list audio devices ────────────────────────────────────────────────────────

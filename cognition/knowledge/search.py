@@ -113,6 +113,7 @@ class KnowledgeSearch:
         max_chars: int | None = None,
         embedder: Embedder | None = None,
         user_id: str | None = None,
+        query_vector=None,
     ) -> str:
         return knowledge_context_for(
             query,
@@ -120,15 +121,18 @@ class KnowledgeSearch:
             max_chars=max_chars,
             embedder=embedder if embedder is not None else self.embedder,
             user_id=user_id,
+            query_vector=query_vector,
         )
 
 
-def _knn(conn: sqlite3.Connection, query: str, embedder: Embedder | None, uid: str, limit: int) -> list[sqlite3.Row]:
+def _knn(conn: sqlite3.Connection, query: str, embedder: Embedder | None, uid: str, limit: int,
+        query_vector=None) -> list[sqlite3.Row]:
     if embedder is None or not (query or "").strip():
         return []
     # Phase 2: shared module cache — identical (text, instruct) pairs embed
-    # once per process instead of once per call site.
-    vector = reason.cached_embed_query(embedder, query, instruct=KNOWLEDGE_QUERY_INSTRUCT)
+    # once per process instead of once per call site. A precomputed
+    # query_vector (same text + KNOWLEDGE_QUERY_INSTRUCT) skips the embed.
+    vector = query_vector if query_vector is not None else reason.cached_embed_query(embedder, query, instruct=KNOWLEDGE_QUERY_INSTRUCT)
     return user_scoped_vec_knn(
         conn,
         vec_table="learned_chunks_vec",
@@ -204,13 +208,14 @@ def search_knowledge(
     *,
     embedder: Embedder | None = None,
     user_id: str | None = None,
+    query_vector=None,
 ) -> list[dict]:
     """Canonical implementation that :class:`KnowledgeSearch`
     delegates to (not a shim — this is the live code path). Kept for the historical import path."""
     uid = user_id or current_user_id()
     conn = connect(uid)
     try:
-        rank_knn = rank_by_id(_knn(conn, query, embedder, uid, KNOWLEDGE_KNN_LIMIT))
+        rank_knn = rank_by_id(_knn(conn, query, embedder, uid, KNOWLEDGE_KNN_LIMIT, query_vector=query_vector))
         rank_fts = rank_by_id(_fts(conn, query, uid, KNOWLEDGE_FTS_LIMIT))
         ids = set(rank_knn) | set(rank_fts)
         if not ids:
@@ -328,6 +333,7 @@ def knowledge_context_for(
     max_chars: int | None = None,
     embedder: Embedder | None = None,
     user_id: str | None = None,
+    query_vector=None,
 ) -> str:
     """Canonical implementation that
     :class:`KnowledgeSearch.context_for` delegates to (not a shim — this is the live code path). Kept for the historical
@@ -341,6 +347,8 @@ def knowledge_context_for(
         max_chars: Max total characters in returned context (default: KNOWLEDGE_CONTEXT_CHARS)
         embedder: Optional embedder for vector search
         user_id: Optional user ID (defaults to current_user_id)
+        query_vector: Optional precomputed embedding of (query, KNOWLEDGE_QUERY_INSTRUCT);
+            skips the embed call when the caller already batched it.
     """
     uid = user_id or current_user_id()
     remaining = KNOWLEDGE_CONTEXT_CHARS if max_chars is None else max_chars
@@ -354,7 +362,7 @@ def knowledge_context_for(
         # write. Counts were bumped on the uncached search.
         return _format_knowledge_context(cached, remaining)
 
-    hits = search_knowledge(query, limit=limit, embedder=embedder, user_id=uid)
+    hits = search_knowledge(query, limit=limit, embedder=embedder, user_id=uid, query_vector=query_vector)
     if hits:
         _search_cache_set(query, uid, limit, embedder_id, hits)
 

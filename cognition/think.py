@@ -72,6 +72,7 @@ from agentic.tools    import web_search_context
 from agentic.agentic  import run_agentic_chat
 from agentic.wiki import wiki_knowledge_context_for
 from cognition.knowledge import knowledge_context_for
+from cognition.knowledge.schema import KNOWLEDGE_QUERY_INSTRUCT
 from cognition import CONTEXT_POOL
 from cognition.recall_budget import fit_block as _fit_recall_block
 from system.log      import get_logger
@@ -1597,9 +1598,30 @@ class AikoThink:
             ],
         ) as ctx:
             embedder = getattr(getattr(memorize, "_mem", None), "_embedder", None)
-            mem_future = CONTEXT_POOL.submit(memorize.search, recall_query, limit=mem_limit, query_vector=query_for_call)
+            # Batch the retrieval embeds into one HTTP POST: the memory
+            # re-embed (only when the enriched recall query differs from the
+            # route text) and the KB embed. Vectors are bit-identical to the
+            # per-leg calls — same texts, same instructs, same geometry —
+            # only the transport is batched. Either leg falls back to its own
+            # per-leg embed when the batch is unavailable or fails.
+            mem_vec = query_for_call
+            kb_vec = None
+            if embedder is not None:
+                pairs = []
+                if mem_vec is None:
+                    pairs.append(("memory", recall_query, _QUERY_INSTRUCT))
+                pairs.append(("knowledge", recall_query, KNOWLEDGE_QUERY_INSTRUCT))
+                try:
+                    vecs = reason.cached_embed_batch(embedder, [(t, i) for _, t, i in pairs])
+                    batched = {name: vec for (name, _, _), vec in zip(pairs, vecs)}
+                    mem_vec = batched.get("memory", mem_vec)
+                    kb_vec = batched.get("knowledge")
+                except Exception as e:
+                    log.debug("retrieval embed batch failed, legs embed per-leg: %s", e)
+            mem_future = CONTEXT_POOL.submit(memorize.search, recall_query, limit=mem_limit, query_vector=mem_vec)
             know_future = CONTEXT_POOL.submit(
-                knowledge_context_for, recall_query, limit=know_limit, max_chars=2000, embedder=embedder
+                knowledge_context_for, recall_query, limit=know_limit, max_chars=2000, embedder=embedder,
+                query_vector=kb_vec,
             )
             try:
                 memories = mem_future.result(timeout=MEMORY_RECALL_TIMEOUT)

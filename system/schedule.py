@@ -1860,6 +1860,58 @@ def _next_ledger_prune() -> datetime:
     return bioclock.local_now() + timedelta(days=LEDGER_PRUNE_INTERVAL_DAYS)
 
 
+def _next_monthly_verify() -> datetime:
+    """Next Sunday 09:00 local — the weekly self-check that last month's
+    consolidation actually ran. Oppa's machine is reliably on Sundays."""
+    now = bioclock.local_now()
+    days_ahead = (6 - now.weekday()) % 7
+    nxt = (now + timedelta(days=days_ahead)).replace(hour=9, minute=0, second=0, microsecond=0)
+    if nxt <= now:
+        nxt += timedelta(days=7)
+    return nxt
+
+
+def _verify_monthly_consolidated(user_id: str | None = None) -> bool:
+    """Confirm last month consolidated; warn loudly if not.
+
+    Marker file per verified month so the first confirming Sunday stands
+    down the rest until next month. Never runs consolidation itself —
+    a missing month is an owner decision, not an automatic backfill.
+    Returns True when verified (or already verified), False when missing.
+    """
+    now = bioclock.local_now()
+    prev_month = (now.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+    try:
+        state_path = _monthly_state_path(user_id=user_id)
+    except Exception:
+        state_path = None
+    marker = None
+    if state_path is not None:
+        try:
+            marker = state_path.parent / f".monthly_verify_{prev_month}"
+            if marker.exists():
+                log.debug("monthly-verify: %s already confirmed.", prev_month)
+                return True
+        except Exception:
+            marker = None
+    try:
+        done = _read_last_consolidated_month(user_id=user_id)
+    except Exception as exc:
+        log.warning("monthly-verify: cannot read consolidation state: %s", exc)
+        return False
+    if done == prev_month:
+        log.info("monthly-verify: %s consolidated OK.", prev_month)
+        if marker is not None:
+            try:
+                marker.write_text("verified\n", encoding="utf-8")
+            except Exception as exc:
+                log.debug("monthly-verify: marker write failed: %s", exc)
+        return True
+    log.warning("monthly-verify: %s NOT consolidated (last: %s) — needs attention.",
+                prev_month, done)
+    return False
+
+
 def _fly_replay_time() -> tuple[int, int]:
     """Nightly replay wall-clock time. Default 23:30 local — ahead of the
     00:00 dream/consolidation job so replayed plasticity is visible to it."""
@@ -1968,6 +2020,7 @@ class ScheduleRunner:
         self._next_daily   = _next_daily_reflect_and_dream()
         self._next_monthly = _next_monthly_consolidate()
         self._next_ledger_prune = bioclock.local_now()
+        self._next_monthly_verify = _next_monthly_verify()
         self._next_fly_replay = _next_fly_replay()
 
         # catch-up state — checked on start(). NOTE: if _owner_user_id is
@@ -2176,6 +2229,7 @@ class ScheduleRunner:
                     (self._next_daily, "daily"),
                     (self._next_monthly, "monthly"),
                     (self._next_ledger_prune, "ledger-prune"),
+                    (self._next_monthly_verify, "monthly-verify"),
                     (self._next_fly_replay, "fly-replay"),
                 ] if t <= now],
                 key=lambda x: x[0],
@@ -2211,6 +2265,11 @@ class ScheduleRunner:
                                     log.error("Scheduler: fly_replay failed; next run remains scheduled.")
                             finally:
                                 self._next_fly_replay = _next_fly_replay()
+                        elif name == "monthly-verify":
+                            try:
+                                _verify_monthly_consolidated(user_id=self._owner_user_id)
+                            finally:
+                                self._next_monthly_verify = _next_monthly_verify()
                         else:
                             if self._run_ledger_prune():
                                 self._next_ledger_prune = _next_ledger_prune()

@@ -288,7 +288,7 @@ MONTHLY_CONSOLIDATION_SOFT_THRESHOLD: "0.44"  # Min retention-gate score to surv
 MONTHLY_CONSOLIDATION_CHUNK_MEMS: "25"  # Memory facts per fallback monthly summary chunk.
 MONTHLY_CONSOLIDATION_MAX_INPUT_CHARS: "6000"  # Max source chars per monthly consolidation LLM request.
 MONTHLY_CONSOLIDATION_DELETE_DAILY_SUMMARIES: "0"  # After folding a month's pinned daily facts/day-records into "[YYYY-MM] ..." consolidated facts, delete the daily-granularity originals. Set to 0 to keep consolidation purely additive (compress + archive, no deletion) until you've verified retrieval/growth behavior.
-MONTHLY_CONSOLIDATION_MIN_MEMS: "5"  # Skip fallback months with fewer memories than this.
+MONTHLY_CONSOLIDATION_MIN_MEMS: "1"  # Skip fallback months with fewer memories than this.
 MONTHLY_CONSOLIDATION_MIN_MONTH: "8"  # Floor on how many month candidates the retention gate considers before consolidation.
 MONTHLY_CONSOLIDATION_MAX_MONTH: "30"  # Cap on month candidates scanned per consolidation pass.
 MONTHLY_CONSOLIDATION_LLM_TIMEOUT: "120"  # Seconds before monthly summary LLM calls time out.

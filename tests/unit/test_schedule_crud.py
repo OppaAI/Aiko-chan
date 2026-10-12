@@ -333,3 +333,31 @@ class TestScheduleJobDedup:
             "Tick", "tick", "00:00", frequency="interval", interval_seconds=1800, user_id=uid)
         assert r1["id"] != r2["id"]
         assert self._count(uid) == 2
+
+
+
+def test_monthly_verify_confirms_and_marks(tmp_path, monkeypatch):
+    import datetime
+    import system.schedule as sch
+    monkeypatch.setattr(sch, "_monthly_state_path", lambda user_id=None: tmp_path / "state.json")
+    now = datetime.datetime.now().astimezone()
+    prev_month = (now.replace(day=1) - datetime.timedelta(days=1)).strftime("%Y-%m")
+    monkeypatch.setattr(sch, "_read_last_consolidated_month", lambda user_id=None: prev_month)
+    assert sch._verify_monthly_consolidated(user_id="u1") is True
+    assert (tmp_path / f".monthly_verify_{prev_month}").exists()
+    # second run stands down on the marker
+    assert sch._verify_monthly_consolidated(user_id="u1") is True
+
+
+def test_monthly_verify_warns_when_missing(tmp_path, monkeypatch):
+    import system.schedule as sch
+    monkeypatch.setattr(sch, "_monthly_state_path", lambda user_id=None: tmp_path / "state.json")
+    monkeypatch.setattr(sch, "_read_last_consolidated_month", lambda user_id=None: "2000-01")
+    assert sch._verify_monthly_consolidated(user_id="u1") is False
+    assert list(tmp_path.glob(".monthly_verify_*")) == []
+
+
+def test_next_monthly_verify_is_sunday_morning():
+    import system.schedule as sch
+    nxt = sch._next_monthly_verify()
+    assert nxt.weekday() == 6 and (nxt.hour, nxt.minute) == (9, 0)

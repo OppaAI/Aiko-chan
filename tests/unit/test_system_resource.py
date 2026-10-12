@@ -82,3 +82,17 @@ def test_companion_rss_logs_missing_memory_but_ignores_exit_race(monkeypatch, ca
     assert f"companion process {missing_pid}" in caplog.text
     assert "memory_info is unavailable" in caplog.text
     assert f"companion process {exited_pid}" not in caplog.text
+
+
+def test_rss_mb_logs_and_falls_back_when_psutil_broken(monkeypatch, caplog):
+    """P2 regression: a psutil failure in rss_mb() (silent fallback to /proc)
+    must be logged at debug, not swallowed by a bare except-pass."""
+    import logging
+    import sys
+
+    # `import psutil` -> ImportError, in any environment.
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    with caplog.at_level(logging.DEBUG, logger="system.resource"):
+        value = ram.rss_mb()
+    assert any("psutil" in r.message for r in caplog.records)
+    assert value is None or value > 0  # /proc fallback still works on Linux

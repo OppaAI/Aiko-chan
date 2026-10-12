@@ -52,7 +52,9 @@ def rss_mb() -> float | None:
 
         return float(psutil.Process().memory_info().rss) / (1024 * 1024)
     except Exception:
-        pass
+        # Was a bare `except: pass` — psutil failing (and the silent fall
+        # back to /proc) went unnoticed.
+        log.debug("rss_mb(): psutil read failed, falling back to /proc", exc_info=True)
     try:
         with open("/proc/self/statm") as handle:
             pages = int(handle.read().split()[1])

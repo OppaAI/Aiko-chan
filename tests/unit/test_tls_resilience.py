@@ -143,3 +143,14 @@ def test_self_healing_adapter_reraises_when_no_heal_possible(monkeypatch):
     with pytest.raises(OSError, match="TLS CA certificate bundle"):
         adapter.send(requests.Request("GET", "https://x.example").prepare())
     assert len(calls) == 1
+
+
+def test_resolve_logs_when_certifi_missing(monkeypatch, caplog):
+    """P2 regression: a missing/broken certifi (silent fallback to system
+    bundles) must be logged at debug, not swallowed by a bare except-pass."""
+    import logging
+
+    monkeypatch.setitem(sys.modules, "certifi", None)  # `import certifi` -> ImportError
+    with caplog.at_level(logging.DEBUG, logger="system.tls"):
+        tls.resolve_ca_bundle()
+    assert any("certifi" in r.message for r in caplog.records)

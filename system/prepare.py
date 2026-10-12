@@ -93,13 +93,17 @@ def run_post_auth(uid: str, *, memorize=None, think=None) -> None:
                 try:
                     texts.append(memorize.persona_context() or "")
                 except Exception:
-                    pass
+                    # Was a bare `except: pass` — a corrupt memory DB would
+                    # silently drop the persona half of the relevance anchor.
+                    log.warning("[prepare] persona_context() failed — Grasp anchor missing persona text", exc_info=True)
                 try:
                     for m in memorize.get_all():
                         if m.get("pinned"):
                             texts.append(m.get("memory") or m.get("text") or "")
                 except Exception:
-                    pass
+                    # Was a bare `except: pass` — silently dropped the pinned
+                    # half of the relevance anchor.
+                    log.warning("[prepare] memorize.get_all() failed — Grasp anchor missing pinned memories", exc_info=True)
                 from cognition.memory.grasp import build_anchor_tokens, set_static_anchor_tokens
                 anchor = build_anchor_tokens(*texts)
                 if anchor:

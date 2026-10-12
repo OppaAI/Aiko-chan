@@ -366,12 +366,9 @@ class AikoWeb:
         http_t = threading.Thread(target=self._run_http, daemon=True, name="aiko-http")
         http_t.start()
 
-        # ⚠️ TIMING: _loop_ready is set BEFORE uvicorn.Server.serve() starts, so this
-        # signals "event loop exists" not "server is accepting connections". There's
-        # a brief race window where start_servers() returns but uvicorn hasn't bound
-        # the socket yet. In practice this is fine (milliseconds), but if you see
-        # connection-refused errors, consider awaiting server.started or using
-        # Starlette's lifespan event instead.
+        # _loop_ready now fires only after uvicorn's server.started event (socket
+        # bound) or serve() dying outright (bind failure) — start_servers()
+        # no longer returns while nothing is listening.
         self._loop_ready.wait(timeout=5)
 
     def _run_http(self) -> None:
@@ -394,8 +391,41 @@ class AikoWeb:
             loop="asyncio"
         )
         server = uvicorn.Server(config)
-        self._loop_ready.set()
-        self._loop.run_until_complete(server.serve())
+
+        async def _serve_and_signal() -> None:
+            serve_task = asyncio.ensure_future(server.serve())
+            # Signal _loop_ready only once the socket is actually bound (or
+            # serve() has died trying) — it previously fired before serve()
+            # even started, so start_servers() could return while nothing was
+            # listening yet.
+            started_wait = asyncio.ensure_future(server.started.wait())
+            done, pending = await asyncio.wait(
+                {serve_task, started_wait}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if started_wait in pending:
+                # serve() exited before signaling startup (bind failure):
+                # don't leave the waiter hanging on a dead task.
+                started_wait.cancel()
+            self._loop_ready.set()
+            # Re-raises serve() failures (e.g. port already in use) instead
+            # of swallowing them; on the happy path runs until shutdown.
+            await serve_task
+
+        try:
+            self._loop.run_until_complete(_serve_and_signal())
+        except (SystemExit, Exception):
+            # Uvicorn raises SystemExit (not Exception) on bind failure; it
+            # escapes run_until_complete before _serve_and_signal() resumes,
+            # so without this the 5s _loop_ready wait would always time out.
+            log.exception("[aiko-web] HTTP server exited")
+            raise
+        finally:
+            # Backstop: waiters must never hang the full 5s on a dead server.
+            self._loop_ready.set()
+            # Clear before closing so later _broadcast() calls hit the None
+            # guard instead of submitting to a closed loop.
+            loop, self._loop = self._loop, None
+            loop.close()
 
     async def _ws_handler(self, ws) -> None:
         from interface.webui.auth import sessions, signer, SESSION_MAX_AGE_SECONDS

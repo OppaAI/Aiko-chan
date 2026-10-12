@@ -90,3 +90,18 @@ class TestStepSink:
     def test_no_ansi_in_log_records(self):
         assert bt._strip_ansi("\033[38;5;141mhello\033[0m") == "hello"
         assert bt._strip_ansi("plain") == "plain"
+
+
+def test_ui_sink_failure_is_logged_not_swallowed(monkeypatch, caplog):
+    """P2 regression: a broken UI sink in _emit_banner must be logged at
+    debug, not silently swallowed by a bare except-pass."""
+
+    class ExplodingSink:
+        def add_message(self, sender, text):
+            raise RuntimeError("sink broken")
+
+    monkeypatch.setattr(bt, "_ui_sink", ExplodingSink())
+    monkeypatch.setattr(bt, "TRACE_UI_ENABLED", True)
+    with caplog.at_level(logging.DEBUG, logger="brain_trace"):
+        bt._emit_banner("hello", color="")
+    assert any("UI sink failed" in r.message for r in caplog.records)

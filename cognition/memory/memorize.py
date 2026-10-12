@@ -3018,20 +3018,43 @@ class AikoMemorize:
         return True
 
     def close(self) -> None:
-        """Stop the write-worker thread and close the sqlite connection."""
+        """Stop the write-worker thread and close the sqlite connection.
+
+        Drain discipline mirrors switch_user(): the write worker may wait up
+        to MEMORY_WRITE_MAX_WAIT for an idle window before processing queued
+        writes, so the connection must not be closed until the worker thread
+        has actually exited. Closing it out from under a mid-write worker is
+        the heap-corruption/segfault scenario the _write_loop finally-block
+        comment warns about — leak-on-shutdown beats segfault.
+        """
+        # Use MEMORY_WRITE_MAX_WAIT + buffer since the write worker may wait
+        # for an idle window up to that long before processing queued writes
+        # (same discipline as switch_user()).
+        drain_timeout = MEMORY_WRITE_MAX_WAIT + 15.0
         try:
-            if not self.wait_for_writes(timeout=5.0):
-                log.warning("AikoMemorize.close(): pending writes did not finish within 5s")
+            if not self.wait_for_writes(timeout=drain_timeout):
+                log.error(
+                    "AikoMemorize.close(): pending writes did not drain within %.0fs",
+                    drain_timeout,
+                )
         except Exception as e:
             log.debug("AikoMemorize.close(): wait_for_writes: %s", e)
         # Stop the write-worker thread if it's running
         if self._write_worker is not None and self._write_worker.is_alive():
             try:
                 self._write_queue.put(None)
-                self._write_worker.join(timeout=2.0)
+                self._write_worker.join(timeout=drain_timeout)
             except Exception as e:
                 log.debug("AikoMemorize.close(): write worker shutdown: %s", e)
-        if self._mem_backend is not None:
+        worker_exited = self._write_worker is None or not self._write_worker.is_alive()
+        if not worker_exited:
+            log.error(
+                "AikoMemorize.close(): write worker still alive after %.0fs; "
+                "leaving the sqlite connection open rather than closing it "
+                "under a live worker",
+                drain_timeout,
+            )
+        elif self._mem_backend is not None:
             with self._mem._db_lock:
                 try:
                     self._conn.close()

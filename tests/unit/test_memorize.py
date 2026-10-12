@@ -20,6 +20,8 @@ Assumptions (adjust if your vecstore.py differs):
 from __future__ import annotations
 
 import hashlib
+import queue
+import sqlite3
 import struct
 import threading
 import time
@@ -1602,3 +1604,102 @@ def test_queue_write_and_switch_user_concurrency(monkeypatch):
         reset_current_user_id(token)
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BUG-1 (P0) regression — close() drain discipline
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestCloseDrainDiscipline:
+    """close() must drain the write worker with the MEMORY_WRITE_MAX_WAIT + 15s
+    discipline (mirroring switch_user()) and must NEVER close the sqlite
+    connection out from under a live worker — that is the heap-corruption /
+    segfault scenario the _write_loop finally-block comment warns about."""
+
+    def _memo_with_worker(self, backend, write_fn=None, ignore_poison=False):
+        """AikoMemorize with a real Queue + worker thread. write_fn(item) runs
+        per queued item. The loop mirrors _write_loop's poison-pill protocol
+        (single task_done() in finally, including for the sentinel)."""
+        memo = AikoMemorize.__new__(AikoMemorize)
+        memo._mem_backend = backend
+        memo._write_queue = queue.Queue()
+        memo.episodic = None
+
+        def fake_write_loop():
+            while True:
+                item = memo._write_queue.get()
+                try:
+                    if item == "DIE":
+                        return
+                    if item is None and not ignore_poison:
+                        return
+                    if write_fn is not None:
+                        write_fn(item)
+                finally:
+                    memo._write_queue.task_done()
+
+        memo._write_worker = threading.Thread(target=fake_write_loop, daemon=True)
+        memo._write_worker.start()
+        return memo
+
+    def test_close_drains_slow_write_before_closing(self, backend, monkeypatch):
+        """A slow write (8s) must complete before the connection closes.
+
+        The old code waited only 5s + 2s join, then closed the connection
+        while the worker was still mid-write. New code drains with
+        MEMORY_WRITE_MAX_WAIT + 15s.
+        """
+        import cognition.memory.memorize as memorize_mod
+        monkeypatch.setattr(memorize_mod, "MEMORY_WRITE_MAX_WAIT", 0.05)
+        write_done = threading.Event()
+
+        def slow_write(item):
+            time.sleep(8.0)
+            write_done.set()
+
+        memo = self._memo_with_worker(backend, write_fn=slow_write)
+        memo._write_queue.put(("u", "r", "u1", "Oppa", None, None))
+        memo.close()
+        # The write finished BEFORE close() proceeded: on the old code
+        # close() returned ~7s in, while the write was still in flight.
+        assert write_done.is_set()
+        assert not memo._write_worker.is_alive()
+        with pytest.raises(sqlite3.ProgrammingError):
+            backend._conn.execute("SELECT 1")
+
+    def test_close_fast_path_still_prompt(self, backend, monkeypatch):
+        """No pending writes: close() returns promptly and closes cleanly."""
+        import cognition.memory.memorize as memorize_mod
+        monkeypatch.setattr(memorize_mod, "MEMORY_WRITE_MAX_WAIT", 0.05)
+        memo = self._memo_with_worker(backend)
+        start = time.monotonic()
+        memo.close()
+        elapsed = time.monotonic() - start
+        assert elapsed < 5.0
+        assert not memo._write_worker.is_alive()
+        with pytest.raises(sqlite3.ProgrammingError):
+            backend._conn.execute("SELECT 1")
+
+    def test_close_never_closes_under_live_worker(self, backend, monkeypatch):
+        """Fail-safe branch: if the worker won't exit, the connection stays
+        open. Leak-on-shutdown beats segfault."""
+        import cognition.memory.memorize as memorize_mod
+        monkeypatch.setattr(memorize_mod, "MEMORY_WRITE_MAX_WAIT", 0.05)
+        # Worker that swallows the poison pill: simulates a worker stuck in
+        # a write that never observes the shutdown sentinel.
+        memo = self._memo_with_worker(
+            backend, write_fn=lambda item: None, ignore_poison=True
+        )
+        real_join = memo._write_worker.join
+        # Poison + join can't kill a stuck worker: no-op the join so the
+        # worker is deterministically still alive at the is_alive() check.
+        monkeypatch.setattr(memo._write_worker, "join", lambda timeout=None: None)
+        memo.close()
+        assert memo._write_worker.is_alive()
+        # Connection must still be usable — never closed under the worker.
+        backend._conn.execute("SELECT 1")
+        # Cleanup: restore the real join and stop the daemon thread.
+        monkeypatch.undo()
+        memo._write_queue.put("DIE")
+        real_join(timeout=5.0)
+        assert not memo._write_worker.is_alive()

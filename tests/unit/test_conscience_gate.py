@@ -519,3 +519,44 @@ def test_band_ask_reason_survives_long_content():
     assert out.action == ASK
     assert "0.62" in out.reason
     assert "fraud" in out.reason
+
+
+# ── BUG-3 (P1): safety-path exceptions must be visible, never swallowed ──
+class TestGateExceptionVisibility:
+    """The fly-veto and mb-valence blocks sit inside the moral gate. If they
+    throw, the gate must log the failure (log.exception) rather than degrade
+    to ALLOW silently. Verdict behavior on the happy path is unchanged —
+    this is about visibility, not changing the verdict policy."""
+
+    def _allow_ctx(self, **overrides):
+        ctx = {"tool": "web_search", "scope": "external", "mb_valence": -0.1}
+        ctx.update(overrides)
+        return ctx
+
+    def test_fly_veto_failure_is_logged(self, monkeypatch, caplog):
+        import cognition.fly_behavior.action_select as action_select
+        from cognition.conscience.core import ConscienceCircuitCore
+
+        def boom(**kwargs):
+            raise RuntimeError("simulated veto scoring failure")
+
+        monkeypatch.setattr(action_select, "score_tool_call", boom)
+        core = ConscienceCircuitCore(user_id="test")
+        verdict = Verdict(decision=ALLOW)
+        with caplog.at_level("ERROR", logger="cognition.conscience.core"):
+            out = core._apply_tool_policy(verdict, self._allow_ctx())
+        assert out.decision == ALLOW  # no propagation, verdict intact
+        assert any("fly-veto" in r.message for r in caplog.records)
+
+    def test_mb_valence_failure_is_logged(self, caplog):
+        from cognition.conscience.core import ConscienceCircuitCore
+
+        core = ConscienceCircuitCore(user_id="test")
+        verdict = Verdict(decision=ALLOW)
+        # "not-a-number" makes float(mb_v) raise ValueError inside the block
+        with caplog.at_level("ERROR", logger="cognition.conscience.core"):
+            out = core._apply_tool_policy(
+                verdict, self._allow_ctx(mb_valence="not-a-number")
+            )
+        assert out.decision == ALLOW  # no propagation, verdict intact
+        assert any("mb-valence" in r.message for r in caplog.records)

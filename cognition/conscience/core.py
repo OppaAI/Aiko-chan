@@ -525,7 +525,7 @@ class ConscienceCircuitCore:
                     f"(votes={fly_vote['votes']})",
                 )
         except Exception:
-            pass
+            log.exception("[ccc] fly-veto scoring failed; continuing without the veto signal")
         try:
             mb_v = ctx.get("mb_valence")
             if (
@@ -546,7 +546,7 @@ class ConscienceCircuitCore:
                     f"aversion to this context",
                 )
         except Exception:
-            pass
+            log.exception("[ccc] mb-valence check failed; continuing without the valence signal")
         if (
             IRREVERSIBLE_REQUIRES_APPROVAL
             and verdict.decision == CAUTION

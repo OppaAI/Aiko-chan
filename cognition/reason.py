@@ -103,6 +103,65 @@ def cached_embed_query(embedder, text: str, instruct: str = "") -> np.ndarray:
     return vec.copy()
 
 
+def cached_embed_batch(embedder, pairs: list[tuple[str, str]]) -> list[np.ndarray]:
+    """Embed several (text, instruct) pairs with a single HTTP POST for the misses.
+
+    Bit-identical vectors to calling cached_embed_query per pair (same cache,
+    same keys, same instruct prefixing, same geometry) — only the transport is
+    batched. Returns one float32 vector per pair, in order; each is a private
+    copy, matching cached_embed_query's contract.
+
+    Falls back to per-pair cached_embed_query when the embedder has no
+    query-semantic batch method or the batch POST fails (which also preserves
+    embed_query's 400-halve-and-retry for oversized inputs).
+    """
+    from cognition.memory.vecstore import HarrierEmbedder, instruct_query_text
+
+    if not pairs:
+        return []
+    keys = [_cache_key(t, i, embedder) for t, i in pairs]
+    out: list[np.ndarray | None] = [None] * len(pairs)
+    miss_idx: list[int] = []
+    with _embed_query_cache_lock:
+        for n, key in enumerate(keys):
+            hit = _embed_query_cache.get(key)
+            if hit is not None:
+                _embed_query_cache.move_to_end(key)
+                out[n] = hit.copy()
+            else:
+                miss_idx.append(n)
+    if miss_idx:
+        # Batch fast path only for embedders with a query-semantic batch
+        # contract: HarrierEmbedder.embed_batch feeds the same _embed_texts
+        # funnel as embed_query, so pre-prefixed batch input yields identical
+        # vectors. A foreign embed_batch/embed_documents/embed may be
+        # document-semantic — those vectors must never be cached as query
+        # vectors, so anything else falls back to per-pair cached_embed_query
+        # (the Embedder protocol's embed_query).
+        batch = embedder.embed_batch if isinstance(embedder, HarrierEmbedder) else None
+        try:
+            if batch is None:
+                raise AttributeError("no query-semantic batch method")
+            prefixed = [instruct_query_text(pairs[n][0], pairs[n][1]) for n in miss_idx]
+            vecs = np.asarray(batch(prefixed), dtype=np.float32)
+            if len(vecs) != len(miss_idx):
+                raise ValueError(f"batch returned {len(vecs)} vectors for {len(miss_idx)} texts")
+        except Exception:
+            # Same outcome as before batching existed, one POST per pair.
+            for n in miss_idx:
+                text, instruct = pairs[n]
+                out[n] = cached_embed_query(embedder, text, instruct=instruct)
+            return [v for v in out if v is not None]
+        with _embed_query_cache_lock:
+            for n, vec in zip(miss_idx, vecs):
+                _embed_query_cache[keys[n]] = vec
+                _embed_query_cache.move_to_end(keys[n])
+                while len(_embed_query_cache) > _EMBED_QUERY_CACHE_MAX:
+                    _embed_query_cache.popitem(last=False)
+                out[n] = vec.copy()
+    return [v for v in out if v is not None]
+
+
 def cosine_similarity(vec_a, vec_b) -> float:
     # float32 throughout: the old float64 default doubled temp memory per
     # call for precision nothing downstream can use (scores gate thresholds).

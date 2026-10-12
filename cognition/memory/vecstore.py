@@ -85,6 +85,16 @@ _QUERY_INSTRUCT   = os.getenv(
 # pre-chunked at ingest and never pass through this cap.
 _EMBED_QUERY_MAX_CHARS = max(256, env_int("EMBED_QUERY_MAX_CHARS", 2000))
 
+
+def instruct_query_text(query: str, instruct: str) -> str:
+    """Format a search query with the instruction prefix the embedding model expects.
+
+    Single source of truth for the ``Instruct: …\\nQuery: …`` format — used by
+    HarrierEmbedder.embed_query/embed_queries and by reason.cached_embed_batch
+    so batched vectors are bit-identical to per-query ones.
+    """
+    return f"Instruct: {instruct}\nQuery: {(query or '')[:_EMBED_QUERY_MAX_CHARS]}"
+
 # vec0 MATCH KNN oversampling — see user_scoped_vec_knn. Defaults mirror the
 # memory-domain constants in cognition.memory.schema.
 KNN_MATCH_OVERSCAN = env_int("KNN_MATCH_OVERSCAN", 16)
@@ -373,10 +383,10 @@ class HarrierEmbedder:
         Embed a single search query with the instruction prefix.
         Returns np.ndarray(dims,).
         """
-        text = (query or "")[:_EMBED_QUERY_MAX_CHARS]
+        text = instruct_query_text(query, instruct)
         for _ in range(4):
             try:
-                return self._embed_texts([f"Instruct: {instruct}\nQuery: {text}"])[0]
+                return self._embed_texts([text])[0]
             except requests.exceptions.HTTPError as e:
                 # llama-server's /embedding 400s past its token ctx and the
                 # limit depends on content density, not chars — halve and
@@ -385,11 +395,11 @@ class HarrierEmbedder:
                     raise
                 text = text[: max(256, len(text) // 2)]
                 log.debug("embed_query 400 — retrying with %d chars", len(text))
-        return self._embed_texts([f"Instruct: {instruct}\nQuery: {text}"])[0]
+        return self._embed_texts([text])[0]
 
     def embed_queries(self, queries: list[str], instruct: str = _QUERY_INSTRUCT) -> np.ndarray:
         """Embed multiple search queries with the instruction prefix. Returns np.ndarray (N, dims)."""
-        prefixed = [f"Instruct: {instruct}\nQuery: {(q or '')[:_EMBED_QUERY_MAX_CHARS]}" for q in queries]
+        prefixed = [instruct_query_text(q, instruct) for q in queries]
         return self.embed_batch(prefixed)
 
     @staticmethod

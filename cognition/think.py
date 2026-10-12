@@ -72,6 +72,7 @@ from agentic.tools    import web_search_context
 from agentic.agentic  import run_agentic_chat
 from agentic.wiki import wiki_knowledge_context_for
 from cognition.knowledge import knowledge_context_for
+from cognition.knowledge.schema import KNOWLEDGE_QUERY_INSTRUCT
 from cognition import CONTEXT_POOL
 from cognition.recall_budget import fit_block as _fit_recall_block
 from system.log      import get_logger
@@ -1597,9 +1598,29 @@ class AikoThink:
             ],
         ) as ctx:
             embedder = getattr(getattr(memorize, "_mem", None), "_embedder", None)
-            mem_future = CONTEXT_POOL.submit(memorize.search, recall_query, limit=mem_limit, query_vector=query_for_call)
+            # Batch the retrieval embeds into one HTTP POST, but only when
+            # both legs actually need a fresh embed of the recall query
+            # (enriched follow-ups). When the route vector is reused the
+            # memory leg needs no embed at all: submit it immediately rather
+            # than blocking it behind the KB embed, and let the KB leg embed
+            # per-leg inside its future as before (its result cache is
+            # checked there before any embed it needs).
+            mem_vec = query_for_call
+            kb_vec = None
+            if mem_vec is None and embedder is not None:
+                try:
+                    vecs = reason.cached_embed_batch(
+                        embedder,
+                        [(recall_query, _QUERY_INSTRUCT),
+                         (recall_query, KNOWLEDGE_QUERY_INSTRUCT)],
+                    )
+                    mem_vec, kb_vec = vecs
+                except Exception as e:
+                    log.debug("retrieval embed batch failed, legs embed per-leg: %s", e)
+            mem_future = CONTEXT_POOL.submit(memorize.search, recall_query, limit=mem_limit, query_vector=mem_vec)
             know_future = CONTEXT_POOL.submit(
-                knowledge_context_for, recall_query, limit=know_limit, max_chars=2000, embedder=embedder
+                knowledge_context_for, recall_query, limit=know_limit, max_chars=2000, embedder=embedder,
+                query_vector=kb_vec,
             )
             try:
                 memories = mem_future.result(timeout=MEMORY_RECALL_TIMEOUT)

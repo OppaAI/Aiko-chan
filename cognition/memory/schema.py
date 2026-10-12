@@ -148,6 +148,13 @@ MEMORY_RECALL_CONTEXT_MATCH_WEIGHT = float(os.getenv("MEMORY_RECALL_CONTEXT_MATC
 # stuck "active". See AikoMemorize.queue_write().
 MEMORY_WRITE_IDLE_GRACE = float(os.getenv("MEMORY_WRITE_IDLE_GRACE", 3.0))
 MEMORY_WRITE_MAX_WAIT = float(os.getenv("MEMORY_WRITE_MAX_WAIT", 45.0))
+# Bound on the async write queue (see AikoMemorize.queue_write()): if the
+# background writer stalls (LLM/embed hang), turns keep enqueueing with no
+# backpressure otherwise. On full, the oldest item is dropped with a warning
+# (best-effort write semantics) rather than stalling the caller's turn or
+# growing memory without bound on an 8GB box. Sized for several minutes of
+# active chatting at ~1 turn / 20-30s; each item is a few KB.
+MEMORY_WRITE_QUEUE_MAXSIZE = max(8, env_int("MEMORY_WRITE_QUEUE_MAXSIZE", 64))
 
 MEMORY_CROSS_STORE_ENABLED = os.getenv("MEMORY_CROSS_STORE_ENABLED", "1").lower() in {
     "1", "true", "yes", "on",
@@ -722,6 +729,7 @@ __all__ = [
     "MEMORY_SUPERSESSION_NARRATIVE_MAX",
     "MEMORY_WRITE_IDLE_GRACE",
     "MEMORY_WRITE_MAX_WAIT",
+    "MEMORY_WRITE_QUEUE_MAXSIZE",
     "PERSONA_CACHE_TTL",
     "PERSONA_CONTEXT_CHARS",
     "PERSONA_RECALL_LIMIT",

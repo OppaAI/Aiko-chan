@@ -116,6 +116,7 @@ from .schema import (
     MEMORY_SUPERSESSION_NARRATIVE_MAX,
     MEMORY_WRITE_IDLE_GRACE,
     MEMORY_WRITE_MAX_WAIT,
+    MEMORY_WRITE_QUEUE_MAXSIZE,
     PERSONA_CACHE_TTL,
     PERSONA_CONTEXT_CHARS,
     PERSONA_RECALL_LIMIT,
@@ -2463,7 +2464,9 @@ class AikoMemorize:
                 user_id=uid,
                 embedder=self._embedder,
             )
-        self._write_queue: "queue.Queue[tuple]" = queue.Queue()
+        self._write_queue: queue.Queue[tuple] = queue.Queue(
+            maxsize=MEMORY_WRITE_QUEUE_MAXSIZE
+        )
         self._user_switch_lock = threading.RLock()
         self._write_worker = threading.Thread(target=self._write_loop, daemon=True)
         self._write_worker.start()
@@ -2909,6 +2912,11 @@ class AikoMemorize:
         without this module needing to know how the caller tracks turn
         state. If either is omitted, the write runs as soon as it's
         dequeued with no idle wait.
+
+        The queue is bounded (MEMORY_WRITE_QUEUE_MAXSIZE): on a stalled
+        writer the oldest queued turn is dropped with a warning rather than
+        blocking this call or growing memory without bound. Writes are
+        best-effort; a dropped turn simply isn't persisted.
         """
         with self._user_switch_lock:
             user_id = self._resolve_user_id(user_id)  # resolved here, on the caller's thread — not in _write_loop
@@ -2926,7 +2934,29 @@ class AikoMemorize:
                         "will wait for idle window before LLM fact extraction (when is_active_turn given)",
                     ],
                 )
-            self._write_queue.put((user_input, response_text, user_id, display_name, is_active_turn, idle_since))
+            # Never block the caller's turn on a stalled writer: drop the oldest
+            # queued turn with a warning instead of growing the queue without
+            # bound. task_done() on the dropped item keeps the
+            # wait_for_writes()/drain_embeds() unfinished-tasks accounting
+            # balanced.
+            try:
+                self._write_queue.put_nowait(
+                    (user_input, response_text, user_id, display_name, is_active_turn, idle_since)
+                )
+            except queue.Full:
+                try:
+                    self._write_queue.get_nowait()
+                    self._write_queue.task_done()
+                except queue.Empty:
+                    pass
+                try:
+                    self._write_queue.put_nowait(
+                        (user_input, response_text, user_id, display_name, is_active_turn, idle_since)
+                    )
+                except queue.Full:
+                    log.warning("AikoMemorize.queue_write(): write queue full; dropping turn")
+                    return
+                log.warning("AikoMemorize.queue_write(): write queue full; dropped oldest queued turn")
 
     def _write_loop(self) -> None:
         while True:
@@ -3039,10 +3069,24 @@ class AikoMemorize:
                 )
         except Exception as e:
             log.debug("AikoMemorize.close(): wait_for_writes: %s", e)
-        # Stop the write-worker thread if it's running
+        # Stop the write-worker thread if it's running. The sentinel put must
+        # not block: the queue is bounded, and with a wedged worker a
+        # blocking put() would hang shutdown forever — drop the oldest item
+        # to make room for the sentinel instead.
         if self._write_worker is not None and self._write_worker.is_alive():
             try:
-                self._write_queue.put(None)
+                try:
+                    self._write_queue.put_nowait(None)
+                except queue.Full:
+                    try:
+                        self._write_queue.get_nowait()
+                        self._write_queue.task_done()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self._write_queue.put_nowait(None)
+                    except queue.Full:
+                        log.warning("AikoMemorize.close(): write queue full; worker may not observe shutdown")
                 self._write_worker.join(timeout=drain_timeout)
             except Exception as e:
                 log.debug("AikoMemorize.close(): write worker shutdown: %s", e)

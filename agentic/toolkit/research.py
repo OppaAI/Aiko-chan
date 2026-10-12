@@ -56,6 +56,7 @@ from agentic.toolkit.ingest import (
     _extract_with_markitdown,
     _sniff_content_type,
 )
+from agentic.toolkit.browser_session import get_browser_session
 from agentic.toolkit.provenance import authority_bonus, query_looks_time_sensitive
 from agentic.toolkit.cache import TTLCache
 
@@ -449,6 +450,10 @@ def _crawl4ai_fetch_many(urls: list[str], max_chars: int) -> dict[str, str]:
     Also used (with a single-URL list) by deep_read as the
     JS-rendering escalation path when a plain web_fetch comes back thin.
 
+    Now also captures ARIA accessibility snapshots for each page to
+    extract interactive elements (links, buttons, forms) — structured
+    data that improves LLM extraction quality.
+
     Already filters out robots-disallowed URLs itself as defense in depth,
     though _deep_search_impl also filters before calling this.
     """
@@ -505,6 +510,66 @@ def _crawl4ai_fetch_many(urls: list[str], max_chars: int) -> dict[str, str]:
             return pool.submit(_run_isolated).result(timeout=120)
     except Exception as e:
         log.info("[crawl4ai] batch fetch failed for %d url(s): %s", len(urls), e)
+        return {}
+
+
+async def _crawl4ai_fetch_enriched(urls: list[str], max_chars: int) -> dict[str, dict]:
+    """
+    Enhanced fetch that returns both markdown text and ARIA interactive
+    elements for each URL. Uses the shared BrowserSession for domain-scoped
+    browser management and captures filtered accessibility snapshots.
+
+    Returns: {url: {"text": str, "elements": list[AriaElement], "title": str}}
+    """
+    if not urls or _optional_import("crawl4ai") is None:
+        return {}
+
+    allowed_urls = [u for u in urls if _source_agreement_allows(u)] if RESEARCH_RESPECT_ROBOTS else list(urls)
+    if not allowed_urls:
+        return {}
+
+    try:
+        import asyncio
+        browser = get_browser_session()
+        out: dict[str, dict] = {}
+
+        for url in allowed_urls:
+            async with browser.page_for(url) as page:
+                await page.goto(url, wait_until="domcontentloaded", timeout=CRAWL4AI_TIMEOUT_MS)
+
+                # Get markdown via crawl4ai's extraction on the page
+                from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
+                config = CrawlerRunConfig(
+                    cache_mode=CacheMode.BYPASS,
+                    page_timeout=CRAWL4AI_TIMEOUT_MS,
+                    word_count_threshold=CRAWL4AI_WORD_COUNT_THRESHOLD,
+                    excluded_tags=["nav", "footer", "header", "aside", "form"],
+                    exclude_external_links=True,
+                    exclude_social_media_links=True,
+                )
+                async with AsyncWebCrawler() as crawler:
+                    result = await crawler.arun(url=url, config=config)
+                    if result and getattr(result, "success", False):
+                        md = getattr(result, "markdown", None)
+                        text = getattr(md, "fit_markdown", None) or md or ""
+                        text = str(text).strip()[:max_chars] if text else ""
+                    else:
+                        text = ""
+
+                # Capture ARIA snapshot for interactive elements
+                from agentic.toolkit.aria_snapshot import capture_filtered_snapshot
+                snapshot = await capture_filtered_snapshot(page)
+
+                out[url] = {
+                    "text": text,
+                    "elements": snapshot.get("interactive_elements", []),
+                    "title": snapshot.get("title", ""),
+                    "aria_snapshot": snapshot.get("aria_snapshot", ""),
+                }
+
+        return out
+    except Exception as e:
+        log.info("[crawl4ai] enriched fetch failed for %d url(s): %s", len(urls), e)
         return {}
 
 

@@ -60,9 +60,10 @@ class ExperienceWriter:
 
 
 def record_experience(owner, goal: str, steps: list[dict], final_answer: str, verified_ok: bool, score: float, embedder=None) -> str | None:
-    """Legacy free-function shim: full implementation of the write path.
+    """Canonical implementation of the write path.
 
-    :class:`ExperienceWriter.record` delegates to this."""
+    :class:`ExperienceWriter.record` delegates to this (not a shim —
+    this is the live code path)."""
     uid = current_user_id()
     exp_steps = [
         ExperienceStep(

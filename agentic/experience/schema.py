@@ -182,8 +182,8 @@ def _db_path() -> str:
 
 
 def connect(user_id: str | None = None) -> sqlite3.Connection:
-    """Legacy free-function shim: sole implementation that
-    :class:`ExperienceSchema.connect` delegates to. Reads the DB path at call
+    """Canonical implementation that :class:`ExperienceSchema.connect`
+    delegates to (not a shim — this is the live code path). Reads the DB path at call
     time so tests/studio can override agentic.experience.EXPERIENCE_DB_PATH."""
     conn = initialize_store_db(_db_path(), _DDL, user_id=user_id, vector=True)
     cols = [r[1] for r in conn.execute("PRAGMA table_info(experiences)").fetchall()]
@@ -216,7 +216,7 @@ def ensure_experience_schema_migrated(conn: sqlite3.Connection) -> None:
 
 
 def sanitize(text: str, max_chars: int = 500) -> str:
-    """Legacy free-function shim kept for the historical import path."""
+    """Canonical secret-redacting sanitizer used across the experience stack."""
     t = _SECRET_RE.sub(r"\1\2[redacted]", text or "")
     t = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[redacted]", t)
     return re.sub(r"\s+", " ", t).strip()[:max_chars]

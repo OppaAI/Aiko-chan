@@ -303,8 +303,8 @@ def ingest_file(
     user_id: str | None = None,
     schema: KnowledgeSchema | None = None,
 ) -> str | None:
-    """Legacy free-function shim: sole implementation that
-    :class:`KnowledgeIngest.ingest_file` delegates to. Kept for the historical
+    """Canonical implementation that
+    :class:`KnowledgeIngest.ingest_file` delegates to (not a shim — this is the live code path). Kept for the historical
     import path. Extract a workspace file and store it in learned knowledge RAG."""
     try:
         text, source = extract_text_from_file(relative_path, user_id=user_id)
@@ -323,8 +323,8 @@ def ingest_text(
     user_id: str | None = None,
     schema: KnowledgeSchema | None = None,
 ) -> str | None:
-    """Legacy free-function shim: sole implementation that
-    :class:`KnowledgeIngest.ingest_text` delegates to. Kept for the historical
+    """Canonical implementation that
+    :class:`KnowledgeIngest.ingest_text` delegates to (not a shim — this is the live code path). Kept for the historical
     import path. Chunk, embed, and persist durable learned knowledge."""
     clean = _sanitize_text(text)
     if not clean:

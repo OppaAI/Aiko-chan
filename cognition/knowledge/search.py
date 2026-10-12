@@ -205,8 +205,8 @@ def search_knowledge(
     embedder: Embedder | None = None,
     user_id: str | None = None,
 ) -> list[dict]:
-    """Legacy free-function shim: sole implementation that :class:`KnowledgeSearch`
-    delegates to. Kept for the historical import path."""
+    """Canonical implementation that :class:`KnowledgeSearch`
+    delegates to (not a shim — this is the live code path). Kept for the historical import path."""
     uid = user_id or current_user_id()
     conn = connect(uid)
     try:
@@ -329,8 +329,8 @@ def knowledge_context_for(
     embedder: Embedder | None = None,
     user_id: str | None = None,
 ) -> str:
-    """Legacy free-function shim: sole implementation that
-    :class:`KnowledgeSearch.context_for` delegates to. Kept for the historical
+    """Canonical implementation that
+    :class:`KnowledgeSearch.context_for` delegates to (not a shim — this is the live code path). Kept for the historical
     import path.
 
     Retrieve knowledge context for a query, tracking access counts.

@@ -55,8 +55,8 @@ def prune_knowledge(
     embedder=None,
 ) -> dict:
     """
-    Legacy free-function shim: sole implementation that
-    :class:`KnowledgeLifecycle.prune` delegates to. Kept for the historical
+    Canonical implementation that
+    :class:`KnowledgeLifecycle.prune` delegates to (not a shim — this is the live code path). Kept for the historical
     import path.
 
     Prune knowledge DB: archive cold chunks, delete never-accessed old chunks,

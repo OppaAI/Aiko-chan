@@ -44,7 +44,7 @@ class ExperienceSearch:
 
 
 def search_experience(query: str, limit: int = 3, embedder=None, user_id: str | None = None) -> list[dict]:
-    """Legacy free-function shim: :class:`ExperienceSearch.search` delegates here."""
+    """Canonical implementation that :class:`ExperienceSearch.search` delegates to (not a shim)."""
     uid = user_id or current_user_id()
     conn = connect(uid)
     try:
@@ -163,7 +163,7 @@ def _attr(value: object) -> str:
 
 
 def experience_context_for(query: str, limit: int = 3, embedder=None) -> str:
-    """Legacy free-function shim: :class:`ExperienceSearch.context_for` delegates here."""
+    """Canonical implementation that :class:`ExperienceSearch.context_for` delegates to (not a shim)."""
     hits = search_experience(query, limit=limit, embedder=embedder)
     if not hits:
         return "<experience_context>\nNo similar past task found.\n</experience_context>"

@@ -9,9 +9,51 @@ Modes stay off/shadow until explicitly enabled in config.
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timezone
 
 log = logging.getLogger("aiko.fly_behavior.turn")
+
+# Background fullbrain stepping (latency #6): the 470ms connectome
+# propagation runs off the turn's critical path. Only one step runs at
+# a time (overlap guard); the turn consumes the previous step's outputs
+# (one turn of staleness on slow modulators).
+_fullbrain_bg_lock = threading.Lock()
+_fullbrain_latest: dict = {}
+_fullbrain_latest_lock = threading.Lock()
+
+
+def _fullbrain_step_bg(fb, kc, kc_body_ids, user_id) -> None:
+    """Run one fullbrain step in the background, then publish its outputs
+    for the next turn to consume. Releases the overlap guard on exit."""
+    try:
+        import time as _time
+        _t0 = _time.perf_counter()
+        step = fb.step(kc, kc_body_ids)
+        _ms = (_time.perf_counter() - _t0) * 1000.0
+        dn = float(step.get("dn_drive", 0.0))
+        # DN drive is O(5e-5) (measured 4.6e-5..5.4e-5); map gently
+        # around the 1.0 baseline - a real neural signal, never a swing.
+        latest = {
+            "motor_vigor": round(max(0.8, min(1.2, 1.0 + 3000.0 * (dn - 50e-6))), 3),
+            "clock_drive": round(float(step.get("clock_drive", 0.0)), 5),
+            "brain_arousal": round(float(step.get("arousal", 0.0)), 5),
+            "whole_brain_ms": round(_ms, 1),
+        }
+        with _fullbrain_latest_lock:
+            _fullbrain_latest.clear()
+            _fullbrain_latest.update(latest)
+        from cognition.flymemory.fullbrain import mark_stepped
+        mark_stepped()
+        try:
+            from cognition.fly_behavior import metrics as _fly_metrics
+            _fly_metrics.record_fullbrain(ran=True, ms=_ms, user_id=user_id)
+        except Exception:
+            pass
+    except Exception as exc:
+        log.debug("background whole-brain step failed: %s", str(exc))
+    finally:
+        _fullbrain_bg_lock.release()
 
 
 def _circadian_phase_now() -> float:
@@ -114,48 +156,46 @@ def apply_turn_priors(
                         {"kind": "mb_valence", "mode": mb_mode, "bias": round(bias, 4)}
                     )
                     # Whole-brain step (Phase 4): seed slice KCs into the full
-                    # connectome. DN drive becomes motor vigor; clock-neuron
-                    # drive gates the circadian rhythm gain below.
+                    # connectome. Runs in the background every turn - the
+                    # 470ms propagation stays off the turn's critical path.
+                    # This turn consumes the PREVIOUS step's outputs (one
+                    # turn of staleness on slow modulators); clock_drive
+                    # below feeds the circadian rhythm gain as before.
                     try:
                         from cognition.fly_registry import get_fullbrain
-                        from cognition.flymemory.fullbrain import mark_stepped, should_step
-                        import time as _time
 
                         fb = get_fullbrain()
                         if fb is not None:
-                            if not should_step():
-                                out["whole_brain"] = False
+                            with _fullbrain_latest_lock:
+                                _latest = dict(_fullbrain_latest)
+                            if _latest:
+                                out["motor_vigor"] = _latest["motor_vigor"]
+                                out["clock_drive"] = _latest["clock_drive"]
+                                out["brain_arousal"] = _latest["brain_arousal"]
+                                out["whole_brain"] = True
+                                out["whole_brain_ms"] = _latest["whole_brain_ms"]
+                            # Start the next step in the background. The
+                            # overlap guard (non-blocking acquire) is the
+                            # throttle: if the previous step is still
+                            # running, skip this turn - the next turn will
+                            # try again. No EVERY_N gating: backgrounded
+                            # steps cost no turn latency.
+                            if _fullbrain_bg_lock.acquire(blocking=False):
+                                _bg = threading.Thread(
+                                    target=_fullbrain_step_bg,
+                                    args=(fb, kc.copy(),
+                                          mb.kc_body_ids.copy(),
+                                          user_id),
+                                    name="aiko-fullbrain-step",
+                                    daemon=True,
+                                )
+                                _bg.start()
+                                out["whole_brain_bg"] = True
+                            else:
                                 out["whole_brain_throttled"] = True
                                 try:
                                     from cognition.fly_behavior import metrics as _fly_metrics
                                     _fly_metrics.record_fullbrain(ran=False, user_id=user_id)
-                                except Exception:
-                                    pass
-                            else:
-                                _t0 = _time.perf_counter()
-                                step = fb.step(kc, mb.kc_body_ids)
-                                _ms = (_time.perf_counter() - _t0) * 1000.0
-                                mark_stepped()
-                                dn = float(step.get("dn_drive", 0.0))
-                                # DN drive is O(5e-5) (measured 4.6e-5..5.4e-5);
-                                # map gently around the 1.0 baseline — a real
-                                # neural signal, never a wild swing.
-                                out["motor_vigor"] = round(
-                                    max(0.8, min(1.2, 1.0 + 3000.0 * (dn - 50e-6))), 3
-                                )
-                                out["clock_drive"] = round(
-                                    float(step.get("clock_drive", 0.0)), 5
-                                )
-                                out["brain_arousal"] = round(
-                                    float(step.get("arousal", 0.0)), 5
-                                )
-                                out["whole_brain"] = True
-                                out["whole_brain_ms"] = round(_ms, 1)
-                                try:
-                                    from cognition.fly_behavior import metrics as _fly_metrics
-                                    _fly_metrics.record_fullbrain(
-                                        ran=True, ms=_ms, user_id=user_id
-                                    )
                                 except Exception:
                                     pass
                     except Exception as exc:

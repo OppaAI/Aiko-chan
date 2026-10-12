@@ -68,7 +68,8 @@ class TestCapabilityStructure:
         assert "save_note" in always_on
 
     def test_capabilities_defined(self):
-        expected_caps = {"research", "scheduling", "kb_proposal", "photo", "repo", "job_hunt", "social"}
+        expected_caps = {"research", "scheduling", "kb_proposal", "photo", "repo", "job_hunt", "social",
+                           "it_ops", "note_taking", "weather", "coding", "everyday", "multi_agent"}
         assert set(CAPABILITIES.keys()) == expected_caps
 
     def test_research_capability_domains(self):
@@ -284,3 +285,41 @@ class TestCapabilityThreshold:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+class TestCapabilityPlaybookConsistency:
+    """Every capability id declared by any playbook must be registered,
+    with trigger phrases, tool domains, and an overlay. Guards the
+    reachability bug where unregistered ids silently excluded playbooks
+    on capability-matched turns."""
+
+    def test_all_playbook_capability_ids_registered(self):
+        from agentic.graph_engine import _default_playbooks
+        declared: set[str] = set()
+        for p in _default_playbooks():
+            declared.update(p.get("capabilities") or [])
+        assert declared, "no playbook declares capabilities?"
+        assert declared <= set(CAPABILITIES), (
+            f"unregistered capability ids: {sorted(declared - set(CAPABILITIES))}"
+        )
+
+    def test_every_capability_has_triggers_domains_overlay(self):
+        for cid, cap in CAPABILITIES.items():
+            assert cap.triggers, f"{cid}: no trigger phrases"
+            assert isinstance(cap.tool_domains, tuple), f"{cid}: domains not a tuple"
+            assert isinstance(cap.system_overlay, str) and cap.system_overlay.strip(), (
+                f"{cid}: empty system overlay"
+            )
+
+    def test_every_capability_domain_tag_exists_on_tools(self):
+        import agentic.toolkit.plan  # noqa: F401 — register note/planning tools
+        try:
+            import agentic.toolkit.it_ops  # noqa: F401
+        except Exception:
+            pass
+        tags = set(registry.get_tool_domains().values())
+        for cid, cap in CAPABILITIES.items():
+            if not cap.tool_domains:
+                continue  # e.g. weather: LLM-only playbook, no tools
+            assert set(cap.tool_domains) & tags, (
+                f"{cid}: domains {cap.tool_domains} match no registered tool"
+            )

@@ -124,6 +124,7 @@ log = get_logger(__name__)
 
 EMC_ENABLED = env_bool("EMC_ENABLED", "1")
 EMC_EMBED_ON_FLUSH = env_bool("EMC_EMBED_ON_FLUSH", "1")
+EMC_EMBED_QUEUE_MAXSIZE = max(16, env_int("EMC_EMBED_QUEUE_MAXSIZE", 128))
 EMC_FLUSH_BATCH = max(1, env_int("EMC_FLUSH_BATCH", 32))
 EMC_STAGING_MAX = max(10, env_int("EMC_STAGING_MAX", 200))
 
@@ -577,8 +578,20 @@ class EpisodicStore:
         # thread stalls turns (1+ HTTP round-trips per flush). Instead the
         # embed runs on a dedicated worker thread; _inscribe only queues the
         # (storage_id, trace) pair after the storage row + FTS insert commit.
-        self._embed_queue: "queue.Queue[tuple[int, str] | None]" = queue.Queue()
+        # The queue is bounded: if the embed HTTP path stalls, _enqueue_embed
+        # drops the oldest queued item (episodes stay FTS-searchable; only the
+        # KNN vector for the dropped episode is lost — best-effort) rather
+        # than growing memory without bound on an 8GB box.
+        self._embed_queue: queue.Queue[tuple[int, str] | None] = queue.Queue(
+            maxsize=EMC_EMBED_QUEUE_MAXSIZE
+        )
         self._embed_worker: threading.Thread | None = None
+        # Guards the check-then-act worker (re)start in _enqueue_embed: without
+        # it, two concurrent enqueues can both see a dead worker and spawn two
+        # threads consuming the same queue. Dedicated lock (not self._lock):
+        # the worker loop takes self._lock for its DB writes, so reusing it
+        # here would serialize every enqueue behind embed I/O for no reason.
+        self._embed_worker_lock = threading.Lock()
         self._turns_since_flush = 0
         with self._lock:
             ensure_episode_schema(self._conn)
@@ -946,15 +959,39 @@ class EpisodicStore:
         return storage_id
 
     def _enqueue_embed(self, storage_id: int, trace: str) -> None:
-        """Queue a (storage_id, trace) embed for the background worker."""
-        if self._embed_worker is None or not self._embed_worker.is_alive():
-            self._embed_worker = threading.Thread(
-                target=self._embed_worker_loop,
-                name="emc-embed-worker",
-                daemon=True,
-            )
-            self._embed_worker.start()
-        self._embed_queue.put((storage_id, trace))
+        """Queue a (storage_id, trace) embed for the background worker.
+
+        The worker (re)start check-then-act is guarded by
+        _embed_worker_lock so concurrent enqueues can't spawn two workers.
+        The put itself never blocks: on a full queue the oldest item is
+        dropped (best-effort embed semantics) rather than stalling the
+        conversation thread or growing memory without bound.
+        """
+        with self._embed_worker_lock:
+            if self._embed_worker is None or not self._embed_worker.is_alive():
+                self._embed_worker = threading.Thread(
+                    target=self._embed_worker_loop,
+                    name="emc-embed-worker",
+                    daemon=True,
+                )
+                self._embed_worker.start()
+        try:
+            self._embed_queue.put_nowait((storage_id, trace))
+        except queue.Full:
+            try:
+                self._embed_queue.get_nowait()
+                self._embed_queue.task_done()
+            except queue.Empty:
+                pass
+            try:
+                self._embed_queue.put_nowait((storage_id, trace))
+            except queue.Full:
+                log.warning(
+                    "EMC embed queue full; skipping embed for episode %s",
+                    storage_id,
+                )
+                return
+            log.warning("EMC embed queue full; dropped oldest queued episode embed")
 
     def _embed_worker_loop(self) -> None:
         """Embed queued episodes off the conversation thread. Best-effort: a
@@ -1367,10 +1404,24 @@ class EpisodicStore:
             self.flush_writes()
         except Exception as e:
             log.debug("EMC flush_all on close: %s", e)
-        # Stop the embed worker thread if it's running
+        # Stop the embed worker thread if it's running. The sentinel put must
+        # not block: with a bounded queue and a wedged worker, a blocking
+        # put() would hang shutdown forever — drop the oldest item to make
+        # room for the sentinel instead.
         if self._embed_worker is not None and self._embed_worker.is_alive():
             try:
-                self._embed_queue.put(None)
+                try:
+                    self._embed_queue.put_nowait(None)
+                except queue.Full:
+                    try:
+                        self._embed_queue.get_nowait()
+                        self._embed_queue.task_done()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self._embed_queue.put_nowait(None)
+                    except queue.Full:
+                        log.warning("EMC embed queue full on close; worker may not observe shutdown")
                 self._embed_worker.join(timeout=2.0)
             except Exception as e:
                 log.debug("EMC embed worker shutdown: %s", e)

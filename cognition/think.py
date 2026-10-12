@@ -1698,6 +1698,29 @@ class AikoThink:
                 return [], "<knowledge_context>\nLookup failed.\n</knowledge_context>"
         return self._fetch_memory_and_knowledge(user_input, query_vector=None)
 
+    def _speculative_kb_embed(self, raw_input: str):
+        """Submit a speculative (recall_query, KNOWLEDGE_QUERY_INSTRUCT)
+        embed for the chained explicit knowledge search.
+
+        Returns a Future of the vector, or None when no embedder is
+        available. _fetch_chained_knowledge consumes it only if the
+        _memory_cannot_answer gate opens; otherwise the vector is
+        discarded (the embed ran off the critical path on CONTEXT_POOL).
+        """
+        try:
+            memorize = self._get_memorize()
+            embedder = getattr(getattr(memorize, "_mem", None), "_embedder", None)
+            if embedder is None:
+                return None
+            recall_query = self._recall_query(raw_input)
+            return CONTEXT_POOL.submit(
+                reason.cached_embed_query,
+                embedder, recall_query, KNOWLEDGE_QUERY_INSTRUCT,
+            )
+        except Exception as exc:
+            log.debug("[think] speculative KB embed submit failed: %s", exc)
+            return None
+
     def _fetch_memory_only(
         self, user_input: str, query_vector: np.ndarray | None = None,
         mem_limit: int = MEMORY_RECALL_LIMIT,
@@ -1745,6 +1768,7 @@ class AikoThink:
         """
         from cognition.attention import for_identity
         memorize = self._get_memorize()
+        _kb_vec_future = None  # speculative KB embed; set in the chained branch below
         if mem_kb_future is not None:
             # Legacy path: a pre-started future (tests / external
             # callers). route() no longer passes one for chat.
@@ -1752,6 +1776,14 @@ class AikoThink:
         else:
             # Chained recall: memory → entity-link knowledge hop →
             # explicit knowledge search only when memory can't answer.
+            #
+            # The explicit search (if the _memory_cannot_answer gate opens)
+            # needs a (recall_query, KNOWLEDGE_QUERY_INSTRUCT) vector.
+            # Embed it speculatively on CONTEXT_POOL concurrent with the
+            # memory search, so a gated-open turn pays max(mem, kb_embed)
+            # instead of mem + kb_embed. If the gate stays closed the
+            # vector is discarded; the embed ran off the critical path.
+            _kb_vec_future = self._speculative_kb_embed(raw_input)
             memories = self._fetch_memory_only(
                 raw_input, query_vector=query_vec, mem_limit=mem_limit,
             )
@@ -1772,6 +1804,7 @@ class AikoThink:
             # weak-set drop so the hop and the gate see final memories).
             knowledge_block = self._fetch_chained_knowledge(
                 raw_input, memories, query_vec, know_limit=know_limit,
+                kb_vec_future=_kb_vec_future,
             )
         # Skip cross-store related_knowledge when primary knowledge already
         # hit — both search the same query, so this only duplicates chunks.
@@ -1874,6 +1907,7 @@ class AikoThink:
         query_vec: np.ndarray | None,
         *,
         know_limit: int = KNOWLEDGE_RECALL_LIMIT,
+        kb_vec_future=None,
     ) -> str:
         """Chained knowledge recall for chat.
 
@@ -1882,21 +1916,51 @@ class AikoThink:
         2. Explicit vector search — only when memory cannot answer this turn
            (no/weak memories, or explicit learned-note phrasing).
 
+        The two legs are independent once memories are known, so they run
+        concurrently on CONTEXT_POOL: a turn pays max(linked, explicit)
+        instead of linked + explicit. The explicit search reuses the
+        speculatively pre-computed KB vector (kb_vec_future) when
+        available, skipping its embedding call; on any failure it falls
+        back to embedding in-leg.
+
         Returns the concatenated <knowledge_context> blocks ("" when none).
         """
-        blocks: list[str] = []
-        linked = _blank_empty_knowledge(self._fetch_linked_knowledge(memories, raw_input))
-        if linked:
-            blocks.append(linked)
-            log.debug("[think] linked knowledge hop: %d chars", len(linked))
+        linked_future = CONTEXT_POOL.submit(
+            self._fetch_linked_knowledge, memories, raw_input,
+        )
+        explicit_future = None
         if _memory_cannot_answer(raw_input, memories):
             recall_query = self._recall_query(raw_input)
             memorize = self._get_memorize()
             embedder = getattr(getattr(memorize, "_mem", None), "_embedder", None) if memorize else None
+            kb_vec = None
+            if kb_vec_future is not None:
+                try:
+                    kb_vec = kb_vec_future.result(timeout=MEMORY_RECALL_TIMEOUT)
+                except Exception as exc:
+                    log.debug("[think] speculative KB vector unavailable, embedding in-leg: %s", exc)
+                    kb_vec = None
             try:
-                explicit = _blank_empty_knowledge(knowledge_context_for(
-                    recall_query, limit=know_limit, max_chars=2000, embedder=embedder
-                ))
+                explicit_future = CONTEXT_POOL.submit(
+                    knowledge_context_for,
+                    recall_query, limit=know_limit, max_chars=2000,
+                    embedder=embedder, query_vector=kb_vec,
+                )
+            except Exception as exc:
+                log.warning("[think] explicit knowledge search submit failed: %s", exc)
+                explicit_future = None
+        blocks: list[str] = []
+        try:
+            linked = _blank_empty_knowledge(linked_future.result(timeout=MEMORY_RECALL_TIMEOUT))
+        except Exception as exc:
+            log.warning("[think] linked knowledge hop failed: %s", exc)
+            linked = ""
+        if linked:
+            blocks.append(linked)
+            log.debug("[think] linked knowledge hop: %d chars", len(linked))
+        if explicit_future is not None:
+            try:
+                explicit = _blank_empty_knowledge(explicit_future.result(timeout=MEMORY_RECALL_TIMEOUT))
             except Exception as exc:
                 log.warning("[think] explicit knowledge search failed: %s", exc)
                 explicit = ""

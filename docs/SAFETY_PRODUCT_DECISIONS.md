@@ -79,3 +79,21 @@ states, post-login and ASR background failures, and inner-speech
 reflection errors all log at warning or above. A safety signal that
 fails quietly is worse than no signal — it reports coverage that
 doesn't exist.
+
+## 11. Social autopost stays draft-only until per-lane approval
+
+All autopost/autodraft lanes default off, and photo autopost additionally
+requires `human_approved=true` in the draft (defense in depth). Flipping
+any lane to auto-publish is a per-platform product decision with
+spam/abuse consequences — never a drive-by code change. Weekly drafts
+may generate (WEEKLY_SOCIAL_AUTODRAFT defaults on); publishing never
+happens without a human.
+
+## 12. Fly paths default off in code, live by yaml on this deployment
+
+Every `MEMORY_FLY*_MODE` / `AIKO_FLY_*` flag defaults to off/shadow in
+code (safe for fresh clones on 8GB boxes), while `config/memory.yaml`
+sets them live here (`load_config` flattens yaml into environ). This
+split is intentional: heaviness is opt-in per deployment, never
+assumed. Do not "simplify" by changing code defaults to live — that
+would light up the full connectome runtime on every fresh install.

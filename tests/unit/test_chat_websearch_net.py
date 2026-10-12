@@ -97,7 +97,7 @@ def chat_env(monkeypatch):
     monkeypatch.setattr(think, "_websearch_full_block", lambda *a, **kw: "")
     monkeypatch.setattr(think, "_sanitize_history", lambda history: history)
     monkeypatch.setattr(think, "_store_async", lambda *a, **kw: None)
-    monkeypatch.setattr(think, "_finalize_response", lambda user_input, resp, cb=None, already_emitted=None, _spoken_prefix="": resp)
+    monkeypatch.setattr(think, "_finalize_response", lambda user_input, resp, cb=None, already_emitted=None, _spoken_prefix="", **kw: resp)
     return think
 
 

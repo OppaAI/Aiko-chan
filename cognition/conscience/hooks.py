@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +30,122 @@ _APPROVED_ONCE: dict[str, tuple[str, float]] = {}
 _APPROVED_INPUT: dict[str, tuple[str, float]] = {}  # escalation_id -> (input, expiry)
 _APPROVAL_TTL_S = 600.0
 _APPROVED_MAX = 50
+
+# Held-output registry for streamed-turn ASK: when a streamed turn's record
+# is held for a human accept/decline, the completed text waits here instead
+# of entering history/memory. One-shot: popped on first resolution.
+# In-memory only (never persisted) — a restart auto-purges, which is the
+# safe default. TTL bounds stale entries; expiry resolves to decline.
+_HELD_OUTPUTS: dict[str, dict] = {}
+_HELD_LOCK = threading.Lock()
+HELD_OUTPUT_TTL_S = 25.0  # interactive turns; autonomous asks keep the ledger's 180s
+
+
+def _held_content_hash(text: str) -> str:
+    import hashlib as _hashlib
+    return _hashlib.sha256((text or "").encode("utf-8", errors="replace")).hexdigest()
+
+
+def hold_output_for_approval(escalation_id: str, *, held_text: str, sentence_indices: list[int],
+                             categories: list[str], user_id: str | None, history_len: int,
+                             hold_token: str | None, user_input: str, store_turn: bool) -> None:
+    """Register a streamed turn's completed text as held for accept/decline."""
+    import time as _time
+    with _HELD_LOCK:
+        _HELD_OUTPUTS[escalation_id] = {
+            "held_text": held_text,
+            "content_hash": _held_content_hash(held_text),
+            "sentence_indices": list(sentence_indices),
+            "categories": list(categories),
+            "user_id": user_id,
+            "history_len": history_len,
+            "hold_token": hold_token,
+            "user_input": user_input,
+            "store_turn": store_turn,
+            "created_at": _time.monotonic(),
+        }
+        while len(_HELD_OUTPUTS) > _APPROVED_MAX:
+            _HELD_OUTPUTS.pop(next(iter(_HELD_OUTPUTS)))
+    log.info("[ccc-hooks] output held for approval: %s (%d chars, sentences %s)",
+             escalation_id, len(held_text or ""), sentence_indices)
+
+
+def pop_held_output(escalation_id: str) -> dict | None:
+    """One-shot take of a held output. Returns None when absent; returns the
+    record with expired=True when the hold lapsed (late approvals must not
+    commit it)."""
+    import time as _time
+    with _HELD_LOCK:
+        held = _HELD_OUTPUTS.pop(escalation_id, None)
+        if held is not None and \
+                _time.monotonic() - held["created_at"] > HELD_OUTPUT_TTL_S:
+            held["expired"] = True
+            _EXPIRED_HOLD_IDS[escalation_id] = _time.monotonic() + _EXPIRED_TTL_S
+            log.info("[ccc-hooks] held output %s expired; late decision cannot commit it",
+                     escalation_id)
+    return held
+
+
+def peek_held_output(escalation_id: str) -> dict | None:
+    with _HELD_LOCK:
+        return _HELD_OUTPUTS.get(escalation_id)
+
+
+# Tombstones for expired holds: escalation_id -> monotonic expiry.
+# Bounds the "already expired" window; pruned opportunistically in
+# sweep_held_outputs.
+_EXPIRED_HOLD_IDS: dict[str, float] = {}
+_EXPIRED_TTL_S = 300.0
+
+
+def is_expired_hold(escalation_id: str) -> bool:
+    """True when a hold for this id expired (late decisions must not commit)."""
+    import time as _time
+    with _HELD_LOCK:
+        exp = _EXPIRED_HOLD_IDS.get(escalation_id)
+        if exp is None:
+            return False
+        if exp < _time.monotonic():
+            del _EXPIRED_HOLD_IDS[escalation_id]
+            return False
+        return True
+
+
+def sweep_held_outputs() -> list[dict]:
+    """Drop expired holds. Returns the expired records so the caller can
+    append withheld markers at their recorded history positions. Expired
+    IDs are tombstoned so a late approval gets an honest "already expired"
+    answer instead of falling through to the tool-resume path."""
+    import time as _time
+    expired = []
+    with _HELD_LOCK:
+        now = _time.monotonic()
+        for eid in [e for e, h in _HELD_OUTPUTS.items()
+                    if now - h["created_at"] > HELD_OUTPUT_TTL_S]:
+            expired.append((eid, _HELD_OUTPUTS.pop(eid)))
+        for eid, _h in expired:
+            _EXPIRED_HOLD_IDS[eid] = now + _EXPIRED_TTL_S
+        # Opportunistic prune of stale tombstones.
+        for eid in [e for e, exp in _EXPIRED_HOLD_IDS.items() if exp < now]:
+            del _EXPIRED_HOLD_IDS[eid]
+    for _eid, h in expired:
+        log.info("[ccc-hooks] held output expired without decision; purged")
+    return [h for _eid, h in expired]
+
+
+def push_turn_ask_notice(user_id: str | None, escalation_id: str, summary: str) -> None:
+    """One turn-level ask notice (aggregated, not one per sentence)."""
+    try:
+        from system.notice import get_notice_bus
+        get_notice_bus(user_id).push(
+            "conscience",
+            f"held for your call [{escalation_id}]: {summary[:160]} "
+            f"— reply 'approve ccc-{escalation_id}' or "
+            f"'deny ccc-{escalation_id}'",
+        )
+    except Exception as exc:
+        log.debug("[ccc-hooks] turn ask notice push failed: %s", exc)
+
 
 # Standing-permission cache: AutonomyPolicy per uid (thread-safe, JSON
 # durable). Learned trust lives here, not in the maps above.
@@ -93,6 +210,53 @@ def _prune_approved() -> None:
         pass
 
 
+def _complete_held_output(owner, user_id: str | None, escalation_id: str,
+                           approved: bool, held: dict) -> str:
+    """Complete a held streamed-turn output after the human's decision.
+
+    Commit (approve): the held text enters history at its token-anchored
+    position and is stored to memory — but only when the content hash still
+    matches. Anything else fails closed to purge. An admin may approve
+    another user's held turn (oversight); the commit preserves the held
+    user's identity. Non-admin approvers are already blocked by can_approve
+    in resolve_ccc_approval.
+    Purge (deny/expired/superseded/mismatch): a withheld marker takes the
+    turn's history slot; nothing is stored to memory.
+    """
+    WITHHELD = "[withheld: turn did not pass the final conscience check]"
+    reason = ""
+    commit = False
+    if held.get("expired"):
+        reason = "that question already expired, so I left it out of the record"
+    elif not approved:
+        reason = "withheld from the record as you asked"
+    elif _held_content_hash(held.get("held_text") or "") != held.get("content_hash"):
+        reason = "the held text changed since it was flagged"
+    else:
+        commit = True
+    if not commit:
+        log.info("[ccc-hooks] held output %s purged: %s", escalation_id, reason)
+    try:
+        if owner is None or not hasattr(owner, "_history"):
+            log.warning("[ccc-hooks] held output %s: no owner history to complete", escalation_id)
+            return "Noted — I've left that out of the record." if not commit else "Noted."
+        if commit:
+            try:
+                owner._commit_held_output(held)
+            except ValueError as exc:
+                # Anchor trimmed away: the turn's context is gone; the
+                # approved text has nowhere safe to land. Fail closed.
+                log.info("[ccc-hooks] held output %s superseded (%s); purged", escalation_id, exc)
+                return ("That one's already moved on — I've left it out of "
+                        "the record.")
+            return "Alright — that's in the record now."
+        owner._purge_held_output(held, WITHHELD)
+        return f"Noted — {reason}."
+    except Exception as exc:
+        log.warning("[ccc-hooks] held output %s completion failed: %s", escalation_id, exc)
+        return "I couldn't complete that just now — I've left it out of the record."
+
+
 def resolve_ccc_approval(user_input: str, user_id: str | None = None, owner=None) -> str | None:
     """Return a confirmation string if input is approve/deny ccc-<id>, else None."""
     match = _CCC_APPROVAL_RE.search(user_input or "")
@@ -112,6 +276,34 @@ def resolve_ccc_approval(user_input: str, user_id: str | None = None, owner=None
                     "An admin can approve it instead.")
     try:
         from cognition.conscience import conscience_for
+
+        # Held-output escalations (streamed turn held for accept/decline) are
+        # checked FIRST, against the HELD USER's ledger — the escalation was
+        # opened on their turn, so the approver's own ledger won't have it.
+        # An admin may approve another user's held turn (oversight); the
+        # commit preserves the held user's identity for history/memory.
+        held_peek = peek_held_output(escalation_id)
+        if held_peek is not None or is_expired_hold(escalation_id):
+            if is_expired_hold(escalation_id):
+                # Swept before the decision arrived: the marker is already in
+                # history; answer honestly instead of "going ahead".
+                log.info("[ccc-hooks] late decision for expired hold %s", escalation_id)
+                return ("That question already expired, so I left it out of "
+                        "the record.")
+            held_uid = held_peek.get("user_id")
+            resolved = conscience_for(held_uid).resolve_escalation(
+                escalation_id,
+                approved,
+                note=f"via chat: {verb} (approver {user_id})",
+            )
+            if not resolved:
+                return f"I don't have an open question with id {escalation_id}."
+            # One-shot: pop here so a replayed approval finds nothing to commit.
+            held = pop_held_output(escalation_id)
+            if held is not None:
+                return _complete_held_output(owner, user_id, escalation_id, approved, held)
+            return "Noted."
+
         resolved = conscience_for(user_id).resolve_escalation(
             escalation_id,
             approved,
@@ -280,47 +472,60 @@ def gate_respond(*, user_input: str, user_id: str | None, llm_client=None, embed
 
 
 def gate_speak(*, draft: str, user_input: str = "", llm_client=None, embedder=None, already_emitted: bool = False,
-             fail_closed: bool = False):
+             fail_closed: bool = False, return_verdict: bool = False, quiet_escalation: bool = False):
     """Evaluate act=speak. Returns replacement text or None to keep draft.
 
     fail_closed: when True, evaluation errors are re-raised instead of
     preserving the draft. Early sentence streaming (cognition/think.py)
     opts in: an unevaluated sentence must never reach TTS. Normal
     finalization keeps the fail-open default.
+
+    return_verdict: when True, returns (replacement, verdict) so callers
+    can see ESCALATE (which otherwise collapses to "keep draft").
+
+    quiet_escalation: when True, an ESCALATE verdict is recorded in the
+    ledger but no owner notice is pushed. The sentence-streaming caller
+    aggregates per-sentence escalations into one turn-level ask instead
+    of a stack of prompts.
     """
     try:
         from cognition.conscience import conscience_for, REFUSE, ESCALATE
         verdict = conscience_for().evaluate(
             act="speak",
             content=draft,
-            context={"surface": "chat", "user_input": (user_input or "")[:400]},
+            context={"surface": "chat", "user_input": (user_input or "")[:400],
+                     "quiet_escalation": quiet_escalation},
             llm_client=llm_client,
             embedder=embedder,
             surface="chat",
         )
+        def _out(replacement):
+            return (replacement, verdict) if return_verdict else replacement
         if verdict.decision == ESCALATE:
             # An uncertain outbound draft is not worth interrupting speech
             # for. The inbound respond gate already passed this turn, so the
             # speak backstop replaces clear refusals only; doubt lets the
             # draft through (logged) instead of swapping the reply for an
             # approval question that no persisted invocation could satisfy.
+            # (The sentence-stream caller records the escalation and holds
+            # the turn's record for a human decision at finalization.)
             log.info(
                 "[ccc-hooks] speak escalate keeps draft: %s",
                 (verdict.reasons[0] if verdict.reasons else "")[:160],
             )
-            return None
+            return _out(None)
         if verdict.decision == REFUSE:
             if verdict.pastoral_note:
-                return verdict.pastoral_note
-            return "I should hold that thought."
+                return _out(verdict.pastoral_note)
+            return _out("I should hold that thought.")
         if verdict.decision == "caution" and verdict.constraint:
             log.info("[ccc-hooks] speak caution: %s", verdict.constraint[:120])
-        return None
+        return _out(None)
     except Exception as exc:
         log.warning("[ccc-hooks] speak gate failed; preserving draft under caution: %s", exc)
         if fail_closed:
             raise
-        return draft
+        return (draft, None) if return_verdict else draft
 
 
 def gate_tool(*, name: str, args: dict, llm_client=None, embedder=None, social_post_tools=None):

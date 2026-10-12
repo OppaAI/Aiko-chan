@@ -83,8 +83,12 @@ def _bare_think(monkeypatch, review_flags=(), gate_result="keep"):
 
     def fake_gate_speak(*, draft, **kwargs):
         if gate_result == "keep":
-            return None
-        return gate_result  # refusal / substitution text
+            out = None
+        else:
+            out = gate_result  # refusal / substitution text
+        if kwargs.get("return_verdict"):
+            return out, None
+        return out
 
     monkeypatch.setattr(hooks, "gate_speak", fake_gate_speak)
     return think
@@ -165,7 +169,7 @@ def test_stream_response_sentence_sink_end_to_end(monkeypatch):
     monkeypatch.setattr(think_module, "_SENTENCE_STREAM", True)
     latency_mod.reset()
     from cognition.conscience import hooks
-    monkeypatch.setattr(hooks, "gate_speak", lambda *, draft, **kw: None)
+    monkeypatch.setattr(hooks, "gate_speak", lambda *, draft, **kw: (None, None) if kw.get("return_verdict") else None)
 
     think = _stream_think(["Hello world. ", "How are you?"])
     speak = FakeSpeak()
@@ -207,7 +211,7 @@ def _finalize_think(monkeypatch, correct_fn=None):
     think._get_speak = lambda: None
     think._client = None
     from cognition.conscience import hooks
-    monkeypatch.setattr(hooks, "gate_speak", lambda *, draft, **kw: None)
+    monkeypatch.setattr(hooks, "gate_speak", lambda *, draft, **kw: (None, None) if kw.get("return_verdict") else None)
     emitted = []
     monkeypatch.setattr(
         think, "_emit_finalized_response",
@@ -295,7 +299,7 @@ def test_drain_counts_only_accepted_sentences(monkeypatch):
     monkeypatch.setattr(think_module, "_SENTENCE_STREAM", True)
     latency_mod.reset()
     from cognition.conscience import hooks
-    monkeypatch.setattr(hooks, "gate_speak", lambda *, draft, **kw: None)
+    monkeypatch.setattr(hooks, "gate_speak", lambda *, draft, **kw: (None, None) if kw.get("return_verdict") else None)
 
     think = _stream_think(["Hello world. ", "Bad news here. ", "All good."])
     think._review_response = (
@@ -323,7 +327,7 @@ def test_drain_rejected_first_sentence_counts_nothing(monkeypatch):
     monkeypatch.setattr(think_module, "_SENTENCE_STREAM", True)
     latency_mod.reset()
     from cognition.conscience import hooks
-    monkeypatch.setattr(hooks, "gate_speak", lambda *, draft, **kw: None)
+    monkeypatch.setattr(hooks, "gate_speak", lambda *, draft, **kw: (None, None) if kw.get("return_verdict") else None)
 
     think = _stream_think(["Nope. ", "Later."])
     think._review_response = lambda user_input, text: {"flags": ["bad", "worse"]}
@@ -393,6 +397,8 @@ def test_sentence_sink_enables_fail_closed_gate(monkeypatch):
 
     def _rec_gate_speak(*, draft, fail_closed=False, **kw):
         seen["fail_closed"] = fail_closed
+        if kw.get("return_verdict"):
+            return None, None
         return None
 
     monkeypatch.setattr(hooks, "gate_speak", _rec_gate_speak)

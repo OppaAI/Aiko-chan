@@ -43,7 +43,7 @@ def _stream_think(monkeypatch, speak):
     think._sanitize_history = lambda history: history
     think._store_async = lambda *a, **kw: None
     think._finalize_response = (
-        lambda user_input, resp, cb=None, already_emitted=None, _spoken_prefix="": resp
+        lambda user_input, resp, cb=None, already_emitted=None, _spoken_prefix="", **kw: resp
     )
     monkeypatch.setattr(think_module, "_SENTENCE_STREAM", True)
     return think

@@ -1614,6 +1614,16 @@ def register_system_handlers_only(
         except Exception:
             log.exception("Failed to register deep-study schedule handlers.")
 
+    # Attach the EMC-4 episodic distill step to the nightly dream pass.
+    # Without this, dream() consolidates semantic memory but silently skips
+    # episodic distillation (attach_dream_hook is otherwise never called).
+    # Idempotent; safe to run on every boot path including post-login re-runs.
+    try:
+        from cognition.memory.episode import attach_dream_hook
+        attach_dream_hook()
+    except Exception:
+        log.exception("Failed to attach episodic distill to dream().")
+
     try:
         register_system_handler("workspace_knowledge_scan", _workspace_scan_handler)
         register_system_handler("check_email", _check_email_handler)

@@ -243,11 +243,4 @@ def _retrain_job() -> None:
         _last_retrain = time.monotonic()
 
 
-def start_continuous_training() -> None:
-    """Call once at boot (e.g. from system.wakeup) to enable background retrains."""
-    # No dedicated thread needed; log_example triggers on demand.
-    # This is a hook for future periodic checks.
-    log.info("attention continuous training enabled (buffer=%s)", _BUFFER_PATH)
-
-
-__all__ = ["log_example", "start_continuous_training"]
+__all__ = ["log_example"]

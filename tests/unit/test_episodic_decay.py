@@ -58,3 +58,41 @@ def test_maybe_flush_cap_trigger(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "staging_count", lambda: em.EMC_STAGING_MAX + 5)
     monkeypatch.setattr(store, "flush_staging", lambda *a, **k: 7)
     assert store.maybe_flush() == 7
+
+
+def test_retire_distilled_old_unrecalled(tmp_path, monkeypatch):
+    from cognition.memory import episode as em
+    import sqlite3
+    db = tmp_path / "emc.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE emc_storage (id INTEGER PRIMARY KEY, user_id TEXT, timestamp TEXT, recall_count INTEGER DEFAULT 0, superseded_by TEXT)")
+    old = "2020-01-01T00:00:00+00:00"
+    new = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    conn.execute("INSERT INTO emc_storage (id, user_id, timestamp, recall_count) VALUES (1, 'u', ?, 0)", (old,))
+    conn.execute("INSERT INTO emc_storage (id, user_id, timestamp, recall_count) VALUES (2, 'u', ?, 50)", (old,))
+    conn.execute("INSERT INTO emc_storage (id, user_id, timestamp, recall_count) VALUES (3, 'u', ?, 0)", (new,))
+    conn.commit()
+    store = mock_store(conn)
+    batch = [{"id": 1, "timestamp": old, "recall_count": 0},
+             {"id": 2, "timestamp": old, "recall_count": 50},
+             {"id": 3, "timestamp": new, "recall_count": 0}]
+    assert em._retire_distilled(store, batch, ["m1"]) == 1
+    got = {r[0]: r[1] for r in conn.execute("SELECT id, superseded_by FROM emc_storage")}
+    assert got[1] == "distilled:m1"   # old + unrecalled -> retired
+    assert got[2] is None             # recalled -> kept
+    assert got[3] is None             # fresh -> kept
+    conn.close()
+
+
+def mock_store(conn):
+    class S:
+        _lock = __import__("threading").RLock()
+        _conn = conn
+    return S()
+
+
+def test_retire_disabled_or_empty(monkeypatch):
+    from cognition.memory import episode as em
+    assert em._retire_distilled(None, [], []) == 0
+    monkeypatch.setattr(em, "EMC_SUPERSEDE_ENABLED", False)
+    assert em._retire_distilled(object(), [{"id": 1}], ["m"]) == 0

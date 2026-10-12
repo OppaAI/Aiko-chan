@@ -1636,6 +1636,52 @@ def _candidate_episodes(store, user_id: str, limit: int) -> list[dict]:
     ]
 
 
+# EMC-7b: retirement. Distillation preserves content into semantic facts;
+# retirement retires the episode row from recall once nobody needs the
+# original anymore: successfully distilled + older than SUPERSEDE_AGE_DAYS
+# + recalled at most SUPERSEDE_MAX_RECALLS times. Rows are NOT deleted
+# (superseded_by set; recall filters it out) — fully reversible by
+# clearing the field. Disabled with EMC_SUPERSEDE_ENABLED=0.
+EMC_SUPERSEDE_ENABLED = env_bool("EMC_SUPERSEDE_ENABLED", "1")
+EMC_SUPERSEDE_AGE_DAYS = max(1.0, env_float("EMC_SUPERSEDE_AGE_DAYS", 30.0))
+EMC_SUPERSEDE_MAX_RECALLS = max(0, env_int("EMC_SUPERSEDE_MAX_RECALLS", 2))
+
+
+def _retire_distilled(store, batch: list[dict], mem_ids: list[str]) -> int:
+    """Retire freshly-distilled episodes nobody recalls. Returns count."""
+    if not EMC_SUPERSEDE_ENABLED or not batch or not mem_ids:
+        return 0
+    try:
+        import time as _time
+        now = _time.time()
+        retired = 0
+        with store._lock:
+            for c in batch:
+                try:
+                    recalls = int(c.get("recall_count") or 0)
+                except (TypeError, ValueError):
+                    recalls = 0
+                if recalls > EMC_SUPERSEDE_MAX_RECALLS:
+                    continue
+                ts = _parse_ts(c.get("timestamp"))
+                if ts is None or (now - ts) / 86400.0 < EMC_SUPERSEDE_AGE_DAYS:
+                    continue
+                store._conn.execute(
+                    "UPDATE emc_storage SET superseded_by = ? WHERE id = ? "
+                    "AND (superseded_by IS NULL)",
+                    (f"distilled:{mem_ids[0]}", int(c["id"])),
+                )
+                retired += 1
+            if retired:
+                store._conn.commit()
+        if retired:
+            log.info("EMC retired %d distilled episodes (superseded_by set).", retired)
+        return retired
+    except Exception as e:
+        log.debug("EMC retire-distilled failed: %s", e)
+        return 0
+
+
 def _mark_distilled(store, ids: list[int], *, distilled_into: list[str] | None = None) -> None:
     if not ids:
         return
@@ -1774,6 +1820,8 @@ def distill_episodes(
             ids = [c["id"] for c in batch]
             _mark_distilled(store, ids, distilled_into=batch_mem_ids)
             distilled_ids.extend(ids)
+            result["retired"] = result.get("retired", 0) + _retire_distilled(
+                store, batch, batch_mem_ids)
 
     result["distilled_episodes"] = len(distilled_ids)
     result["facts_written"] = facts_written

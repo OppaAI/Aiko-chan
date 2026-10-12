@@ -310,6 +310,20 @@ The `dream()` consolidation system runs across all phases and improves continuou
 | Hugo + GitHub daily reflection publishing | ✅ Done |
 | Cross-session memory coherence improvements | 🔲 Ongoing |
 | Dream-driven personality drift (subtle, long-term) | 🔲 Phase 4+ |
+| Episodic decay (forgetting curve, 60d half-life) | ✅ Done |
+| Episodic supersede-on-distill (retire absorbed rows) | ✅ Done |
+
+### Deliberately not built (memory subsystem)
+
+These were considered, prototyped in discussion, and rejected with
+reasons. Re-proposing any of them requires answering its objection —
+they are not backlog, they are decisions.
+
+| Item | Why not |
+|---|---|
+| **Time-based retrains** (periodic LightGBM retrain on a timer) | The threshold trigger (50 buffered rows / 10 min) already covers the workload: new information enters only via turns, which is exactly what the threshold counts. A timer would burn GPU relearning identical buffers. Revisit only if quiet-day staleness is ever measured (it hasn't been). |
+| **Touch-on-cache-hit** (bump recall counts on TTL cache hits) | Explicit anti-write-amplification design: hot queries would issue a DB write per turn. Counts still accrue on every uncached search — sufficient signal for decay resistance. Changing this trades a real correctness property for counter precision. |
+| **Replay write-back** (shadow replay outcomes modify EMC rows) | Replay runs in shadow mode by design; its outputs are observations, not decisions. Letting an unreviewed simulator edit memory needs a doctrine rule for what replay may change — that rule doesn't exist yet. Promoting replay past shadow is a doctrine call, not a code gap. |
 
 ---
 

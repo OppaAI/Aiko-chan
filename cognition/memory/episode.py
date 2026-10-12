@@ -140,6 +140,39 @@ EMC_KNN_LIMIT = max(1, env_int("EMC_KNN_LIMIT", 12))
 EMC_FTS_LIMIT = max(1, env_int("EMC_FTS_LIMIT", 12))
 EMC_RRF_K = max(1, env_int("EMC_RRF_K", 60))
 
+# EMC-7: forgetting. Human episodic memory fades with age unless refreshed
+# by recall; salience slows the fade. Applied as a score multiplier at
+# recall time (lazy — no data deleted, fully reversible by tuning).
+# Half-life in days at salience 0; effective half-life scales with
+# (1 + salience). Recalled memories resist via log boost (capped 2x).
+# 0 disables (scores untouched).
+EMC_DECAY_HALF_LIFE_DAYS = max(0.0, env_float("EMC_DECAY_HALF_LIFE_DAYS", 60.0))
+EMC_DECAY_MIN_FACTOR = 0.05
+
+
+def decay_factor(timestamp, recall_count: int = 0, salience: float = 0.0) -> float:
+    """Forgetting-curve multiplier in (0, 2]: 1.0 = fresh, fading with age.
+
+    Returns 1.0 when decay is disabled, the timestamp is unparseable, or
+    anything goes wrong — forgetting must degrade recall gracefully,
+    never blank it on an error.
+    """
+    try:
+        if not EMC_DECAY_HALF_LIFE_DAYS:
+            return 1.0
+        ts = _parse_ts(timestamp)
+        if ts is None:
+            return 1.0
+        import time as _time
+        age_days = max(0.0, (_time.time() - ts) / 86400.0)
+        sal = max(0.0, min(1.0, float(salience or 0.0)))
+        boost = 1.0 + math.log1p(max(0, int(recall_count or 0)))
+        hl = EMC_DECAY_HALF_LIFE_DAYS * (1.0 + sal)
+        factor = min(2.0, boost) * 0.5 ** (age_days / hl)
+        return max(EMC_DECAY_MIN_FACTOR, factor)
+    except Exception:
+        return 1.0
+
 # Fly mushroom-body layer: KC sparse codes (FlyHash-style) as an extra
 # recall key. Reuses the grasp MB master mode (off | shadow | live); shadow
 # only logs the top KC overlap, live adds a small RRF-scale bonus.

@@ -237,43 +237,55 @@ def web_fetch(
         if cached is not None:
             return cached
  
-    if importlib.util.find_spec("trafilatura") is None:
-        tavily = _tavily_extract(url, max_chars)
-        if tavily:
-            if use_cache:
-                _FETCH_CACHE.set(cache_key, tavily)
-            return tavily
+    if importlib.util.find_spec("trafilatura") is None and not TAVILY_API_KEY:
         return "[fetch failed: trafilatura is not installed]"
-    trafilatura = importlib.import_module("trafilatura")
 
-    downloaded, error = ingest_from_url(url, max_download_bytes)
-    if error:
-        tavily = _tavily_extract(url, max_chars)
-        if tavily:
-            if use_cache:
-                _FETCH_CACHE.set(cache_key, tavily)
-            return tavily
-        return error
+    # Self-healing strategy order: domains with a history of trafilatura
+    # failure go straight to the escalation that works (see fetch_heal).
+    # Order changes; the contract doesn't — first strategy yielding
+    # TAVILY_MIN_CHARS wins, failures fall through, errors preserved.
+    from agentic.toolkit import fetch_heal
+    strategies = fetch_heal.preferred_order(url, ("trafilatura", "tavily"))
+    if strategies[:1] != ["trafilatura"]:
+        log.debug("web_fetch: %s healed order %s", parsed.hostname, strategies)
+    trafilatura_mod = (
+        importlib.import_module("trafilatura")
+        if importlib.util.find_spec("trafilatura") is not None else None
+    )
 
-    try:
-        text = trafilatura.extract(downloaded, include_links=False, include_tables=False) or ""
-    except Exception as e:
-        tavily = _tavily_extract(url, max_chars)
-        if tavily:
-            if use_cache:
-                _FETCH_CACHE.set(cache_key, tavily)
-            return tavily
-        return f"[fetch failed: {e}]"
+    text = ""
+    last_error = "[fetch failed: no extractable text]"
+    downloaded: bytes | None = None
+    for strategy in strategies:
+        if strategy == "tavily":
+            tavily = _tavily_extract(url, max_chars)
+            fetch_heal.record(url, "tavily", bool(tavily and len(tavily) >= TAVILY_MIN_CHARS))
+            if tavily and len(tavily) > len(text):
+                text = tavily
+        else:
+            if trafilatura_mod is None:
+                fetch_heal.record(url, "trafilatura", False)
+                last_error = "[fetch failed: trafilatura is not installed]"
+                continue
+            if downloaded is None:
+                downloaded, error = ingest_from_url(url, max_download_bytes)
+                if error:
+                    fetch_heal.record(url, "trafilatura", False)
+                    last_error = error
+                    continue
+            try:
+                chunk = trafilatura_mod.extract(downloaded, include_links=False, include_tables=False) or ""
+            except Exception as e:
+                fetch_heal.record(url, "trafilatura", False)
+                last_error = f"[fetch failed: {e}]"
+                continue
+            fetch_heal.record(url, "trafilatura", len(chunk) >= TAVILY_MIN_CHARS)
+            if len(chunk) > len(text):
+                text = chunk
+        if len(text) >= TAVILY_MIN_CHARS:
+            break
 
-    if not text or len(text) < TAVILY_MIN_CHARS:
-        # Thin/empty extraction (JS wall, bot block, boilerplate-only) —
-        # take whichever source yields more text, so a garbage page never
-        # wins over a good vendor extraction.
-        tavily = _tavily_extract(url, max_chars)
-        if tavily and len(tavily) > len(text):
-            text = tavily
-
-    result = text[:max_chars] if text else "[fetch failed: no extractable text]"
+    result = text[:max_chars] if text else last_error
     if use_cache and text:
         _FETCH_CACHE.set(cache_key, result)
     return result

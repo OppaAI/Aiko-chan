@@ -312,6 +312,8 @@ The `dream()` consolidation system runs across all phases and improves continuou
 | Dream-driven personality drift (subtle, long-term) | 🔲 Phase 4+ |
 | Episodic decay (forgetting curve, 60d half-life) | ✅ Done |
 | Episodic supersede-on-distill (retire absorbed rows) | ✅ Done |
+| Dream illustration (FLUX via Modal txt2img, Hugo + GitHub publish) | ✅ Done |
+| On-request imagegen in chat threads | ✅ Done |
 
 ### Deliberately not built (memory subsystem)
 

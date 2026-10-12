@@ -57,10 +57,13 @@ generalizes (it currently degrades 61% → 38% off-distribution).
 
 ## Decision
 
-**B — alongside, triage-first** (decided 2026-10-10, provisional: "try B first").
+**B — alongside, triage-first** (confirmed final 2026-10-12, owner ruling).
 
-B is what is already merged and running (`CCC_JUDGE_SCHEME=triage` maps
-triage verdicts onto the (v,h) contract: refuse→refuse, ask→escalate,
-allow→fall through to the doctrine pipeline), so this decision changes
-zero code. Revisit A (replace) if the category head ever generalizes
-off-distribution.
+Rationale for finality: triage alone is likely to pass something that
+should be negative — the binary head's measured strength is precision
+on clear cases, not recall on adversarial/novel ones. Retiring (v,h)
+would remove the only layer that speaks the doctrine's own language
+(commandments, neighbour semantics, lexical veto) exactly where the
+model is weakest. The (v,h) pipeline therefore stays as the mandatory
+fall-through on every triage allow, not as a legacy to sunset: either
+side can still refuse, and neither side can allow alone.

@@ -18,6 +18,7 @@ unless --force is given.
 from __future__ import annotations
 
 import argparse
+import ast
 import datetime as _dt
 import json
 import os
@@ -42,6 +43,9 @@ Rules:
 - Brief and factual. No speculation beyond what the history shows.
 - At least one entry must carry the month name as a key (e.g. "june 2026") so "what happened in June?" finds it.
 - Output ONLY the JSON lines, no markdown fences, no commentary.
+
+Example of one entry (exactly this shape, double quotes, one per line):
+{"keys": ["june 2026", "sqlite-vec"], "content": "June 4, 2026: the memory backend moved from Qdrant to a custom sqlite-vec.", "enabled": true}
 
 Git history for {month_label}:
 ```
@@ -126,16 +130,47 @@ def call_llm(prompt: str) -> str:
     return resp.choices[0].message.content or ""
 
 
+def _parse_line(line: str):
+    """Parse one candidate entry, tolerating small-model output quirks."""
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError:
+        pass
+    try:
+        # Single-quoted dicts, True/False/None literals.
+        rec = ast.literal_eval(line)
+        return rec if isinstance(rec, dict) else None
+    except (ValueError, SyntaxError, MemoryError, RecursionError):
+        return None
+
+
 def parse_entries(text: str, month_key: str) -> list[dict]:
     # Tolerate markdown fences around the JSONL.
     text = re.sub(r"^```(?:json)?\s*", "", text.strip())
     text = re.sub(r"\s*```$", "", text)
+    recs: list = []
+    s = text.strip()
+    if s.startswith("["):
+        # Whole response is a JSON array instead of JSONL.
+        try:
+            arr = json.loads(s)
+            if isinstance(arr, list):
+                recs = arr
+        except json.JSONDecodeError:
+            pass
+    if not recs:
+        for line in s.splitlines():
+            line = line.strip().rstrip(",")
+            if not line.startswith("{"):
+                continue
+            rec = _parse_line(line)
+            if rec is None:
+                print(f"warning: skipping unparseable entry: {line[:100]}",
+                      file=sys.stderr)
+                continue
+            recs.append(rec)
     entries = []
-    for line in text.splitlines():
-        line = line.strip().rstrip(",")
-        if not line.startswith("{"):
-            continue
-        rec = json.loads(line)
+    for rec in recs:
         if not isinstance(rec, dict):
             continue
         # keys must be a list of nonempty strings; a bare string like

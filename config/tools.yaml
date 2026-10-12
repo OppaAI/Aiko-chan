@@ -446,6 +446,30 @@
       "skill": false
     },
     {
+      "handler": "agentic.toolkit.research:deep_read_enriched",
+      "name": "deep_read_enriched",
+      "description": "Fetch one EXACT URL and return BOTH markdown text AND ARIA interactive elements (links, buttons, forms) from the accessibility tree. Unlike deep_read (plain text only), this returns structured data: extracted markdown, page title, and interactive elements with roles/names/URLs. Use when you need to understand page structure, find specific links/buttons, or extract structured data from interactive pages.",
+      "props": {
+        "url": {
+          "type": "string",
+          "description": "The exact URL to fetch and read."
+        },
+        "query": {
+          "type": "string",
+          "description": "Optional focus query — if given, text is relevance-filtered while interactive elements are kept intact."
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "domain": "research",
+      "scope": "network",
+      "react": true,
+      "graph": true,
+      "wiki": true,
+      "skill": false
+    },
+    {
       "handler": "agentic.toolkit.research:deep_research",
       "name": "deep_research",
       "description": "Research tool that fetches and synthesizes full source pages from discovered URLs. Use when the research itself is the deliverable or for deep/thorough self-learning.",

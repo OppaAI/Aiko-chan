@@ -170,7 +170,7 @@ RESEARCH_AGREEMENT_SIMILARITY: "0.5"  # Word-shingle Jaccard similarity threshol
 RESEARCH_AGREEMENT_SHINGLE_SIZE: "5"  # Word-shingle length used for the similarity check above.
 
 # -- Crawl4AI (deep_research only, richer page extraction) --
-RESEARCH_USE_CRAWL4AI: "0"  # 0 to always use web_fetch instead of Crawl4AI's Playwright browser. Set 1 only if JS rendering is needed and RAM isn't a concern (Chromium/Playwright uses substantial RAM per page).
+RESEARCH_USE_CRAWL4AI: "1"  # 1 to use Crawl4AI's Playwright browser for JS rendering. Set 0 if RAM is constrained (Chromium/Playwright uses substantial RAM per page).
 CRAWL4AI_TIMEOUT_MS: "20000"  # Per-page timeout for Crawl4AI's Playwright load. Consider raising on Jetson for cold-start latency on first run.
 CRAWL4AI_MAX_CONCURRENT: "2"  # Max concurrent Playwright pages within one Crawl4AI batch session. Headless Chromium is not light — drop this to 2 on Jetson if it's competing with llama-server for RAM during a research round.
 CRAWL4AI_WORD_COUNT_THRESHOLD: "40"  # Minimum word count for Crawl4AI to consider a page block worth keeping, filtering out nav/boilerplate fragments.

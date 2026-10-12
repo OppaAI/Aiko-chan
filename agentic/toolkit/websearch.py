@@ -245,7 +245,7 @@ def web_fetch(
     # Order changes; the contract doesn't — first strategy yielding
     # TAVILY_MIN_CHARS wins, failures fall through, errors preserved.
     from agentic.toolkit import fetch_heal
-    strategies = fetch_heal.preferred_order(url, ("trafilatura", "tavily"))
+    strategies = fetch_heal.preferred_order(url, ("trafilatura", "tavily", "crawl4ai"))
     if strategies[:1] != ["trafilatura"]:
         log.debug("web_fetch: %s healed order %s", parsed.hostname, strategies)
     trafilatura_mod = (
@@ -262,6 +262,49 @@ def web_fetch(
             fetch_heal.record(url, "tavily", bool(tavily and len(tavily) >= TAVILY_MIN_CHARS))
             if tavily and len(tavily) > len(text):
                 text = tavily
+        elif strategy == "crawl4ai":
+            if _optional_import("crawl4ai") is None:
+                fetch_heal.record(url, "crawl4ai", False)
+                last_error = "[fetch failed: crawl4ai is not installed]"
+                continue
+            try:
+                crawl4ai = importlib.import_module("crawl4ai")
+                AsyncWebCrawler = crawl4ai.AsyncWebCrawler
+                CrawlerRunConfig = crawl4ai.CrawlerRunConfig
+                CacheMode = crawl4ai.CacheMode
+
+                async def _crawl() -> str:
+                    config = CrawlerRunConfig(
+                        cache_mode=CacheMode.BYPASS,
+                        page_timeout=30000,
+                        word_count_threshold=10,
+                        excluded_tags=["nav", "footer", "header", "aside", "form"],
+                        exclude_external_links=True,
+                        exclude_social_media_links=True,
+                    )
+                    async with AsyncWebCrawler() as crawler:
+                        result = await crawler.arun(url=url, config=config)
+                        if result and getattr(result, "success", False):
+                            md = getattr(result, "markdown", None)
+                            return str(getattr(md, "fit_markdown", None) or md or "").strip()
+                    return ""
+
+                try:
+                    import asyncio
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    chunk = asyncio.run(_crawl())
+                else:
+                    import concurrent.futures
+                    chunk = concurrent.futures.ThreadPoolExecutor(max_workers=1).submit(asyncio.run, _crawl()).result(timeout=60)
+
+                fetch_heal.record(url, "crawl4ai", len(chunk) >= TAVILY_MIN_CHARS)
+                if len(chunk) > len(text):
+                    text = chunk
+            except Exception as e:
+                fetch_heal.record(url, "crawl4ai", False)
+                last_error = f"[fetch failed: crawl4ai: {e}]"
+                continue
         else:
             if trafilatura_mod is None:
                 fetch_heal.record(url, "trafilatura", False)

@@ -120,6 +120,11 @@ class DeepReadArgs(BaseModel):
     query: str = ""
 
 
+class DeepReadEnrichedArgs(BaseModel):
+    url: str = Field(min_length=1)
+    query: str = ""
+
+
 class RepoFileTreeArgs(BaseModel):
     prefix: str = ""
     limit: int = Field(default=200, ge=1, le=2000)

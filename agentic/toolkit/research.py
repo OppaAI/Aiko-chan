@@ -634,6 +634,78 @@ def deep_read(
     return f"[Fetched content — {url}, condensed for: {query}]\n\n{condensed}"
 
 
+@tool(TOOLS["deep_read_enriched"])
+def deep_read_enriched(
+    url: str,
+    query: str = "",
+    embedder=None,
+    max_chars: int = DEEP_READ_MAX_CHARS,
+) -> str:
+    """
+    Fetch one EXACT URL and return BOTH markdown text AND ARIA interactive
+    elements (links, buttons, forms) extracted from the accessibility tree.
+
+    Unlike deep_read (which returns plain text), this returns structured
+    data: the extracted markdown, the page title, and a list of interactive
+    elements with their roles, names, and target URLs. This is the
+    "agentic browsing" upgrade — the model can see not just what the page
+    says, but what actions are available.
+
+    Use when you need to understand page structure, find specific links/
+    buttons, or extract structured data from interactive pages.
+    """
+    if not url or not url.strip():
+        return "[fetch failed: empty url]"
+    url = url.strip()
+
+    content_type = _sniff_content_type(url)
+    if content_type != "html":
+        downloaded, error = ingest_from_url(url, DEEP_READ_MAX_DOWNLOAD_BYTES)
+        if error:
+            return error
+        text = _extract_with_markitdown(downloaded, content_type, max_chars)
+        return f"[Enriched fetch — {url}]\n\ntext: {text}\n\ninteractive_elements: []"
+
+    # HTML path: use enriched crawl4ai fetch
+    enriched = _crawl4ai_fetch_enriched([url], max_chars)
+    result = enriched.get(url)
+    if not result:
+        return f"[fetch failed: {url} returned no data]"
+
+    text = result.get("text", "")
+    elements = result.get("elements", [])
+    title = result.get("title", "")
+    aria_snapshot = result.get("aria_snapshot", "")
+
+    # Format elements for LLM consumption
+    if elements:
+        elem_lines = []
+        for el in elements:
+            parts = [f"[{el.ref}] {el.role}"]
+            if el.name:
+                parts.append(f'"{el.name}"')
+            if el.url and not el.url.startswith("#"):
+                parts.append(f"-> {el.url}")
+            elem_lines.append(" ".join(parts))
+        elements_text = "\n".join(elem_lines)
+    else:
+        elements_text = "No interactive elements found"
+
+    base = f"[Enriched fetch — {url}]"
+    if title:
+        base += f" (title: {title})"
+    if text:
+        base += f"\n\ntext:\n{text}"
+    base += f"\n\ninteractive_elements:\n{elements_text}"
+
+    if not query:
+        return base
+
+    # If query provided, condense the text but keep elements
+    condensed = condense_evidence([(url, text)], query, embedder=embedder, top_k=12)
+    return f"{base}\n\ncondensed for: {query}\n{condensed}"
+
+
 # ── evidence condensation ──────────────────────────────────────────────
 # These helpers score, dedupe, filter, and format evidence chunks.
 # Moved here from websearch.py to keep research logic in the research module.

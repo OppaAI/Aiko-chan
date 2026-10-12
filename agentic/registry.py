@@ -122,7 +122,7 @@ def _attach_builtin_arg_models() -> None:
     try:
         from agentic.tool_models import (
             DirectSocialPostArgs, DraftJobPostSocialArgs, DraftPhotoSocialArgs, DraftVideoSocialArgs,
-            DeepReadArgs, LearnKnowledgeArgs, PostPhotoSocialArgs, PostJobPostSocialArgs, PostSocialDraftArgs, PostVideoSocialArgs,
+            DeepReadArgs, DeepReadEnrichedArgs, LearnKnowledgeArgs, PostPhotoSocialArgs, PostJobPostSocialArgs, PostSocialDraftArgs, PostVideoSocialArgs,
             RepoFileTreeArgs, RepoReadFileArgs, RepoSearchTextArgs, ResearchQueryArgs,
             SaveNoteArgs, ScheduleJobArgs, ScheduleReminderArgs, WriteReportArgs,
         )
@@ -138,6 +138,7 @@ def _attach_builtin_arg_models() -> None:
         "adaptive_search": ResearchQueryArgs,
         "deep_research": ResearchQueryArgs,
         "deep_read": DeepReadArgs,
+        "deep_read_enriched": DeepReadEnrichedArgs,
         "repo_file_tree": RepoFileTreeArgs,
         "repo_read_file": RepoReadFileArgs,
         "repo_search_text": RepoSearchTextArgs,

@@ -41,8 +41,7 @@ def _fullbrain_step_bg(fb, kc, kc_body_ids, user_id) -> None:
             "whole_brain_ms": round(_ms, 1),
         }
         with _fullbrain_latest_lock:
-            _fullbrain_latest.clear()
-            _fullbrain_latest.update(latest)
+            _fullbrain_latest[user_id] = latest
         from cognition.flymemory.fullbrain import mark_stepped
         mark_stepped()
         try:
@@ -167,7 +166,7 @@ def apply_turn_priors(
                         fb = get_fullbrain()
                         if fb is not None:
                             with _fullbrain_latest_lock:
-                                _latest = dict(_fullbrain_latest)
+                                _latest = dict(_fullbrain_latest.get(user_id) or {})
                             if _latest:
                                 out["motor_vigor"] = _latest["motor_vigor"]
                                 out["clock_drive"] = _latest["clock_drive"]
@@ -181,15 +180,19 @@ def apply_turn_priors(
                             # try again. No EVERY_N gating: backgrounded
                             # steps cost no turn latency.
                             if _fullbrain_bg_lock.acquire(blocking=False):
-                                _bg = threading.Thread(
-                                    target=_fullbrain_step_bg,
-                                    args=(fb, kc.copy(),
-                                          mb.kc_body_ids.copy(),
-                                          user_id),
-                                    name="aiko-fullbrain-step",
-                                    daemon=True,
-                                )
-                                _bg.start()
+                                try:
+                                    _bg = threading.Thread(
+                                        target=_fullbrain_step_bg,
+                                        args=(fb, kc.copy(),
+                                              mb.kc_body_ids.copy(),
+                                              user_id),
+                                        name="aiko-fullbrain-step",
+                                        daemon=True,
+                                    )
+                                    _bg.start()
+                                except Exception:
+                                    _fullbrain_bg_lock.release()
+                                    raise
                                 out["whole_brain_bg"] = True
                             else:
                                 out["whole_brain_throttled"] = True

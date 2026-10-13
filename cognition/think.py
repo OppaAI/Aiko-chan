@@ -4049,7 +4049,14 @@ class AikoThink:
                 pass
         review = self._review_response(user_input, draft)
         _latency.mark("local_review")
-        response = self._correct_response(user_input, draft, review)
+        if sentences_gated:
+            # Sentence-stream path: each sentence was already gated and
+            # spoken; an LLM rewrite here would only diverge the text record
+            # from what the user heard (the audio can't be recalled). Accept
+            # the draft — review flags are already logged to the reviews ring.
+            response = draft
+        else:
+            response = self._correct_response(user_input, draft, review)
         if response != draft:
             self._review_response(user_input, response)
         try:

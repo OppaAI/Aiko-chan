@@ -2293,10 +2293,11 @@ def _run_agentic_chat_inner(
                     )
                     if rewritten:
                         _append_step_trace(trace_ctx, "verify_rewrite", {"rewritten_chars": len(rewritten)})
-                        graph_verdict = _verify_final_answer(owner, user_input, rewritten, graph_state)
-                        log.info(f"VERIFY (rewrite): ok={graph_verdict.ok} score={graph_verdict.score}")
-                        _append_step_trace(trace_ctx, "verify", {"ok": graph_verdict.ok, "score": graph_verdict.score, "feedback": graph_verdict.feedback[:500], "mode": "graph_rewrite"})
-                        if graph_verdict.ok:
+                        rewrite_verdict = _verify_final_answer(owner, user_input, rewritten, graph_state)
+                        log.info(f"VERIFY (rewrite): ok={rewrite_verdict.ok} score={rewrite_verdict.score}")
+                        _append_step_trace(trace_ctx, "verify", {"ok": rewrite_verdict.ok, "score": rewrite_verdict.score, "feedback": rewrite_verdict.feedback[:500], "mode": "graph_rewrite"})
+                        if rewrite_verdict.ok:
+                            graph_verdict = rewrite_verdict
                             graph_result.final_answer = rewritten
             else:
                 log.info("VERIFY: skipped (AGENT_VERIFY_FINAL=0)")

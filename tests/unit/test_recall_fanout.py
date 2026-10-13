@@ -110,3 +110,50 @@ def test_speculative_failure_falls_back_to_in_leg_embed(monkeypatch):
     # Falls back to embedding inside knowledge_context_for (vector=None).
     assert seen["query_vector"] is None
     assert "explicit" in out
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _fetch_memory_only timeout (latency minor)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFetchMemoryOnlyTimeout:
+    def _timeout_think(self, search_fn, timeout=0.2):
+        import cognition.think as think_mod
+        think = object.__new__(AikoThink)
+        think._get_memorize = lambda: SimpleNamespace(search=search_fn)
+        think._recall_query = lambda x: x
+        # Patch the timeout to a small value for the test
+        self._orig_timeout = think_mod.MEMORY_RECALL_TIMEOUT
+        think_mod.MEMORY_RECALL_TIMEOUT = timeout
+        return think, think_mod
+
+    def _restore(self, think_mod):
+        import cognition.think as m
+        m.MEMORY_RECALL_TIMEOUT = self._orig_timeout
+
+    def test_slow_search_times_out_returns_empty(self):
+        import time
+        import cognition.think as think_mod
+        def slow_search(*a, **kw):
+            time.sleep(5)
+            return [{"memory": "too late"}]
+        think, mod = self._timeout_think(slow_search, timeout=0.2)
+        try:
+            t0 = time.time()
+            out = think._fetch_memory_only("hello")
+            elapsed = time.time() - t0
+        finally:
+            self._restore(mod)
+        assert out == []
+        assert elapsed < 2.0, f"took {elapsed:.2f}s, timeout did not fire"
+
+    def test_fast_search_returns_results(self):
+        import cognition.think as think_mod
+        def fast_search(*a, **kw):
+            return [{"memory": "quick", "_recall_score": 1.0}]
+        think, mod = self._timeout_think(fast_search, timeout=5.0)
+        try:
+            out = think._fetch_memory_only("hello")
+        finally:
+            self._restore(mod)
+        assert len(out) == 1
+        assert out[0]["memory"] == "quick"

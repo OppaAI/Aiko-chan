@@ -19,8 +19,10 @@ Usage (called once from run_webui() before run_session()):
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
+import traceback
 from pathlib import Path
 
 from system.log import get_logger
@@ -32,6 +34,25 @@ _DEFAULT_INTERVAL = 180  # seconds — same default as scheduler job
 _SOCIAL_THREAD: threading.Thread | None = None
 _SOCIAL_STOP_EVENT = threading.Event()
 _DESIRED: dict[str, dict] = {}   # label -> {"interval": s, "fn": callable}
+_consec_failures: dict[str, int] = {}  # label -> consecutive poll exceptions
+
+# Cap for failure backoff: recovery is noticed within ~30 min worst case.
+_MAX_BACKOFF_S = 1800.0
+
+_SECRET_PARAM_RE = re.compile(
+    r"(access_token|access-token|api[_-]?key|bearer)=([^&\s'\"\)]+)",
+    re.IGNORECASE,
+)
+
+
+def _redact_secrets(text: str) -> str:
+    """Scrub credentials from URLs/headers before they reach the log.
+
+    Request exception tracebacks embed the full URL including
+    access_token — without this, every monitor failure writes a live
+    credential into the log file.
+    """
+    return _SECRET_PARAM_RE.sub(r"\1=[REDACTED]", text)
 
 _SHARED_MEMORIZE: dict = {"ref": None}
 _FALLBACK_MEMORIZE: dict = {"ref": None}
@@ -206,8 +227,29 @@ def _social_loop() -> None:
             try:
                 cfg["fn"]()
             except Exception:
-                log.exception("[%s_daemon] Unexpected error in monitor loop", label)
-            next_due[label] = time.monotonic() + cfg["interval"]
+                fails = _consec_failures.get(label, 0) + 1
+                _consec_failures[label] = fails
+                log.error(
+                    "[%s_daemon] Unexpected error in monitor loop (consecutive failure #%d):\n%s",
+                    label, fails, _redact_secrets(traceback.format_exc()),
+                )
+                # Back off exponentially so a sustained outage (e.g. Meta
+                # 500s for an hour) doesn't burn retries every interval.
+                extra = min(cfg["interval"] * (2 ** min(fails, 3)), _MAX_BACKOFF_S)
+                next_due[label] = time.monotonic() + cfg["interval"] + extra
+                if extra:
+                    log.warning(
+                        "[%s_daemon] backing off %.0fs after %d consecutive failures",
+                        label, cfg["interval"] + extra, fails,
+                    )
+            else:
+                if _consec_failures.get(label):
+                    log.info(
+                        "[%s_daemon] recovered after %d consecutive failures",
+                        label, _consec_failures[label],
+                    )
+                _consec_failures[label] = 0
+                next_due[label] = time.monotonic() + cfg["interval"]
         pause = max(0.5, min(next_due.values()) - time.monotonic()) if next_due else 1.0
 
         deadline = time.monotonic() + pause

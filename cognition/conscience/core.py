@@ -388,7 +388,19 @@ class ConscienceCircuitCore:
             layered.decision = decision
             layered.reasons = [why, *reasons][:6]
         if decision == CAUTION:
-            layered.constraint = self._constraint_for(layered, retrieved)
+            # Prompt attachment is score-gated: a weak retrieval (below
+            # trigger level) stays ledger-only. Ministral demonstrably
+            # quotes prompt constraint blocks into replies instead of
+            # heeding them silently (V-OCC-01 misfire on an identity
+            # question), so a low-score caution must not put norm text
+            # in the prompt at all. Ledger + reasons still record the why.
+            if self._best_prohibition(retrieved) >= _TRIGGER_LEVEL:
+                layered.constraint = self._constraint_for(layered, retrieved)
+            else:
+                log.info(
+                    "[ccc] caution below trigger level (%.2f) — ledger-only, no prompt block",
+                    self._best_prohibition(retrieved),
+                )
         if decision in (REFUSE, ESCALATE):
             layered.pastoral_note = self._note_for(layered, retrieved)
 

@@ -135,15 +135,19 @@ function valenceHue(d) {
   return 'neutral';
 }
 
+// Reference-style amber family: every hue lives in the gold range so the
+// graph reads as one luminous field (Image 1 mood). Valence differences
+// survive as brightness, not hue — negativity dims to bronze.
+const TYPE_ICON = { memory: '\u2726', entity: '\u{1F464}', knowledge: '\u{1F4D6}', experience: '\u26a1', episode: '\u{1F550}' };
 function hueColor(hue) {
-  if (hue === 'entity') return '#554f7a';
-  if (hue === 'knowledge') return '#5f7d6b';
-  if (hue === 'experience') return '#7d6b57';
-  if (hue === 'episode') return '#4a6b70';
-  if (hue === 'imprint') return '#6e5a70';
-  if (hue === 'neg') return '#385c70';
-  if (hue === 'pos') return '#796a3c';
-  return '#646c7a';
+  if (hue === 'entity') return '#d9a441';
+  if (hue === 'knowledge') return '#c9992e';
+  if (hue === 'experience') return '#e8933c';
+  if (hue === 'episode') return '#b8a05a';
+  if (hue === 'imprint') return '#c77b4a';
+  if (hue === 'neg') return '#6e6250';
+  if (hue === 'pos') return '#ffd97a';
+  return '#8a7a5a';
 }
 
 /** Translucent glass fill — dim nodes ghost into the background. */
@@ -167,27 +171,29 @@ function nodeRadius(d) {
     r = Math.min(1, r + 0.06);
   }
   // Continuous, score-proportional radius for every node type.
-  if (d.type === 'entity') return 3.5 + 10 * Math.pow(r, 1.2);
-  return 2.5 + 10.5 * Math.pow(r, 1.25);
+  if (d.type === 'entity') return 3.5 + 7 * Math.pow(r, 1.15);
+  return 2.5 + 7.5 * Math.pow(r, 1.2);
 }
 
 function edgeOpacity(e) {
   const s = nodeById.get(typeof e.source === 'object' ? e.source.id : e.source);
   const t = nodeById.get(typeof e.target === 'object' ? e.target.id : e.target);
-  // Brightness follows the SIZES of both endpoint nodes (entities included
-  // via their own radius curve): big-to-big links glow, small-to-small fade.
-  const rn = n => n ? Math.max(0, Math.min(1, (nodeRadius(n) - 2.5) / 11)) : 0.2;
-  const mid = Math.pow(Math.max(0.02, rn(s) * rn(t)), 0.5);
+  const rs = s ? retainOf(s) : 0.25;
+  const rt = t ? retainOf(t) : 0.25;
+  const mid = Math.pow(Math.max(0.05, rs * rt), 0.45);
   const w = Math.max(0, Math.min(1, Number(e.weight) || 0.4));
   const wBoost = 0.35 + 0.65 * w;
-  if (e.type === 'supersedes') return Math.min(0.9, (0.3 + mid * 0.65) * wBoost);
-  return Math.min(0.85, (0.12 + mid * 0.73) * wBoost);
+  if (e.type === 'supersedes') return Math.min(0.85, (0.25 + mid * 0.7) * wBoost);
+  if (e.type === 'mentions' || e.type === 'grounded_in' || e.type === 'practiced_in' || e.type === 'distilled_into') {
+    return Math.min(0.8, (0.06 + mid * 0.75) * wBoost);
+  }
+  return Math.min(0.6, (0.04 + mid * 0.55) * wBoost);
 }
 
 function edgeColor(e) {
-  if (e.type === 'supersedes') return '#a68b4f';
-  if (e.type === 'distilled_into') return '#4a6b70';
-  return '#385c70';
+  if (e.type === 'supersedes') return '#f59e0b';
+  if (e.type === 'distilled_into') return '#e8b84a';
+  return '#a87f2e';
 }
 
 function lineageText(d, graph) {
@@ -435,7 +441,7 @@ function layoutOrganic(nodes, links, w, h) {
   const compRadius = comp => {
     let area = 0;
     for (const n of comp) { const r = nodeRadius(n) + 6; area += r * r; }
-    return Math.sqrt(area / Math.PI) * 1.08 + 4;
+    return Math.sqrt(area / Math.PI) * 1.5 + 8;
   };
 
   // 2. Component centers on a golden-angle spiral.
@@ -488,7 +494,7 @@ function layoutOrganic(nodes, links, w, h) {
     const hubOf = new Map(hubs.map(h => [h.id, h]));
     hubs.forEach((h, hi) => {
       const a = hi * GOLDEN + (rnd() - 0.5) * 0.9;
-      const rr = c.r * 0.30 * Math.sqrt((hi + 1) / hubs.length);
+      const rr = c.r * 0.38 * Math.sqrt((hi + 1) / hubs.length);
       h._ax = c.x + Math.cos(a) * rr;
       h._ay = c.y + Math.sin(a) * rr;
     });
@@ -502,9 +508,9 @@ function layoutOrganic(nodes, links, w, h) {
       if (!hid) for (const nb of adj.get(n.id)) for (const nn of adj.get(nb)) consider(nn);
       const hub = hid ? hubOf.get(hid) : null;
       if (hub) {
-        const spread = Math.min(c.r * 0.35, 10 + 5 * Math.sqrt(adj.get(hub.id).length));
-        n._ax = hub._ax + gauss() * spread * 0.30;
-        n._ay = hub._ay + gauss() * spread * 0.30;
+        const spread = Math.min(c.r * 0.45, 12 + 6 * Math.sqrt(adj.get(hub.id).length));
+        n._ax = hub._ax + gauss() * spread * 0.40;
+        n._ay = hub._ay + gauss() * spread * 0.40;
       } else {
         const a = rnd() * Math.PI * 2;
         const rr = Math.sqrt(rnd()) * Math.max(6, c.r - nodeRadius(n));
@@ -523,12 +529,12 @@ function layoutOrganic(nodes, links, w, h) {
 
   // 4. Relax overlaps (collision only) around each node's anchor.
   const sim = d3.forceSimulation(nodes)
-    .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 1.5).iterations(4))
-    .force('x', d3.forceX(d => d._ax).strength(0.45))
-    .force('y', d3.forceY(d => d._ay).strength(0.45))
+    .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 5).iterations(4))
+    .force('x', d3.forceX(d => d._ax).strength(0.30))
+    .force('y', d3.forceY(d => d._ay).strength(0.30))
     .randomSource(mulberry32(1777))
     .stop();
-  for (let i = 0; i < 150; i++) sim.tick();
+  for (let i = 0; i < 60; i++) sim.tick();
   sim.stop();
   for (const n of nodes) { delete n._ax; delete n._ay; }
 
@@ -575,30 +581,26 @@ function buildGraph() {
 
   layoutOrganic(nodes, links, w, h);
 
-  const nebR = Math.min(w, h) * 0.58;
-  g.append('circle')
-    .attr('cx', w / 2).attr('cy', h / 2).attr('r', nebR)
-    .attr('fill', 'url(#nebula)').attr('pointer-events', 'none');
-
-  // Which nodes carry visible labels: hottest ~75 by retain, small and dim
-  // like the reference (labels ride on the bright nodes, not the whole field).
+  // Which nodes carry visible labels: hottest ~40 by retain (reference style:
+  // labels ride on the bright nodes, not the whole field).
   const hotIds = new Set(
-    [...nodes].sort((a, b) => retainOf(b) - retainOf(a)).slice(0, 75).map(n => n.id)
+    [...nodes].sort((a, b) => retainOf(b) - retainOf(a)).slice(0, 40).map(n => n.id)
   );
 
-  // dotted synapse connectors — brightness follows both endpoint sizes
+  // thin luminous connectors — brightness follows both endpoint sizes
   // (dim when both ends are small); supersede edges stay solid + directed.
   linkSel = g.append('g').selectAll('line').data(links).join('line')
     .attr('class', 'edge')
-    .attr('stroke', d => d.type === 'supersedes' ? '#a68b4f' : shade(edgeColor(d), 0.12))
+    .attr('stroke', d => d.type === 'supersedes' ? '#f59e0b' : shade(edgeColor(d), -0.30))
     .attr('stroke-width', d => {
-      if (d.type === 'supersedes') return 1.2;
+      if (d.type === 'supersedes') return 1.0;
       const wgt = Math.max(0, Math.min(1, Number(d.weight) || 0.4));
-      return 0.5 + wgt * 0.6;
+      return 0.4 + wgt * 0.4;
     })
-    .attr('stroke-opacity', d => edgeOpacity(d) * 0.9)
+    .attr('stroke-opacity', d => edgeOpacity(d) * 0.6)
     .attr('stroke-linecap', 'round')
-        .attr('marker-end', d => d.type === 'supersedes' ? 'url(#arrow-sup)' : null)
+    .attr('stroke-dasharray', null)
+    .attr('marker-end', d => d.type === 'supersedes' ? 'url(#arrow-sup)' : null)
     .attr('x1', d => nodeById.get(d.source).x)
     .attr('y1', d => nodeById.get(d.source).y)
     .attr('x2', d => nodeById.get(d.target).x)
@@ -622,6 +624,14 @@ function buildGraph() {
     .attr('stroke-dasharray', d =>
       (d.type === 'memory' && (d.status === 'superseded' || d.is_tip === false)) ? '3,2' : null);
 
+  // hub halo — faint amber aura on important nodes (cheap glow, no filters)
+  nodeSel.insert('circle', ':first-child')
+    .attr('class', 'halo')
+    .attr('r', d => nodeRadius(d) * 1.9)
+    .attr('fill', '#ffb84d')
+    .attr('fill-opacity', d => retainOf(d) > 0.65 ? 0.10 : 0)
+    .attr('pointer-events', 'none');
+
   // soft glass sheen on bright nodes — frosted, not plastic
   nodeSel.append('ellipse')
     .attr('class', 'glare')
@@ -633,10 +643,19 @@ function buildGraph() {
     .attr('opacity', d => 0.10 + 0.28 * retainOf(d))
     .attr('pointer-events', 'none');
 
+  // type pictograms (reference-style icon nodes) — text glyphs, no assets
+  nodeSel.append('text').attr('class', 'node-icon')
+    .attr('text-anchor', 'middle')
+    .attr('dy', d => nodeRadius(d) * 0.32)
+    .style('font-size', d => `${Math.max(7, nodeRadius(d) * 0.72)}px`)
+    .style('opacity', 0.8)
+    .attr('pointer-events', 'none')
+    .text(d => TYPE_ICON[d.type] || '');
+
   nodeSel.append('text').attr('class', 'node-label')
     .attr('dy', d => -(nodeRadius(d) + 6))
     .attr('text-anchor', 'middle')
-    .style('opacity', d => (hotIds.has(d.id) || d.pinned) ? 0.6 : 0)
+    .style('opacity', d => (hotIds.has(d.id) || d.pinned || nodeRadius(d) > 8) ? 0.85 : 0)
     .text(nodeLabel);
 
   // free drag without a force simulation — move node + its edges
@@ -663,8 +682,8 @@ function defs_(svg) {
   const defs = svg.append('defs');
   defs.append('marker').attr('id','arrow-sup').attr('viewBox','0 0 10 10')
     .attr('refX', 9).attr('refY', 5).attr('markerWidth', 5).attr('markerHeight', 5).attr('orient','auto')
-    .append('path').attr('d','M 0 1 L 10 5 L 0 9 Z').attr('fill', '#a68b4f').attr('opacity', 0.8);
-  // Glassy orbs: soft sheen, feathered edge that melts into
+    .append('path').attr('d','M 0 1 L 10 5 L 0 9 Z').attr('fill', '#f59e0b').attr('opacity', 0.8);
+  // Translucent glass marbles: soft sheen, feathered edge that melts into
   // the dark background (outer stop fades to transparent).
   for (const h of HUES) {
     const base = hueColor(h);
@@ -680,11 +699,6 @@ function defs_(svg) {
   const glare = defs.append('radialGradient').attr('id', 'glare').attr('cx', '50%').attr('cy', '50%').attr('r', '50%');
   glare.append('stop').attr('offset', '0%').attr('stop-color', '#ffffff').attr('stop-opacity', 0.85);
   glare.append('stop').attr('offset', '100%').attr('stop-color', '#ffffff').attr('stop-opacity', 0);
-  // Soft nebula glow behind the node cluster (reference style).
-  const neb = defs.append('radialGradient').attr('id', 'nebula').attr('cx', '50%').attr('cy', '50%').attr('r', '50%');
-  neb.append('stop').attr('offset', '0%').attr('stop-color', '#2c3c58').attr('stop-opacity', 0.34);
-  neb.append('stop').attr('offset', '55%').attr('stop-color', '#1b2540').attr('stop-opacity', 0.14);
-  neb.append('stop').attr('offset', '100%').attr('stop-color', '#1b2540').attr('stop-opacity', 0);
 }
 
 /* ── re-filter: organic re-layout of the visible set (full rebuild) ─────── */

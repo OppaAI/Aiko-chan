@@ -1,5 +1,5 @@
 :root {
-  --bg: #0c0614;
+  --bg: #0a1420;
   --panel: #160e22;
   --text: #e8e0f0;
   --muted: #8b7a9e;
@@ -103,7 +103,7 @@ header .sub {
 #canvas {
   flex: 1;
   position: relative;
-  background: radial-gradient(ellipse at 50% 40%, #1a0f28 0%, var(--bg) 70%);
+  background: radial-gradient(ellipse at 50% 40%, #14283f 0%, var(--bg) 70%);
 }
 
 svg {

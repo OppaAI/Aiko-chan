@@ -386,7 +386,6 @@ def test_streaming_waits_for_final_gate_and_emits_only_replacement(monkeypatch):
     assert emitted == []
 
     monkeypatch.setattr(think, "_review_response", lambda *args: None)
-    monkeypatch.setattr(think, "_correct_response", lambda _user, value, _review: value)
     monkeypatch.setattr(think, "_get_memorize", lambda: None)
     from cognition.conscience.schema import Verdict, REFUSE
     _refuse_v = Verdict(decision=REFUSE, gate="judge", act="speak", reasons=["refused"])

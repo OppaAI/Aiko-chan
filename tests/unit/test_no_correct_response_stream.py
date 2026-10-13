@@ -1,11 +1,11 @@
-"""Skip _correct_response when sentence streaming already spoke the draft
-(latency #10): a second LLM call after the stream only diverges the text
-record from the audio the user already heard. The review flags are still
-logged to the reviews ring; only the LLM rewrite is skipped.
+"""No _correct_response LLM rewrite (latency #10): the review flags are
+logged to the reviews ring for observability, but the LLM rewrite was the
+same model fixing its own output — unproven value for ~1-3s TTFT. The draft
+is accepted as-is.
 
 Locked here:
-  * sentences_gated=True -> _correct_response NOT called (draft accepted)
-  * sentences_gated=False -> _correct_response called (existing behavior)
+  * _finalize_response never calls the LLM correction (method removed)
+  * review flags are still logged via _review_response
 """
 from __future__ import annotations
 
@@ -20,24 +20,18 @@ from cognition.think import AikoThink
 def think():
     t = object.__new__(AikoThink)
     t._speak_lock = threading.Lock()
-    # Review yields >=2 flags so _correct_response would normally fire.
+    # Review yields >=2 flags; previously this would have fired the LLM rewrite.
     t._review_response = lambda *a, **kw: {"flags": ["f1", "f2"]}
     t._get_speak = lambda: None
     t._get_memorize = lambda: None
     return t
 
 
-def test_sentence_streamed_path_skips_llm_correction(think):
-    calls = []
-    think._correct_response = lambda *a, **kw: calls.append(1) or "corrected"
+def test_finalize_accepts_draft_without_llm_rewrite(think):
+    # The _correct_response method no longer exists; _finalize_response
+    # must not attempt an LLM correction.
+    assert not hasattr(think, "_correct_response")
     out = think._finalize_response("hi", "draft text", sentences_gated=True)
-    assert calls == []
     assert out == "draft text"
-
-
-def test_non_streamed_path_still_corrects(think):
-    calls = []
-    think._correct_response = lambda *a, **kw: calls.append(1) or "corrected"
     out = think._finalize_response("hi", "draft text", sentences_gated=False)
-    assert calls == [1]
-    assert out == "corrected"
+    assert out == "draft text"

@@ -1576,6 +1576,49 @@ def _verify_final_answer(owner, user_input: str, answer: str, state: TaskState) 
         return VerificationResult(ok=True, feedback="Verifier unavailable; deterministic checks passed.", score=0.75)
 
 
+def _rewrite_failed_answer(owner, user_input: str, answer: str, verdict: VerificationResult, state: TaskState) -> str | None:
+    """One targeted rewrite attempt after the verifier rejects an answer.
+
+    Uses the verifier's specific feedback (not generic heuristics) to guide
+    the rewrite. Returns the rewritten answer, or None if the rewrite fails.
+    The caller re-verifies; only one attempt is made (no loop).
+    """
+    try:
+        prompt = (
+            "You are Aiko's answer repair editor. The verifier rejected the candidate answer below. "
+            "Rewrite it to address ONLY the specific issues in the verifier feedback. "
+            "Preserve everything that was correct; do not invent facts not in the task ledger. "
+            "Return only the corrected answer, no preamble.\n\n"
+            f"User request:\n{user_input}\n\n"
+            f"Task ledger/tool evidence:\n{state.summary()}\n\n"
+            f"Candidate answer:\n{answer}\n\n"
+            f"Verifier feedback (fix these issues):\n{verdict.feedback}\n"
+        )
+        from cognition.think import THINK_OFF_EXTRA_BODY
+        think_off = THINK_OFF_EXTRA_BODY
+    except Exception:
+        think_off = None
+    try:
+        create_kwargs = dict(
+            model=owner._llm_model,
+            messages=[{"role": "user", "content": prompt}],
+            stream=False,
+            max_tokens=1024,
+            temperature=0.2,
+            extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+        )
+        if think_off is not None:
+            create_kwargs["extra_body"] = think_off
+        resp = owner._client.chat.completions.create(**create_kwargs)
+        rewritten = (resp.choices[0].message.content or "").strip()
+        if not rewritten:
+            return None
+        return rewritten
+    except Exception as e:
+        log.warning("Agent answer rewrite failed: %s", e)
+        return None
+
+
 def _estimate_tokens(text: str) -> int:
     """Rough token estimate — good enough for a budget guard, not
     for billing/accounting. Divisor is AGENT_TOKEN_ESTIMATE_DIVISOR
@@ -2239,6 +2282,23 @@ def _run_agentic_chat_inner(
                 graph_verdict = _verify_final_answer(owner, user_input, graph_result.final_answer, graph_state)
                 log.info(f"VERIFY: result ok={graph_verdict.ok} score={graph_verdict.score} feedback_len={len(graph_verdict.feedback) if graph_verdict.feedback else 0}")
                 _append_step_trace(trace_ctx, "verify", {"ok": graph_verdict.ok, "score": graph_verdict.score, "feedback": graph_verdict.feedback[:500], "mode": "graph"})
+                # One targeted rewrite on verifier failure: the verifier's
+                # specific feedback guides the fix (unlike generic heuristics).
+                # Re-verify; if it still fails, fall through to the existing
+                # failure handling below.
+                if graph_verdict is not None and not graph_verdict.ok:
+                    log.info("VERIFY: attempting one targeted rewrite of rejected answer")
+                    rewritten = _rewrite_failed_answer(
+                        owner, user_input, graph_result.final_answer, graph_verdict, graph_state
+                    )
+                    if rewritten:
+                        _append_step_trace(trace_ctx, "verify_rewrite", {"rewritten_chars": len(rewritten)})
+                        rewrite_verdict = _verify_final_answer(owner, user_input, rewritten, graph_state)
+                        log.info(f"VERIFY (rewrite): ok={rewrite_verdict.ok} score={rewrite_verdict.score}")
+                        _append_step_trace(trace_ctx, "verify", {"ok": rewrite_verdict.ok, "score": rewrite_verdict.score, "feedback": rewrite_verdict.feedback[:500], "mode": "graph_rewrite"})
+                        if rewrite_verdict.ok:
+                            graph_verdict = rewrite_verdict
+                            graph_result.final_answer = rewritten
             else:
                 log.info("VERIFY: skipped (AGENT_VERIFY_FINAL=0)")
 

@@ -1738,8 +1738,18 @@ class AikoThink:
             return []
         recall_query = self._recall_query(user_input)
         query_for_call = query_vector if recall_query == user_input else None
+        mem_future = CONTEXT_POOL.submit(
+            memorize.search, recall_query, limit=mem_limit,
+            query_vector=query_for_call,
+        )
         try:
-            memories = memorize.search(recall_query, limit=mem_limit, query_vector=query_for_call)
+            memories = mem_future.result(timeout=MEMORY_RECALL_TIMEOUT)
+        except concurrent.futures.TimeoutError:
+            log.warning(
+                "[think] Memory recall timed out after %.1fs — skipping.",
+                MEMORY_RECALL_TIMEOUT,
+            )
+            memories = []
         except Exception as e:
             log.error("Memory search failed: %s", e)
             memories = []

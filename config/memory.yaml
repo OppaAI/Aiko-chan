@@ -258,9 +258,6 @@ AIKO_FULLBRAIN_MIN_INTERVAL_S: "2.0"  # Minimum seconds between fullbrain steps.
 # Workers run on AuRoRA local ports 8082-8085; each declares allowed tools.
 NEEDLE_WORKERS: '[{"id": "needle-1", "role": "general", "base_url": "http://127.0.0.1:8082", "allowed_tools": ["deep_research", "web_fetch", "web_search", "adaptive_search"]}, {"id": "needle-2", "role": "coding", "base_url": "http://127.0.0.1:8083", "allowed_tools": ["code_apply_patch", "code_diff_preview", "code_lint", "code_run_tests", "repo_search_text", "repo_file_tree"]}, {"id": "needle-3", "role": "analysis", "base_url": "http://127.0.0.1:8084", "allowed_tools": ["deep_research", "synthesize_report", "write_report", "combine_evidence"]}, {"id": "needle-4", "role": "research", "base_url": "http://127.0.0.1:8085", "allowed_tools": ["adaptive_search", "deep_research", "web_fetch", "web_search"]}]'
 
-# Embedding server (HarrierEmbedder) — point to llm-router (systemd service)
-# llm-router runs Ministral (LLM) + Harrier (embedding) together on port 8080
-EMBED_BASE_URL: "http://127.0.0.1:8080"
 # Action blend is also env-overridable (code default weight 0.25).
 # AIKO_FLY_ACTION_WEIGHT: "0.25"
 

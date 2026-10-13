@@ -529,13 +529,12 @@ class AikoSpeak:
 
     def _synthesize(self, text: str) -> bytes | None:
         """
-        POST to MioTTS /mio/tts and return raw WAV bytes.
+        POST to MioTTS /mio/tts/stream and return raw WAV bytes.
         Returns None on failure.
 
-        NOTE on the temp file: the server replies with a server-side
-        output_file path on the shared local disk, so the read+unlink
-        round-trip is inherent to this API (no inline-audio mode) — the
-        per-chunk saving here is TCP keep-alive via _http(), not disk I/O.
+        The stream endpoint returns the WAV bytes inline (audio/wav,
+        chunked) — no server-side file, no read+unlink round-trip.
+        HTTP keep-alive via _http() keeps per-chunk setup cheap.
         """
         import json
         # Skip empty chunks (e.g. emoji/markup-only LLM output that
@@ -567,22 +566,15 @@ class AikoSpeak:
 
         timeout = 60 if MIOTTS_BEST_OF_N_ENABLED else 30
         try:
-            r = self._http().post(f"{MIOTTS_API_URL}/mio/tts", json=payload_data, timeout=timeout)
+            # /mio/tts/stream returns the WAV bytes inline (audio/wav,
+            # chunked) — no server-side file, no read+unlink round-trip.
+            r = self._http().post(f"{MIOTTS_API_URL}/mio/tts/stream", json=payload_data, timeout=timeout)
             r.raise_for_status()
-            body = r.json()
-            if "output_file" not in body:
-                log.error(f"[speak] unexpected TTS response keys: {list(body.keys())}")
+            wav_bytes = r.content
+            if not wav_bytes or len(wav_bytes) < 46:
+                log.error("[speak] TTS stream returned no audio")
                 self._push_notice("TTS", "voice synthesis failed — continuing in text")
                 return None
-            # Read the WAV file that was written
-            wav_path = body["output_file"]
-            with open(wav_path, 'rb') as f:
-                wav_bytes = f.read()
-            # Clean up temp file
-            try:
-                os.remove(wav_path)
-            except Exception as e:
-                log.warning(f"[speak] failed to delete temp file {wav_path}: {e}")
             _latency.mark("first_tts_synth")
             return wav_bytes
         except Exception as e:

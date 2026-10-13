@@ -2194,12 +2194,14 @@ class AikoThink:
                     ctx.set(outputs={"intent": label, "vector_dim": int(query_vec.shape[0]), "method": "llm_tiebreak"},
                             factors=[f"ambiguous gap={gap:.3f}, llm mode → LLM tiebreak"])
                     return label, query_vec
-                llm_label = self._classify_quaternary_intent_llm(
-                    user_input, allow_agentic=_AGENTIC_MODE_ON,
-                )
-                ctx.set(outputs={"intent": llm_label, "vector_dim": int(query_vec.shape[0]), "method": "llm_tiebreak"},
-                        factors=[f"ambiguous gap={gap:.3f}, semantic mode → LLM tiebreak"])
-                return llm_label, query_vec
+                # Default: ambiguous → localchat. The LLM tiebreak costs a
+                # full TTFT (~1-3s on Jetson) to resolve a close call, and
+                # localchat is the safe default — the user can rephrase if
+                # they wanted tools/web. Explicit opt-in via _ROUTE_MODE=llm.
+                log.debug("[route] ambiguous gap, defaulting localchat (no LLM tiebreak)")
+                ctx.set(outputs={"intent": "localchat", "vector_dim": int(query_vec.shape[0])},
+                        factors=[f"ambiguous gap={gap:.3f} → localchat default (LLM tiebreak skipped)"])
+                return "localchat", query_vec
 
             if _is_greeting_only(user_input):
                 ctx.set(outputs={"intent": "greeting", "vector_dim": int(query_vec.shape[0])},

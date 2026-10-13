@@ -203,10 +203,9 @@ def test_stream_response_sink_ignored_when_flag_off(monkeypatch):
 
 # ── _finalize_response spoken-prefix skip ────────────────────────────────
 
-def _finalize_think(monkeypatch, correct_fn=None):
+def _finalize_think(monkeypatch):
     think = object.__new__(AikoThink)
     think._review_response = lambda u, t: {"flags": []}
-    think._correct_response = correct_fn or (lambda u, d, r: d)
     think._get_memorize = lambda: None
     think._get_speak = lambda: None
     think._client = None
@@ -234,16 +233,6 @@ def test_finalize_emits_nothing_when_all_spoken(monkeypatch):
     out = think._finalize_response("hi", draft, _spoken_prefix="Only sentence.")
     assert out == draft
     assert emitted == []
-
-
-def test_finalize_warns_and_emits_full_on_correction_divergence(monkeypatch):
-    think, emitted = _finalize_think(
-        monkeypatch, correct_fn=lambda u, d, r: "Completely different."
-    )
-    draft = "First sentence. Second sentence."
-    out = think._finalize_response("hi", draft, _spoken_prefix="First sentence.")
-    assert out == "Completely different."
-    assert emitted == ["Completely different."]
 
 
 # ---------------------------------------------------------------------------

@@ -4049,7 +4049,10 @@ class AikoThink:
                 pass
         review = self._review_response(user_input, draft)
         _latency.mark("local_review")
-        response = self._correct_response(user_input, draft, review)
+        # No LLM correction: the review flags are logged to the reviews ring
+        # for observability, but the rewrite was the same model fixing its own
+        # output — unproven value for ~1-3s TTFT. Accept the draft.
+        response = draft
         if response != draft:
             self._review_response(user_input, response)
         try:
@@ -4211,28 +4214,6 @@ class AikoThink:
             )
         self._emit_finalized_response(response, token_callback=token_callback)
         return response
-
-    def _correct_response(self, user_input: str, draft: str, review: dict | None) -> str:
-        """Repair only high-risk drafts, keeping the correction bounded."""
-        if not review or len(review.get("flags", [])) < 2 or not draft.strip():
-            return draft
-        system = (
-            f"{self._current_system_prompt()}\n\n"
-            "You are Aiko's final response editor. Rewrite the draft only to fix the listed reliability issues. "
-            "Preserve the user's intent, do not invent facts, and return only the corrected answer. "
-            "If information is uncertain, say so plainly. Keep the original tone and length when possible."
-        )
-        prompt = (
-            f"User request:\n{user_input[:1200]}\n\n"
-            f"Draft:\n{draft[:3000]}\n\n"
-            f"Warnings:\n- " + "\n- ".join(review.get("flags", [])[:4])
-        )
-        corrected = self._fallback_completion(
-            [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-            _effective_max_tokens(min(600, _BASE_TOKENS)),
-            "metacognitive response correction",
-        )
-        return draft if not corrected.strip() or corrected.startswith("[LLM error]") else corrected.strip()
 
     def _review_response(self, user_input: str, response_text: str) -> dict:
         try:

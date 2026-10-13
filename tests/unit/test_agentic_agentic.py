@@ -73,6 +73,7 @@ from agentic.agentic import (
     AGENT_RESEARCH_MAX_CALLS,
     _research_call_count,
     _verify_final_answer,
+    _rewrite_failed_answer,
     _looks_like_approval_reply,
     _stream_agent_message,
 )
@@ -480,6 +481,41 @@ class TestVerifyFinalAnswer:
         result = _verify_final_answer(owner, "goal", "answer", state)
         assert isinstance(result, VerificationResult)
         assert result.ok is True
+
+
+class TestRewriteFailedAnswer:
+    """Tests for _rewrite_failed_answer (one targeted rewrite on verifier failure)."""
+
+    def test_rewrite_returns_corrected_text(self):
+        from agentic.agentic import VerificationResult
+        state = TaskState("goal")
+        owner = MockOwner()
+        owner._client = MockLLMClient("Rewritten answer with fixes.")
+        verdict = VerificationResult(ok=False, feedback="Missing tool evidence for X.", score=0.5)
+        out = _rewrite_failed_answer(owner, "do X", "bad answer", verdict, state)
+        assert out == "Rewritten answer with fixes."
+        # The verifier feedback was included in the prompt.
+        prompt = owner._client.last_messages[0]["content"]
+        assert "Missing tool evidence for X." in prompt
+        assert "bad answer" in prompt
+
+    def test_rewrite_returns_none_on_empty(self):
+        from agentic.agentic import VerificationResult
+        state = TaskState("goal")
+        owner = MockOwner()
+        owner._client = MockLLMClient("")
+        verdict = VerificationResult(ok=False, feedback="Bad.", score=0.3)
+        out = _rewrite_failed_answer(owner, "do X", "bad answer", verdict, state)
+        assert out is None
+
+    def test_rewrite_returns_none_on_exception(self):
+        from agentic.agentic import VerificationResult
+        state = TaskState("goal")
+        owner = MockOwner()
+        owner._client = None
+        verdict = VerificationResult(ok=False, feedback="Bad.", score=0.3)
+        out = _rewrite_failed_answer(owner, "do X", "bad answer", verdict, state)
+        assert out is None
 
 
 class TestGraphExecutorIntegration:

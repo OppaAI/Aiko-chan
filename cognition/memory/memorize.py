@@ -1936,8 +1936,13 @@ class _MemoryBackend:
                 rank_graph_w = {row["id"]: i + 1 for i, row in enumerate(wide_graph_rows)}
 
             wide_all_ids = set(rank_knn_w) | set(rank_fts_w) | set(rank_graph_w)
+            # Latency #11: the wide candidate set is a superset of the quick
+            # pass — only fetch rows we haven't already fetched, then merge.
+            # Skips the redundant SELECT for overlapping IDs.
+            new_ids = wide_all_ids - set(quick_row_by_id)
             with self._db_lock:
-                wide_row_by_id = self._fetch_full_rows(wide_all_ids)
+                new_row_by_id = self._fetch_full_rows(new_ids) if new_ids else {}
+            wide_row_by_id = {**quick_row_by_id, **new_row_by_id}
 
             scored_ids, scores, row_by_id = self._rank_and_score(
                 rank_knn_w, rank_fts_w, rank_graph_w,
@@ -2138,8 +2143,13 @@ class _MemoryBackend:
                 rank_graph_w.setdefault(str(_row["id"]), _wbase + _i + 1)
 
             wide_all_ids = set(rank_knn_w) | set(rank_fts_w) | set(rank_graph_w)
+            # Latency #11: the wide candidate set is a superset of the quick
+            # pass — only fetch rows we haven't already fetched, then merge.
+            # Skips the redundant SELECT for overlapping IDs.
+            new_ids = wide_all_ids - set(quick_row_by_id)
             with self._db_lock:
-                wide_row_by_id = self._fetch_full_rows(wide_all_ids)
+                new_row_by_id = self._fetch_full_rows(new_ids) if new_ids else {}
+            wide_row_by_id = {**quick_row_by_id, **new_row_by_id}
 
             scored_ids, scores, row_by_id = self._rank_and_score(
                 rank_knn_w, rank_fts_w, rank_graph_w,

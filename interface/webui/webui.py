@@ -398,14 +398,11 @@ class AikoWeb:
             # serve() has died trying) — it previously fired before serve()
             # even started, so start_servers() could return while nothing was
             # listening yet.
-            started_wait = asyncio.ensure_future(server.started.wait())
-            done, pending = await asyncio.wait(
-                {serve_task, started_wait}, return_when=asyncio.FIRST_COMPLETED
-            )
-            if started_wait in pending:
-                # serve() exited before signaling startup (bind failure):
-                # don't leave the waiter hanging on a dead task.
-                started_wait.cancel()
+            # NOTE: uvicorn>=0.30 made Server.started a plain bool (was an
+            # asyncio.Event). Poll it — pyproject floors uvicorn at 0.50.2,
+            # so the old Event API can't come back via a downgrade.
+            while not server.started and not serve_task.done():
+                await asyncio.sleep(0.05)
             self._loop_ready.set()
             # Re-raises serve() failures (e.g. port already in use) instead
             # of swallowing them; on the happy path runs until shutdown.

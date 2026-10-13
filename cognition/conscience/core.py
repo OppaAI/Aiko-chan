@@ -687,7 +687,17 @@ class ConscienceCircuitCore:
             )
         top = next((n for score, n in retrieved if score > 0 and n.polarity < 0), None)
         if top is not None:
-            return f"Stay clear of this: {top.statement[:160]}"
+            # Never quote the norm statement or ID verbatim: Ministral
+            # echoes prompt blocks into replies instead of heeding them
+            # silently (observed: constraint text + confabulated norm ID
+            # word-mixed into a normal answer). A paraphrased behavioral
+            # directive steers true positives just as well, and even an
+            # echo of it reads as normal assistant wording, not a leak.
+            # The verbatim norm + ID stay ledger-only (verdict.reasons).
+            return (
+                "Answer only from what you actually know; do not "
+                "speculate, and do not present guesses as revealed fact."
+            )
         return "Answer plainly and honestly; claim no more certainty than you have."
 
     @staticmethod

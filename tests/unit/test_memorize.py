@@ -571,6 +571,36 @@ class TestSearchIntegration:
         results = backend.search("secret fact", user_id="u1", limit=5)
         assert all("u2" not in r["memory"] for r in results)
 
+    def test_wide_pass_does_not_refetch_quick_rows(self, backend, monkeypatch):
+        """Latency #11: the wide pass must only fetch rows not already
+        fetched by the quick pass (no redundant SELECT for overlapping IDs)."""
+        # Seed 25 rows: quick pass (6+6+6) can't see them all, wide pass
+        # (20+20+20) finds more — but must not re-fetch the quick ones.
+        for i in range(25):
+            backend.add_raw(f"Oppa memory number {i} about topic {i % 5}", user_id="u1")
+
+        fetch_calls: list[set] = []
+        orig_fetch = backend._fetch_full_rows
+        def _recording_fetch(ids):
+            fetch_calls.append(set(ids))
+            return orig_fetch(ids)
+        monkeypatch.setattr(backend, "_fetch_full_rows", _recording_fetch)
+
+        # High limit forces the wide pass.
+        results = backend.search("Oppa memory topic", user_id="u1", limit=20)
+
+        # Two fetches happened (quick + wide with new IDs).
+        assert len(fetch_calls) == 2, f"expected 2 fetch calls, got {len(fetch_calls)}"
+        quick_ids, wide_ids = fetch_calls
+        # Wide pass found new IDs (otherwise it wouldn't have fetched)...
+        assert len(wide_ids) > 0, "wide pass should have found new IDs"
+        # ...but must not re-request IDs the quick pass already fetched.
+        assert wide_ids.isdisjoint(quick_ids), (
+            f"wide pass re-fetched {wide_ids & quick_ids}"
+        )
+        # Results still come back (merge didn't drop anything).
+        assert len(results) > 0
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # "Does Aiko know who she's talking to" — display_name -> LLM prompt

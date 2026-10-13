@@ -2257,6 +2257,12 @@ class _MemoryBackend:
         last_rowid = 0
         while True:
             with self._db_lock:
+                # Reopen if a user-switch/close landed between pages —
+                # without this, post-login get_all() throws
+                # ProgrammingError on a closed connection (get_since
+                # already guards this way; iter_all was the only reader
+                # missing it).
+                self._ensure_open()
                 rows = self._conn.execute(
                     """
                     SELECT rowid, id, memory, created_at, status,

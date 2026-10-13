@@ -236,10 +236,11 @@ def test_quaternary_llm_classifier_allows_greeting_label():
     assert "Label: greeting" in prompt
 
 
-def test_ambiguous_semantic_scores_fall_back_to_quaternary_tiebreak(monkeypatch):
-    """Webchat above threshold but inside the gap must be resolved by the
-    quaternary LLM classifier — webchat stays reachable (the old binary
-    agentic-or-chat tie-break collapsed it to localchat)."""
+def test_ambiguous_semantic_scores_default_to_localchat_no_llm(monkeypatch):
+    """Ambiguous gap defaults to localchat without spending an LLM tiebreak
+    call (~1-3s TTFT). The fly tiebreak runs first (free); if it can't
+    decide, localchat is the safe default. Explicit opt-in via ROUTE_MODE=llm.
+    """
     think = _bare_think(FakeEmbedder())
     monkeypatch.setenv("ROUTE_WEBCHAT_THRESHOLD", "0.60")
     monkeypatch.setattr(think_module, "_SEMANTIC_ROUTE_MIN_GAP", 0.05)
@@ -251,6 +252,36 @@ def test_ambiguous_semantic_scores_fall_back_to_quaternary_tiebreak(monkeypatch)
         think_module.reason, "label_scores_topk",
         lambda *a, **kw: {"webchat": 0.65, "agentic": 0.63, "localchat": 0.10},
     )
+    # Fly tiebreak abstains (not decisive).
+    monkeypatch.setattr(think, "_fly_route_tiebreak", lambda *a, **kw: None)
+    tiebreak_calls = []
+    monkeypatch.setattr(
+        think, "_classify_quaternary_intent_llm",
+        lambda text, allow_agentic=True: tiebreak_calls.append(text) or "webchat",
+    )
+
+    intent, _ = think._route_intent("what does PNE stand for")
+    # No LLM tiebreak spent; safe default.
+    assert tiebreak_calls == []
+    assert intent == "localchat"
+
+
+def test_ambiguous_semantic_scores_llm_mode_still_tiebreaks(monkeypatch):
+    """ROUTE_MODE=llm explicitly opts back into the LLM tiebreak for
+    ambiguous gaps."""
+    think = _bare_think(FakeEmbedder())
+    monkeypatch.setenv("ROUTE_WEBCHAT_THRESHOLD", "0.60")
+    monkeypatch.setattr(think_module, "_SEMANTIC_ROUTE_MIN_GAP", 0.05)
+    monkeypatch.setattr(think_module, "_ROUTE_MODE", "llm")
+    monkeypatch.setattr(
+        think, "_semantic_example_vectors",
+        lambda examples, instruct: (["webchat", "agentic"], np.zeros((2, 2), dtype=np.float32)),
+    )
+    monkeypatch.setattr(
+        think_module.reason, "label_scores_topk",
+        lambda *a, **kw: {"webchat": 0.65, "agentic": 0.63, "localchat": 0.10},
+    )
+    monkeypatch.setattr(think, "_fly_route_tiebreak", lambda *a, **kw: None)
     tiebreak_calls = []
     monkeypatch.setattr(
         think, "_classify_quaternary_intent_llm",

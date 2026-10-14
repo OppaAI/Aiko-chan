@@ -532,7 +532,13 @@ body::before {
 #panel-footer-legal a { color: var(--cy-dim); }
 
 /* companion HUD inside the stage */
-#ws-dots { top: 16px !important; right: 16px; z-index: 9; }
+#vrm-side #ws-dots {
+  position: absolute !important;
+  top: 16px !important;
+  right: 16px !important;
+  left: auto !important;
+  z-index: 9;
+}
 #companion-hud {
   z-index: 8;
   left: auto !important;
@@ -822,11 +828,12 @@ body::before {
 #screen-live-indicator[hidden] { display: none !important; }
 
 /* ══ stage-right cluster: presence box at the edge, status stack to its left ══ */
-#stage-side-cluster {
-  position: absolute;
-  right: 18px;
-  top: 50%;
-  transform: translateY(-50%);
+#vrm-side #stage-side-cluster {
+  position: absolute !important;
+  right: 18px !important;
+  left: auto !important;
+  top: 50% !important;
+  transform: translateY(-50%) !important;
   z-index: 8;
   display: flex;
   align-items: center;

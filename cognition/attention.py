@@ -1038,6 +1038,18 @@ class EdgeCognitiveState:
     def _on_evict(self) -> None:
         """State is leaving the identity cache: detach from the trigger bus
         and close the policy store so dead states can't fire or leak."""
+        # A debounced persist may still be queued for this identity — the
+        # flush skips states that are no longer cached, so save now or the
+        # latest changes are lost with the eviction.
+        try:
+            with _persist_lock:
+                pending = self._identity in _persist_pending
+                if pending:
+                    _persist_pending.discard(self._identity)
+            if pending:
+                self._do_persist()
+        except Exception:
+            pass
         try:
             from cognition.policy import trigger_bus
             _bus = trigger_bus()

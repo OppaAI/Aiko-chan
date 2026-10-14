@@ -433,8 +433,13 @@ class InnerSpeech:
             rows = self._get_store().unconsolidated_since(since)
         except Exception as e:
             log.debug("inner_speech: spontaneous_recall failed: %s", e)
+            rows = None
+        if rows is None:
+            # Database failure (not an empty result): roll the cooldown back
+            # to "due" so a later tick can retry instead of staying silent
+            # for 30 minutes.
             with self._lock:
-                self._last_spont_t = 0.0  # don't burn the cooldown on failure
+                self._last_spont_t = now - 1800.0
             return None
         with self._lock:
             for r in reversed(rows):  # most recent first

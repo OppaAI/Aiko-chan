@@ -286,8 +286,12 @@ class InnerSpeechStore:
 
     # ── midnight join ──────────────────────────────────────────────────
 
-    def unconsolidated_since(self, since_iso: str) -> list[dict]:
-        """Rows since `since_iso` not yet folded into the dream. For dream.py."""
+    def unconsolidated_since(self, since_iso: str) -> list[dict] | None:
+        """Rows since `since_iso` not yet folded into the dream. For dream.py.
+
+        Returns None (not []) when the query itself fails, so callers can
+        tell a database failure apart from a genuinely empty result.
+        """
         try:
             with self._lock:
                 rows = self._conn.execute(
@@ -299,7 +303,7 @@ class InnerSpeechStore:
             return [dict(r) for r in rows]
         except Exception as e:
             log.warning("inner_speech: unconsolidated_since failed: %s", e)
-            return []
+            return None
 
     def mark_consolidated(self, ids: list[str]) -> None:
         if not ids:

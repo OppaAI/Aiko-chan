@@ -506,10 +506,14 @@ class SubliminalLayer:
         try:
             from interface.webui.webui import webui_bridge  # local import — cyclic-safe
             bridge = webui_bridge()
-            if bridge is not None:
-                bridge.set_expression(vrm_name, intensity)
+            if bridge is None:
+                return False
+            bridge.set_expression(vrm_name, intensity)
         except Exception as e:
             log.debug("subliminal: VRM broadcast skipped: %s", e)
+            return False
+        # Record as emitted only after a successful broadcast: if the bridge
+        # was down, the next call must retry instead of assuming stability.
         self._vrm_last = vrm_name
         self._vrm_last_intensity = intensity
         self._vrm_last_t = now

@@ -272,8 +272,11 @@ def _split_thinking(text: str) -> tuple[str, str]:
         if inner:
             parts.append(inner)
         return ""
-    clean = _THINK_BLOCK_RE.sub(_grab, text)
-    clean = _PRIVATE_BLOCK_RE.sub("", clean)
+    # Drop parroted private prompt blocks BEFORE harvesting thinking: a
+    # <thinking> block nested inside an <inner_speech> wrapper is prompt
+    # parroting, not fresh cognition, and must never reach the thinking box.
+    clean = _PRIVATE_BLOCK_RE.sub("", text)
+    clean = _THINK_BLOCK_RE.sub(_grab, clean)
     # Trailing unclosed block: thinking content -> box, private content ->
     # dropped. Either way it is not speech.
     m = _ANY_TRAIL_RE.search(clean)
@@ -306,7 +309,10 @@ class _ThinkingTokenFilter:
     def feed(self, token: str, final: bool = False) -> str:
         if token:
             self._buf += token
-        buf = self._buf
+        # Drop complete parroted private blocks BEFORE harvesting thinking:
+        # a <thinking> block nested inside a private echo is prompt parroting,
+        # not fresh cognition, and must never reach the thinking box.
+        buf = _PRIVATE_BLOCK_RE.sub("", self._buf)
         out: list[str] = []
         last = 0
         for m in _THINK_BLOCK_RE.finditer(buf):
@@ -316,9 +322,6 @@ class _ThinkingTokenFilter:
                 self.thinking_parts.append(inner)
             last = m.end()
         out.append(buf[last:])
-        # Parroted private prompt blocks: drop silently (never boxed, never spoken).
-        buf = "".join(out)
-        out = [ _PRIVATE_BLOCK_RE.sub("", buf) ]
         clean = _STRAY_CLOSE_RE.sub("", "".join(out))
         if not final:
             # Hold back anything from an unclosed thinking opener onward: the

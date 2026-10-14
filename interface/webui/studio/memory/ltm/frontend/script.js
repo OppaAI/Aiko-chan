@@ -22,7 +22,7 @@ async function getCurrentUser() {
 
 function qs() {
   const p = new URLSearchParams();
-  const uid = document.getElementById('user-id').value.trim();
+  const uid = ((document.getElementById('user-id') || {}).value || '').trim();
   if (uid) p.set('user_id', uid);
   p.set('limit', document.getElementById('limit').value || '200');
   p.set('include_history', document.getElementById('include-history').checked);
@@ -132,7 +132,7 @@ function hueColor(hue) {
 function nodeOpacity(d) {
   let r = retainOf(d);
   // Quadratic-ish so mid-retain is already bright; floor keeps dim nodes readable
-  let o = 0.22 + Math.pow(r, 0.85) * 0.78;
+  let o = 0.38 + Math.pow(r, 0.85) * 0.62;
   const hue = valenceHue(d);
   if (hue === 'pos' || hue === 'neg') o = Math.min(1, o + 0.08);
   if (d.pinned) o = Math.max(o, 0.88);
@@ -282,7 +282,7 @@ async function runSearch() {
   try {
     const p = new URLSearchParams();
     p.set('q', q);
-    const uid = document.getElementById('user-id').value.trim();
+    const uid = ((document.getElementById('user-id') || {}).value || '').trim();
     if (uid) p.set('user_id', uid);
     p.set('limit', '10');
     const resp = await fetch(`${API_BASE}/search?` + p.toString());
@@ -421,38 +421,30 @@ function render() {
 
   const defs = svg.append('defs');
 
-  // per-node glass gradients + glow filters (enhanced for 3D glossy glass effect)
-  nodes.forEach((d, i) => {
-    const hue = valenceHue(d);
-    const col = hueColor(hue);
-    const op = nodeOpacity(d);
-    const gid = `glass-${i}`;
-    
-    // Multi-stop radial gradient for 3D glossy sphere (like molecule models)
-    const grad = defs.append('radialGradient')
-      .attr('id', gid)
-      .attr('cx', '30%').attr('cy', '25%').attr('r', '60%')
-      .attr('fy', '40%');
-    
-    // Subtle light transition (not harsh white)
-    grad.append('stop').attr('offset', '0%').attr('stop-color', col).attr('stop-opacity', 0.78 * op);
-    grad.append('stop').attr('offset', '12%').attr('stop-color', '#ffffff').attr('stop-opacity', 0.18 * op);
-    // Main color body
-    grad.append('stop').attr('offset', '42%').attr('stop-color', col).attr('stop-opacity', 0.68 * op);
-    // Shadow deepening toward bottom
-    grad.append('stop').attr('offset', '70%').attr('stop-color', col).attr('stop-opacity', 0.42 * op);
-    // Dark rim for depth
-    grad.append('stop').attr('offset', '100%').attr('stop-color', '#000000').attr('stop-opacity', 0.15 * op);
-    
-    d._glassId = gid;
-    d._hueCol = col;
-    d._op = op;
-    d._specularId = `spec-${i}`;
+/* Lighten (amt>0) or darken (amt<0) a #rrggbb color, amt in [-1, 1]. */
+function shade(hex, amt) {
+  const n = parseInt(String(hex).slice(1), 16);
+  let r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  const t = amt < 0 ? 0 : 255, p = Math.abs(amt);
+  r = Math.round((t - r) * p + r);
+  g = Math.round((t - g) * p + g);
+  b = Math.round((t - b) * p + b);
+  return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+}
 
-    const fid = `glow-${i}`;
-    GraphBoot.addGlowFilter(defs, fid, glowStrength(d));
-    d._glowId = fid;
-  });
+  // Shared glass gradients, one per hue (KB style): no per-node defs,
+  // no blur filters — per-node opacity moves to fill-opacity on the
+  // element. Same current-colour palette, a fraction of the DOM cost.
+  for (const h of [...new Set(nodes.map(d => valenceHue(d)))]) {
+    const base = hueColor(h);
+    const gr = defs.append('radialGradient')
+      .attr('id', 'gloss-' + h)
+      .attr('cx', '34%').attr('cy', '28%').attr('r', '78%');
+    gr.append('stop').attr('offset', '0%').attr('stop-color', shade(base, 0.38));
+    gr.append('stop').attr('offset', '40%').attr('stop-color', shade(base, 0.10));
+    gr.append('stop').attr('offset', '72%').attr('stop-color', base);
+    gr.append('stop').attr('offset', '100%').attr('stop-color', base).attr('stop-opacity', 0.30);
+  }
 
   defs.append('marker').attr('id','arrow-sup').attr('viewBox','0 0 10 10')
     .attr('refX', 22).attr('refY', 5).attr('markerWidth', 6).attr('markerHeight', 6).attr('orient','auto')
@@ -480,10 +472,10 @@ function render() {
   const link = g.append('g').selectAll('path').data(links).join('path')
     .attr('stroke', d => d.type === 'supersedes' ? 'var(--orange)' : (d.type === 'distilled_into' ? '#51d4c8' : '#3de0ff'))
     .attr('stroke-width', d => {
-      if (d.type === 'supersedes') return 1.8;
-      if (d.type === 'distilled_into') return 1.5;
+      if (d.type === 'supersedes') return 1.0;
+      if (d.type === 'distilled_into') return 0.8;
       const w = Math.max(0, Math.min(1, Number(d.weight) || 0.4));
-      return 0.8 + w * 2.5;
+      return 0.5 + w * 0.3;
     })
     .attr('stroke-opacity', d => edgeOpacity(d, nodeById))
     .attr('stroke-linecap', 'round')
@@ -491,6 +483,8 @@ function render() {
     .attr('marker-end', d => d.type === 'supersedes' ? 'url(#arrow-sup)' : null)
     .attr('d', quadraticPath);
 
+  // Labels on hubs only (KB style): top retain + pinned carry tags.
+  const hotTop = new Set([...nodes].sort((a, b) => retainOf(b) - retainOf(a)).slice(0, 30).map(n => n.id));
   const node = g.append('g').selectAll('g').data(nodes).join('g')
     .attr('class', 'node-group')
     .style('cursor', 'pointer')
@@ -498,19 +492,19 @@ function render() {
     .call(GraphBoot.makeDrag(() => simulation))
     .on('click', (event, d) => { event.stopPropagation(); showDetails(d); });
 
-  // outer glow disc (soft synapse halo) with subtle pulse
+  // soft halo disc (plain opacity, no blur filter — KB style)
   node.append('circle')
     .attr('r', d => nodeRadius(d) + 3)
-    .attr('fill', d => d._hueCol)
+    .attr('fill', d => hueColor(valenceHue(d)))
     .attr('opacity', d => 0.08 + retainOf(d) * 0.18)
-    .attr('filter', d => `url(#${d._glowId})`)
     .attr('class', 'pulse-glow');
 
-  // glass body with glossy gradient
+  // glass body with shared glossy gradient (per-hue, not per-node)
   node.append('circle')
     .attr('r', nodeRadius)
-    .attr('fill', d => `url(#${d._glassId})`)
-    .attr('stroke', d => d.pinned ? '#ffffff' : d._hueCol)
+    .attr('fill', d => `url(#gloss-${valenceHue(d)})`)
+    .attr('fill-opacity', nodeOpacity)
+    .attr('stroke', d => d.pinned ? '#ffffff' : hueColor(valenceHue(d)))
     .attr('stroke-width', d => d.pinned ? 1.8 : 0.9)
     .attr('stroke-opacity', d => d.pinned ? 0.7 : 0.35 + retainOf(d) * 0.4)
     .attr('stroke-dasharray', d =>
@@ -552,7 +546,9 @@ function render() {
   node.append('text').attr('class','node-label')
     .attr('dy', d => nodeRadius(d) + 11)
     .attr('text-anchor','middle')
+    .attr('opacity', 0.85)
     .text(d => {
+      if (!hotTop.has(d.id) && !d.pinned) return '';
       const t = d.label || d.id;
       return t.length > 20 ? t.slice(0, 18) + '…' : t;
     });

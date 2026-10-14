@@ -15,6 +15,7 @@ let viewport = null;   // zoom target group
 let edgesG = null;     // lines layer
 let nodesG = null;     // node layer
 let linkSel = null;    // current line selection (for drag updates)
+let liveSim = null;      // live force sim: drag to move, release to spring back
 let currentNodes = [];
 let currentLinks = [];
 
@@ -37,12 +38,12 @@ function importanceOf(d) {
 
 function nodeRadius(d) {
   const r = importanceOf(d);
-  if (d.type === 'entity') return 5 + 16 * Math.pow(r, 1.25);
-  return 5 + 24 * Math.pow(r, 1.35);
+  if (d.type === 'entity') return 4 + 13 * Math.pow(r, 1.25);
+  return 4 + 19 * Math.pow(r, 1.35);
 }
 
 function nodeOpacity(d) {
-  return 0.15 + importanceOf(d) * 0.55;
+  return 0.30 + importanceOf(d) * 0.55;
 }
 
 /* Edge brightness follows both endpoint sizes — dim when both ends are small. */
@@ -314,7 +315,7 @@ function layoutOrganic(nodes, links, w, h) {
 
   // 4. Relax overlaps (collision only) around each node's anchor.
   const sim = d3.forceSimulation(nodes)
-    .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 5).iterations(4))
+    .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 10).iterations(4))
     .force('x', d3.forceX(d => d._ax).strength(0.30))
     .force('y', d3.forceY(d => d._ay).strength(0.30))
     .randomSource(mulberry32(1777))
@@ -394,20 +395,37 @@ function edgeKey(l) {
   return l.source.id + '|' + l.target.id + '|' + (l.type || '');
 }
 
+// Quadratic Bezier edge paths: organic curve bulge scaled by edge
+// distance (perpendicular offset), same treatment as the LTM graph.
+function quadraticPath(l) {
+  const sc = l.source, t = l.target;
+  const mx = (sc.x + t.x) / 2, my = (sc.y + t.y) / 2;
+  const dx = t.x - sc.x, dy = t.y - sc.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const k = Math.min(18, len * 0.12);
+  return `M ${sc.x},${sc.y} Q ${mx - dy / len * k},${my + dx / len * k} ${t.x},${t.y}`;
+}
+
 function positionEdges(sel) {
-  sel
-    .attr('x1', l => l.source.x).attr('y1', l => l.source.y)
-    .attr('x2', l => l.target.x).attr('y2', l => l.target.y);
+  sel.attr('d', quadraticPath);
 }
 
 function makeNodeDrag() {
   return d3.drag()
+    .on('start', function (ev, d) {
+      if (liveSim) liveSim.alpha(0.6).restart();
+      d.fx = d.x; d.fy = d.y;
+    })
     .on('drag', function (ev, d) {
+      d.fx = ev.x; d.fy = ev.y;
       d.x = ev.x;
       d.y = ev.y;
       d3.select(this)
         .attr('transform', `translate(${d.x},${d.y})`);
       if (linkSel) positionEdges(linkSel);
+    })
+    .on('end', function (ev, d) {
+      d.fx = null; d.fy = null;
     });
 }
 
@@ -425,16 +443,31 @@ function update() {
   currentNodes = nodes;
   currentLinks = links;
   layoutOrganic(nodes, links, w, h);
+  // Anchor every node where layout put it, then run a live simulation
+  // around those anchors: drags rehearse via makeNodeDrag, release drops
+  // the fix and the anchor springs pull the node home (bounce-back).
+  for (const n of nodes) { n._ax = n.x; n._ay = n.y; }
+  if (liveSim) liveSim.stop();
+  liveSim = d3.forceSimulation(nodes)
+    .force('x', d3.forceX(d => d._ax).strength(0.14))
+    .force('y', d3.forceY(d => d._ay).strength(0.14))
+    .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 9).iterations(2))
+    .on('tick', () => {
+      nodesG.selectAll('g.node').attr('transform', d => `translate(${d.x},${d.y})`);
+      if (linkSel) positionEdges(linkSel);
+    });
+  liveSim.alpha(0.5).restart();
   const nChunks = nodes.filter(n => n.type !== 'entity').length;
   const nEnts = nodes.length - nChunks;
   const statsEl = document.getElementById('graph-stats');
   if (statsEl) statsEl.textContent = `${nodes.length} nodes · ${links.length} edges · drag nodes · scroll zoom`;
 
-  // Edges: thin straight connectors — brightness follows both endpoint
+  // Edges: thin quadratic-curve connectors — brightness follows both endpoint
   // sizes (dim when both ends are small).
-  linkSel = edgesG.selectAll('line').data(links, edgeKey);
+  linkSel = edgesG.selectAll('path').data(links, edgeKey);
   linkSel = linkSel.join(
-    enter => enter.append('line')
+    enter => enter.append('path')
+      .attr('fill', 'none')
       .attr('stroke', l => (l.type === 'about' ? EDGE_ABOUT : EDGE_SAMEDOC))
       .attr('stroke-width', l => (l.type === 'about' ? 1.1 : 0.7)),
     updateE => updateE,

@@ -1358,3 +1358,33 @@ html[data-theme="light"] #thinking-box {
   color: #5A4E6E !important;
 }
 html[data-theme="light"] #thinking-box > summary { color: #7A68A6 !important; }
+
+/* Outfit picker: standalone control (vrm-hud is hidden in this theme) */
+#vrm-outfit-picker {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 10;
+  background: rgba(10, 14, 26, 0.85);
+  border: 1px solid rgba(94, 234, 212, 0.3);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--cy-text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+#vrm-outfit-picker label {
+  font-weight: 600;
+  white-space: nowrap;
+}
+#vrm-outfit-picker select {
+  background: rgba(20, 28, 48, 0.9);
+  color: var(--cy-text);
+  border: 1px solid rgba(94, 234, 212, 0.3);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 13px;
+  cursor: pointer;
+}

@@ -402,10 +402,10 @@ function positionEdges(sel) {
 
 function makeNodeDrag() {
   return d3.drag()
-    .on('drag', (ev, d) => {
+    .on('drag', function (ev, d) {
       d.x = ev.x;
       d.y = ev.y;
-      d3.select(ev.sourceEvent.target.closest('g.node'))
+      d3.select(this)
         .attr('transform', `translate(${d.x},${d.y})`);
       if (linkSel) positionEdges(linkSel);
     });

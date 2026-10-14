@@ -97,8 +97,6 @@ const exprCurrent = {};
 const exprAnim = {}; // name -> { from, to, t, dur }
 const MOUTH_KEYS = new Set(['aa', 'ih', 'ou', 'ee', 'oh']);
 let explicitExpr = false; // true while aikoSetExpression holds a non-neutral emotion
-let exprResetTimer = null;
-const EXPR_RESET_DELAY = 4000;
 
 // ── blink: single 120 ms sin(π·t) curve, every 2–6 s (slower while thinking) ─
 let blinkWait = 2.5;
@@ -138,6 +136,8 @@ let gestureState = 'none';
 let gestureT = 0;
 let gestureDuration = 0;
 let gestureCooldown = 2.0 + Math.random() * 3.0;
+let lastListenNodT = -10, nextListenNodIn = 2.5; // backchannel nods while listening
+let lastInteractT = 0, escalationDone = {};     // long-idle escalation
 let gestureTarget = {};
 let gestureLookAt = 0; // lookAtHand head-tracking: -1 left, +1 right, 0 off
 let lastVisemeAt = 0;
@@ -179,7 +179,7 @@ const THINK_POSES = {
     head: [0.040, 0.030, 0.085], neck: [0.020, 0.020, 0.035], fingers: 0.20,
   },
   gazeUp: {  // chin up, eyes skyward, arms relaxed
-    head: [-0.055, 0.020, 0], neck: [-0.030, 0, 0],
+    head: [-0.028, 0.020, 0], neck: [-0.015, 0, 0],
     chest: -0.012, spine: -0.008, fingers: 0,
   },
 };
@@ -190,7 +190,7 @@ let thinkSide = 1;
 let thinkLean = { x: 0, y: 0, z: 0 };
 let thinkDriftPhase = 0;
 const THINK_LEANS = [
-  { x: -0.045, y: 0, z: 0 },  // up
+  { x: -0.022, y: 0, z: 0 },  // up
   { x: 0.038, y: 0, z: 0 },   // down
   { x: 0, y: 0.05, z: 0 },    // left
   { x: 0, y: -0.05, z: 0 },   // right
@@ -289,6 +289,23 @@ const GESTURES = [
   'skirtSmooth',       // smooths skirt with both hands
   'hugSelf',           // wraps arms around herself, shy
   'happyBounce',       // little bounce on her toes
+  // ── new axis-correct additions ──
+  'yawnCover',         // stifles a tiny yawn behind her hand
+  'shoulderShrug',     // one shoulder hitches, head cants
+  'handOnChest',       // fingertips rest lightly on the chest
+  'fingerDrum',        // fingers drum softly on the cheek
+  'glanceUp',          // quick searching glance upward
+  // ── understated, deadpan-cute ──
+  'deadpanTilt',       // flat "eh?" head tilt
+  'poke',              // tsukkomi poke toward the viewer
+  'flatStare',         // unimpressed, head dips a fraction
+  'softSigh',          // tiny exhale, shoulders settle
+  // ── batch 2: anime mannerisms ──
+  'hairFlip',          // sweeps hair back over the shoulder
+  'cheekPoke',         // pokes her own cheek, head tilts into it
+  'sleevePull',        // tugs sleeves over her hands, shy dip
+  'waveBoth',          // genki two-hand wave
+  'earLean',           // leans an ear toward you — "say again?"
 ];
 
 const SPEAKING_GESTURES = [
@@ -297,6 +314,10 @@ const SPEAKING_GESTURES = [
   'bothHandsExplain',  // both hands open outward
   'shrugExplain',      // "who knows?" shoulder hitch, palms out
   'countFingers',      // listing points on fingers
+  // ── new axis-correct additions ──
+  'palmPresent',       // "here it is": both palms present forward
+  'handToHeart',       // "I mean it": palm over the heart
+  'nodAgree',          // one slow, definite nod
 ];
 
 // Retuned 1–3.5 s: short enough to feel alive, long enough to read.
@@ -316,6 +337,8 @@ const GESTURE_DURATION = {
   headScratch: 2.6,
   sway: 3.2,
   headNod: 2.2,
+  headShake: 2.2,
+  blowKiss: 3.2,
   wristFlick: 2.0,
   adjustSleeve: 2.4,
   handOnHip: 2.8,
@@ -351,6 +374,24 @@ const GESTURE_DURATION = {
   skirtSmooth: 2.8,
   hugSelf: 3.2,
   happyBounce: 2.4,
+  yawnCover: 3.0,
+  shoulderShrug: 2.2,
+  handOnChest: 2.8,
+  fingerDrum: 3.2,
+  glanceUp: 2.4,
+  palmPresent: 2.4,
+  handToHeart: 2.8,
+  nodAgree: 2.2,
+  listenNod: 1.6,
+  deadpanTilt: 2.5,
+  poke: 1.8,
+  flatStare: 2.8,
+  softSigh: 2.4,
+  hairFlip: 2.2,
+  cheekPoke: 2.4,
+  sleevePull: 2.6,
+  waveBoth: 2.8,
+  earLean: 2.6,
 };
 
 function startGesture(name) {
@@ -366,9 +407,44 @@ function startGesture(name) {
   };
 }
 
+let recentGestures = [];
+const RECENCY_N = 12;
+// Idle gestures that match her current facial emotion (face and body tell
+// the same story). neutral / weak expression -> null -> full pool.
+const EMOTION_GESTURES = {
+  happy:    ['happyBounce', 'sway', 'hairTwirl', 'skirtSmooth', 'footTap', 'shoulderShrug'],
+  sad:      ['hugSelf', 'headScratch', 'fingerDrum', 'thoughtfulLook'],
+  angry:    ['crossArms', 'handOnHip', 'footTap', 'brushShoulder'],
+  relaxed:  ['sway', 'gentleStretch', 'stretchUp', 'yawnCover', 'hairBrush'],
+  Surprised:['glanceUp', 'lookAround', 'raiseHand', 'handOnChest'],
+};
+function emotionGestureSubset() {
+  let best = null, bw = 0.15;
+  for (const e of ['happy','angry','sad','relaxed','Surprised']) {
+    const w = (typeof exprCurrent !== 'undefined' && exprCurrent[e]) || 0;
+    if (w > bw) { bw = w; best = e; }
+  }
+  return best ? EMOTION_GESTURES[best] : null;
+}
 function pickGesture() {
+  // Long-idle escalation first (only when truly idle) — see below.
+  if (!speakingRecently() && !thinkingActive && !listeningActive) {
+    const idleFor = t - lastInteractT;
+    if (idleFor > 300 && !escalationDone.l3) { escalationDone.l3 = true; recentGestures.push('glanceUp'); startGesture('glanceUp'); return; }
+    if (idleFor > 200 && !escalationDone.l2) { escalationDone.l2 = true; recentGestures.push('stretchUp'); startGesture('stretchUp'); return; }
+    if (idleFor > 120 && !escalationDone.l1) { escalationDone.l1 = true; recentGestures.push('yawnCover'); startGesture('yawnCover'); return; }
+  }
   const pool = speakingRecently() ? SPEAKING_GESTURES : GESTURES;
-  let gesture = pool[(Math.random() * pool.length) | 0];
+  // Emotion bias applies to idle selection only — never substitute an idle
+  // emotion subset while she's speaking (e.g. a yawn mid-sentence).
+  const eb = speakingRecently() ? null : emotionGestureSubset();
+  const srcPool = (eb && Math.random() < 0.55) ? eb : pool;
+  // Random pick with recency avoidance: feels random, still cycles everything.
+  const fresh = srcPool.filter(g => !recentGestures.includes(g));
+  const choices = fresh.length ? fresh : srcPool;
+  let gesture = choices[(Math.random() * choices.length) | 0];
+  recentGestures.push(gesture);
+  if (recentGestures.length > RECENCY_N) recentGestures.shift();
   // While thinking, suppress idle look-arounds (she holds her gaze).
   if (thinkingActive && gesture === 'lookAround') gesture = 'curiousTilt';
   startGesture(gesture);
@@ -529,6 +605,11 @@ function applyGestures(dt) {
   if (!vrm?.humanoid) return;
 
   if (gestureState === 'none') {
+    // Backchannel: soft nods every few seconds while she's listening to you.
+    if (listeningActive && t - lastListenNodT > nextListenNodIn) {
+      lastListenNodT = t; nextListenNodIn = 3.0 + Math.random() * 3.0;
+      startGesture('listenNod'); return;
+    }
     if (speakingRecently()) gestureCooldown = Math.min(gestureCooldown, 1.0);
     gestureCooldown -= dt;
     if (gestureCooldown <= 0) {
@@ -575,18 +656,20 @@ function applyGestures(dt) {
     }
 
     case 'lookAtHand': {
+      // Hand raised into view in front of the face; head tracks it.
+      // (Elbow flexion is local z: right -z, left +z; -S = inward on both.)
       const k = Math.sin(p * Math.PI);
-      add(UA, -0.16 * k, 0, S * 0.24 * k);
-      add(LA, -0.32 * k, 0, S * 0.05 * k);
-      add(HD, 0.08 * k, S * -0.15 * k, 0);
+      add(UA, 1.05 * k, S * 0.70 * k, S * 0.30 * k);
+      add(LA, 0, 0, -S * 2.30 * k);
+      add(HD, 0.05 * k, S * -0.10 * k, 0);
       gestureLookAt = S; // true head tracking, resolved in composePose
       break;
     }
 
     case 'hairBrush': {
       const k = Math.sin(p * Math.PI);
-      add(UA, -0.15 * k, 0, S * 0.30 * k);
-      add(LA, -0.27 * k, 0, S * 0.11 * k);
+      add(UA, 0.80 * k, S * 0.74 * k, S * 0.85 * k);
+      add(LA, 0, 0, -S * 2.55 * k);
       add(HD, -0.05 * k, S * -0.13 * k, S * 0.07 * k);
       add('head', 0, S * 0.02 * k, -S * 0.025 * k);
       break;
@@ -595,7 +678,7 @@ function applyGestures(dt) {
     case 'fingerPlay': {
       const k = Math.sin(p * Math.PI);
       add('head', 0.028 * k, S * 0.05 * k, 0);
-      add(LA, -0.13 * k, 0, 0);
+      add(LA, 0, 0, -S * 0.12 * k);
       add(HD, 0, S * -0.09 * k, S * Math.sin(gestureT * 5.0) * 0.035 * k);
       applyFingerCurl(side, k);
       break;
@@ -626,25 +709,32 @@ function applyGestures(dt) {
     }
 
     case 'stretchNeck':
-      add('neck', -0.035 * held, 0, gestureTarget.tilt * 0.2 * held);
-      add('head', -0.028 * held, 0, gestureTarget.tilt * 0.12 * held);
+      add('neck', -0.018 * held, 0, gestureTarget.tilt * 0.2 * held);
+      add('head', -0.014 * held, 0, gestureTarget.tilt * 0.12 * held);
       add('chest', -0.015 * held, 0, 0);
       break;
 
     case 'raiseHand':
-      add(UA, -0.24 * held, 0, S * 0.14 * held);
-      add(LA, -0.30 * heldM, 0, S * 0.05 * heldM);
+      // Enthusiastic hand raise: arm swings forward-up, elbow softly bent.
+      // (Upper-arm x+ = forward; elbow flexion is local z.)
+      add(UA, 0.90 * held, S * 0.30 * held, S * 1.00 * held);
+      add(LA, 0, 0, -S * 0.30 * heldM);
       add(HD, 0.04 * heldT, 0, 0);
       add('head', -0.012 * held, S * 0.035 * held, 0);
       break;
 
-    case 'chinTouch':
-      add(UA, -0.20 * held, 0, S * 0.20 * held);
-      add(LA, -0.35 * heldM, 0, S * 0.035 * heldM);
-      add(HD, -0.06 * heldT, S * -0.07 * heldT, 0);
-      add('head', 0.020 * held, 0, S * 0.018 * held);
+    case 'chinTouch': {
+      // Dominant hand rises to the chin; head dips to meet it.
+      // (Right-side only: left elbow doesn't mirror cleanly on this model.
+      // Numbers tuned headlessly — hand lands at the jaw.)
+      add('rightUpperArm', 0.92 * held, 0.80 * held, 0.38 * held);
+      add('rightLowerArm', 0, 0, -2.55 * heldM);
+      add('rightHand', -0.08 * heldT, -0.05 * heldT, 0);
+      add('head', 0.030 * held, 0.010 * held, 0.015 * held);
       add('neck', 0.015 * held, 0, 0);
+      applyFingerCurl(1, 0.30 * held);
       break;
+    }
 
     case 'shoulderRoll': {
       // Easy forward roll: lift, roll forward, settle. (The old version
@@ -690,7 +780,7 @@ function applyGestures(dt) {
       add('chest', 0, 0, -sw * 0.004);
       add('head', 0, 0, -sw * 0.006);
       add('neck', 0, 0, -sw * 0.004);
-      add('leftUpperArm', 0, 0, sw * 0.02);
+      add('leftUpperArm', 0, 0, -sw * 0.02);
       add('rightUpperArm', 0, 0, sw * 0.02);
       break;
     }
@@ -699,6 +789,32 @@ function applyGestures(dt) {
       const nod = pulseCurve(p, 3) * 0.05;
       add('head', nod, 0, 0);
       add('neck', nod * 0.5, 0, 0);
+      break;
+    }
+
+    case 'headShake': {
+      // Side-to-side "no": 1.5 yaw cycles, slight downward tilt for readability.
+      const shk = Math.sin(p * Math.PI * 3) * 0.055 * held;
+      add('head', 0.012 * held, shk, 0);
+      add('neck', 0, shk * 0.45, 0);
+      break;
+    }
+
+    case 'blowKiss': {
+      // Two beats, right arm: fingertips to lips, then hand blows outward
+      // toward the viewer with a sweet head tilt.
+      // AXIS MODEL (measured 2026-10-13 on Aiko.vrm, native frame):
+      //   upper-arm: y+ = forward swing, z+ = up, x = twist (NOT x=swing/y=twist)
+      //   forearm: z- = flexion, x = twist.
+      // Beat 1 verified: hand bone lands at the cheek, fingertips at the lips.
+      // Beat 2 verified: hand 44cm toward the viewer at face height.
+      const k1 = Math.sin(Math.min(1, p * 2.4) * Math.PI);                    // beat 1: hand to lips
+      const k2 = Math.sin(Math.max(0, Math.min(1, (p - 0.45) / 0.55)) * Math.PI); // beat 2: blow outward
+      add('rightUpperArm', 0.90 * k1 + 0.10 * k2, 1.55 * k1 + 1.35 * k2, 0.10 * k1 + 0.20 * k2);
+      add('rightLowerArm', 0, 0, -2.65 * k1 - 0.15 * k2);
+      add('rightHand', -0.10 * k1 + 0.12 * k2, 0, 0);
+      add('head', 0.060 * k1, 0, 0.050 * k1 + 0.055 * k2);
+      add('neck', 0.025 * k1, 0, 0.020 * k1 + 0.020 * k2);
       break;
     }
 
@@ -715,17 +831,17 @@ function applyGestures(dt) {
       const k = Math.sin(p * Math.PI);
       const Q = S < 0 ? 'right' : 'left';
       const QS = -S;
-      add(Q + 'UpperArm', -0.12 * k, 0, QS * 0.09 * k);
-      add(Q + 'LowerArm', -0.18 * k, QS * -0.14 * k, 0);
-      add(Q + 'Hand', -0.07 * k, 0, QS * -0.05 * k);
+      add(Q + 'UpperArm', 0.28 * k, 0, -QS * 0.16 * k);
+      add(Q + 'LowerArm', 0, 0, -QS * 0.40 * k);
+      add(Q + 'Hand', -0.05 * k, 0, QS * -0.05 * k);
       add('head', 0.018 * k, 0, 0);
       break;
     }
 
     case 'handOnHip': {
       const k = holdCurve(p);
-      add(UA, -0.07 * k, 0, S * 0.19 * k);
-      add(LA, -0.05 * k, 0, S * 0.12 * k);
+      add(UA, -0.06 * k, 0, S * 0.22 * k);
+      add(LA, 0, 0, -S * 0.42 * k);
       add(HD, 0, S * -0.035 * k, S * 0.09 * k);
       add('head', 0, -S * 0.02 * k, 0);
       add('spine', 0, 0, S * 0.005 * k);
@@ -734,17 +850,17 @@ function applyGestures(dt) {
 
     case 'crossArms': {
       const k = holdCurve(p);
-      add('leftUpperArm', -0.03 * k, 0, -0.05 * k);
-      add('rightUpperArm', -0.03 * k, 0, 0.05 * k);
-      add('leftLowerArm', -0.04 * k, 0, -0.04 * k);
-      add('rightLowerArm', -0.04 * k, 0, 0.04 * k);
+      add('leftUpperArm', 0.15 * k, 0.20 * k, 0.35 * k);
+      add('rightUpperArm', 0.15 * k, 0.20 * k, -0.35 * k);
+      add('leftLowerArm', 0, 0, 1.10 * k);
+      add('rightLowerArm', 0, 0, -1.10 * k);
       add('head', 0.015 * k, 0, 0);
       break;
     }
 
     case 'touchCollar':
-      add(UA, -0.17 * held, 0, S * 0.15 * held);
-      add(LA, -0.29 * heldM, 0, S * 0.07 * heldM);
+      add(UA, 0.85 * held, S * 0.68 * held, S * 0.22 * held);
+      add(LA, 0, 0, -S * 2.20 * heldM);
       add(HD, 0.05 * heldT, S * -0.09 * heldT, 0);
       add('head', -0.015 * held, S * 0.03 * held, 0);
       break;
@@ -754,8 +870,8 @@ function applyGestures(dt) {
       const br = pulseTapered(p, 2.5);
       const Q = S < 0 ? 'right' : 'left';
       const QS = -S;
-      add(Q + 'UpperArm', -br * 0.10, 0, QS * br * 0.07);
-      add(Q + 'LowerArm', -br * 0.15, 0, 0);
+      add(Q + 'UpperArm', br * 0.30, 0, -QS * br * 0.22);
+      add(Q + 'LowerArm', 0, 0, -QS * br * 0.30);
       add(Q + 'Hand', 0, 0, -QS * br * 0.10);
       add('head', 0, -S * br * 0.035, 0);
       break;
@@ -763,8 +879,8 @@ function applyGestures(dt) {
 
     case 'stretchArm': {
       const st = pulseCurve(p, 1);
-      add(UA, -st * 0.27, 0, S * st * 0.10);
-      add(LA, -st * 0.14, 0, 0);
+      add(UA, st * 0.85, 0, S * st * 0.10);
+      add(LA, 0, 0, -S * st * 0.15);
       add(HD, st * 0.07, 0, 0);
       add('head', 0, S * st * 0.04, 0);
       add('chest', st * 0.01, 0, 0);
@@ -782,8 +898,8 @@ function applyGestures(dt) {
 
     case 'openPalm': {
       const talk = pulseCurve(p, 2);
-      add(UA, -talk * 0.10, 0, S * talk * 0.14);
-      add(LA, -talk * 0.16, 0, 0);
+      add(UA, talk * 0.50, S * talk * 0.10, S * talk * 0.15);
+      add(LA, 0, 0, -S * talk * 0.35);
       add(HD, talk * 0.06, S * -talk * 0.10, 0);
       applyFingerCurl(side, Math.abs(talk) * 0.7);
       break;
@@ -800,8 +916,8 @@ function applyGestures(dt) {
     case 'earTuck': {
       const swp = holdCurve(p, 0.32, 0.28);
       const stroke = pulseTapered(p, 1.5) * 0.03;
-      add(UA, -0.18 * swp, 0, S * 0.26 * swp);
-      add(LA, -0.31 * swp, 0, S * 0.06 * swp);
+      add(UA, 0.85 * swp, S * 0.72 * swp, S * 0.80 * swp);
+      add(LA, 0, 0, -S * 2.50 * swp);
       add(HD, -0.05 * swp + stroke, S * -0.11 * swp, 0);
       add('head', 0, S * 0.02 * swp, -S * 0.03 * swp);
       add('neck', 0, 0, -S * 0.015 * swp);
@@ -812,8 +928,8 @@ function applyGestures(dt) {
       const op = pulseCurve(p, 1);
       add('leftUpperArm', -0.035 * op, 0, -0.06 * op);
       add('rightUpperArm', -0.035 * op, 0, 0.06 * op);
-      add('leftLowerArm', -0.03 * op, 0, 0);
-      add('rightLowerArm', -0.03 * op, 0, 0);
+      add('leftLowerArm', 0, 0, 0.02 * op);
+      add('rightLowerArm', 0, 0, -0.02 * op);
       add('chest', -0.015 * op, 0, 0);
       add('spine', -0.008 * op, 0, 0);
       add('head', -0.018 * op, 0, S * 0.008 * op);
@@ -822,10 +938,10 @@ function applyGestures(dt) {
 
     case 'handsClasp': {
       const cl = holdCurve(p, 0.30, 0.32);
-      add('leftUpperArm', -0.08 * cl, 0, -0.13 * cl);
-      add('rightUpperArm', -0.08 * cl, 0, 0.13 * cl);
-      add('leftLowerArm', -0.18 * cl, 0, -0.08 * cl);
-      add('rightLowerArm', -0.18 * cl, 0, 0.08 * cl);
+      add('leftUpperArm', 0.30 * cl, 0.25 * cl, 0.20 * cl);
+      add('rightUpperArm', 0.30 * cl, 0.25 * cl, -0.20 * cl);
+      add('leftLowerArm', 0, 0, 0.80 * cl);
+      add('rightLowerArm', 0, 0, -0.80 * cl);
       add('leftHand', 0, 0.07 * cl, -0.035 * cl);
       add('rightHand', 0, -0.07 * cl, 0.035 * cl);
       add('head', 0.012 * cl, 0, 0);
@@ -843,8 +959,8 @@ function applyGestures(dt) {
 
     case 'emphasizePoint': {
       const em = pulseTapered(p, 1.5);
-      add(UA, -em * 0.16, 0, S * em * 0.12);
-      add(LA, -em * 0.21, 0, 0);
+      add(UA, em * 0.55, S * em * 0.15, S * em * 0.10);
+      add(LA, 0, 0, -S * em * 0.50);
       add(HD, em * 0.05, S * -em * 0.08, 0);
       add('head', -em * 0.012, S * em * 0.02, 0);
       applyFingerCurl(side, Math.abs(em) * 0.5);
@@ -853,10 +969,10 @@ function applyGestures(dt) {
 
     case 'bothHandsExplain': {
       const ex = pulseTapered(p, 1.8);
-      add('leftUpperArm', -ex * 0.10, 0, -ex * 0.11);
-      add('rightUpperArm', -ex * 0.10, 0, ex * 0.11);
-      add('leftLowerArm', -ex * 0.14, 0, -ex * 0.035);
-      add('rightLowerArm', -ex * 0.14, 0, ex * 0.035);
+      add('leftUpperArm', ex * 0.40, ex * 0.10, -ex * 0.15);
+      add('rightUpperArm', ex * 0.40, ex * 0.10, ex * 0.15);
+      add('leftLowerArm', 0, 0, ex * 0.30);
+      add('rightLowerArm', 0, 0, -ex * 0.30);
       add('leftHand', ex * 0.06, ex * 0.09, 0);
       add('rightHand', ex * 0.06, -ex * 0.09, 0);
       add('head', -Math.abs(ex) * 0.008, S * Math.abs(ex) * 0.015, 0);
@@ -907,8 +1023,8 @@ function applyGestures(dt) {
       // Right arm raised OUTWARD-up beside the head, hand swaying.
       const wv = pulseCurve(p, 5) * 0.14;
       const lift = holdCurve(p);
-      add('rightUpperArm', -0.12 * lift, 0, -0.75 * lift);
-      add('rightLowerArm', -0.09 * lift, 0, 0);
+      add('rightUpperArm', 0.15 * lift, 0, 0.62 * lift);
+      add('rightLowerArm', 0, 0, -0.12 * lift);
       add('rightHand', 0, 0, wv * lift);
       add('head', -0.02 * lift, 0.045 * lift, 0);
       add('spine', -0.012 * lift, 0, 0);
@@ -919,8 +1035,8 @@ function applyGestures(dt) {
     case 'giggle': {
       const g = Math.abs(pulseCurve(p, 4)) * 0.04;
       const lift = holdCurve(p);
-      add('leftUpperArm', -g * 1.2, 0, 0);
-      add('rightUpperArm', -g * 1.2, 0, 0);
+      add('leftUpperArm', g * 1.2, 0, 0);
+      add('rightUpperArm', g * 1.2, 0, 0);
       add('head', 0.05 * lift + g * 0.5, 0, S * 0.035 * lift);
       add('chest', g * 0.8, 0, 0);
       add('spine', g * 0.4, 0, 0);
@@ -942,10 +1058,10 @@ function applyGestures(dt) {
       const c = pulseCurve(p, 3);
       const lift = holdCurve(p);
       const spread = (0.22 + c * 0.15) * lift;
-      add('leftUpperArm', -0.30 * lift, 0, -spread * 0.55);
-      add('rightUpperArm', -0.30 * lift, 0, spread * 0.55);
-      add('leftLowerArm', -0.19 * lift, 0, 0);
-      add('rightLowerArm', -0.19 * lift, 0, 0);
+      add('leftUpperArm', 0.62 * lift, 0.30 * lift, spread * 0.55);
+      add('rightUpperArm', 0.62 * lift, 0.30 * lift, -spread * 0.55);
+      add('leftLowerArm', 0, 0, 0.90 * lift);
+      add('rightLowerArm', 0, 0, -0.90 * lift);
       add('head', -0.03 * lift, c * 0.02 * lift, 0);
       add('spine', -0.018 * lift + Math.abs(c) * 0.008, 0, 0);
       applyFingerCurl(-1, 0.25 * lift);
@@ -966,8 +1082,8 @@ function applyGestures(dt) {
       add('head', -0.025 * lift, 0, swd * 0.9);
       add('leftUpperArm', -0.10 * lift, 0, -armL * lift);
       add('rightUpperArm', -0.10 * lift, 0, armR * lift);
-      add('leftLowerArm', 0, 0, -armL * 0.35 * lift);
-      add('rightLowerArm', 0, 0, armR * 0.35 * lift);
+      add('leftLowerArm', 0, 0, armL * 0.35 * lift);
+      add('rightLowerArm', 0, 0, -armR * 0.35 * lift);
       applyFingerCurl(-1, 0.1 * lift);
       applyFingerCurl(1, 0.1 * lift);
       break;
@@ -977,8 +1093,8 @@ function applyGestures(dt) {
       const k = Math.sin(p * Math.PI);
       const twirl = Math.sin(gestureT * 7.0) * 0.09 * k;
       add('head', 0.018 * k, 0, S * 0.035 * k);
-      add(UA, -0.17 * k, 0, S * 0.32 * k);
-      add(LA, -0.29 * k, 0, S * 0.10 * k);
+      add(UA, 0.88 * k, S * 0.70 * k, S * 0.75 * k);
+      add(LA, 0, 0, -S * 2.35 * k);
       add(HD, 0, S * -0.12 * k, S * twirl);
       applyFingerCurl(side, 0.55 * k);
       break;
@@ -990,10 +1106,10 @@ function applyGestures(dt) {
       hipsShift(swb * 0.6, swb);
       add('spine', 0, 0, -swb * 0.5);
       add('head', 0.02 * k, 0, swb * 0.7);
-      add('leftUpperArm', 0.19 * k, 0, -0.06 * k);
-      add('rightUpperArm', 0.19 * k, 0, 0.06 * k);
-      add('leftLowerArm', 0.12 * k, 0, 0);
-      add('rightLowerArm', 0.12 * k, 0, 0);
+      add('leftUpperArm', -0.35 * k, 0, 0.05 * k);
+      add('rightUpperArm', -0.35 * k, 0, -0.05 * k);
+      add('leftLowerArm', 0, 0, 0.25 * k);
+      add('rightLowerArm', 0, 0, -0.25 * k);
       applyFingerCurl(-1, 0.25 * k);
       applyFingerCurl(1, 0.25 * k);
       break;
@@ -1015,10 +1131,10 @@ function applyGestures(dt) {
       const sm = Math.sin(glide * Math.PI) * 0.13;
       add('spine', sm * 0.35, 0, 0);
       add('head', sm * 0.30, 0, 0);
-      add('leftUpperArm', -0.19 * glide - sm * 0.15, 0, -0.08 * glide);
-      add('rightUpperArm', -0.19 * glide - sm * 0.15, 0, 0.08 * glide);
-      add('leftLowerArm', -0.09 * glide, 0, 0);
-      add('rightLowerArm', -0.09 * glide, 0, 0);
+      add('leftUpperArm', 0.17 * glide + sm * 0.15, 0, 0.06 * glide);
+      add('rightUpperArm', 0.17 * glide + sm * 0.15, 0, -0.06 * glide);
+      add('leftLowerArm', 0, 0, 0.20 * glide);
+      add('rightLowerArm', 0, 0, -0.20 * glide);
       applyFingerCurl(-1, 0.15 * glide);
       applyFingerCurl(1, 0.15 * glide);
       break;
@@ -1028,10 +1144,10 @@ function applyGestures(dt) {
       const sq = holdCurve(p, 0.30, 0.35);
       add('spine', sq * 0.03, 0, 0);
       add('head', sq * 0.035, 0, S * 0.018 * sq);
-      add('leftUpperArm', -sq * 0.12, -sq * 0.30, 0);
-      add('rightUpperArm', -sq * 0.12, sq * 0.30, 0);
-      add('leftLowerArm', -sq * 0.19, 0, 0);
-      add('rightLowerArm', -sq * 0.19, 0, 0);
+      add('leftUpperArm', sq * 0.25, sq * 0.15, sq * 0.30);
+      add('rightUpperArm', sq * 0.25, sq * 0.15, -sq * 0.30);
+      add('leftLowerArm', 0, 0, sq * 1.20);
+      add('rightLowerArm', 0, 0, -sq * 1.20);
       applyFingerCurl(-1, 0.45 * sq);
       applyFingerCurl(1, 0.45 * sq);
       break;
@@ -1045,10 +1161,189 @@ function applyGestures(dt) {
       add('head', -0.03 * lift, 0, 0);
       add('leftUpperArm', -0.11 * lift, 0, -0.20 * lift);
       add('rightUpperArm', -0.11 * lift, 0, 0.20 * lift);
-      add('leftLowerArm', 0, 0, -0.09 * lift);
-      add('rightLowerArm', 0, 0, 0.09 * lift);
+      add('leftLowerArm', 0, 0, 0.12 * lift);
+      add('rightLowerArm', 0, 0, -0.12 * lift);
       applyFingerCurl(-1, 0.12 * lift);
       applyFingerCurl(1, 0.12 * lift);
+      break;
+    }
+
+    // ── new natural gestures (2026-10-14: written with measured axes) ──
+
+    case 'yawnCover': {
+      // Tiny stifled yawn: loose fist rises to cover the mouth.
+      // (Right-side only: left elbow doesn't mirror cleanly on this model.)
+      const yc = holdCurve(p, 0.35, 0.35);
+      add('rightUpperArm', 0.92 * yc, 0.78 * yc, 0.33 * yc);
+      add('rightLowerArm', 0, 0, -2.50 * yc);
+      add('rightHand', -0.05 * yc, -0.05 * yc, 0);
+      add('head', 0.030 * yc, -0.020 * yc, 0.025 * yc);
+      add('neck', 0.015 * yc, 0, 0);
+      applyFingerCurl(1, 0.55 * yc);
+      break;
+    }
+
+    case 'shoulderShrug': {
+      // One shoulder hitches in a tiny "mm?" — head cants with it.
+      const ss = pulseCurve(p, 1);
+      add(UA, 0, 0, S * ss * 0.07);
+      add('head', 0, 0, S * ss * 0.030);
+      add('neck', 0, 0, S * ss * 0.018);
+      break;
+    }
+
+    case 'handOnChest': {
+      // Fingertips rest lightly on the chest — soft, earnest.
+      const hc = holdCurve(p, 0.35, 0.35);
+      add(UA, 0.42 * hc, S * 0.10 * hc, S * 0.15 * hc);
+      add(LA, 0, 0, -S * 1.70 * hc);
+      add(HD, -0.04 * hc, 0, 0);
+      add('head', 0.015 * hc, 0, 0);
+      break;
+    }
+
+    case 'fingerDrum': {
+      // Hand floats up and the fingers drum a soft rhythm on the cheek.
+      const fd = holdCurve(p, 0.30, 0.35);
+      const drum = Math.max(0, Math.sin(gestureT * 8.0)) * fd;
+      add(UA, 0.95 * fd, S * 0.78 * fd, S * 0.40 * fd);
+      add(LA, 0, 0, -S * 2.55 * fd);
+      add(HD, -0.05 * fd, 0, 0);
+      add('head', 0.020 * fd, S * 0.015 * fd, S * 0.025 * fd);
+      applyFingerCurl(side, 0.35 * fd + drum * 0.30);
+      break;
+    }
+
+    case 'glanceUp': {
+      // Quick searching glance upward, then back down.
+      const gu = holdCurve(p, 0.40, 0.30);
+      add('head', -gu * 0.030, S * gu * 0.020, 0);
+      add('neck', -gu * 0.015, 0, 0);
+      break;
+    }
+
+    case 'palmPresent': {
+      // "Here it is": both palms turn up and present forward.
+      const pp = pulseTapered(p, 1.5);
+      add('leftUpperArm', pp * 0.58, pp * 0.10, -pp * 0.12);
+      add('rightUpperArm', pp * 0.58, pp * 0.10, pp * 0.12);
+      add('leftLowerArm', 0, 0, pp * 0.25);
+      add('rightLowerArm', 0, 0, -pp * 0.25);
+      add('leftHand', pp * 0.08, pp * 0.10, 0);
+      add('rightHand', pp * 0.08, -pp * 0.10, 0);
+      add('head', -pp * 0.010, S * pp * 0.015, 0);
+      break;
+    }
+
+    case 'handToHeart': {
+      // "I mean it": right palm settles over the heart.
+      const hh = holdCurve(p, 0.35, 0.35);
+      add('rightUpperArm', 0.48 * hh, 0.15 * hh, 0.12 * hh);
+      add('rightLowerArm', 0, 0, -1.80 * hh);
+      add('rightHand', 0, 0.05 * hh, 0);
+      add('head', 0.012 * hh, 0, 0);
+      add('spine', 0.008 * hh, 0, 0);
+      break;
+    }
+
+    case 'nodAgree': {
+      // One slow, definite nod — "yes, exactly".
+      const na = pulseCurve(p, 1) * 0.055;
+      add('head', 0.030 * Math.sin(p * Math.PI) + na, 0, 0);
+      add('neck', na * 0.5, 0, 0);
+      add('spine', na * 0.2, 0, 0);
+      break;
+    }
+
+    case 'listenNod': {
+      // Backchannel nod while listening — small, warm, frequent.
+      // (Reactive only: driven by the listening branch, not the idle pools.)
+      const nod = pulseCurve(p, 2) * 0.022;
+      add('head', nod, 0, 0);
+      add('neck', nod * 0.5, 0, 0);
+      break;
+    }
+
+    case 'deadpanTilt': {  // flat "eh?" tilt
+      const k = holdCurve(p);
+      add('head', 0.012 * k, 0, 0.060 * k);
+      add('neck', 0, 0, 0.020 * k);
+      break;
+    }
+
+    case 'poke': {  // tsukkomi poke toward the viewer
+      const k = Math.sin(p * Math.PI);
+      add('rightUpperArm', 0.65 * k, 0, -0.12 * k);
+      add('rightLowerArm', 0, 0, -0.18 * k);
+      add('rightHand', 0.06 * k, 0, 0);
+      add('head', 0.010 * k, 0, 0.020 * k);
+      break;
+    }
+
+    case 'flatStare': {  // unimpressed, head dips a fraction
+      const k = holdCurve(p);
+      add('head', 0.038 * k, 0, 0);
+      add('neck', 0.020 * k, 0, 0);
+      add('chest', 0.008 * k, 0, 0);
+      break;
+    }
+
+    case 'softSigh': {  // tiny exhale, shoulders settle
+      const k = Math.sin(p * Math.PI);
+      add('chest', 0.022 * k, 0, 0);
+      add('head', 0.018 * k, 0, 0.015 * k);
+      add('rightUpperArm', 0, 0, 0.020 * k);
+      add('leftUpperArm', 0, 0, -0.020 * k);
+      break;
+    }
+
+    case 'hairFlip': {  // sweeps hair back over the shoulder
+      // (Headless-tuned twice: the hand must reach head height to read.)
+      const k = Math.sin(p * Math.PI);
+      add('rightUpperArm', 0.70 * k, 0.50 * k, 0.65 * k);
+      add('rightLowerArm', 0, 0, -1.55 * k);
+      add('rightHand', -0.10 * k, 0, 0.15 * k);
+      add('head', 0.015 * k, -0.04 * k, -0.03 * k);
+      break;
+    }
+
+    case 'cheekPoke': {  // pokes her own cheek, head tilts into it
+      // (Headless-tuned: the spec's small lift landed at the chest, not the cheek.)
+      const k = Math.sin(p * Math.PI);
+      add('rightUpperArm', 0.90 * k, 0.75 * k, 0.38 * k);
+      add('rightLowerArm', 0, 0, -2.50 * k);
+      add('head', 0.020 * k, 0, 0.045 * k);
+      break;
+    }
+
+    case 'sleevePull': {  // tugs sleeves over her hands, shy dip
+      const k = Math.sin(p * Math.PI);
+      add('rightUpperArm', 0.25 * k, 0, -0.35 * k);
+      add('rightLowerArm', 0, 0, -0.70 * k);
+      add('leftUpperArm', 0.25 * k, 0, 0.35 * k);
+      add('leftLowerArm', 0, 0, 0.70 * k);
+      add('head', 0.025 * k, 0, 0.020 * k);
+      break;
+    }
+
+    case 'waveBoth': {  // genki two-hand wave
+      // (Headless-tuned: arms go up-OUT; the spec's inward z crossed them.)
+      const wv = Math.sin(t * 9.0) * 0.10 * held;
+      add('rightUpperArm', 0.50 * held, 0.15 * held, 0.50 * held);
+      add('rightLowerArm', 0, 0, (-0.30 + wv) * held);
+      add('leftUpperArm', 0.50 * held, -0.15 * held, -0.50 * held);
+      add('leftLowerArm', 0, 0, (0.30 - wv) * held);
+      add('head', -0.020 * held, 0, Math.sin(t * 4.5) * 0.020 * held);
+      break;
+    }
+
+    case 'earLean': {  // leans an ear toward you, hand cups it — "say again?"
+      // (Headless-tuned: the spec's small lift landed at the chest, not the ear.)
+      const k = holdCurve(p);
+      add('head', 0, 0.10 * k, 0.10 * k);
+      add('rightUpperArm', 0.80 * k, 0.70 * k, 0.70 * k);
+      add('rightLowerArm', 0, 0, -2.40 * k);
+      add('rightHand', 0, 0.10 * k, 0);
       break;
     }
 
@@ -1057,8 +1352,8 @@ function applyGestures(dt) {
     case 'chinThink':
       add('head', 0.060 * held, -0.050 * held, -0.025 * held);
       add('neck', 0.035 * held, -0.030 * held, 0);
-      add('rightUpperArm', -0.20 * held, 0, 0.23 * held);
-      add('rightLowerArm', -0.36 * heldM, 0, 0.04 * heldM);
+      add('rightUpperArm', 0.34 * held, 0, -0.08 * held);
+      add('rightLowerArm', 0, 0, -0.62 * heldM);
       add('rightHand', -0.08 * heldT, -0.08 * heldT, 0);
       applyFingerCurl(1, 0.30 * held);
       break;
@@ -1066,8 +1361,8 @@ function applyGestures(dt) {
     case 'handNearMouth':
       add('head', 0.035 * held, 0.070 * held, 0);
       add('neck', 0, 0.040 * held, 0);
-      add('leftUpperArm', -0.21 * held, 0, -0.24 * held);
-      add('leftLowerArm', -0.33 * heldM, 0, -0.06 * heldM);
+      add('leftUpperArm', 0.34 * held, 0, 0.08 * held);
+      add('leftLowerArm', 0, 0, 0.58 * heldM);
       add('leftHand', -0.04 * heldT, 0.10 * heldT, 0);
       applyFingerCurl(-1, 0.25 * held);
       break;
@@ -1075,17 +1370,17 @@ function applyGestures(dt) {
     case 'armsFoldThink':
       add('head', 0.050 * held, 0, 0.030 * held);
       add('neck', 0, 0, 0.018 * held);
-      add('leftUpperArm', -0.08 * held, 0, -0.21 * held);
-      add('rightUpperArm', -0.08 * held, 0, 0.21 * held);
-      add('leftLowerArm', -0.21 * heldM, 0, -0.16 * heldM);
-      add('rightLowerArm', -0.21 * heldM, 0, 0.16 * heldM);
+      add('leftUpperArm', 0.08 * held, 0, 0.20 * held);
+      add('rightUpperArm', 0.08 * held, 0, -0.20 * held);
+      add('leftLowerArm', 0, 0, 0.55 * heldM);
+      add('rightLowerArm', 0, 0, -0.55 * heldM);
       break;
 
     case 'lookUpThink':
-      add('head', -0.070 * held, 0.120 * held, -0.018 * held);
-      add('neck', -0.040 * held, 0.050 * held, 0);
-      add('rightUpperArm', -0.12 * held, 0, 0.14 * held);
-      add('rightLowerArm', -0.24 * heldM, 0, 0);
+      add('head', -0.035 * held, 0.120 * held, -0.018 * held);
+      add('neck', -0.020 * held, 0.050 * held, 0);
+      add('rightUpperArm', 0.06 * held, 0, 0.10 * held);
+      add('rightLowerArm', 0, 0, -0.22 * heldM);
       add('rightHand', 0, 0, 0.06 * heldT);
       break;
 
@@ -1093,8 +1388,8 @@ function applyGestures(dt) {
       const nod = pulseCurve(p, 3) * 0.035;
       add('head', 0.05 * held + nod, -0.08 * held, -0.02 * held);
       add('neck', 0.025 * held + nod * 0.5, -0.04 * held, 0);
-      add('rightUpperArm', -0.09 * held, 0, 0.10 * held);
-      add('rightLowerArm', -0.15 * heldM, 0, 0);
+      add('rightUpperArm', 0.06 * held, 0, 0.08 * held);
+      add('rightLowerArm', 0, 0, -0.20 * heldM);
       add('rightHand', -0.035 * heldT, 0, 0);
       break;
     }
@@ -1103,8 +1398,8 @@ function applyGestures(dt) {
       const tap = Math.max(0, Math.sin(gestureT * 5.5)) * Math.sin(p * Math.PI);
       add('head', 0.055 * held, 0.040 * held, 0.020 * held);
       add('neck', 0.028 * held, 0.020 * held, 0);
-      add('rightUpperArm', -0.18 * held, 0, 0.21 * held);
-      add('rightLowerArm', -0.34 * heldM, 0, 0.035 * heldM);
+      add('rightUpperArm', 0.16 * held, 0, 0.12 * held);
+      add('rightLowerArm', 0, 0, -0.38 * heldM);
       add('rightHand', -0.06 * heldT - tap * 0.03, -0.07 * heldT, 0);
       applyFingerCurl(1, 0.35 * held);
       break;
@@ -1302,11 +1597,18 @@ loader.load(VRM_URL,
     }
 
     fill.style.width = '100%';
+    // Wardrobe: hide all W_* garment nodes by default (the file has them
+    // visible; only the selected outfit's nodes should show).
+    vrm.scene.traverse(o => {
+      if (o.name && o.name.startsWith('W_')) o.visible = false;
+    });
     setTimeout(() => {
       const ov = document.getElementById('load-overlay');
       ov.classList.add('fade');
       setTimeout(() => ov.style.display = 'none', 800);
     }, 300);
+    // Welcome bow: she bows hello once she appears.
+    setTimeout(() => { try { startGesture('bow'); } catch (_) {} }, 1500);
   },
   (prog) => {
     const p = prog.total ? prog.loaded / prog.total : 0;
@@ -1335,29 +1637,31 @@ function applyMouthShape(weight = mouthOpen) {
 const VRM_EMOJI_EXPRESSIONS = {
   '😊': 'happy', '😄': 'happy', '😁': 'happy', '😆': 'happy', '🥰': 'happy', '😍': 'happy', '🙂': 'happy', '😋': 'happy', '🌸': 'happy', '✨': 'happy', '❤️': 'happy', '💖': 'happy', '☺️': 'happy',
   '😒': 'angry', '😡': 'angry', '😠': 'angry', '😤': 'angry', '🤬': 'angry', '💢': 'angry',
-  '😭': 'sorrow', '😢': 'sorrow', '🥺': 'sorrow', '☹️': 'sorrow', '🙁': 'sorrow', '😔': 'sorrow', '😞': 'sorrow', '💧': 'sorrow',
-  '😮': 'surprised', '😯': 'surprised', '😲': 'surprised', '😳': 'surprised', '🤯': 'surprised', '😱': 'surprised', '⁉️': 'surprised', '❓': 'surprised',
-  '😜': 'fun', '🤪': 'fun', '😏': 'fun', '😈': 'fun', '🙃': 'fun', '😉': 'fun',
+  '😭': 'sad', '😢': 'sad', '🥺': 'sad', '☹️': 'sad', '🙁': 'sad', '😔': 'sad', '😞': 'sad', '💧': 'sad',
+  '😮': 'Surprised', '😯': 'Surprised', '😲': 'Surprised', '😳': 'Surprised', '🤯': 'Surprised', '😱': 'Surprised', '⁉️': 'Surprised', '❓': 'Surprised',
+  '😜': 'relaxed', '🤪': 'relaxed', '😏': 'relaxed', '😈': 'relaxed', '🙃': 'relaxed', '😉': 'relaxed',
   '😐': 'neutral', '😑': 'neutral', '😶': 'neutral', '🤖': 'neutral', '😴': 'neutral', '🤔': 'neutral', '💭': 'neutral'
 };
 
+// Aliases resolve to the six emotion blendshapes Aiko.vrm actually has
+// (neutral, happy, angry, sad, relaxed, Surprised — case-sensitive).
 const VRM_EXPR_ALIASES = {
-  'sad': 'sorrow',
-  'relaxed': 'fun',
+  'sorrow': 'sad',
+  'fun': 'relaxed',
   'joy': 'happy',
+  'surprised': 'Surprised',
   'annoyed': 'angry',
   'shy': 'happy',
   'thinking': 'neutral'
 };
 
 window.aikoSetExpression = (name, intensity = 1.0) => {
+  lastInteractT = t; escalationDone = {};
   const mapped = VRM_EMOJI_EXPRESSIONS[name] || VRM_EXPR_ALIASES[name] || name;
   for (const k of Object.keys(exprTargets)) if (k !== 'blink') exprTargets[k] = 0;
   explicitExpr = Boolean(mapped && mapped !== 'neutral');
   if (mapped && mapped !== 'neutral') {
     exprTargets[mapped] = intensity;
-    if (mapped === 'sorrow') exprTargets['sad'] = intensity;
-    if (mapped === 'fun') exprTargets['relaxed'] = intensity;
   }
 
   const el = document.getElementById('vrm-emotion');
@@ -1366,13 +1670,66 @@ window.aikoSetExpression = (name, intensity = 1.0) => {
     el.className = (name && name !== 'neutral') ? 'active' : '';
   }
 
-  clearTimeout(exprResetTimer);
-  if (mapped && mapped !== 'neutral') {
-    exprResetTimer = setTimeout(() => window.aikoSetExpression('neutral'), EXPR_RESET_DELAY);
+  // No auto-reset: the expression persists until the backend broadcasts a new
+  // emotion (it only sends on actual emotion change), per the user's request.
+};
+
+// ── Outfit wardrobe ──────────────────────────────────────────────────────
+// Aiko.vrm is the wardrobe build: base model + W_<key>_<garment> nodes for
+// all outfits (hidden by default). wardrobe.json maps outfit keys to the
+// nodes to show and base nodes to hide.
+let wardrobeManifest = null;
+let pendingOutfit = null;
+
+fetch('./assets/wardrobe.json')
+  .then(r => r.ok ? r.json() : null)
+  .then(j => {
+    wardrobeManifest = j;
+    if (pendingOutfit) {
+      const name = pendingOutfit;
+      pendingOutfit = null;
+      window.aikoSetOutfit(name);
+    }
+  })
+  .catch(() => { /* wardrobe.json missing — outfits unavailable */ });
+
+window.aikoSetOutfit = (name) => {
+  // Queue if the model or manifest isn't ready yet.
+  if (!vrm || !wardrobeManifest) {
+    pendingOutfit = name;
+    return;
   }
+  const outfits = wardrobeManifest.outfits || {};
+  // Hide all wardrobe nodes first.
+  vrm.scene.traverse(o => {
+    if (o.name && o.name.startsWith('W_')) o.visible = false;
+  });
+  // Restore base clothing nodes.
+  const bodyClothes = vrm.scene.getObjectByName('BodyClothes');
+  if (bodyClothes) bodyClothes.visible = true;
+
+  if (!name || name === 'default' || !outfits[name]) {
+    // Unknown or default: base outfit only. (Unknown names are ignored
+    // silently — the backend only sends known keys.)
+    lastInteractT = t; escalationDone = {};
+    return;
+  }
+  const spec = outfits[name];
+  // Show this outfit's garments.
+  for (const nodeName of (spec.nodes || [])) {
+    const node = vrm.scene.getObjectByName(nodeName);
+    if (node) node.visible = true;
+  }
+  // Hide base clothing that the outfit replaces.
+  for (const baseName of (spec.hideBase || [])) {
+    const node = vrm.scene.getObjectByName(baseName);
+    if (node) node.visible = false;
+  }
+  lastInteractT = t; escalationDone = {};
 };
 
 window.aikoSetViseme = (viseme, weight = 1.0) => {
+  lastInteractT = t; escalationDone = {};
   activeViseme = VISEME[viseme] ?? viseme;
   applyMouthShape(mouthOpen);
   const dot = document.getElementById('speak-dot');
@@ -1397,6 +1754,7 @@ window.aikoSetMouthOpen = (weight = 0) => {
 
 // ── state pose API ────────────────────────────────────────────────
 window.aikoSetThinking = (active = true) => {
+  lastInteractT = t; escalationDone = {};
   const on = Boolean(active);
   if (on && !thinkingActive) rollThinkingEpisode();
   thinkingActive = on;
@@ -1412,6 +1770,7 @@ window.aikoTestThinking = (variant, leanName = 'neutral') => {
   thinkingActive = true;
 };
 window.aikoSetListening = (active = true) => {
+  lastInteractT = t; escalationDone = {};
   listeningActive = Boolean(active);
 };
 // Back-compat alias: aikoSetPose('thinking', b) → aikoSetThinking(b)
@@ -1428,9 +1787,12 @@ const KNOWN_GESTURES = new Set([
   ...THINKING_POSES,
   // Reactive-only: deliberately excluded from the idle pools.
   'dance', 'wave', 'giggle', 'bow', 'clap',
+  'headShake', // reactive-only: sent by the motion director on disagreement
+  'blowKiss', // reactive-only: user-requested kiss blow
 ]);
 
 window.aikoPlayGesture = (name) => {
+  lastInteractT = t; escalationDone = {};
   if (typeof name !== 'string' || !KNOWN_GESTURES.has(name)) return;
   // Envelopes start at exactly 0, so no snapshot/blend is needed — the new
   // gesture simply takes over from the current additive pose.

@@ -999,6 +999,16 @@ class AikoWeb:
         """Broadcast a vetted avatar pose intent to the current user."""
         self._broadcast_to_current_user({"type": "pose", "name": name, "active": bool(active)})
 
+    def set_outfit(self, name: str) -> None:
+        """Broadcast an avatar outfit change to the current user.
+
+        The frontend (vrm.js ``window.aikoSetOutfit``) validates the name
+        against its wardrobe manifest and ignores unknown names.
+        """
+        if not name or not isinstance(name, str):
+            return
+        self._broadcast_to_current_user({"type": "outfit", "name": name})
+
     def play_gesture(self, name: str) -> None:
         """Broadcast a one-shot avatar gesture to the current user.
 

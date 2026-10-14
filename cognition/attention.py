@@ -889,6 +889,22 @@ class EdgeCognitiveState:
                         bridge = webui_bridge()
                         if bridge is not None and hasattr(bridge, "play_gesture"):
                             bridge.play_gesture(gesture)
+                    # Nod / head-shake on HER agreement / disagreement.
+                    # Runs on the reply text (post-generation), unlike suggest()
+                    # which fires pre-LLM on the user text.
+                    reply_gesture = self._motion_director.suggest_reply(assistant)
+                    if reply_gesture:
+                        from interface.webui.webui import webui_bridge
+                        bridge = webui_bridge()
+                        if bridge is not None and hasattr(bridge, "play_gesture"):
+                            bridge.play_gesture(reply_gesture)
+                    # Explicit outfit request ("change into your pajamas").
+                    outfit = self._motion_director.suggest_outfit(user)
+                    if outfit:
+                        from interface.webui.webui import webui_bridge
+                        bridge = webui_bridge()
+                        if bridge is not None and hasattr(bridge, "set_outfit"):
+                            bridge.set_outfit(outfit)
             except Exception:
                 pass
         # Deferred policy teaching: did Oppa teach (or confirm) a behavior?

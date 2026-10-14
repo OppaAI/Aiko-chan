@@ -736,13 +736,22 @@ function driveArmFromPose(side, lm) {
   const spread = mapRange(el.x - sh.x, -0.35, 0.35, -0.95, 0.95);
   const bend = mapRange(reach, 0.08, 0.42, -1.35, -0.10);
   const twist = mapRange(lower.x, -0.35, 0.35, -0.45, 0.45);
+  // Depth cue (MediaPipe z: smaller = closer to camera). When the wrist comes toward
+  // the camera the 2D reach collapses, so swing the arm forward instead of snapping
+  // the elbow shut.
+  const towardCam = Math.max(0, Math.min(1, ((sh.z ?? 0) - (wr.z ?? 0)) * 2.0));
   const b = side < 0 ? leftArm : rightArm;
   const restUA = side < 0 ? REST.leftUpperArm : REST.rightUpperArm;
   const restLA = side < 0 ? REST.leftLowerArm : REST.rightLowerArm;
-  b.uaPivot.rotation.x = lift;
-  b.uaPivot.rotation.z = restUA.z + spread * side;
-  b.laPivot.rotation.x = bend;
-  b.laPivot.rotation.z = restLA.z + twist * side;
+  b.uaPivot.rotation.x = lift - towardCam * 0.5;
+  // NOTE: the preview is CSS-mirrored (selfie view) and the avatar mirrors the
+  // performer, but the landmarks are unmirrored. In unmirrored space a hand moving
+  // to the performer's right DECREASES x, while the avatar's hand must move toward
+  // +x — so the lateral terms take -spread/-twist for BOTH arms. (`* side` made the
+  // right arm move opposite to the performer.)
+  b.uaPivot.rotation.z = restUA.z - spread;
+  b.laPivot.rotation.x = bend * (1 - towardCam * 0.5);
+  b.laPivot.rotation.z = restLA.z - twist;
   b.hPivot.rotation.x = mapRange(wr.y - el.y, -0.24, 0.24, -0.45, 0.45);
   b.hPivot.rotation.y = mapRange(lower.x, -0.25, 0.25, 0.45, -0.45);
 }

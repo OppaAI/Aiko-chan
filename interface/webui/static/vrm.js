@@ -1428,11 +1428,23 @@ function composePose() {
     const s = statePose[name] || _Z3;
     const g = gesturePose[name] || _Z3;
     const r = REST[name] || _Z3;
-    bone.rotation.set(
-      r.x + v.x + s.x + g.x,
-      r.y + v.y + s.y + g.y,
-      r.z + v.z + s.z + g.z
-    );
+    let fx = r.x + v.x + s.x + g.x;
+    let fy = r.y + v.y + s.y + g.y;
+    let fz = r.z + v.z + s.z + g.z;
+    // Joint limits: prevent elbow hyperextension and arm clipping through body.
+    // (Aiko.vrm: upper-arm x+=forward, z+=up; forearm z-=flexion on right, z+=flexion on left.)
+    if (name.endsWith('LowerArm')) {
+      if (name.startsWith('right')) {
+        fz = Math.max(-2.55, Math.min(0.12, fz));  // flexion only, no backward bend
+      } else {
+        fz = Math.max(-0.12, Math.min(2.55, fz));
+      }
+      fx = Math.max(-0.35, Math.min(0.35, fx));  // minimal twist
+    } else if (name.endsWith('UpperArm')) {
+      fx = Math.max(-0.7, Math.min(1.7, fx));
+      fz = Math.max(-1.3, Math.min(1.3, fz));
+    }
+    bone.rotation.set(fx, fy, fz);
   }
   // Hips: rotation + translation (weight shifts, bounce). Rest height is
   // restored every frame; gestures only add offsets on top.

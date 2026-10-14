@@ -260,7 +260,6 @@ const GESTURES = [
   'curiousTilt',
   'shiftWeight',
   'stretchNeck',
-  'raiseHand',
   'chinTouch',
   'shoulderRoll',
   'sway',
@@ -1046,7 +1045,7 @@ function applyGestures(dt) {
     case 'bow': {
       // Observed on Aiko.vrm: torso x+ arches BACKWARD, so the bow
       // pitches on negative-x (head/neck already flipped last round).
-      const b = pulseCurve(p, 1) * 0.20;
+      const b = pulseCurve(p, 1) * 0.10;
       add('spine', -b, 0, 0);
       add('chest', -b * 0.7, 0, 0);
       // Head nods WITH the spine (chin down, fingerChin convention):

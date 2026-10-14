@@ -58,23 +58,6 @@ _CELEBRATION = ("congratulations", "congrats", "yay", "we did it", "birthday",
 # Outfit requests: user asks Aiko to change clothes. Keys must match the
 # wardrobe manifest in the combined wardrobe VRM (vrm.js window.aikoSetOutfit).
 # Order matters: check specific outfits before the generic change verbs.
-_OUTFIT_PATTERNS = (
-    ("pajama",    ("pajama", "pajamas", "pyjama", "寝間着", "パジャマ")),
-    ("swimsuit",  ("swimsuit", "bikini", "水着", "みずぎ")),
-    ("sailor",    ("sailor", "セーラー",)),
-    ("gym",       ("gym clothes", "gym shirt", "体操服", "たいそうふく")),
-    ("beret",     ("beret", "ベレー",)),
-    ("seifuku",   ("seifuku", "school uniform", "制服", "せいふく")),
-    ("cardigan",  ("pink cardigan", "カーディガン")),
-    ("loungewear",("loungewear", "room wear")),
-    ("yukata",    ("yukata", "浴衣", "ゆかた")),
-)
-_OUTFIT_VERBS = ("change into", "wear the", "wear your", "put on",
-                 "着替えて", "きがえて", "着せて")
-# Negations that cancel an outfit request ("don't change", "not the pajamas").
-# Kept narrow: only clear "don't do it" signals, so "wear the pajamas,
-# not the seifuku" still matches pajama.
-_OUTFIT_NEGATIONS = ("don't", "do not", "doesn't", "やめて", "いやだ")
 
 _AGREE = (
     "you're right", "youre right", "you are right", "exactly", "i agree",
@@ -201,24 +184,6 @@ class MotionDirector:
         self._last_gesture_t[candidate] = now
         self._last_any_t = now
         return candidate
-
-    def suggest_outfit(self, user_text: str) -> str | None:
-        """Map an explicit outfit request to a wardrobe key, or None.
-
-        Requires BOTH an outfit noun and an affirmative intent verb —
-        a bare noun ("pajamas?") or a negated request ("don't wear the
-        pajamas") is ignored. No cooldowns — changing clothes is always
-        user-initiated.
-        """
-        low = (user_text or "").lower()
-        if _contains(low, _OUTFIT_NEGATIONS):
-            return None
-        if not _contains(low, _OUTFIT_VERBS):
-            return None
-        for key, nouns in _OUTFIT_PATTERNS:
-            if _contains(low, nouns):
-                return key
-        return None
 
     def reset_cooldowns(self) -> None:
         self._last_gesture_t.clear()

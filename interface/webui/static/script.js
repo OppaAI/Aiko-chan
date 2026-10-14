@@ -1431,7 +1431,6 @@ function connectWS() {
       case 'viseme': if (window.aikoSetViseme) window.aikoSetViseme(msg.viseme, msg.weight ?? 1.0); break;
       case 'pose': if (window.aikoSetPose) window.aikoSetPose(msg.name, msg.active); break;
       case 'gesture': if (window.aikoPlayGesture) window.aikoPlayGesture(msg.name); break;
-      case 'outfit': if (window.aikoSetOutfit) window.aikoSetOutfit(msg.name); break;
     }
   };
 
@@ -1555,13 +1554,3 @@ fetch('/api/auth/config')
     setAuthStatus('Failed to load authentication system.');
   });
 
-
-// Outfit picker: route dropdown changes to the VRM wardrobe.
-document.addEventListener('DOMContentLoaded', () => {
-  const sel = document.getElementById('vrm-outfit');
-  if (sel) {
-    sel.addEventListener('change', () => {
-      if (window.aikoSetOutfit) window.aikoSetOutfit(sel.value);
-    });
-  }
-});

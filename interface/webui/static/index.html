@@ -161,31 +161,33 @@
     </div>
 
 
+
+        <div id="ws-dots">
+          <div class="status-line">
+            <div class="dot" id="ws-dot"></div><span id="ws-label">ws offline</span>
+          </div>
+          <div class="status-line">
+            <div class="dot" id="speak-dot"></div><span id="speak-label">idle</span>
+          </div>
+          <div class="status-line">
+            <div class="dot" id="vad-dot"></div><span id="vad-status">vad loading…</span>
+          </div>
+        </div>
+
+        <div id="stage-side-cluster">
+          <div id="stage-status-stack" aria-live="polite">
+            <div id="voice-status"></div>
+            <div class="companion-status" id="companion-status">settling in</div>
+            <div id="companion-error" hidden></div>
+          </div>
+        </div><!-- /stage-side-cluster -->
+
     </div>
 
     <div class="emotion-badge" id="emotion-badge" style="display:none;">
       <span id="emotion-emoji">💗</span> <span id="emotion-text">happy</span>
     </div>
 
-    <div id="ws-dots">
-      <div class="status-line">
-        <div class="dot" id="ws-dot"></div><span id="ws-label">ws offline</span>
-      </div>
-      <div class="status-line">
-        <div class="dot" id="speak-dot"></div><span id="speak-label">idle</span>
-      </div>
-      <div class="status-line">
-        <div class="dot" id="vad-dot"></div><span id="vad-status">vad loading…</span>
-      </div>
-    </div>
-
-    <div id="stage-side-cluster">
-      <div id="stage-status-stack" aria-live="polite">
-        <div id="voice-status"></div>
-        <div class="companion-status" id="companion-status">settling in</div>
-        <div id="companion-error" hidden></div>
-      </div>
-    </div><!-- /stage-side-cluster -->
 
     <div id="transcript-store" hidden>
       <div class="ts-head"><span>RELATIONSHIP LOG</span><button type="button" id="ts-close" aria-label="Close transcript">✕</button></div>

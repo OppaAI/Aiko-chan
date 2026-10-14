@@ -64,6 +64,7 @@ from pathlib import Path
 import hashlib
 import re
 import contextvars
+from contextlib import contextmanager
 import threading
 import time
 import unicodedata
@@ -218,7 +219,6 @@ _SENTENCE_STREAM = os.getenv("AIKO_SENTENCE_STREAM", "1").strip().lower() not in
 _THINK_TAGS = ("thinking", "plan", "check")
 _PRIVATE_TAGS = ("inner_speech", "subconscious_guidance", "subconscious_priming")
 _THINK_BLOCK_RE = re.compile(r"<(thinking|plan|check)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
-_THINK_OPEN_RE = re.compile(r"<(thinking|plan|check)>", re.IGNORECASE)
 _PRIVATE_BLOCK_RE = re.compile(
     r"<(inner_speech|subconscious_guidance|subconscious_priming)>(.*?)</\1>",
     re.DOTALL | re.IGNORECASE,
@@ -231,7 +231,28 @@ _ANY_TRAIL_RE = re.compile(
     r"<(thinking|plan|check|inner_speech|subconscious_guidance|subconscious_priming)>.*$",
     re.DOTALL | re.IGNORECASE,
 )
+# A lone closer with no opener — small models parrot half a block. Strip it
+# so literal tags are never spoken aloud or shown in the UI.
+_STRAY_CLOSE_RE = re.compile(
+    r"</(thinking|plan|check|inner_speech|subconscious_guidance|subconscious_priming)>",
+    re.IGNORECASE,
+)
 _THINKING_TEXT_CAP = 2000  # UI box cap; thinking beyond this is truncated
+
+
+def _strip_private_echo(text: str) -> str:
+    """Remove parroted private prompt blocks from harvested thinking text.
+
+    Complete blocks and a trailing unclosed private opener are dropped —
+    they are prompt echoes, not fresh thinking, and must never be boxed
+    into the UI thinking box or persisted as genuine thought.
+    """
+    text = _PRIVATE_BLOCK_RE.sub("", text or "")
+    text = re.sub(
+        r"<(inner_speech|subconscious_guidance|subconscious_priming)>.*$",
+        "", text, flags=re.DOTALL | re.IGNORECASE,
+    )
+    return _STRAY_CLOSE_RE.sub("", text).strip()
 
 
 def _split_thinking(text: str) -> tuple[str, str]:
@@ -247,21 +268,25 @@ def _split_thinking(text: str) -> tuple[str, str]:
         return "", text
     parts: list[str] = []
     def _grab(m: "re.Match") -> str:
-        inner = (m.group(2) or "").strip()
+        inner = _strip_private_echo(m.group(2) or "")
         if inner:
             parts.append(inner)
         return ""
-    clean = _THINK_BLOCK_RE.sub(_grab, text)
-    clean = _PRIVATE_BLOCK_RE.sub("", clean)
+    # Drop parroted private prompt blocks BEFORE harvesting thinking: a
+    # <thinking> block nested inside an <inner_speech> wrapper is prompt
+    # parroting, not fresh cognition, and must never reach the thinking box.
+    clean = _PRIVATE_BLOCK_RE.sub("", text)
+    clean = _THINK_BLOCK_RE.sub(_grab, clean)
     # Trailing unclosed block: thinking content -> box, private content ->
     # dropped. Either way it is not speech.
     m = _ANY_TRAIL_RE.search(clean)
     if m:
         tag = (m.group(1) or "").lower()
-        inner = _ANY_OPEN_RE.sub("", clean[m.start():]).strip()
+        inner = _strip_private_echo(_ANY_OPEN_RE.sub("", clean[m.start():]))
         if tag in _THINK_TAGS and inner:
             parts.append(inner)
         clean = clean[:m.start()]
+    clean = _STRAY_CLOSE_RE.sub("", clean)
     thinking = "\n".join(parts).strip()
     if len(thinking) > _THINKING_TEXT_CAP:
         thinking = thinking[:_THINKING_TEXT_CAP].rstrip() + "…"
@@ -284,28 +309,30 @@ class _ThinkingTokenFilter:
     def feed(self, token: str, final: bool = False) -> str:
         if token:
             self._buf += token
-        buf = self._buf
+        # Drop complete parroted private blocks BEFORE harvesting thinking:
+        # a <thinking> block nested inside a private echo is prompt parroting,
+        # not fresh cognition, and must never reach the thinking box.
+        buf = _PRIVATE_BLOCK_RE.sub("", self._buf)
         out: list[str] = []
         last = 0
         for m in _THINK_BLOCK_RE.finditer(buf):
             out.append(buf[last:m.start()])
-            inner = (m.group(2) or "").strip()
+            inner = _strip_private_echo(m.group(2) or "")
             if inner:
                 self.thinking_parts.append(inner)
             last = m.end()
         out.append(buf[last:])
-        # Parroted private prompt blocks: drop silently (never boxed, never spoken).
-        buf = "".join(out)
-        out = [ _PRIVATE_BLOCK_RE.sub("", buf) ]
-        clean = "".join(out)
+        clean = _STRAY_CLOSE_RE.sub("", "".join(out))
         if not final:
             # Hold back anything from an unclosed thinking opener onward: the
             # closer may arrive in a later chunk, and text inside the block
-            # must never leak into speech/chat.
+            # must never leak into speech/chat. Hold from the FIRST opener —
+            # anything between an earlier and a later opener is still inside
+            # a block and must not be released.
             opens = list(_ANY_OPEN_RE.finditer(clean))
             if opens:
-                self._buf = clean[opens[-1].start():]
-                return clean[:opens[-1].start()]
+                self._buf = clean[opens[0].start():]
+                return clean[:opens[0].start()]
             # Hold back a trailing partial-tag tail ("<", "<th", "<think", …).
             lt = clean.rfind("<")
             if lt != -1 and ">" not in clean[lt:]:
@@ -402,6 +429,24 @@ _deep_think_ctx: contextvars.ContextVar[bool] = contextvars.ContextVar("aiko_dee
 # shared AikoThink serves concurrent turns, so instance state would let one
 # turn's thinking leak into another's UI box / inner-speech store.
 _thinking_text_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("aiko_thinking_text", default="")
+
+
+@contextmanager
+def _deep_think_flag_scope(think, enabled: bool):
+    """Scope the reasoning/deep-think ContextVars to a single turn.
+
+    Set on entry, always reset on exit — a mid-turn exception must never
+    leak the 6x deep-think token budget (or disabled sentence streaming)
+    into the next turn sharing this thread.
+    """
+    if enabled:
+        think._reasoning = True
+        think._deep_think = True
+    try:
+        yield
+    finally:
+        think._reasoning = False
+        think._deep_think = False
 
 def _resolve_base_tokens() -> int:
     try:
@@ -1852,6 +1897,7 @@ class AikoThink:
             "knowledge_block": knowledge_block,
             "memory_block": memory_block,
             "persona_block": persona_block,
+            "deep_think_meta": deep_think_meta,
         }
 
     def _super_node_entities(self) -> set[str]:
@@ -2733,10 +2779,6 @@ class AikoThink:
             _latency.reset()
         _latency.mark("input_received")
 
-        if deep_think:
-            self._reasoning = True
-            self._deep_think = True
-
         # Fused soft-gate prompts (see _soft_gate_reply) carry an injected
         # "[Style only — ...]" control block for the LLM. Everything below
         # except llm_prompt uses the raw user text so the directive never
@@ -2744,7 +2786,7 @@ class AikoThink:
         raw_input = _strip_style_directives(user_input)
         deep_think_summary: str | None = None
 
-        with _brain_trace.step("think.chat", layer="context",
+        with _deep_think_flag_scope(self, deep_think), _brain_trace.step("think.chat", layer="context",
                                inputs={"user_input": user_input, "raw_input": raw_input, "skip_memory": skip_memory,
                                        "store_turn": store_turn, "websearch_net": websearch_net,
                                        "web_search": web_search,
@@ -2790,14 +2832,17 @@ class AikoThink:
                 except concurrent.futures.TimeoutError:
                     log.warning("Chat recall chain timed out after %.0fs; continuing without memory.",
                                 MEMORY_RECALL_TIMEOUT * 3)
-                    _blocks = {"memories": [], "knowledge_block": "", "memory_block": "", "persona_block": ""}
+                    _blocks = {"memories": [], "knowledge_block": "", "memory_block": "", "persona_block": "",
+                               "deep_think_meta": {}}
                 except Exception:
                     log.exception("Chat recall chain failed; continuing without memory.")
-                    _blocks = {"memories": [], "knowledge_block": "", "memory_block": "", "persona_block": ""}
+                    _blocks = {"memories": [], "knowledge_block": "", "memory_block": "", "persona_block": "",
+                               "deep_think_meta": {}}
                 memories = _blocks["memories"]
                 knowledge_block = _blocks["knowledge_block"]
                 memory_block = _blocks["memory_block"]
                 persona_block = _blocks["persona_block"]
+                deep_think_meta = _blocks.get("deep_think_meta") or {}
                 try:
                     _sys_pair = _sys_future.result(timeout=MEMORY_RECALL_TIMEOUT * 3)
                 except Exception:
@@ -3157,8 +3202,6 @@ class AikoThink:
                 # Held turns (ASK) must not reach memory before the human
                 # decides; approval stores via _commit_held_output instead.
                 self._store_async(raw_input, raw_response)
-            self._reasoning = False
-            self._deep_think = False
             ctx.set(outputs={"reply_chars": len(raw_response or "")},
                     factors=[f"LLM stream done; reply {len(raw_response or '')} chars"])
             if return_deep_think_summary:
@@ -3783,7 +3826,8 @@ class AikoThink:
                 try:
                     token = _think_filter.feed(token)
                 except Exception:
-                    log.warning("[think] thinking-filter failed; passing token through", exc_info=True)
+                    log.warning("[think] thinking-filter failed; dropping token", exc_info=True)
+                    token = ""  # fail closed: a raw <inner_speech> chunk must never reach TTS
                 # Thinking-channel harvest: reasoning-capable templates
                 # (granite-4, MiniCPM-think, …) may emit the whole turn as
                 # thinking tokens. Some servers surface those as

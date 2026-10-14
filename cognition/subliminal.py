@@ -107,60 +107,38 @@ class AffectState:
 # downstream consumers (VRM blendshapes, prompt labels) can blend. We do
 # NOT use a full Ekman model — too much state for a 8GB Jetson. Instead,
 # a coarse palette with strong, cheap associations.
-
-_EMOTION_VOCAB: tuple[tuple[str, tuple[float, float, float]], ...] = (
-    # (name, (valence_threshold, arousal_threshold, dominance_threshold))
-    # value, energy, control
-    ("calm",         ( 0.0,  0.0, 0.0)),
-    ("neutral",      ( 0.0,  0.0, 0.0)),  # base when no emotion fires
-    ("content",      ( 0.3,  0.0, 0.0)),
-    ("warm",         ( 0.3,  0.0, 0.3)),
-    ("curious",      ( 0.1,  0.4, 0.0)),
-    ("excited",      ( 0.4,  0.7, 0.0)),
-    ("proud",        ( 0.4,  0.5, 0.6)),
-    ("playful",      ( 0.3,  0.5,-0.3)),
-    ("tender",       ( 0.4,  0.0, 0.5)),
-    ("affectionate", ( 0.5,  0.0, 0.5)),
-    ("focused",      ( 0.0,  0.5, 0.6)),
-    ("determined",   ( 0.0,  0.6, 0.7)),
-    ("tense",        (-0.1,  0.6, 0.0)),
-    ("anxious",      (-0.2,  0.6,-0.2)),
-    ("sad",          (-0.4,  0.0, 0.0)),
-    ("tired",        (-0.2, -0.4, 0.0)),
-    ("frustrated",   (-0.3,  0.5, 0.3)),
-    ("hurt",         (-0.5,  0.2,-0.2)),
-    ("defensive",    (-0.2,  0.4, 0.5)),
-    ("rejected",     (-0.4,  0.2,-0.4)),
-)
+#
+# Single source of truth for the PAD prototypes (hand-tuned, cheap
+# Euclidean). Kept at module level so _classify_emotion() doesn't rebuild
+# the table on every call.
+_EMOTION_PROTOTYPES: dict[str, tuple[float, float, float]] = {
+    "calm":         ( 0.0,  0.2, 0.5),
+    "content":      ( 0.4,  0.3, 0.5),
+    "warm":         ( 0.5,  0.3, 0.5),
+    "curious":      ( 0.1,  0.6, 0.4),
+    "excited":      ( 0.6,  0.8, 0.5),
+    "proud":        ( 0.5,  0.6, 0.7),
+    "playful":      ( 0.4,  0.6, 0.4),
+    "tender":       ( 0.5,  0.3, 0.4),
+    "affectionate": ( 0.6,  0.4, 0.5),
+    "focused":      ( 0.1,  0.6, 0.7),
+    "determined":   ( 0.2,  0.7, 0.7),
+    "tense":        (-0.1,  0.7, 0.3),
+    "anxious":      (-0.3,  0.7, 0.2),
+    "sad":          (-0.5,  0.3, 0.3),
+    "tired":        (-0.2,  0.2, 0.3),
+    "frustrated":   (-0.4,  0.6, 0.4),
+    "hurt":         (-0.5,  0.5, 0.2),
+    "defensive":    (-0.2,  0.5, 0.6),
+    "rejected":     (-0.5,  0.4, 0.2),
+}
 
 
 def _classify_emotion(a: AffectState) -> tuple[str, float]:
     """Pick best emotion for current PAD by nearest prototype; returns (name, confidence)."""
-    # Prototype PAD targets (hand-tuned, cheap Euclidean)
-    prototypes: dict[str, tuple[float, float, float]] = {
-        "calm":         ( 0.0,  0.2, 0.5),
-        "content":      ( 0.4,  0.3, 0.5),
-        "warm":         ( 0.5,  0.3, 0.5),
-        "curious":      ( 0.1,  0.6, 0.4),
-        "excited":      ( 0.6,  0.8, 0.5),
-        "proud":        ( 0.5,  0.6, 0.7),
-        "playful":      ( 0.4,  0.6, 0.4),
-        "tender":       ( 0.5,  0.3, 0.4),
-        "affectionate": ( 0.6,  0.4, 0.5),
-        "focused":      ( 0.1,  0.6, 0.7),
-        "determined":   ( 0.2,  0.7, 0.7),
-        "tense":        (-0.1,  0.7, 0.3),
-        "anxious":      (-0.3,  0.7, 0.2),
-        "sad":          (-0.5,  0.3, 0.3),
-        "tired":        (-0.2,  0.2, 0.3),
-        "frustrated":   (-0.4,  0.6, 0.4),
-        "hurt":         (-0.5,  0.5, 0.2),
-        "defensive":    (-0.2,  0.5, 0.6),
-        "rejected":     (-0.5,  0.4, 0.2),
-    }
     best = ("neutral", 0.4)
     best_dist = 10.0
-    for name, (vt, at, dt) in prototypes.items():
+    for name, (vt, at, dt) in _EMOTION_PROTOTYPES.items():
         d = ((a.valence - vt) ** 2 + (a.arousal - at) ** 2 + (a.dominance - dt) ** 2) ** 0.5
         if d < best_dist:
             best_dist = d
@@ -196,6 +174,50 @@ _EMOTION_TO_VRM = {
 }
 
 
+# ── Fly DN layer access (cached for the hot per-turn path) ──────────────
+
+_FLYDN_MODE: str | None = None
+_FLYDN: Any = None
+_FLYDN_MISSING = object()  # sentinel: lookup attempted and failed
+
+
+def _flydn_mode() -> str:
+    """Cached MEMORY_FLYDN_MODE ('off' default). Read once; restart to change."""
+    global _FLYDN_MODE
+    if _FLYDN_MODE is None:
+        try:
+            _FLYDN_MODE = (os.getenv("MEMORY_FLYDN_MODE", "off") or "off").strip().lower()
+        except Exception:
+            _FLYDN_MODE = "off"
+    return _FLYDN_MODE
+
+
+def _flydn_drive(*, energy: float, decisiveness: float, affect: float) -> dict | None:
+    """Fly descending-neuron drive, or None when the DN layer is off/unavailable.
+
+    The mode and the fly instance are cached after first use, so the hot
+    per-turn path pays only for the drive() call itself.
+    """
+    if _flydn_mode() not in ("shadow", "live"):
+        return None
+    global _FLYDN
+    if _FLYDN is None:
+        try:
+            from cognition.flysense import get_flydn
+
+            _FLYDN = get_flydn()
+        except Exception as exc:
+            log.debug("subliminal flydn unavailable: %s", exc)
+            _FLYDN = _FLYDN_MISSING
+    if _FLYDN is _FLYDN_MISSING:
+        return None
+    try:
+        return _FLYDN.drive(energy=energy, decisiveness=decisiveness, affect=affect)
+    except Exception as exc:
+        log.debug("subliminal flydn skipped: %s", exc)
+        return None
+
+
 # ── SubliminalLayer ───────────────────────────────────────────────────────
 
 class SubliminalLayer:
@@ -209,7 +231,7 @@ class SubliminalLayer:
     __slots__ = (
         "_intuitions", "_pre_attentive", "_affect",
         "_emotion", "_emotion_intensity", "_impulse", "_bias",
-        "_vrm_emit", "_vrm_last", "_vrm_last_t",
+        "_vrm_emit", "_vrm_last", "_vrm_last_intensity", "_vrm_last_t",
         "_lock_ref", "_recent_event_tokens",
         # Daydream state: lingering dispositions only. Spontaneous
         # pop-ups now come from genuine inner-speech recall, not templates.
@@ -226,6 +248,7 @@ class SubliminalLayer:
         self._bias: str = ""
         self._vrm_emit: bool = False
         self._vrm_last: str = "neutral"
+        self._vrm_last_intensity: float = 0.0
         self._vrm_last_t: float = 0.0
         self._lock_ref = lock
         # Windowed tokens for novelty across the last few events.
@@ -286,23 +309,13 @@ class SubliminalLayer:
         ar -= 0.05 * cues.get("identity", 0.0)
         ar = max(0.0, min(1.0, 0.85 * ar + 0.05))
         # Fly DN layer: descending arousal drive blends in (small, clamped).
-        try:
-            _dn_mode = (os.getenv("MEMORY_FLYDN_MODE", "off") or "off").strip().lower()
-        except Exception:
-            _dn_mode = "off"
-        if _dn_mode in ("shadow", "live"):
-            try:
-                from cognition.flysense import get_flydn as _get_flydn
-                _drv = _get_flydn().drive(energy=float(ar),
-                                      decisiveness=float(cues.get("action", 0.0)),
-                                      affect=float(v))
-            except Exception as exc:
-                log.debug("subliminal flydn skipped: %s", exc)
-                _drv = None
-            if _drv is not None:
-                log.debug("subliminal flydn mode=%s arousal=%.2f", _dn_mode, _drv["arousal"])
-                if _dn_mode == "live":
-                    ar = max(0.0, min(1.0, ar + 0.1 * (_drv["arousal"] - 0.5) * 2.0))
+        _drv = _flydn_drive(energy=float(ar),
+                            decisiveness=float(cues.get("action", 0.0)),
+                            affect=float(v))
+        if _drv is not None:
+            log.debug("subliminal flydn mode=%s arousal=%.2f", _flydn_mode(), _drv["arousal"])
+            if _flydn_mode() == "live":
+                ar = max(0.0, min(1.0, ar + 0.1 * (_drv["arousal"] - 0.5) * 2.0))
 
         # Dominance — agency grows when action cues are present, uncertainty shrinks it
         d = self._affect.dominance
@@ -466,24 +479,14 @@ class SubliminalLayer:
         vrm_name, base_intensity = _EMOTION_TO_VRM.get(emo, ("neutral", 0.4))
         intensity = float(min(1.0, base_intensity * (0.5 + score)))
         # Fly DN layer: vigor scales expression intensity (visible on avatar).
-        try:
-            _dn_mode = (os.getenv("MEMORY_FLYDN_MODE", "off") or "off").strip().lower()
-        except Exception:
-            _dn_mode = "off"
-        if _dn_mode in ("shadow", "live"):
-            try:
-                from cognition.flysense import get_flydn as _get_flydn
-                _drv = _get_flydn().drive(energy=float(self._affect.arousal),
-                                      decisiveness=float(self._affect.agency),
-                                      affect=float(self._affect.valence))
-            except Exception as exc:
-                log.debug("subliminal flydn vrm skipped: %s", exc)
-                _drv = None
-            if _drv is not None:
-                log.debug("subliminal flydn vrm mode=%s arousal=%.2f",
-                          _dn_mode, _drv["arousal"])
-                if _dn_mode == "live":
-                    intensity = float(min(1.0, intensity * (0.8 + 0.4 * _drv["arousal"])))
+        _drv = _flydn_drive(energy=float(self._affect.arousal),
+                            decisiveness=float(self._affect.agency),
+                            affect=float(self._affect.valence))
+        if _drv is not None:
+            log.debug("subliminal flydn vrm mode=%s arousal=%.2f",
+                      _flydn_mode(), _drv["arousal"])
+            if _flydn_mode() == "live":
+                intensity = float(min(1.0, intensity * (0.8 + 0.4 * _drv["arousal"])))
         return vrm_name, intensity
 
     def broadcast_vrm(self, force: bool = False) -> bool:
@@ -496,16 +499,23 @@ class SubliminalLayer:
         if not force and (now - self._vrm_last_t) < 1.5:
             return False
         vrm_name, intensity = self.vrm_expression()
-        if vrm_name == self._vrm_last and abs(intensity - 0.0) < 0.01 and not force:
+        # Skip the broadcast when nothing changed — the avatar already shows it.
+        if (not force and vrm_name == self._vrm_last
+                and abs(intensity - self._vrm_last_intensity) < 0.05):
             return False
         try:
             from interface.webui.webui import webui_bridge  # local import — cyclic-safe
             bridge = webui_bridge()
-            if bridge is not None:
-                bridge.set_expression(vrm_name, intensity)
+            if bridge is None:
+                return False
+            bridge.set_expression(vrm_name, intensity)
         except Exception as e:
             log.debug("subliminal: VRM broadcast skipped: %s", e)
+            return False
+        # Record as emitted only after a successful broadcast: if the bridge
+        # was down, the next call must retry instead of assuming stability.
         self._vrm_last = vrm_name
+        self._vrm_last_intensity = intensity
         self._vrm_last_t = now
         return True
 
@@ -625,7 +635,7 @@ __all__ = [
     "SubliminalLayer",
     "PreAttentiveScan",
     "AffectState",
-    "_EMOTION_VOCAB",
+    "_EMOTION_PROTOTYPES",
     "_EMOTION_TO_VRM",
     "_scan_cues",
 ]

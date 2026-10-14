@@ -508,7 +508,7 @@ def dream_and_post(
         )
         _day_start = _day_start_dt.isoformat()
         _day_end = (_day_start_dt + timedelta(days=1)).isoformat()
-        _thoughts = _store.unconsolidated_since(_day_start)
+        _thoughts = _store.unconsolidated_since(_day_start) or []
         # Upper-bound to the target UTC day: the store query has no end
         # boundary, so a late-running reflection could otherwise sweep in
         # (and prematurely consolidate) thoughts belonging to the next day.

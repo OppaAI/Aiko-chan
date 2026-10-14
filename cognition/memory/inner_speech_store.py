@@ -153,6 +153,18 @@ class InnerSpeechStore:
             return None
         tid = uuid.uuid4().hex[:16]
         now = datetime.now(timezone.utc).isoformat()
+        # Embed BEFORE taking the lock / opening the transaction: the embedder
+        # is an HTTP call to :8080 and must never hold the SQLite write lock
+        # (or an open transaction) across the network.
+        vec = self._embed(text)
+        blob = None
+        if vec:
+            try:
+                import sqlite_vec  # type: ignore
+
+                blob = sqlite_vec.serialize_float32(vec)
+            except Exception as e:
+                log.debug("inner_speech: vec serialize failed: %s", e)
         try:
             with self._lock, self._conn:
                 self._conn.execute(
@@ -160,11 +172,7 @@ class InnerSpeechStore:
                     " VALUES (?, ?, ?, ?, ?, ?)",
                     (tid, self._user_id, text, kind, source, now),
                 )
-                vec = self._embed(text)
-                if vec:
-                    import sqlite_vec  # type: ignore
-
-                    blob = sqlite_vec.serialize_float32(vec)
+                if blob is not None:
                     self._conn.execute(
                         "INSERT INTO thoughts_vec(id, embedding) VALUES (?, ?)",
                         (tid, blob),
@@ -278,8 +286,12 @@ class InnerSpeechStore:
 
     # ── midnight join ──────────────────────────────────────────────────
 
-    def unconsolidated_since(self, since_iso: str) -> list[dict]:
-        """Rows since `since_iso` not yet folded into the dream. For dream.py."""
+    def unconsolidated_since(self, since_iso: str) -> list[dict] | None:
+        """Rows since `since_iso` not yet folded into the dream. For dream.py.
+
+        Returns None (not []) when the query itself fails, so callers can
+        tell a database failure apart from a genuinely empty result.
+        """
         try:
             with self._lock:
                 rows = self._conn.execute(
@@ -291,7 +303,7 @@ class InnerSpeechStore:
             return [dict(r) for r in rows]
         except Exception as e:
             log.warning("inner_speech: unconsolidated_since failed: %s", e)
-            return []
+            return None
 
     def mark_consolidated(self, ids: list[str]) -> None:
         if not ids:

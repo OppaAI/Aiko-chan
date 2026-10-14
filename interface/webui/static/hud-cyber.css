@@ -532,11 +532,11 @@ body::before {
 #panel-footer-legal a { color: var(--cy-dim); }
 
 /* companion HUD inside the stage */
-#ws-dots { top: 16px !important; left: 16px; right: auto; z-index: 9; }
+#ws-dots { top: 16px !important; right: 16px; z-index: 9; }
 #companion-hud {
   z-index: 8;
-  left: 16px !important;
-  right: auto;
+  left: auto !important;
+  right: 16px;
   top: 158px;
   bottom: auto !important;
   max-width: 248px;
@@ -824,8 +824,7 @@ body::before {
 /* ══ stage-right cluster: presence box at the edge, status stack to its left ══ */
 #stage-side-cluster {
   position: absolute;
-  left: 18px;
-  right: auto;
+  right: 18px;
   top: 50%;
   transform: translateY(-50%);
   z-index: 8;
@@ -999,7 +998,7 @@ body::before {
 @media (max-width: 900px) {
   #talk-frame { bottom: 46px; }
   #talk-btn { padding: 10px 26px !important; }
-  #stage-side-cluster { top: 54px; bottom: auto; transform: none; left: 10px; right: auto; }
+  #stage-side-cluster { top: 54px; bottom: auto; transform: none; right: 10px; }
   #stage-side-cluster #companion-hud { max-width: 210px; }
   #stage-status-stack { display: none; }
 }

@@ -67,9 +67,14 @@ _OUTFIT_PATTERNS = (
     ("seifuku",   ("seifuku", "school uniform", "制服", "せいふく")),
     ("cardigan",  ("pink cardigan", "カーディガン")),
     ("loungewear",("loungewear", "room wear")),
+    ("yukata",    ("yukata", "浴衣", "ゆかた")),
 )
 _OUTFIT_VERBS = ("change into", "wear the", "wear your", "put on",
                  "着替えて", "きがえて", "着せて")
+# Negations that cancel an outfit request ("don't change", "not the pajamas").
+# Kept narrow: only clear "don't do it" signals, so "wear the pajamas,
+# not the seifuku" still matches pajama.
+_OUTFIT_NEGATIONS = ("don't", "do not", "doesn't", "やめて", "いやだ")
 
 _AGREE = (
     "you're right", "youre right", "you are right", "exactly", "i agree",
@@ -101,7 +106,10 @@ def _contains(low: str, words: tuple[str, ...]) -> bool:
         if re.fullmatch(r"[\x00-\x7F]+", w):
             return rf"\b{esc}"
         return esc
-    return any(re.search(_pat(w), low) for w in words)
+    # re.ASCII: \b uses ASCII word boundaries, so English cues still match
+    # when adjacent to non-ASCII text (e.g. "byeまたね"). CJK patterns are
+    # bare substrings, unaffected by the flag.
+    return any(re.search(_pat(w), low, flags=re.ASCII) for w in words)
 
 
 class MotionDirector:
@@ -197,10 +205,16 @@ class MotionDirector:
     def suggest_outfit(self, user_text: str) -> str | None:
         """Map an explicit outfit request to a wardrobe key, or None.
 
-        Requires an outfit noun; a bare verb ("change!") is ignored.
-        No cooldowns — changing clothes is always user-initiated.
+        Requires BOTH an outfit noun and an affirmative intent verb —
+        a bare noun ("pajamas?") or a negated request ("don't wear the
+        pajamas") is ignored. No cooldowns — changing clothes is always
+        user-initiated.
         """
         low = (user_text or "").lower()
+        if _contains(low, _OUTFIT_NEGATIONS):
+            return None
+        if not _contains(low, _OUTFIT_VERBS):
+            return None
         for key, nouns in _OUTFIT_PATTERNS:
             if _contains(low, nouns):
                 return key

@@ -435,7 +435,9 @@ function pickGesture() {
     if (idleFor > 120 && !escalationDone.l1) { escalationDone.l1 = true; recentGestures.push('yawnCover'); startGesture('yawnCover'); return; }
   }
   const pool = speakingRecently() ? SPEAKING_GESTURES : GESTURES;
-  const eb = emotionGestureSubset();
+  // Emotion bias applies to idle selection only — never substitute an idle
+  // emotion subset while she's speaking (e.g. a yawn mid-sentence).
+  const eb = speakingRecently() ? null : emotionGestureSubset();
   const srcPool = (eb && Math.random() < 0.55) ? eb : pool;
   // Random pick with recency avoidance: feels random, still cycles everything.
   const fresh = srcPool.filter(g => !recentGestures.includes(g));

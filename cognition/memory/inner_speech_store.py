@@ -153,6 +153,18 @@ class InnerSpeechStore:
             return None
         tid = uuid.uuid4().hex[:16]
         now = datetime.now(timezone.utc).isoformat()
+        # Embed BEFORE taking the lock / opening the transaction: the embedder
+        # is an HTTP call to :8080 and must never hold the SQLite write lock
+        # (or an open transaction) across the network.
+        vec = self._embed(text)
+        blob = None
+        if vec:
+            try:
+                import sqlite_vec  # type: ignore
+
+                blob = sqlite_vec.serialize_float32(vec)
+            except Exception as e:
+                log.debug("inner_speech: vec serialize failed: %s", e)
         try:
             with self._lock, self._conn:
                 self._conn.execute(
@@ -160,11 +172,7 @@ class InnerSpeechStore:
                     " VALUES (?, ?, ?, ?, ?, ?)",
                     (tid, self._user_id, text, kind, source, now),
                 )
-                vec = self._embed(text)
-                if vec:
-                    import sqlite_vec  # type: ignore
-
-                    blob = sqlite_vec.serialize_float32(vec)
+                if blob is not None:
                     self._conn.execute(
                         "INSERT INTO thoughts_vec(id, embedding) VALUES (?, ?)",
                         (tid, blob),

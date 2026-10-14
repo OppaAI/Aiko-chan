@@ -185,8 +185,14 @@ def _flush_persist_pending() -> None:
         pending = list(_persist_pending)
         _persist_pending.clear()
     for ident in pending:
-        state = for_identity(ident)
-        state._do_persist()
+        # Don't resurrect LRU-evicted identities: for_identity() would
+        # construct a brand-new EdgeCognitiveState (InnerSpeech, stores,
+        # bus registration) just to write back a snapshot for a state we
+        # deliberately dropped.
+        with _states_lock:
+            state = _states.get(ident)
+        if state is not None:
+            state._do_persist()
 EDGE_COGNITION_MAX_IDENTITIES = max(1, env_int("EDGE_COGNITION_MAX_IDENTITIES", 16))
 EDGE_COGNITION_MAX_LESSON_EVIDENCE = 64
 
@@ -846,16 +852,24 @@ class EdgeCognitiveState:
             # LLM think can take seconds and must never block the turn path.
             # (observe() itself keeps only the cheap gate synchronous and
             # dispatches the heavy work to a daemon thread.)
+            # Emotion + impulse are read once per turn and shared by the
+            # inner-speech update and the motion director below.
+            _emo, _inten, _impulse = "neutral", 0.4, "respond_normally"
+            try:
+                if self._subliminal is not None:
+                    _emo, _inten = self._subliminal.emotion()
+                    _impulse = self._subliminal.impulse()
+            except Exception:
+                pass
             try:
                 if self._inner_speech is not None and self._subliminal is not None:
-                    _emo, _inten = self._subliminal.emotion()
                     _scan = self._subliminal._pre_attentive
                     inner_turn = (
                         user,
                         assistant,
                         _emo,
                         _inten,
-                        self._subliminal.impulse(),
+                        _impulse,
                         dict(_scan.cues) if _scan is not None else {},
                         _scan.recurring_focus if _scan is not None else frozenset(),
                         self._subliminal.lingering_dispositions(),
@@ -867,10 +881,9 @@ class EdgeCognitiveState:
             # feel instant even while tokens are still generating.
             try:
                 if self._motion_director is not None and self._subliminal is not None:
-                    emo, inten = self._subliminal.emotion()
                     gesture = self._motion_director.suggest(
-                        user, emotion=emo, intensity=inten,
-                        impulse=self._subliminal.impulse())
+                        user, emotion=_emo, intensity=_inten,
+                        impulse=_impulse)
                     if gesture:
                         from interface.webui.webui import webui_bridge  # local import — cyclic-safe
                         bridge = webui_bridge()
@@ -1035,6 +1048,11 @@ class EdgeCognitiveState:
         try:
             if self._policy is not None:
                 self._policy.close()
+        except Exception:
+            pass
+        try:
+            if self._inner_speech is not None:
+                self._inner_speech.close()
         except Exception:
             pass
 
@@ -1425,6 +1443,7 @@ class EdgeCognitiveState:
         """
         text = (user_input or "").strip()
         tokens = _tokens(text)
+        _time_sensitive = is_time_sensitive(text)
 
         features = {
             # Input shape
@@ -1436,7 +1455,7 @@ class EdgeCognitiveState:
             "has_action_verb": 1.0 if any(v in text.lower() for v in ("can you", "could you", "do", "make", "write")) else 0.0,
             "has_negation": 1.0 if _gated_match("negation", text, _NEGATION_RE) else 0.0,
             "has_uncertainty": 1.0 if _gated_match("uncertain", text, _UNCERTAIN_RE) else 0.0,
-            "has_time_ref": 1.0 if is_time_sensitive(text) else 0.0,
+            "has_time_ref": 1.0 if _time_sensitive else 0.0,
 
             # Context alignment
             "overlap_with_active_goal": len(tokens & _tokens(" ".join(
@@ -1451,7 +1470,7 @@ class EdgeCognitiveState:
 
             # Gated detector binaries (regex fallback, LightGBM when trained)
             "is_critical": 1.0 if is_critical_task(text) else 0.0,
-            "is_time_sensitive": 1.0 if is_time_sensitive(text) else 0.0,
+            "is_time_sensitive": 1.0 if _time_sensitive else 0.0,
             "has_question": 1.0 if _gated_match("question", text, _QUESTION_RE) else 0.0,
             "has_commitment": 1.0 if _gated_match("commitment", text, _COMMITMENT_RE) else 0.0,
             "has_task": 1.0 if _gated_match("task", text, _TASK_RE) else 0.0,
@@ -2016,9 +2035,11 @@ class EdgeCognitiveState:
             conflicts.append({"memory_id": row.get("id"), "current": query[:220], "remembered": text[:240], "shared_terms": sorted(overlap)[:8], "status": str(row.get("status") or "active")})
         return conflicts[:3]
 
-    def memory_resolution_guidance(self, query: str, memories: list[dict] | None = None) -> str:
+    def memory_resolution_guidance(self, query: str, memories: list[dict] | None = None,
+                                   conflicts: list[dict] | None = None) -> str:
         """Describe a safe clarification/update path without mutating memory. Resolution strategy."""
-        conflicts = self.memory_conflicts(query, memories)
+        if conflicts is None:
+            conflicts = self.memory_conflicts(query, memories)
         if not conflicts:
             return ""
         lower = (query or "").casefold()
@@ -2066,12 +2087,13 @@ class EdgeCognitiveState:
 
     def adaptive_tts_rate(self) -> float:
         """Choose a conservative speech rate from recent voice cues. Speech adaptation."""
-        latest = (self.snapshot().get("perceptions") or [{}])[0]
+        snap = self.snapshot()
+        latest = (snap.get("perceptions") or [{}])[0]
         if isinstance(latest.get("words_per_second"), (int, float)) and latest["words_per_second"] > 4.5:
             return 1.05
-        if (isinstance(latest.get("pause_density"), (int, float)) and latest["pause_density"] > 0.55) or self.snapshot().get("uncertainty", 0.0) > 0.35:
+        if (isinstance(latest.get("pause_density"), (int, float)) and latest["pause_density"] > 0.55) or snap.get("uncertainty", 0.0) > 0.35:
             return 0.9
-        if self.snapshot().get("affect", 0.0) < -0.25:
+        if snap.get("affect", 0.0) < -0.25:
             return 0.92
         return 1.0
 
@@ -2186,8 +2208,9 @@ class EdgeCognitiveState:
         lines = ["<grounded_context>", f"Local time: {now.strftime('%A, %Y-%m-%d %H:%M')} ({period})", f"User activity: {activity}", f"Idle duration: {max(0, int(idle_seconds))} seconds"]
         if jobs:
             lines.append("Upcoming scheduled work: " + " | ".join(jobs[:5]))
-        outcomes = self.snapshot().get("tool_outcomes", [])
-        perceptions = self.snapshot().get("perceptions", [])
+        snap = self.snapshot()
+        outcomes = snap.get("tool_outcomes", [])
+        perceptions = snap.get("perceptions", [])
         if perceptions:
             latest = perceptions[0]
             duration = latest.get("duration_s")
@@ -2265,7 +2288,7 @@ class EdgeCognitiveState:
                 self._pending_memory_conflicts.clear()
                 self._pending_memory_conflicts.extend(conflicts[:3])
             lines.append("Long-term memory conflicts requiring clarification: " + " | ".join(c["remembered"] for c in conflicts[:2]))
-        resolution = self.memory_resolution_guidance(query, memories)
+        resolution = self.memory_resolution_guidance(query, memories, conflicts=conflicts)
         if resolution:
             lines.append(resolution)
         if snap["lessons"]:
@@ -2315,9 +2338,10 @@ class EdgeCognitiveState:
             flags.append("recent statements may conflict; clarify before relying on them")
         if "superseded" in statuses:
             flags.append("some retrieved memory may be outdated")
-        if self.memory_conflicts(query, rows):
+        _mc_conflicts = self.memory_conflicts(query, rows)
+        if _mc_conflicts:
             flags.append("new statement conflicts with retrieved memory; clarify before updating belief")
-        if self.memory_resolution_guidance(query, rows):
+        if self.memory_resolution_guidance(query, rows, conflicts=_mc_conflicts):
             flags.append("memory conflict requires explicit confirmation before supersession")
         if temporal:
             flags.append("query may require current external information")
@@ -2354,21 +2378,27 @@ class EdgeCognitiveState:
         inner_speech.db) plus one unprompted aside if due. Returns ""
         on silent turns — no filler, no fake thinking. Only past
         recalled thoughts and fresh genuine ones ever appear here.
+
+        Aside ownership lives here, not in InnerSpeech.prompt_block():
+        the aside is popped first and then merged into the rendered block,
+        so a queued daydream can never be silently dropped or duplicated.
         """
-        try:
-            inner = self.inner_speech_block()
-        except Exception:
-            inner = ""
         try:
             aside = self.maybe_aside()
         except Exception:
             aside = None
-        if aside and inner:
+        try:
+            inner = self.inner_speech_block()
+        except Exception:
+            inner = ""
+        if aside:
             closing = "</inner_speech>"
             if closing in inner:
                 inner = inner.replace(closing, f"- {aside}\n{closing}", 1)
-            else:
+            elif inner:
                 inner += f"\n- {aside}"
+            else:
+                inner = f"<inner_speech>\n- {aside}\n</inner_speech>"
         return inner
 
     def context(self, query: str = "") -> str:

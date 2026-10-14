@@ -91,7 +91,7 @@ class InnerSpeech:
         self._last_think_ts = 0.0
         self._last_snapshot: dict[str, Any] = {}
         self._think_in_flight = False      # one background think at a time
-        self._surfaced_ids: set[str] = set()  # db thoughts already popped up
+        self._surfaced_ids: dict[str, None] = {}  # insertion-ordered set of surfaced db ids
         self._last_spont_t = -1800.0          # idle pop-ups: start "due"
 
     # ── lazy resources ─────────────────────────────────────────────
@@ -205,13 +205,18 @@ class InnerSpeech:
             return []
         if not raw or raw.strip().upper() == "NOTHING":
             return []
-        lines = [_clip(ln) for ln in raw.splitlines() if _clip(ln)]
-        # Strip list markers / quotes the model likes to add.
+        # Strip list markers / quotes the model likes to add. Clip once per
+        # line and stop after 3 — the rest is never used.
         cleaned = []
-        for ln in lines[:3]:
+        for ln in raw.splitlines():
+            ln = _clip(ln)
+            if not ln:
+                continue
             ln = ln.lstrip("-•*0123456789. ").strip().strip("\"'")
             if ln and ln.upper() != "NOTHING":
                 cleaned.append(_clip(ln))
+                if len(cleaned) >= 3:
+                    break
         return cleaned
 
     # ── per-turn entry (replaces InnerVoice.observe) ────────────────
@@ -245,15 +250,16 @@ class InnerSpeech:
             )
         except Exception:
             s = 0.0
+        threshold = _salience_threshold()
         with self._lock:
             self._last_intensity = intensity if isinstance(intensity, (int, float)) else 0.4
             in_flight = self._think_in_flight
-            if s >= _salience_threshold() and not in_flight:
+            if s >= threshold and not in_flight:
                 self._think_in_flight = True
         # Snapshot updates synchronously — the fly reads it every turn.
         self._update_snapshot(s, emotion=emotion, intensity=intensity,
                               impulse=impulse, focus=recurring_focus, thought=None)
-        if s < _salience_threshold() or in_flight:
+        if s < threshold or in_flight:
             return
         # Salient: heavy work off the caller's thread.
         t = threading.Thread(
@@ -263,7 +269,13 @@ class InnerSpeech:
             daemon=True,
             name="inner-speech-think",
         )
-        t.start()
+        try:
+            t.start()
+        except Exception:
+            # Never leave the single-flight flag set when the thread failed
+            # to start — otherwise inner speech would stay silent forever.
+            with self._lock:
+                self._think_in_flight = False
 
     def _think_async(self, user_text: str, assistant_text: str, salience: float,
                      emotion: str, intensity: float, impulse: str,
@@ -378,12 +390,16 @@ class InnerSpeech:
     # ── reads ──────────────────────────────────────────────────────
 
     def prompt_block(self) -> str:
-        """Render ``<inner_speech>`` for prompt injection. Prompt-only."""
+        """Render ``<inner_speech>`` for prompt injection. Prompt-only.
+
+        Asides are NOT merged here — EdgeCognitiveState.inner_speech_turn_block
+        owns aside placement via maybe_aside(), so a queued daydream is
+        popped exactly once per turn and never duplicated.
+        """
         with self._lock:
             thread = list(self._thread)
             recalled = list(self._recalled)
-            asides = list(self._asides)
-        if not thread and not recalled and not asides:
+        if not thread and not recalled:
             return ""
         lines = ["<inner_speech>"]
         lines.append(
@@ -395,10 +411,6 @@ class InnerSpeech:
             lines.extend(f"- {_clip(t, 160)}" for t in recalled[:3])
         if thread:
             lines.extend(f"- {t}" for t in thread[-5:])
-        if asides:
-            lines.extend(f"- {a}" for a in asides[-2:])
-            with self._lock:
-                self._asides = []
         lines.append("</inner_speech>")
         return "\n".join(lines)
 
@@ -413,7 +425,7 @@ class InnerSpeech:
         with self._lock:
             if now - self._last_spont_t < 1800.0:
                 return None
-            self._last_spont_t = now
+            self._last_spont_t = now  # provisional; rolled back if the fetch fails
         try:
             from datetime import datetime, timedelta, timezone
 
@@ -421,16 +433,19 @@ class InnerSpeech:
             rows = self._get_store().unconsolidated_since(since)
         except Exception as e:
             log.debug("inner_speech: spontaneous_recall failed: %s", e)
+            with self._lock:
+                self._last_spont_t = 0.0  # don't burn the cooldown on failure
             return None
         with self._lock:
             for r in reversed(rows):  # most recent first
                 rid = r.get("id")
                 text = (r.get("text") or "").strip()
                 if rid and text and rid not in self._surfaced_ids and len(text) >= 20:
-                    self._surfaced_ids.add(rid)
-                    # Bounded memory of what has surfaced.
+                    self._surfaced_ids[rid] = None
+                    # Bounded memory of what has surfaced: drop the oldest.
                     if len(self._surfaced_ids) > 200:
-                        self._surfaced_ids = set(list(self._surfaced_ids)[-100:])
+                        for old in list(self._surfaced_ids)[:100]:
+                            del self._surfaced_ids[old]
                     return text
         return None
 

@@ -158,27 +158,27 @@ def _polarity_signature(text: str) -> set[str]:
 def flag_contradictions(memories: list[dict]) -> list[dict]:
     """Mark pairs that share topical tokens but opposing polarity cues."""
     rows = [dict(m) for m in memories]
+    # Token sets and polarity signatures are computed once per row — the
+    # pairwise loop below is O(n^2) and must not redo the regex work.
+    feats = [(_tokens(_memory_text(r)), _polarity_signature(_memory_text(r))) for r in rows]
     for i, a in enumerate(rows):
-        ta = _memory_text(a)
-        wa = _tokens(ta)
-        sa = _polarity_signature(ta)
+        wa, sa = feats[i]
         if not sa:
             continue
         conflicts = []
         for j, b in enumerate(rows):
             if i == j:
                 continue
-            tb = _memory_text(b)
-            wb = _tokens(tb)
+            wb, sb = feats[j]
             if len(wa & wb) < 2:
                 continue
-            sb = _polarity_signature(tb)
-            for stem in list(sa):
+            for stem in sa:
                 key = stem[1:]
-                if stem.startswith("+") and f"-{key}" in sb:
+                if (stem.startswith("+") and f"-{key}" in sb) or (
+                    stem.startswith("-") and f"+{key}" in sb
+                ):
                     conflicts.append(j)
-                if stem.startswith("-") and f"+{key}" in sb:
-                    conflicts.append(j)
+                    break
         if conflicts:
             a["_contradiction"] = True
             a["_contradiction_with"] = sorted(set(conflicts))[:4]

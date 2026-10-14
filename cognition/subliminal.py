@@ -151,26 +151,30 @@ def _classify_emotion(a: AffectState) -> tuple[str, float]:
 # VRM blendshape hints for webui.set_expression(name, intensity).
 # Maps emotion → a blendshape-style expression name the avatar understands.
 _EMOTION_TO_VRM = {
-    "calm":         ("calm",        0.5),
-    "content":      ("smile",       0.5),
-    "warm":         ("smile_soft",  0.6),
-    "curious":      ("eyebrows_up", 0.6),
-    "excited":      ("smile_big",   0.7),
-    "proud":        ("smile_soft",  0.6),
-    "playful":      ("smile_playful", 0.7),
-    "tender":       ("smile_soft",  0.5),
-    "affectionate": ("smile_soft",  0.7),
-    "focused":      ("neutral",     0.4),
-    "determined":   ("neutral",     0.5),
-    "tense":        ("brow_furrow", 0.5),
-    "anxious":      ("brow_furrow", 0.6),
-    "sad":          ("frown",       0.6),
-    "tired":        ("eyes_droop",  0.5),
-    "frustrated":   ("brow_furrow", 0.7),
-    "hurt":         ("frown",       0.6),
-    "defensive":    ("brow_furrow", 0.5),
-    "rejected":     ("frown",       0.7),
-    "neutral":      ("neutral",     0.3),
+    # Mapped 2026-10-13 to Aiko.vrm's 6 real emotional blendshapes
+    # (neutral/happy/angry/sad/relaxed/Surprised — capital S, case-sensitive).
+    # The old map pointed at nonexistent names (smile_soft, brow_furrow, ...)
+    # which three-vrm silently ignores, freezing her face at neutral.
+    "calm":         ("relaxed",   0.5),
+    "content":      ("happy",     0.5),
+    "warm":         ("happy",     0.6),
+    "curious":      ("Surprised", 0.6),
+    "excited":      ("happy",     0.7),
+    "proud":        ("happy",     0.6),
+    "playful":      ("happy",     0.7),
+    "tender":       ("happy",     0.5),
+    "affectionate": ("happy",     0.7),
+    "focused":      ("neutral",   0.4),
+    "determined":   ("angry",     0.5),
+    "tense":        ("angry",     0.5),
+    "anxious":      ("sad",       0.55),
+    "sad":          ("sad",       0.6),
+    "tired":        ("relaxed",   0.5),
+    "frustrated":   ("angry",     0.7),
+    "hurt":         ("sad",       0.6),
+    "defensive":    ("angry",     0.5),
+    "rejected":     ("sad",       0.7),
+    "neutral":      ("neutral",   0.3),
 }
 
 

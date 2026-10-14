@@ -1431,6 +1431,7 @@ function connectWS() {
       case 'viseme': if (window.aikoSetViseme) window.aikoSetViseme(msg.viseme, msg.weight ?? 1.0); break;
       case 'pose': if (window.aikoSetPose) window.aikoSetPose(msg.name, msg.active); break;
       case 'gesture': if (window.aikoPlayGesture) window.aikoPlayGesture(msg.name); break;
+      case 'outfit': if (window.aikoSetOutfit) window.aikoSetOutfit(msg.name); break;
     }
   };
 

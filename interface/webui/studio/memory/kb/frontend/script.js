@@ -18,11 +18,10 @@ let linkSel = null;    // current line selection (for drag updates)
 let currentNodes = [];
 let currentLinks = [];
 
-const COL_CHUNK = '#c9992e';
-const COL_ENTITY = '#d9a441';
-const KB_TYPE_ICON = { entity: '\u{1F464}', chunk: '\u{1F4C4}' };
-const EDGE_ABOUT = '#e8b84a';
-const EDGE_SAMEDOC = '#6e5a30';
+const COL_CHUNK = '#4ade80';
+const COL_ENTITY = '#a78bfa';
+const EDGE_ABOUT = '#6ee7a8';
+const EDGE_SAMEDOC = '#5b4a6e';
 
 function importanceOf(d) {
   const sc = d.scores || {};
@@ -403,10 +402,10 @@ function positionEdges(sel) {
 
 function makeNodeDrag() {
   return d3.drag()
-    .on('drag', function (ev, d) {
+    .on('drag', (ev, d) => {
       d.x = ev.x;
       d.y = ev.y;
-      d3.select(this)
+      d3.select(ev.sourceEvent.target.closest('g.node'))
         .attr('transform', `translate(${d.x},${d.y})`);
       if (linkSel) positionEdges(linkSel);
     });
@@ -437,7 +436,7 @@ function update() {
   linkSel = linkSel.join(
     enter => enter.append('line')
       .attr('stroke', l => (l.type === 'about' ? EDGE_ABOUT : EDGE_SAMEDOC))
-      .attr('stroke-width', l => (l.type === 'about' ? 0.8 : 0.5)),
+      .attr('stroke-width', l => (l.type === 'about' ? 1.1 : 0.7)),
     updateE => updateE,
     exit => exit.remove()
   );
@@ -460,10 +459,7 @@ function update() {
         .call(makeNodeDrag())
         .on('click', (ev, d) => { ev.stopPropagation(); showDetails(d); });
       g.append('circle').attr('class', 'sphere');
-      g.insert('circle', ':first-child').attr('class', 'halo')
-        .attr('fill', '#ffb84d').attr('pointer-events', 'none');
       g.append('ellipse').attr('class', 'glare').attr('fill', 'url(#kb-glare)').attr('pointer-events', 'none');
-      g.append('text').attr('class', 'node-icon').attr('text-anchor', 'middle').attr('pointer-events', 'none');
       g.append('text').attr('class', 'node-label').attr('text-anchor', 'middle');
       g.append('title');
       return g;
@@ -486,17 +482,9 @@ function update() {
     .attr('rx', d => nodeRadius(d) * 0.48)
     .attr('ry', d => nodeRadius(d) * 0.30)
     .attr('opacity', d => 0.10 + 0.28 * importanceOf(d));
-  entered.select('circle.halo')
-    .attr('r', d => nodeRadius(d) * 1.9)
-    .attr('fill-opacity', d => importanceOf(d) > 0.65 ? 0.10 : 0);
-  entered.select('text.node-icon')
-    .attr('dy', d => nodeRadius(d) * 0.32)
-    .style('font-size', d => `${Math.max(7, nodeRadius(d) * 0.72)}px`)
-    .style('opacity', 0.8)
-    .text(d => KB_TYPE_ICON[d.type] || '');
   entered.select('text.node-label')
     .attr('dy', d => -(nodeRadius(d) + 6))
-    .style('opacity', d => (hotIds.has(d.id) || importanceOf(d) > 0.55) ? 0.85 : 0)
+    .style('opacity', d => hotIds.has(d.id) ? 0.85 : 0)
     .text(d => nodeLabel(d).slice(0, 24));
   entered.select('title')
     .text(d => `${nodeLabel(d)} — importance ${importanceOf(d).toFixed(2)}`);

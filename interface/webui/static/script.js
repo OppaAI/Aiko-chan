@@ -1554,3 +1554,14 @@ fetch('/api/auth/config')
     authOverlay.classList.remove('hidden');
     setAuthStatus('Failed to load authentication system.');
   });
+
+
+// Outfit picker: route dropdown changes to the VRM wardrobe.
+document.addEventListener('DOMContentLoaded', () => {
+  const sel = document.getElementById('vrm-outfit');
+  if (sel) {
+    sel.addEventListener('change', () => {
+      if (window.aikoSetOutfit) window.aikoSetOutfit(sel.value);
+    });
+  }
+});

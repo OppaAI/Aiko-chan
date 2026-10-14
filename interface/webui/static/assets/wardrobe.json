@@ -1,0 +1,85 @@
+{
+  "outfits": {
+    "loungewear": {
+      "nodes": [
+        "W_loungewear_cardi",
+        "W_loungewear_top",
+        "W_loungewear_shorts"
+      ],
+      "hideBase": []
+    },
+    "seifuku": {
+      "nodes": [
+        "W_seifuku_shirt",
+        "W_seifuku_blazer",
+        "W_seifuku_button0",
+        "W_seifuku_ribbon",
+        "W_seifuku_skirt"
+      ],
+      "hideBase": []
+    },
+    "beret": {
+      "nodes": [
+        "W_beret_hat",
+        "W_beret_blouse",
+        "W_beret_cardi",
+        "W_beret_skirt"
+      ],
+      "hideBase": []
+    },
+    "pajama": {
+      "nodes": [
+        "W_pajama_top",
+        "W_pajama_pants"
+      ],
+      "hideBase": []
+    },
+    "sailor": {
+      "nodes": [
+        "W_sailor_vest",
+        "W_sailor_collar",
+        "W_sailor_ribbon",
+        "W_sailor_skirt"
+      ],
+      "hideBase": []
+    },
+    "cardigan": {
+      "nodes": [
+        "W_cardigan_shirt",
+        "W_cardigan_tie",
+        "W_cardigan_cardi",
+        "W_cardigan_skirt"
+      ],
+      "hideBase": []
+    },
+    "gym": {
+      "nodes": [
+        "W_gym_shirt",
+        "W_gym_shorts"
+      ],
+      "hideBase": []
+    },
+    "swimsuit": {
+      "nodes": [
+        "W_swimsuit_top",
+        "W_swimsuit_bottoms",
+        "W_swimsuit_ponytail"
+      ],
+      "hideBase": [
+        "BodyClothes"
+      ]
+    },
+    "yukata": {
+      "nodes": [
+        "W_yukata_robe",
+        "W_yukata_obi",
+        "W_yukata_sideponytail"
+      ],
+      "hideBase": []
+    }
+  },
+  "default": {
+    "nodes": [],
+    "hideBase": []
+  }
+}

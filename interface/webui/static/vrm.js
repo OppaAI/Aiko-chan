@@ -1597,6 +1597,11 @@ loader.load(VRM_URL,
     }
 
     fill.style.width = '100%';
+    // Wardrobe: hide all W_* garment nodes by default (the file has them
+    // visible; only the selected outfit's nodes should show).
+    vrm.scene.traverse(o => {
+      if (o.name && o.name.startsWith('W_')) o.visible = false;
+    });
     setTimeout(() => {
       const ov = document.getElementById('load-overlay');
       ov.classList.add('fade');
@@ -1667,6 +1672,60 @@ window.aikoSetExpression = (name, intensity = 1.0) => {
 
   // No auto-reset: the expression persists until the backend broadcasts a new
   // emotion (it only sends on actual emotion change), per the user's request.
+};
+
+// ── Outfit wardrobe ──────────────────────────────────────────────────────
+// Aiko.vrm is the wardrobe build: base model + W_<key>_<garment> nodes for
+// all outfits (hidden by default). wardrobe.json maps outfit keys to the
+// nodes to show and base nodes to hide.
+let wardrobeManifest = null;
+let pendingOutfit = null;
+
+fetch('./assets/wardrobe.json')
+  .then(r => r.ok ? r.json() : null)
+  .then(j => {
+    wardrobeManifest = j;
+    if (pendingOutfit) {
+      const name = pendingOutfit;
+      pendingOutfit = null;
+      window.aikoSetOutfit(name);
+    }
+  })
+  .catch(() => { /* wardrobe.json missing — outfits unavailable */ });
+
+window.aikoSetOutfit = (name) => {
+  // Queue if the model or manifest isn't ready yet.
+  if (!vrm || !wardrobeManifest) {
+    pendingOutfit = name;
+    return;
+  }
+  const outfits = wardrobeManifest.outfits || {};
+  // Hide all wardrobe nodes first.
+  vrm.scene.traverse(o => {
+    if (o.name && o.name.startsWith('W_')) o.visible = false;
+  });
+  // Restore base clothing nodes.
+  const bodyClothes = vrm.scene.getObjectByName('BodyClothes');
+  if (bodyClothes) bodyClothes.visible = true;
+
+  if (!name || name === 'default' || !outfits[name]) {
+    // Unknown or default: base outfit only. (Unknown names are ignored
+    // silently — the backend only sends known keys.)
+    lastInteractT = t; escalationDone = {};
+    return;
+  }
+  const spec = outfits[name];
+  // Show this outfit's garments.
+  for (const nodeName of (spec.nodes || [])) {
+    const node = vrm.scene.getObjectByName(nodeName);
+    if (node) node.visible = true;
+  }
+  // Hide base clothing that the outfit replaces.
+  for (const baseName of (spec.hideBase || [])) {
+    const node = vrm.scene.getObjectByName(baseName);
+    if (node) node.visible = false;
+  }
+  lastInteractT = t; escalationDone = {};
 };
 
 window.aikoSetViseme = (viseme, weight = 1.0) => {

@@ -145,7 +145,68 @@ let lastVisemeAt = 0;
 // ── state pose machine: idle | thinking | listening | speaking ─────────
 let thinkingActive = false;
 let listeningActive = false;
-let thinkingSide = 1; // head-tilt side, re-picked on each activation
+// Thinking variants: one pose per episode, picked at random — finger to
+// chin, fingertip to lips, arms folded (thinker), cheek resting on palm,
+// or chin-up ponder. The head lean (up/down/left/right/tilt/neutral),
+// side and drift phase are re-rolled every activation too, so no two
+// thinkings look alike.
+const THINK_VARIANTS = ['fingerChin', 'fingerLips', 'armsFolded', 'cheekRest', 'gazeUp'];
+// ── thinking pose table ────────────────────────────────────────────────
+// One variant per episode (picked at random); per-episode head lean, side
+// and drift phase are re-rolled so no two thinkings look alike.
+// Arm targets are [x, y, z] deltas mirrored by thinkSide; head adds the
+// random thinkLean + slow drift on top. Tuned against headless screenshots
+// (see window.__thinkPoses live-tuning hook below).
+const THINK_POSES = {
+  // NOTE (2026-10-13): Aiko.vrm bone axes, measured headlessly. Right arm:
+  // upper-arm x+ = swing forward, z- = adduct (inward); forearm x = TWIST
+  // (not bend!), z- = elbow flexion. The old gesture library bends elbows
+  // on x (twist) — visually weak; new poses use z.
+  fingerChin: {  // hand rises to face, finger near chin, head dips to meet it
+    ua: [0.70, 0.80, 0.30], la: [0, 0, -2.60], hd: [-0.10, -0.05, 0],
+    head: [0.060, 0.020, 0.015], neck: [0.030, 0.010, 0], fingers: 0.15,
+  },
+  fingerLips: {  // fingertip to lips, hand a touch higher than chin
+    ua: [0.75, 0.80, 0.28], la: [0, 0, -2.70], hd: [-0.12, -0.06, 0],
+    head: [0.070, 0.010, 0.010], neck: [0.035, 0.005, 0], fingers: 0.15,
+  },
+  armsFolded: {  // arms crossed, dominant hand up to the chin
+    fold: true,
+    head: [0.020, 0.020, 0.010], neck: [0.010, 0, 0], fingers: 0.25,
+  },
+  cheekRest: {  // palm under cheek, head tilts sideways into the hand
+    ua: [0.70, 0.80, 0.30], la: [0, 0, -2.60], hd: [-0.08, -0.10, 0],
+    head: [0.040, 0.030, 0.085], neck: [0.020, 0.020, 0.035], fingers: 0.20,
+  },
+  gazeUp: {  // chin up, eyes skyward, arms relaxed
+    head: [-0.055, 0.020, 0], neck: [-0.030, 0, 0],
+    chest: -0.012, spine: -0.008, fingers: 0,
+  },
+};
+// Live-tuning hook (headless screenshots): window.__thinkPoses.fingerChin.la[0] = -1.7 etc.
+window.__thinkPoses = THINK_POSES;
+let thinkVariant = 0;
+let thinkSide = 1;
+let thinkLean = { x: 0, y: 0, z: 0 };
+let thinkDriftPhase = 0;
+const THINK_LEANS = [
+  { x: -0.045, y: 0, z: 0 },  // up
+  { x: 0.038, y: 0, z: 0 },   // down
+  { x: 0, y: 0.05, z: 0 },    // left
+  { x: 0, y: -0.05, z: 0 },   // right
+  { x: 0, y: 0, z: 0.035 },   // tilt
+  { x: 0, y: 0, z: -0.035 },  // tilt (mirror)
+  { x: 0, y: 0, z: 0 },       // neutral
+];
+const THINK_LEAN_NAMES = ['up', 'down', 'left', 'right', 'tilt', 'tiltM', 'neutral'];
+// One pose per episode — no cycling mid-thought. Variant, head lean, side
+// and drift phase are all re-rolled so every thinking looks a little different.
+function rollThinkingEpisode() {
+  thinkVariant = (Math.random() * THINK_VARIANTS.length) | 0;
+  thinkSide = Math.random() < 0.5 ? -1 : 1;
+  thinkLean = THINK_LEANS[(Math.random() * THINK_LEANS.length) | 0];
+  thinkDriftPhase = Math.random() * Math.PI * 2;
+}
 const stateBlend = { thinking: 0, listening: 0, speaking: 0 }; // eased 0.4 s
 
 // ── layered pose offsets — rebuilt every frame, SUMMED onto REST ────────
@@ -211,6 +272,8 @@ const GESTURES = [
   'touchCollar',
   'brushShoulder',
   'stretchArm',
+  'stretchUp',         // chest-opening stretch, chin lifts
+  'headScratch',       // sheepish hand to back of head
   'leanIn',
   'openPalm',
   'speakingNod',
@@ -232,6 +295,8 @@ const SPEAKING_GESTURES = [
   'leanIn', 'openPalm', 'speakingNod', 'curiousTilt', 'wristFlick',
   'emphasizePoint',    // hand rises to emphasize
   'bothHandsExplain',  // both hands open outward
+  'shrugExplain',      // "who knows?" shoulder hitch, palms out
+  'countFingers',      // listing points on fingers
 ];
 
 // Retuned 1–3.5 s: short enough to feel alive, long enough to read.
@@ -247,6 +312,8 @@ const GESTURE_DURATION = {
   raiseHand: 3.0,
   chinTouch: 3.2,
   shoulderRoll: 2.4,
+  stretchUp: 3.0,
+  headScratch: 2.6,
   sway: 3.2,
   headNod: 2.2,
   wristFlick: 2.0,
@@ -265,6 +332,8 @@ const GESTURE_DURATION = {
   thoughtfulLook: 3.0,
   emphasizePoint: 2.2,
   bothHandsExplain: 2.4,
+  shrugExplain: 2.4,
+  countFingers: 3.4,
   chinThink: 3.2,
   handNearMouth: 3.0,
   armsFoldThink: 3.2,
@@ -375,22 +444,42 @@ function computeStatePose() {
   };
   const th = easeInOutCubic(stateBlend.thinking);
   if (th > 0.001) {
-    const S = thinkingSide; // ±10° head tilt to a random side, gaze up/sideways
-    sadd('head', -0.05 * th, 0.10 * S * th, 0.17 * S * th);
-    sadd('neck', -0.02 * th, 0.04 * S * th, 0.06 * S * th);
-    sadd('spine', 0.020 * th, 0, 0);
-    sadd('chest', 0.025 * th, 0, 0);
-    // Subtle hand-to-chin drift (chinThink bone targets × 0.6).
-    const UA = S > 0 ? 'rightUpperArm' : 'leftUpperArm';
-    const LA = S > 0 ? 'rightLowerArm' : 'leftLowerArm';
-    const HD = S > 0 ? 'rightHand' : 'leftHand';
-    sadd(UA, -0.12 * th, 0, S * 0.14 * th);
-    sadd(LA, -0.22 * th, 0, S * 0.024 * th);
-    sadd(HD, -0.048 * th, -S * 0.048 * th, 0);
-    const prefix = S > 0 ? 'right' : 'left';
-    for (const name of FINGER_BONES) {
-      if (name.startsWith(prefix)) fingerPose[name] = (fingerPose[name] || 0) + 0.18 * th;
+    const S = thinkSide;
+    const P = S > 0 ? 'right' : 'left';
+    const pose = THINK_POSES[THINK_VARIANTS[thinkVariant]];
+    // Slow anime micro-drift so the held pose breathes instead of freezing.
+    const drift = Math.sin(t * 0.9 + thinkDriftPhase) * 0.010 * th;
+    const drift2 = Math.sin(t * 0.63 + thinkDriftPhase * 1.7) * 0.008 * th;
+    if (pose.fold) {
+      // armsFolded: arms crossed at the chest, dominant hand up to the chin.
+      // (Elbow flexion is the forearm's local z, not x — see table note.
+      // Mirror: right-inward/flex = -z, left-inward/flex = +z.)
+      sadd('leftUpperArm', 0.15 * th, 0, 0.30 * th);
+      sadd('rightUpperArm', 0.35 * th, 0, -0.35 * th);
+      sadd('leftLowerArm', 0, 0, 0.90 * th);
+      sadd('rightLowerArm', 0, 0, -1.70 * th);
+      sadd('rightHand', -0.10 * th, -0.05 * th, 0);
+      for (const name of FINGER_BONES) {
+        if (name.startsWith('right')) fingerPose[name] = (fingerPose[name] || 0) + pose.fingers * th;
+      }
+    } else if (pose.ua) {
+      sadd(P + 'UpperArm', pose.ua[0] * th, pose.ua[1] * S * th, pose.ua[2] * S * th);
+      sadd(P + 'LowerArm', pose.la[0] * th, pose.la[1] * S * th, pose.la[2] * S * th);
+      sadd(P + 'Hand', pose.hd[0] * th, pose.hd[1] * S * th, pose.hd[2] * S * th);
+      if (pose.fingers) {
+        for (const name of FINGER_BONES) {
+          if (name.startsWith(P)) fingerPose[name] = (fingerPose[name] || 0) + pose.fingers * th;
+        }
+      }
     }
+    if (pose.chest) sadd('chest', pose.chest * th, 0, 0);
+    if (pose.spine) sadd('spine', pose.spine * th, 0, 0);
+    // Head: variant base (mirrored) + per-episode random lean + drift.
+    sadd('head',
+      pose.head[0] * th + thinkLean.x * th + drift,
+      pose.head[1] * S * th + thinkLean.y * th + drift2,
+      pose.head[2] * S * th + thinkLean.z * th + drift * 0.5);
+    sadd('neck', pose.neck[0] * th, pose.neck[1] * S * th, pose.neck[2] * S * th);
   }
   const li = easeInOutCubic(stateBlend.listening);
   if (li > 0.001) { // leaning in: the universal "I'm listening."
@@ -558,10 +647,39 @@ function applyGestures(dt) {
       break;
 
     case 'shoulderRoll': {
+      // Easy forward roll: lift, roll forward, settle. (The old version
+      // twisted the upper arm backward on Y and read as a dislocation.)
       const roll = pulseTapered(p, 1.5);
-      add(UA, -roll * 0.10, -S * roll * 0.035, -S * roll * 0.06);
-      add('head', 0, 0, S * roll * 0.02);
-      add('neck', 0, 0, S * roll * 0.013);
+      const lift = Math.sin(Math.min(1, p * 1.2) * Math.PI);
+      add(UA, -lift * 0.09, S * roll * 0.015, S * (roll * 0.05 + lift * 0.025));
+      add('head', 0, 0, -S * roll * 0.012);
+      add('neck', -lift * 0.012, 0, 0);
+      break;
+    }
+
+    case 'stretchUp': {
+      // Gentle chest-opening stretch: arms drift out and back, chin lifts.
+      const st = holdCurve(p, 0.35, 0.35);
+      add('leftUpperArm', -st * 0.18, 0, -st * 0.22);
+      add('rightUpperArm', -st * 0.18, 0, st * 0.22);
+      add('chest', -st * 0.045, 0, 0);
+      add('spine', -st * 0.025, 0, 0);
+      add('head', -st * 0.05, 0, 0);
+      add('neck', -st * 0.03, 0, 0);
+      break;
+    }
+
+    case 'headScratch': {
+      // Sheepish head-scratch: right hand to the back of the head.
+      // (Forearm flexion is local z, not x. Right-side only: left elbow
+      // doesn't mirror cleanly on this model.)
+      const sc = holdCurve(p, 0.3, 0.35);
+      const rub = Math.sin(gestureT * 9.0) * 0.02 * sc;
+      add('rightUpperArm', -sc * 0.35, 0, -sc * 0.15);
+      add('rightLowerArm', 0, 0, -sc * 1.40);
+      add('rightHand', rub, 0, 0);
+      add('head', sc * 0.02, -sc * 0.05, sc * 0.06);
+      add('neck', 0, -sc * 0.03, 0);
       break;
     }
 
@@ -745,6 +863,43 @@ function applyGestures(dt) {
       add('spine', -Math.abs(ex) * 0.006, 0, 0);
       applyFingerCurl(-1, Math.abs(ex) * 0.4);
       applyFingerCurl(1, Math.abs(ex) * 0.4);
+      break;
+    }
+
+    case 'shrugExplain': {
+      // "Who knows?" shrug: shoulders hitch, arms drift out, palms open.
+      // (Elbow flexion is local z: right -z, left +z.)
+      const sh = holdCurve(p, 0.3, 0.35);
+      add('leftUpperArm', -sh * 0.12, 0, -sh * 0.18);
+      add('rightUpperArm', -sh * 0.12, 0, sh * 0.18);
+      add('leftLowerArm', 0, 0, sh * 0.25);
+      add('rightLowerArm', 0, 0, -sh * 0.25);
+      add('leftHand', sh * 0.06, sh * 0.08, 0);
+      add('rightHand', sh * 0.06, -sh * 0.08, 0);
+      add('head', sh * 0.015, 0, S * sh * 0.03);
+      add('chest', sh * 0.02, 0, 0);
+      applyFingerCurl(-1, 0.15 * sh);
+      applyFingerCurl(1, 0.15 * sh);
+      break;
+    }
+
+    case 'countFingers': {
+      // Listing points: one hand held up, the other index taps its fingers.
+      // (Upper-arm x+ = forward; z-: right-inward, z+: left-inward.)
+      const cf = holdCurve(p, 0.3, 0.35);
+      const tap = Math.max(0, Math.sin(gestureT * 6.0)) * cf;
+      const OS = -S; // holding hand is the opposite side
+      const OUA = OS > 0 ? 'rightUpperArm' : 'leftUpperArm';
+      const OLA = OS > 0 ? 'rightLowerArm' : 'leftLowerArm';
+      const OHD = OS > 0 ? 'rightHand' : 'leftHand';
+      add(OUA, cf * 0.22, 0, -OS * cf * 0.14);
+      add(OLA, 0, 0, -OS * cf * 0.30);
+      add(OHD, cf * 0.05, 0, 0);
+      add(UA, cf * 0.18, 0, -S * cf * 0.16);
+      add(LA, 0, 0, -S * cf * 0.34);
+      add(HD, -tap * 0.04, 0, 0);
+      add('head', cf * 0.01, S * cf * 0.04, 0);
+      gestureLookAt = OS; // glance at the counting hand
       break;
     }
 
@@ -1062,6 +1217,10 @@ function updateExpressions(dt) {
     const rx = ('relaxed' in exprTargets) ? 'relaxed' : (('fun' in exprTargets) ? 'fun' : null);
     if (rx) { try { em.setValue(rx, 0.5 * th); } catch (_) { } }
   }
+  // Thinking mouth: faintly pursed lips, eased with the thinking blend.
+  // Driven through exprTargets so the fast mouth lerp handles the easing;
+  // visemes reclaim the keys the moment speech starts.
+  if (!speakingRecently()) exprTargets['oh'] = 0.12 * th;
 }
 
 function applyBlink(dt) {
@@ -1239,8 +1398,18 @@ window.aikoSetMouthOpen = (weight = 0) => {
 // ── state pose API ────────────────────────────────────────────────
 window.aikoSetThinking = (active = true) => {
   const on = Boolean(active);
-  if (on && !thinkingActive) thinkingSide = Math.random() < 0.5 ? -1 : 1;
+  if (on && !thinkingActive) rollThinkingEpisode();
   thinkingActive = on;
+};
+// Headless test hook: pin one thinking variant + lean for screenshots.
+window.aikoTestThinking = (variant, leanName = 'neutral') => {
+  const vi = THINK_VARIANTS.indexOf(variant);
+  if (vi >= 0) thinkVariant = vi;
+  const li = THINK_LEAN_NAMES.indexOf(leanName);
+  if (li >= 0) thinkLean = THINK_LEANS[li];
+  thinkSide = 1;
+  thinkDriftPhase = 0;
+  thinkingActive = true;
 };
 window.aikoSetListening = (active = true) => {
   listeningActive = Boolean(active);

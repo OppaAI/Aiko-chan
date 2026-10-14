@@ -1044,11 +1044,15 @@ function applyGestures(dt) {
     }
 
     case 'bow': {
+      // Observed on Aiko.vrm: torso x+ arches BACKWARD, so the bow
+      // pitches on negative-x (head/neck already flipped last round).
       const b = pulseCurve(p, 1) * 0.20;
-      add('spine', b, 0, 0);
-      add('chest', b * 0.7, 0, 0);
-      add('head', b * 0.45, 0, 0);
-      add('neck', b * 0.3, 0, 0);
+      add('spine', -b, 0, 0);
+      add('chest', -b * 0.7, 0, 0);
+      // Head nods WITH the spine (chin down, fingerChin convention):
+      // positive head-x tilts up-back, which read as a backward bow.
+      add('head', -b * 0.45, 0, 0);
+      add('neck', -b * 0.3, 0, 0);
       add('leftUpperArm', b * 0.08, 0, 0);
       add('rightUpperArm', b * 0.08, 0, 0);
       break;

@@ -534,7 +534,7 @@ body::before {
 /* companion HUD inside the stage */
 #vrm-side #ws-dots {
   position: absolute !important;
-  top: 16px !important;
+  top: 48px !important;
   right: 16px !important;
   left: auto !important;
   z-index: 9;

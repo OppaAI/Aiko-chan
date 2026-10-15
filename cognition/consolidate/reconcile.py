@@ -200,52 +200,74 @@ def _decide_cluster_actions(members: list) -> list[dict]:
 
 def _apply_cluster(backend, user_id: str, members: list, actions: list[dict],
                    now: str, result: dict) -> None:
-    """Apply one cluster's actions. Never raises — caller logs per cluster."""
+    """Apply one cluster's actions atomically.
+
+    Owns the transaction: all actions commit together, or the whole cluster
+    rolls back on error (re-raised for the caller's per-cluster logging).
+    supersede_with_temporal runs with commit=False so its writes join this
+    transaction instead of committing early.
+    """
     conn = backend._conn
     by_id = {str(m["id"]): m for m in members}
     member_ids = set(by_id)
     covered: set[str] = set()
+    merged = 0
+    superseded = 0
 
-    for a in actions:
-        act = a.get("action")
-        if act == "merge":
-            src_ids = [
-                str(s) for s in (a.get("source_ids") or [])
-                if str(s) in member_ids and str(s) not in covered
-            ]
-            text = str(a.get("text") or "").strip()
-            if len(src_ids) < 2 or not text:
-                continue
-            mem_type = _majority(str(by_id[s]["mem_type"] or "") for s in src_ids)
-            kind = _majority(str(by_id[s]["kind"] or "") for s in src_ids) or KIND_FACT
-            try:
-                vector = backend._embed(text)
-            except Exception as e:
-                log.debug("reconcile: merge embed failed: %s", e)
-                vector = None
-            new_id = str(uuid.uuid4())
-            backend._insert_row(
-                mem_id=new_id, user_id=user_id, text=text, now=now,
-                vector=vector, pinned=0, source=SOURCE_DREAM,
-                kind=kind, mem_type=mem_type, valid_from=now,
-            )
-            for s in src_ids:
-                _close_row_temporal(conn, s, new_id, user_id, now)
-                covered.add(s)
-            result["merged"] += 1
-            result["superseded"] += len(src_ids)
-        elif act == "supersede":
-            old_id = str(a.get("old_id") or "")
-            new_text = str(a.get("new_text") or "").strip()
-            if old_id not in member_ids or old_id in covered or not new_text:
-                continue
-            new_id = backend.supersede_with_temporal(old_id, new_text, user_id)
-            if new_id:
-                covered.add(old_id)
-                result["superseded"] += 1
-        # "keep" and unknown actions: nothing to do.
+    try:
+        for a in actions:
+            act = a.get("action")
+            if act == "merge":
+                src_ids = [
+                    str(s) for s in (a.get("source_ids") or [])
+                    if str(s) in member_ids and str(s) not in covered
+                ]
+                text = str(a.get("text") or "").strip()
+                if len(src_ids) < 2 or not text:
+                    continue
+                mem_type = _majority(str(by_id[s]["mem_type"] or "") for s in src_ids)
+                kind = _majority(str(by_id[s]["kind"] or "") for s in src_ids) or KIND_FACT
+                try:
+                    vector = backend._embed(text)
+                except Exception as e:
+                    log.debug("reconcile: merge embed failed: %s", e)
+                    vector = None
+                new_id = str(uuid.uuid4())
+                backend._insert_row(
+                    mem_id=new_id, user_id=user_id, text=text, now=now,
+                    vector=vector, pinned=0, source=SOURCE_DREAM,
+                    kind=kind, mem_type=mem_type, valid_from=now,
+                )
+                for s in src_ids:
+                    _close_row_temporal(conn, s, new_id, user_id, now)
+                    covered.add(s)
+                merged += 1
+                superseded += len(src_ids)
+            elif act == "supersede":
+                old_id = str(a.get("old_id") or "")
+                new_text = str(a.get("new_text") or "").strip()
+                if old_id not in member_ids or old_id in covered or not new_text:
+                    continue
+                new_id = backend.supersede_with_temporal(
+                    old_id, new_text, user_id, commit=False)
+                if new_id:
+                    covered.add(old_id)
+                    superseded += 1
+            # "keep" and unknown actions: nothing to do.
 
-    # Stamp every examined member so the job makes progress even on keep/noop.
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    result["merged"] += merged
+    result["superseded"] += superseded
+    result["kept"] += len(member_ids - covered)
+
+    # Progress stamping is best-effort and separate from the action
+    # transaction: a stamp failure must never roll back applied merges.
     for mid in member_ids:
         try:
             conn.execute(
@@ -257,7 +279,6 @@ def _apply_cluster(backend, user_id: str, members: list, actions: list[dict],
         conn.commit()
     except Exception:
         pass
-    result["kept"] += len(member_ids - covered)
 
 
 def _stamp_reconciled(conn, mem_ids: list[str], now: str) -> None:
@@ -322,8 +343,19 @@ def run_reconcile(memorize, user_id: str, now: str | None = None,
         result["error"] = str(e)
         return result
 
+    all_cluster_ids = {
+        str(mid) for cluster in clusters for mid in cluster
+    }
     clusters = clusters[:MEMORY_RECONCILE_MAX_CLUSTERS]
     row_by_id = {str(r["id"]): r for r in rows}
+    # Rows examined by this pass: unclustered candidates plus members of
+    # clusters that actually reached the LLM. Members of clusters cut by the
+    # cluster/LLM budget stay unstamped so the next pass reconsiders them
+    # instead of waiting out RESCAN_DAYS.
+    examined_ids = {
+        str(r["id"]) for r in rows
+        if str(r["id"]) not in all_cluster_ids
+    }
 
     for cluster in clusters:
         members = [row_by_id[mid] for mid in cluster if mid in row_by_id]
@@ -332,6 +364,7 @@ def run_reconcile(memorize, user_id: str, now: str | None = None,
         if result["llm_calls"] >= MEMORY_RECONCILE_MAX_LLM_CALLS:
             log.info("reconcile: LLM call budget exhausted")
             break
+        examined_ids.update(str(m["id"]) for m in members)
         result["clusters"] += 1
         result["llm_calls"] += 1
         try:
@@ -350,17 +383,26 @@ def run_reconcile(memorize, user_id: str, now: str | None = None,
             log.exception("reconcile: apply failed for cluster %s", cluster)
             continue
 
-    # Stamp every examined candidate (clustered, vectorless, or lone) so the
-    # job makes progress and doesn't re-select the same rows every night.
+    # Stamp examined candidates (clustered, vectorless, or lone) so the job
+    # makes progress and doesn't re-select the same rows every night.
     # _apply_cluster already stamped clustered members; re-stamping is a
     # harmless no-op. dry_run writes nothing.
     if not dry_run:
         try:
-            _locked(_stamp_reconciled, conn,
-                    [str(r["id"]) for r in rows], now)
+            _locked(_stamp_reconciled, conn, sorted(examined_ids), now)
         except Exception as e:
             log.debug("reconcile: final stamp failed: %s", e)
-    result["examined"] = len(rows)
+        # Merges/supersessions changed the store: drop cached reads (both the
+        # wrapper and backend search caches, plus the persona blob) so the
+        # next turn sees fresh data.
+        if result["merged"] or result["superseded"]:
+            clear = getattr(memorize, "_clear_search_cache", None)
+            if callable(clear):
+                try:
+                    clear()
+                except Exception as e:
+                    log.debug("reconcile: cache clear failed: %s", e)
+    result["examined"] = len(examined_ids)
     log.info(
         "reconcile: candidates=%d clusters=%d merged=%d superseded=%d "
         "kept=%d llm_calls=%d dry_run=%s",

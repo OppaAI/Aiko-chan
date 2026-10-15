@@ -1055,7 +1055,8 @@ class _MemoryBackend:
     def supersede_with_temporal(self, old_id: str, new_text: str, user_id: str, *,
                                 kind: str | None = None,
                                 mem_type: str | None = None,
-                                source: str = SOURCE_DREAM) -> str | None:
+                                source: str = SOURCE_DREAM,
+                                commit: bool = True) -> str | None:
         """Supersede one memory row with temporal-validity bookkeeping.
 
         The old row is closed (status='superseded', valid_to=now,
@@ -1065,6 +1066,10 @@ class _MemoryBackend:
         valid_to IS NULL. Inherits kind/mem_type from the old row unless
         overridden. Returns the new row id, or None on failure /
         already-superseded.
+
+        ``commit=False`` leaves the transaction open for the caller (used by
+        the reconcile job's per-cluster atomic apply); failures re-raise in
+        that mode so the caller can roll back the whole cluster.
         """
         text = (new_text or "").strip()
         if not old_id or not text or not user_id:
@@ -1093,7 +1098,8 @@ class _MemoryBackend:
                     valid_from=now,
                 )
                 _close_row_temporal(self._conn, old_id, new_id, user_id, now)
-                self._conn.commit()
+                if commit:
+                    self._conn.commit()
                 return new_id
             except Exception as exc:
                 log.warning("Temporal memory supersession failed: %s", exc)
@@ -1101,6 +1107,8 @@ class _MemoryBackend:
                     self._conn.rollback()
                 except Exception:
                     pass
+                if not commit:
+                    raise
                 return None
 
     # ── vector backfill ────────────────────────────────────────────────────────
@@ -3563,9 +3571,11 @@ class AikoMemorize:
     MIN_CLEAR_INTERVAL: float = 0.5  # seconds — debounce window for cache invalidation
 
     def _clear_search_cache(self) -> None:
-        # The search-result cache lives on _MemoryBackend now (see _MemoryBackend.__init__).
-        # Delegate so we don't keep a separate copy on AikoMemorize that would
-        # silently desync from the one the search path actually reads/writes.
+        # AikoMemorize owns its own _search_cache (read by _search_top); the
+        # backend owns a separate one. Clear both so no stale search results
+        # survive a write — previously only the backend cache was cleared.
+        with self._search_cache_lock:
+            self._search_cache.clear()
         if self._mem_backend is not None:
             self._mem._clear_search_cache()
         # Persona blob is identity-derived; a new/changed identity fact must

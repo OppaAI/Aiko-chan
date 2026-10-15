@@ -99,7 +99,7 @@ input[type=text], input[type=number] { width: 100%; background: var(--bg); color
 .edge { transition: stroke-opacity .2s ease, stroke-width .2s ease; }
 
 .search-hit { transition: background .15s; border-radius: 3px; padding: 7px 6px; }
-.search-hit:hover { background: rgba(168,136,232,0.08); }
+.search-hit:hover { background: rgba(58, 74, 46,0.08); }
 .filter-btn { transition: opacity .2s, border-color .2s; }
 
 @media (max-width: 800px) {

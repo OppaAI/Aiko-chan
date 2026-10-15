@@ -176,3 +176,6 @@ a[style*="#1a1028"] {
 .palette-dot[style*="#c651a8"], .swatch[style*="#c651a8"], i[style*="#c651a8"] {
   background: #c8813a !important;
 }
+
+/* dark journal: buttons (hardcoded light surface) */
+html[data-theme="dark"] .btn { background: #1e2417; color: #e6dfd0; }

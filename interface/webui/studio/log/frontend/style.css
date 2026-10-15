@@ -18,3 +18,18 @@ time, .component { color:#7a8f68; font-size:.83rem; font-family:"DM Mono", ui-mo
 .level { font-weight:700; font-family:"DM Mono", ui-monospace, monospace; font-size:.78rem; text-transform:uppercase; letter-spacing:.06em; }
 pre { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; font: .83rem/1.45 "DM Mono", ui-monospace, monospace; color:#4a3728; }
 @media (max-width:800px) { header, main { padding:14px; } article { grid-template-columns:1fr; gap:5px; } }
+
+
+/* ── dark variant: follows the main WebUI theme flag (localStorage 'aiko-theme') ── */
+html[data-theme="dark"] { color-scheme: dark; background: #141a10; color: #e6dfd0; }
+html[data-theme="dark"] header { border-bottom-color: rgba(179, 196, 154, 0.18); }
+html[data-theme="dark"] h1 { color: #b3c49a; }
+html[data-theme="dark"] p { color: #9aa88a; }
+html[data-theme="dark"] button, html[data-theme="dark"] input, html[data-theme="dark"] select { background: #1e2417; color: #e6dfd0; border-color: rgba(179, 196, 154, 0.18); }
+html[data-theme="dark"] button:hover { border-color: #b3c49a; background: rgba(179, 196, 154, 0.14); }
+html[data-theme="dark"] label { color: #9aa88a; }
+html[data-theme="dark"] article { border-color: rgba(179, 196, 154, 0.18); border-left-color: #8aa864; background: rgba(30, 36, 23, 0.9); }
+html[data-theme="dark"] .level-error, html[data-theme="dark"] .level-critical { border-left-color: #c86a4a; }
+html[data-theme="dark"] .level-warning { border-left-color: #c8813a; }
+html[data-theme="dark"] time, html[data-theme="dark"] .component { color: #9aa88a; }
+html[data-theme="dark"] pre { color: #e6dfd0; }

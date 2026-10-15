@@ -40,3 +40,12 @@
 .valence-legend .pos i { background: #c8813a; box-shadow: 0 0 6px #c8813a; }
 .valence-legend .neg i { background: #5b7a4e; box-shadow: 0 0 6px #5b7a4e; }
 .valence-legend .neu i { background: #7a8f68; }
+
+
+/* ── dark variant: score gradient readable on the dark background ── */
+html[data-theme="dark"] .mem.valence-pos .mem-score,
+html[data-theme="dark"] .mem.valence-neg .mem-score,
+html[data-theme="dark"] .mem.valence-neutral .mem-score,
+html[data-theme="dark"] .mem .mem-score {
+  background: linear-gradient(180deg, #b3c49a, #c8813a) !important;
+}

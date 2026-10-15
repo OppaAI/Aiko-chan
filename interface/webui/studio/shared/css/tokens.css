@@ -52,3 +52,113 @@
   --radius: 4px;
   --radius-lg: 6px;
 }
+
+/* ── dark variant: follows the main WebUI theme flag (localStorage 'aiko-theme').
+   The head script sets html[data-theme] synchronously before CSS loads, so there
+   is no flash of the wrong theme. Higher specificity than :root wins over every
+   panel-local light token definition. ── */
+/* ── dark variant: the field-journal at night. Follows the main WebUI theme
+   flag (localStorage 'aiko-theme'). The head script sets html[data-theme]
+   synchronously before CSS loads, so there is no flash of the wrong theme.
+   Higher specificity than :root wins over every panel-local light token
+   definition. Zero purple/violet/pink/teal. ── */
+html[data-theme="dark"] {
+  color-scheme: dark;
+  /* site palette translated to dark */
+  --cream: #e6dfd0;
+  --parch: #232b1a;
+  --moss: #b3c49a;
+  --sage: #9aa88a;
+  --fern: #b3c49a;
+  --bark: #141a10;
+  --soil: #d8d0bd;
+  --ink: #0e120b;
+  --amber: #c8813a;
+  --rust: #c87a4a;
+  --mist: #2a3322;
+  --circuit: #8aa864;
+  /* legacy / shared names */
+  --bg: #141a10;
+  --bg2: #1a2013;
+  --panel: #1e2417;
+  --slot: #1e2417;
+  --border: rgba(179, 196, 154, 0.18);
+  --line: rgba(179, 196, 154, 0.12);
+  --pink: #c8813a;
+  --purple: #b3c49a;
+  --accent: #b3c49a;
+  --accent2: #8aa864;
+  --mauve: #9aa88a;
+  --cyan: #8aa864;
+  --gold: #c8813a;
+  --dim: #9aa88a;
+  --dimmer: rgba(179, 196, 154, 0.08);
+  --dim-text: #9aa88a;
+  --muted: #9aa88a;
+  --text: #e6dfd0;
+  --brown: #c87a4a;
+  --orange: #c8813a;
+  --green: #8aa864;
+  --violet: #9aa88a;
+  --danger: #c86a4a;
+  --glass: rgba(30, 36, 23, 0.9);
+  --glass-bg: rgba(30, 36, 23, 0.9);
+  --glass-border: rgba(179, 196, 154, 0.18);
+  --glass-highlight: rgba(255, 255, 255, 0.04);
+  /* panel-local tokens (defined under :root in panel sheets) */
+  --red: #c86a4a;
+  --red-bright: #d4845f;
+  --orange-bright: #d8953f;
+  --dim-bright: #aab896;
+  --purple-bright: #b3c49a;
+  --green-bright: #8aa864;
+  --cyan-bright: #8aa864;
+  --meta: #9aa88a;
+  --neg: #8aa864;
+  --pos: #c8813a;
+  --neutral: #9aa88a;
+  --entity: #b3c49a;
+  --episode: #8aa864;
+  --n8n-card: rgba(30, 36, 23, 0.9);
+  --n8n-card-border: rgba(179, 196, 154, 0.18);
+  --n8n-dot: #2a3322;
+  --n8n-green: #8aa864;
+  --n8n-red: #c86a4a;
+  --n8n-orange: #c87a4a;
+  --n8n-sub: #9aa88a;
+}
+
+/* shared hardcoded light surfaces → dark (panels loading tokens.css) */
+html[data-theme="dark"] .content-area { background: radial-gradient(ellipse at center, #232b1a 0%, #141a10 70%); }
+html[data-theme="dark"] .canvas-area { background: radial-gradient(ellipse at center, #232b1a 0%, #141a10 70%); }
+html[data-theme="dark"] #back-btn { background: #2a3322; }
+html[data-theme="dark"] .btn-primary:hover { background: #8aa864; box-shadow: 0 0 12px rgba(179, 196, 154, 0.35); }
+html[data-theme="dark"] .btn-danger { color: #c86a4a; }
+/* inline-style neutralizers were light-only; dark-appropriate values for dark mode.
+   (Beats the panel-local !important rules on specificity.) */
+html[data-theme="dark"] #back-btn[style*="#1a1028"],
+html[data-theme="dark"] .back[style*="#1a1028"],
+html[data-theme="dark"] a[style*="#1a1028"] {
+  background: #1e2417 !important;
+}
+html[data-theme="dark"] .palette-dot[style*="#e8c84a"], html[data-theme="dark"] .swatch[style*="#e8c84a"], html[data-theme="dark"] i[style*="#e8c84a"],
+html[data-theme="dark"] .palette-dot[style*="#f0c14a"], html[data-theme="dark"] .swatch[style*="#f0c14a"], html[data-theme="dark"] i[style*="#f0c14a"] {
+  background: #e8c84a !important;
+}
+html[data-theme="dark"] .palette-dot[style*="#d68792"], html[data-theme="dark"] .swatch[style*="#d68792"], html[data-theme="dark"] i[style*="#d68792"] {
+  background: #e08050 !important;
+}
+html[data-theme="dark"] .palette-dot[style*="#84d4e8"], html[data-theme="dark"] .swatch[style*="#84d4e8"], html[data-theme="dark"] i[style*="#84d4e8"],
+html[data-theme="dark"] .palette-dot[style*="#3de0ff"], html[data-theme="dark"] .swatch[style*="#3de0ff"], html[data-theme="dark"] i[style*="#3de0ff"],
+html[data-theme="dark"] .palette-dot[style*="#51d4c8"], html[data-theme="dark"] .swatch[style*="#51d4c8"], html[data-theme="dark"] i[style*="#51d4c8"],
+html[data-theme="dark"] .palette-dot[style*="#4ade80"], html[data-theme="dark"] .swatch[style*="#4ade80"], html[data-theme="dark"] i[style*="#4ade80"] {
+  background: #8aa864 !important;
+}
+html[data-theme="dark"] .palette-dot[style*="#a78bfa"], html[data-theme="dark"] .swatch[style*="#a78bfa"], html[data-theme="dark"] i[style*="#a78bfa"],
+html[data-theme="dark"] .palette-dot[style*="#e879f9"], html[data-theme="dark"] .swatch[style*="#e879f9"], html[data-theme="dark"] i[style*="#e879f9"] {
+  background: #b3c49a !important;
+  box-shadow: none !important;
+}
+html[data-theme="dark"] .palette-dot[style*="#c651a8"], html[data-theme="dark"] .swatch[style*="#c651a8"], html[data-theme="dark"] i[style*="#c651a8"] {
+  background: #c8813a !important;
+}

@@ -3,11 +3,11 @@
    the LTM graph nodes use a distinct neural-valence scheme that other studios
    don't share, so it stays scoped to this file. */
 :root {
-  --neg: #3de0ff;
-  --pos: #f0c14a;
-  --neutral: #8a9bb8;
-  --entity: #c9a0ff;
-  --episode: #51d4c8;
+  --neg: #5b7a4e;
+  --pos: #c8813a;
+  --neutral: #7a8f68;
+  --entity: #3a4a2e;
+  --episode: #5b7a4e;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
@@ -24,7 +24,7 @@ header h1 {
 }
 .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .btn {
-  background: #1a1028; border: 1px solid var(--dim); color: var(--dim);
+  background: #faf8f1; border: 1px solid var(--dim); color: var(--dim-text);
   font-size: 11px; letter-spacing: .08em; padding: 5px 12px; border-radius: 3px;
   cursor: pointer; text-transform: uppercase;
 }
@@ -44,14 +44,14 @@ header h1 {
 .sidebar input[type=number],
 .sidebar input[type=text],
 .sidebar input[type=date] {
-  width: 100%; background: #120a1c; border: 1px solid var(--dim); color: var(--text);
+  width: 100%; background: #ece6d6; border: 1px solid var(--dim); color: var(--text);
   padding: 6px 8px; border-radius: 3px; font-size: 12px;
 }
 .stat { color: var(--dim); font-size: 11px; margin-top: 4px; line-height: 1.45; }
 .canvas-area {
   position: relative;
   background:
-    radial-gradient(ellipse at 50% 40%, #0c1830 0%, #080812 40%, #050510 75%);
+    radial-gradient(ellipse at 50% 40%, #ece6d6 0%, #f4f0e6 70%);
 }
 .canvas-area svg { width: 100%; height: 100%; display: block; }
 
@@ -78,7 +78,7 @@ header h1 {
 }
 .detail-label { color: var(--dim); font-size: 10px; text-transform: uppercase; margin-top: 8px; }
 .detail-value { margin-top: 2px; word-break: break-word; }
-.score-bar { height: 4px; background: #1a1028; border-radius: 2px; margin-top: 4px; overflow: hidden; }
+.score-bar { height: 4px; background: #d4ddd0; border-radius: 2px; margin-top: 4px; overflow: hidden; }
 .score-bar > i { display: block; height: 100%; background: var(--purple); opacity: 0.85; }
 .legend {
   position: absolute; bottom: 12px; left: 14px; display: flex; flex-wrap: wrap;
@@ -130,7 +130,7 @@ header h1 {
 }
 .memory-studio-tab {
   flex: 1;
-  background: #120a1c;
+  background: #ece6d6;
   border: 1px solid var(--dim);
   color: var(--dim);
   text-align: center;
@@ -146,6 +146,33 @@ header h1 {
 .memory-studio-tab.active {
   color: var(--purple);
   border-color: var(--purple);
-  background: rgba(168, 136, 232, 0.12);
-  box-shadow: 0 0 8px rgba(168, 136, 232, 0.22);
+  background: rgba(58, 74, 46, 0.12);
+  box-shadow: 0 0 8px rgba(58, 74, 46, 0.22);
+}
+
+/* ── inline-style neutralizers (HTML untouched) ── */
+#back-btn[style*="#1a1028"],
+.back[style*="#1a1028"],
+a[style*="#1a1028"] {
+  background: #e8e2d4 !important;
+}
+/* legend / palette / swatch dots → elegant accents */
+.palette-dot[style*="#e8c84a"], .swatch[style*="#e8c84a"], i[style*="#e8c84a"],
+.palette-dot[style*="#f0c14a"], .swatch[style*="#f0c14a"], i[style*="#f0c14a"],
+.palette-dot[style*="#d68792"], .swatch[style*="#d68792"], i[style*="#d68792"] {
+  background: #c8813a !important;
+}
+.palette-dot[style*="#84d4e8"], .swatch[style*="#84d4e8"], i[style*="#84d4e8"],
+.palette-dot[style*="#3de0ff"], .swatch[style*="#3de0ff"], i[style*="#3de0ff"],
+.palette-dot[style*="#51d4c8"], .swatch[style*="#51d4c8"], i[style*="#51d4c8"],
+.palette-dot[style*="#4ade80"], .swatch[style*="#4ade80"], i[style*="#4ade80"] {
+  background: #5b7a4e !important;
+}
+.palette-dot[style*="#a78bfa"], .swatch[style*="#a78bfa"], i[style*="#a78bfa"],
+.palette-dot[style*="#e879f9"], .swatch[style*="#e879f9"], i[style*="#e879f9"] {
+  background: #3a4a2e !important;
+  box-shadow: none !important;
+}
+.palette-dot[style*="#c651a8"], .swatch[style*="#c651a8"], i[style*="#c651a8"] {
+  background: #c8813a !important;
 }

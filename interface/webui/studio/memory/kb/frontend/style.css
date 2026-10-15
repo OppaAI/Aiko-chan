@@ -1,13 +1,13 @@
 :root {
-  --bg: #0c0614;
-  --panel: #160e22;
-  --text: #e8e0f0;
-  --muted: #8b7a9e;
-  --dim: #3d2f4f;
-  --accent: #c084fc;
-  --green: #4ade80;
-  --purple: #a78bfa;
-  --brown: #a67c52;
+  --bg: #f4f0e6;
+  --panel: #faf8f1;
+  --text: #4a3728;
+  --muted: #7a8f68;
+  --dim: #d4ddd0;
+  --accent: #3a4a2e;
+  --green: #5b7a4e;
+  --purple: #3a4a2e;
+  --brown: #a0522d;
 }
 
 * { box-sizing: border-box; }
@@ -70,7 +70,7 @@ header .sub {
 .sidebar input[type=text],
 .sidebar select {
   width: 100%;
-  background: #120a1c;
+  background: #ece6d6;
   border: 1px solid var(--dim);
   color: var(--text);
   padding: 6px 8px;
@@ -79,7 +79,7 @@ header .sub {
 }
 
 .btn {
-  background: #2a1840;
+  background: #d4ddd0;
   border: 1px solid var(--accent);
   color: var(--text);
   padding: 7px 10px;
@@ -90,7 +90,7 @@ header .sub {
 }
 
 .btn:hover {
-  background: #3b2258;
+  background: #b3c49a;
 }
 
 .btn:focus-visible,
@@ -103,7 +103,7 @@ header .sub {
 #canvas {
   flex: 1;
   position: relative;
-  background: radial-gradient(ellipse at 50% 40%, #1a0f28 0%, var(--bg) 70%);
+  background: radial-gradient(ellipse at 50% 40%, #f4f0e6 0%, var(--bg) 70%);
 }
 
 svg {
@@ -131,7 +131,7 @@ svg {
 .details {
   margin-top: 14px;
   padding: 10px;
-  background: #120a1c;
+  background: #ece6d6;
   border-radius: 4px;
   border: 1px solid var(--dim);
   display: none;
@@ -207,7 +207,7 @@ svg {
 }
 .memory-studio-tab {
   flex: 1;
-  background: #120a1c;
+  background: #ece6d6;
   border: 1px solid var(--dim);
   color: var(--muted);
   text-align: center;
@@ -225,4 +225,31 @@ svg {
   border-color: var(--accent);
   background: rgba(192, 132, 252, 0.12);
   box-shadow: 0 0 8px rgba(192, 132, 252, 0.22);
+}
+
+/* ── inline-style neutralizers (HTML untouched) ── */
+#back-btn[style*="#1a1028"],
+.back[style*="#1a1028"],
+a[style*="#1a1028"] {
+  background: #e8e2d4 !important;
+}
+/* legend / palette / swatch dots → elegant accents */
+.palette-dot[style*="#e8c84a"], .swatch[style*="#e8c84a"], i[style*="#e8c84a"],
+.palette-dot[style*="#f0c14a"], .swatch[style*="#f0c14a"], i[style*="#f0c14a"],
+.palette-dot[style*="#d68792"], .swatch[style*="#d68792"], i[style*="#d68792"] {
+  background: #c8813a !important;
+}
+.palette-dot[style*="#84d4e8"], .swatch[style*="#84d4e8"], i[style*="#84d4e8"],
+.palette-dot[style*="#3de0ff"], .swatch[style*="#3de0ff"], i[style*="#3de0ff"],
+.palette-dot[style*="#51d4c8"], .swatch[style*="#51d4c8"], i[style*="#51d4c8"],
+.palette-dot[style*="#4ade80"], .swatch[style*="#4ade80"], i[style*="#4ade80"] {
+  background: #5b7a4e !important;
+}
+.palette-dot[style*="#a78bfa"], .swatch[style*="#a78bfa"], i[style*="#a78bfa"],
+.palette-dot[style*="#e879f9"], .swatch[style*="#e879f9"], i[style*="#e879f9"] {
+  background: #3a4a2e !important;
+  box-shadow: none !important;
+}
+.palette-dot[style*="#c651a8"], .swatch[style*="#c651a8"], i[style*="#c651a8"] {
+  background: #c8813a !important;
 }

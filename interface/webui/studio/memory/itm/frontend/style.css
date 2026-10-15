@@ -16,7 +16,7 @@ header h1 { font-size: 14px; letter-spacing: .14em; text-transform: uppercase; c
   border-radius: 4px; padding: 5px 12px; cursor: pointer; font-size: 12px;
 }
 .btn:hover { border-color: var(--purple); }
-.btn-primary { background: var(--purple); color: #120a1c; border-color: var(--purple); font-weight: 600; }
+.btn-primary { background: var(--purple); color: #ece6d6; border-color: var(--purple); font-weight: 600; }
 .body { display: flex; height: calc(100vh - 55px); }
 .sidebar {
   width: 260px; padding: 14px; border-right: 1px solid var(--border);
@@ -40,7 +40,7 @@ header h1 { font-size: 14px; letter-spacing: .14em; text-transform: uppercase; c
   flex: 1; text-align: center; font-size: 11px; text-decoration: none;
   color: var(--dim); padding: 5px 0; border-radius: 4px; border: 1px solid var(--border);
 }
-.memory-studio-tab.active { color: #120a1c; background: var(--purple); border-color: var(--purple); }
+.memory-studio-tab.active { color: #ece6d6; background: var(--purple); border-color: var(--purple); }
 .pipe { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
 .pipe-step { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; text-align: center; }
 .pipe-title { font-size: 9px; letter-spacing: .12em; text-transform: uppercase; color: var(--dim); }
@@ -64,9 +64,9 @@ header h1 { font-size: 14px; letter-spacing: .14em; text-transform: uppercase; c
 .ep-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
 .ep-date { font-size: 11px; color: var(--muted); }
 .badge { font-size: 9px; text-transform: uppercase; letter-spacing: .08em; padding: 2px 7px; border-radius: 3px; }
-.val-pos { background: rgba(240, 193, 74, .15); color: #f0c14a; }
-.val-neg { background: rgba(61, 224, 255, .15); color: #3de0ff; }
-.val-neu { background: rgba(138, 155, 184, .15); color: var(--muted); }
+.val-pos { background: rgba(200, 129, 58, .15); color: #c8813a; }
+.val-neg { background: rgba(91, 122, 78, .15); color: #5b7a4e; }
+.val-neu { background: rgba(122, 143, 104, .15); color: var(--muted); }
 .tag { font-size: 9px; text-transform: uppercase; letter-spacing: .08em; padding: 1px 6px; border-radius: 3px; margin-left: 6px; }
 .tag.distilled { background: rgba(232, 200, 74, .15); color: var(--gold); }
 .tag.staging { background: rgba(74, 58, 106, .5); color: var(--muted); }
@@ -77,7 +77,7 @@ header h1 { font-size: 14px; letter-spacing: .14em; text-transform: uppercase; c
 .ep-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; font-size: 11px; }
 .ents { display: flex; flex-wrap: wrap; gap: 4px; }
 .ent {
-  background: rgba(168, 136, 232, .12); color: var(--muted);
+  background: rgba(58, 74, 46, .12); color: var(--muted);
   font-size: 10px; padding: 2px 7px; border-radius: 3px;
 }
 .muted { color: var(--muted); }
@@ -106,3 +106,30 @@ header h1 { font-size: 14px; letter-spacing: .14em; text-transform: uppercase; c
   display: flex; justify-content: space-between; gap: 10px;
 }
 .fact-text { color: var(--gold); }
+
+/* ── inline-style neutralizers (HTML untouched) ── */
+#back-btn[style*="#1a1028"],
+.back[style*="#1a1028"],
+a[style*="#1a1028"] {
+  background: #e8e2d4 !important;
+}
+/* legend / palette / swatch dots → elegant accents */
+.palette-dot[style*="#e8c84a"], .swatch[style*="#e8c84a"], i[style*="#e8c84a"],
+.palette-dot[style*="#f0c14a"], .swatch[style*="#f0c14a"], i[style*="#f0c14a"],
+.palette-dot[style*="#d68792"], .swatch[style*="#d68792"], i[style*="#d68792"] {
+  background: #c8813a !important;
+}
+.palette-dot[style*="#84d4e8"], .swatch[style*="#84d4e8"], i[style*="#84d4e8"],
+.palette-dot[style*="#3de0ff"], .swatch[style*="#3de0ff"], i[style*="#3de0ff"],
+.palette-dot[style*="#51d4c8"], .swatch[style*="#51d4c8"], i[style*="#51d4c8"],
+.palette-dot[style*="#4ade80"], .swatch[style*="#4ade80"], i[style*="#4ade80"] {
+  background: #5b7a4e !important;
+}
+.palette-dot[style*="#a78bfa"], .swatch[style*="#a78bfa"], i[style*="#a78bfa"],
+.palette-dot[style*="#e879f9"], .swatch[style*="#e879f9"], i[style*="#e879f9"] {
+  background: #3a4a2e !important;
+  box-shadow: none !important;
+}
+.palette-dot[style*="#c651a8"], .swatch[style*="#c651a8"], i[style*="#c651a8"] {
+  background: #c8813a !important;
+}

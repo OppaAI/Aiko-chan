@@ -1,34 +1,39 @@
-/* Shared purple-studio theme — used by every Memory Studio (STM, LTM, ITM, KB, Codebase).
-   Single source of truth so all four studios match the KB look. */
+/* Shared elegant-studio theme — used by every Memory Studio (STM, LTM, ITM, KB, Codebase).
+   Single source of truth so all studios share the field-journal look. */
 :root {
-  --bg:      #0c0614;
-  --panel:   #160e22;
-  --text:    #e8e0f0;
-  --muted:   #8b7a9e;
-  --dim:     #3d2f4f;
-  --accent:  #c084fc;
-  --accent2: #a78bfa;
-  --green:   #4ade80;
-  --purple:  #a78bfa;
-  --pink:    #c651a8;
-  --brown:   #a67c52;
-  --cyan:    #51d4c8;
-  --orange:  #e8843a;
-  --gold:    #f0c14a;
-  --danger:  #e8516a;
-  --bg2:     #160e22;
-  --border:  #3d2f4f;
-  --dimmer:  #2a1a4a;
-  --glass:   rgba(22, 14, 34, 0.82);
-  --slot:    #160e22;
-  --dim-text:#8b7a9e;
-  --font-main: system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: ui-monospace, "SF Mono", menlo, consolas, monospace;
+  --bg:      #f4f0e6;
+  --panel:   #faf8f1;
+  --text:    #4a3728;
+  --muted:   #7a8f68;
+  --dim:     #d4ddd0;
+  --accent:  #3a4a2e;
+  --accent2: #5b7a4e;
+  --green:   #5b7a4e;
+  --purple:  #3a4a2e;
+  --pink:    #c8813a;
+  --brown:   #a0522d;
+  --cyan:    #5b7a4e;
+  --orange:  #c8813a;
+  --gold:    #c8813a;
+  --danger:  #a0522d;
+  --bg2:     #ece6d6;
+  --border:  rgba(58, 74, 46, 0.16);
+  --dimmer:  rgba(58, 74, 46, 0.08);
+  --glass:   rgba(250, 248, 241, 0.92);
+  --slot:    #faf8f1;
+  --dim-text:#7a8f68;
+  --font-main: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "DM Mono", ui-monospace, "SF Mono", menlo, consolas, monospace;
 }
 
 body {
-  font: 13px var(--font-main);
-  background: var(--bg);
+  font: 15px/1.6 var(--font-main);
+  background-color: #f4f0e6;
+  background-image:
+    radial-gradient(ellipse 60% 45% at 12% 0%, rgba(58, 74, 46, 0.06), transparent 70%),
+    linear-gradient(rgba(58, 74, 46, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(58, 74, 46, 0.04) 1px, transparent 1px);
+  background-size: auto, 60px 60px, 60px 60px;
   color: var(--text);
 }
 
@@ -41,23 +46,33 @@ header h1,
 .eyebrow,
 h1, h2 {
   color: var(--accent);
-  letter-spacing: 0.14em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
-  font-weight: 600;
+  font-weight: 400;
+  font-family: var(--font-mono);
+  font-size: 12px;
 }
 
 header h1,
 .top h1,
 .brand h1 {
-  font-size: 15px;
+  font-size: 13px;
   margin: 0;
+}
+
+h1.display, h2.display, .display-title {
+  font-family: "Fraunces", Georgia, serif;
+  font-weight: 300;
+  text-transform: none;
+  letter-spacing: -0.01em;
+  font-size: 24px;
 }
 
 .btn {
   background: var(--panel);
   border: 1px solid var(--border);
   color: var(--muted);
-  font: 12px var(--font-main);
+  font: 11px var(--font-mono);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   padding: 6px 12px;
@@ -68,12 +83,19 @@ header h1,
 .btn:hover {
   color: var(--accent);
   border-color: var(--accent);
+  background: #e8e2d4;
 }
 
 .btn-primary {
   background: var(--accent);
-  color: var(--bg);
+  color: #f4f0e6;
   border-color: var(--accent);
+}
+
+.btn-primary:hover {
+  background: #2c2419;
+  border-color: #2c2419;
+  color: #f4f0e6;
 }
 
 .memory-studio-tabs {
@@ -85,8 +107,8 @@ header h1,
 }
 
 .memory-studio-tab {
-  font: 12px var(--font-main);
-  letter-spacing: 0.14em;
+  font: 11px var(--font-mono);
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--muted);
   text-decoration: none;
@@ -111,12 +133,12 @@ header h1,
    the same theme without renaming every var() reference. */
 :root {
   /* DAG canvas chrome */
-  --amber:  #e8a13a;
-  --mauve:  #d8bcff;
-  --font-ui: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
-  --glass-bg: rgba(24, 16, 36, 0.62);
-  --glass-border: rgba(200, 168, 240, 0.16);
-  --glass-highlight: rgba(255, 255, 255, 0.06);
+  --amber:  #c8813a;
+  --mauve:  #7a8f68;
+  --font-ui: "Instrument Sans", system-ui, "Segoe UI", Roboto, sans-serif;
+  --glass-bg: rgba(250, 248, 241, 0.9);
+  --glass-border: rgba(58, 74, 46, 0.16);
+  --glass-highlight: rgba(255, 255, 255, 0.5);
   /* Fly Studio chrome */
   --line:   var(--border);
   --violet: var(--accent2);

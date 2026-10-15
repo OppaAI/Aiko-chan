@@ -1,23 +1,54 @@
-/* Studio design tokens — shared across Spec / DAG / Memory / MCP / Approval */
+/* Studio design tokens — elegant field-journal theme, matching oppaai.github.io.
+   Shared across Spec / DAG / Memory / MCP / Approval / Calendar / Codebase. */
 :root {
-  --bg: #0a0a0f;
-  --bg2: #0e0e17;
-  --border: #1e1428;
-  --pink: #c651a8;
-  --purple: #a888e8;
-  --mauve: #d8bcff;
-  --cyan: #51d4c8;
-  --gold: #e8c84a;
-  --dim: #4a3a6a;
-  --dimmer: #2a1a4a;
-  --text: #cdbfe6;
-  --danger: #e8516a;
-  --glass-bg: rgba(24, 16, 36, 0.5);
-  --glass-border: rgba(200, 168, 240, 0.16);
-  --glass-highlight: rgba(255, 255, 255, 0.06);
-  --font-main: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-serif: ui-serif, "Iowan Old Style", "Source Serif Pro", charter, georgia, serif;
-  --font-mono: ui-monospace, "SF Mono", menlo, consolas, monospace;
+  /* site palette */
+  --cream: #f4f0e6;
+  --parch: #e8e2d4;
+  --moss: #3a4a2e;
+  --sage: #7a8f68;
+  --fern: #b3c49a;
+  --bark: #2c2419;
+  --soil: #4a3728;
+  --ink: #1a1f14;
+  --amber: #c8813a;
+  --rust: #a0522d;
+  --mist: #d4ddd0;
+  --circuit: #5b7a4e;
+
+  /* legacy names, repointed (panels reference these) */
+  --bg: #f4f0e6;
+  --bg2: #ece6d6;
+  --panel: #faf8f1;
+  --slot: #faf8f1;
+  --border: rgba(58, 74, 46, 0.16);
+  --line: rgba(58, 74, 46, 0.12);
+  --pink: #c8813a;      /* → amber accent */
+  --purple: #3a4a2e;    /* → moss */
+  --accent: #3a4a2e;
+  --accent2: #5b7a4e;
+  --mauve: #7a8f68;     /* → sage */
+  --cyan: #5b7a4e;      /* → circuit green */
+  --gold: #c8813a;
+  --dim: #7a8f68;
+  --dimmer: rgba(58, 74, 46, 0.08);
+  --dim-text: #7a8f68;
+  --muted: #7a8f68;
+  --text: #4a3728;
+  --brown: #a0522d;
+  --orange: #c8813a;
+  --green: #5b7a4e;
+  --violet: #7a8f68;
+  --danger: #a0522d;
+  --glass: rgba(250, 248, 241, 0.9);
+  --glass-bg: rgba(250, 248, 241, 0.9);
+  --glass-border: rgba(58, 74, 46, 0.16);
+  --glass-highlight: rgba(255, 255, 255, 0.5);
+
+  --font-main: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-ui: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-serif: "Fraunces", Georgia, "Times New Roman", serif;
+  --font-display: "Fraunces", Georgia, "Times New Roman", serif;
+  --font-mono: "DM Mono", ui-monospace, "SF Mono", menlo, consolas, monospace;
   --radius: 4px;
-  --radius-lg: 8px;
+  --radius-lg: 6px;
 }

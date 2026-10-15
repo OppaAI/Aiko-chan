@@ -1,20 +1,20 @@
 /* Valence (parity with Neural LTM studio)
  * Border + rim hue follow valence; the numeric score stays the original pink.
  */
-.mem.valence-pos { border-color: rgba(240, 193, 74, 0.55); }
-.mem.valence-neg { border-color: rgba(61, 224, 255, 0.55); }
-.mem.valence-neutral { border-color: rgba(138, 155, 184, 0.35); }
+.mem.valence-pos { border-color: rgba(200, 129, 58, 0.55); }
+.mem.valence-neg { border-color: rgba(91, 122, 78, 0.55); }
+.mem.valence-neutral { border-color: rgba(122, 143, 104, 0.35); }
 
-.mem.valence-pos svg circle.ring { stroke: #f0c14a; }
-.mem.valence-neg svg circle.ring { stroke: #3de0ff; }
-.mem.valence-neutral svg circle.ring { stroke: #8a9bb8; }
+.mem.valence-pos svg circle.ring { stroke: #c8813a; }
+.mem.valence-neg svg circle.ring { stroke: #5b7a4e; }
+.mem.valence-neutral svg circle.ring { stroke: #7a8f68; }
 
 /* Score number: always original purple→pink, never yellow/cyan */
 .mem.valence-pos .mem-score,
 .mem.valence-neg .mem-score,
 .mem.valence-neutral .mem-score,
 .mem .mem-score {
-  background: linear-gradient(180deg, #a888e8, #c651a8) !important;
+  background: linear-gradient(180deg, #3a4a2e, #c8813a) !important;
   -webkit-background-clip: text !important;
   background-clip: text !important;
   -webkit-text-fill-color: transparent !important;
@@ -24,9 +24,9 @@
   font-size: 8px; font-weight: 700; letter-spacing: .08em;
   margin-top: 1px; opacity: 0.85;
 }
-.mem.valence-pos .mem-valence { color: #f0c14a; }
-.mem.valence-neg .mem-valence { color: #3de0ff; }
-.mem.valence-neutral .mem-valence { color: #8a9bb8; }
+.mem.valence-pos .mem-valence { color: #c8813a; }
+.mem.valence-neg .mem-valence { color: #5b7a4e; }
+.mem.valence-neutral .mem-valence { color: #7a8f68; }
 
 .valence-legend {
   display: flex; gap: 10px; align-items: center;
@@ -37,6 +37,6 @@
 .valence-legend i {
   width: 8px; height: 8px; border-radius: 50%; display: inline-block;
 }
-.valence-legend .pos i { background: #f0c14a; box-shadow: 0 0 6px #f0c14a; }
-.valence-legend .neg i { background: #3de0ff; box-shadow: 0 0 6px #3de0ff; }
-.valence-legend .neu i { background: #8a9bb8; }
+.valence-legend .pos i { background: #c8813a; box-shadow: 0 0 6px #c8813a; }
+.valence-legend .neg i { background: #5b7a4e; box-shadow: 0 0 6px #5b7a4e; }
+.valence-legend .neu i { background: #7a8f68; }

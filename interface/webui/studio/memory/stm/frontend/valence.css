@@ -47,5 +47,5 @@ html[data-theme="dark"] .mem.valence-pos .mem-score,
 html[data-theme="dark"] .mem.valence-neg .mem-score,
 html[data-theme="dark"] .mem.valence-neutral .mem-score,
 html[data-theme="dark"] .mem .mem-score {
-  background: linear-gradient(180deg, #a78bfa, #c8813a) !important;
+  background: linear-gradient(180deg, #b3c49a, #c8813a) !important;
 }

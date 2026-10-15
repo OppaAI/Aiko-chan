@@ -699,4 +699,8 @@ a[style*="#1a1028"] {
 
 
 /* ── dark variant ── */
-html[data-theme="dark"] #spec-editor { background: #150d26; color: #cdbfe6; }
+html[data-theme="dark"] #spec-editor { background: #1e2417; color: #e6dfd0; }
+
+/* dark journal: header + canvas (hardcoded light surfaces) */
+html[data-theme="dark"] .studio-header { background: linear-gradient(180deg, var(--bg2) 0%, rgba(20, 26, 16, 0.95) 100%); }
+html[data-theme="dark"] .canvas-area { background: radial-gradient(ellipse at center, #232b1a 0%, #141a10 70%); }

@@ -590,3 +590,19 @@ a[style*="#1a1028"] {
 .palette-dot[style*="#c651a8"], .swatch[style*="#c651a8"], i[style*="#c651a8"] {
   background: #c8813a !important;
 }
+
+
+/* ── dark variant: hardcoded light surfaces → dark ── */
+html[data-theme="dark"] .back { background: #221a38; }
+html[data-theme="dark"] .btn { background: #150d26; }
+html[data-theme="dark"] .btn.danger { color: #e8516a; }
+html[data-theme="dark"] .budget-track { background: #2c2347; }
+html[data-theme="dark"] .stage { background: radial-gradient(ellipse at 45% 45%, #17102c 0%, #0d0718 70%); }
+html[data-theme="dark"] .mem { background: radial-gradient(circle at 40% 35%, #2c2347 0%, #150d26 70%); }
+html[data-theme="dark"] .mem svg circle.track { stroke: #2c2347; }
+html[data-theme="dark"] .evict-item { background: rgba(24, 16, 36, 0.72); color: #cdbfe6; }
+
+
+html[data-theme="dark"] .evict-zone { background: rgba(24, 16, 36, 0.55); }
+html[data-theme="dark"] textarea { background: #150d26; }
+html[data-theme="dark"] .pill.merged { background: linear-gradient(135deg, #2c2347, #150d26); }

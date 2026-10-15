@@ -253,3 +253,16 @@ a[style*="#1a1028"] {
 .palette-dot[style*="#c651a8"], .swatch[style*="#c651a8"], i[style*="#c651a8"] {
   background: #c8813a !important;
 }
+
+
+/* ── dark variant: hardcoded light surfaces → dark ── */
+html[data-theme="dark"] .sidebar input[type=number],
+html[data-theme="dark"] .sidebar input[type=text],
+html[data-theme="dark"] .sidebar select { background: #150d26; }
+html[data-theme="dark"] .btn { background: #2c2347; }
+html[data-theme="dark"] #canvas { background: radial-gradient(ellipse at 50% 40%, #17102c 0%, #0d0718 70%); }
+html[data-theme="dark"] .details { background: #150d26; }
+html[data-theme="dark"] .memory-studio-tab { background: #150d26; }
+
+
+html[data-theme="dark"] .pill.merged { background: linear-gradient(135deg, #2c2347, #150d26); }

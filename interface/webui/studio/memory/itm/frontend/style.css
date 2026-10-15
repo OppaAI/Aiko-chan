@@ -133,3 +133,9 @@ a[style*="#1a1028"] {
 .palette-dot[style*="#c651a8"], .swatch[style*="#c651a8"], i[style*="#c651a8"] {
   background: #c8813a !important;
 }
+
+
+/* ── dark variant: hardcoded light text → dark ── */
+html[data-theme="dark"] .btn-primary,
+html[data-theme="dark"] .memory-studio-tab.active { color: #0d0718; }
+html[data-theme="dark"] .val-neg { color: #8aa864; }

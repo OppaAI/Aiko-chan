@@ -552,3 +552,84 @@ body {
 .content-panel::-webkit-scrollbar-track { background: transparent; }
 .info-panel::-webkit-scrollbar-thumb,
 .content-panel::-webkit-scrollbar-thumb { background: var(--dim); border-radius: 3px; }
+
+/* ── dark variant: follows the main WebUI theme flag (localStorage 'aiko-theme').
+   The head script sets html[data-theme] synchronously before CSS loads, so there
+   is no flash of the wrong theme. Higher specificity than :root wins over every
+   panel-local light token definition. ── */
+html[data-theme="dark"] {
+  color-scheme: dark;
+  /* site palette remapped to the main UI's purple-glass dark */
+  --cream: #14101f;
+  --parch: rgba(200, 168, 240, 0.14);
+  --moss: #a78bfa;
+  --sage: #9a82c4;
+  --fern: #6f5b96;
+  --bark: #8b6fd6;
+  --soil: #cdbfe6;
+  --ink: #0d0718;
+  --amber: #c8813a;
+  --rust: #e08050;
+  --mist: #241b3f;
+  --circuit: #a78bfa;
+  /* legacy / shared names */
+  --bg: #0d0718;
+  --bg2: #150d26;
+  --panel: rgba(24, 16, 36, 0.72);
+  --slot: #150d26;
+  --border: rgba(200, 168, 240, 0.16);
+  --line: rgba(200, 168, 240, 0.10);
+  --pink: #a78bfa;
+  --purple: #a78bfa;
+  --accent: #a78bfa;
+  --accent2: #8aa864;
+  --mauve: #c4b5fd;
+  --cyan: #a78bfa;
+  --gold: #e8c84a;
+  --dim: #9a82c4;
+  --dimmer: rgba(200, 168, 240, 0.08);
+  --dim-text: #9a82c4;
+  --muted: #9a82c4;
+  --text: #cdbfe6;
+  --brown: #e08050;
+  --orange: #c8813a;
+  --green: #8aa864;
+  --violet: #a78bfa;
+  --danger: #e8516a;
+  --glass: rgba(24, 16, 36, 0.55);
+  --glass-bg: rgba(24, 16, 36, 0.55);
+  --glass-border: rgba(200, 168, 240, 0.16);
+  --glass-highlight: rgba(255, 255, 255, 0.06);
+  /* panel-local tokens (defined under :root in panel sheets) */
+  --red: #e8516a;
+  --red-bright: #f0758f;
+  --orange-bright: #e8a13a;
+  --dim-bright: #9a82c4;
+  --purple-bright: #a78bfa;
+  --green-bright: #8aa864;
+  --cyan-bright: #a78bfa;
+  --meta: #9a82c4;
+  --neg: #8aa864;
+  --pos: #c8813a;
+  --neutral: #9a82c4;
+  --entity: #a78bfa;
+  --episode: #8aa864;
+  --n8n-card: rgba(24, 16, 36, 0.72);
+  --n8n-card-border: rgba(200, 168, 240, 0.16);
+  --n8n-dot: #2c2347;
+  --n8n-green: #8aa864;
+  --n8n-red: #e8516a;
+  --n8n-orange: #e08050;
+  --n8n-sub: #9a82c4;
+}
+
+/* approval's own hardcoded light rules → dark */
+html[data-theme="dark"] .btn-primary:hover,
+html[data-theme="dark"] .btn-success:hover,
+html[data-theme="dark"] .btn-danger:hover,
+html[data-theme="dark"] .btn-warning:hover { color: #0d0718; }
+html[data-theme="dark"] .content-area { background: radial-gradient(ellipse at center, #17102c 0%, #0d0718 70%); }
+html[data-theme="dark"] .status-badge.enriched { background: rgba(167, 139, 250, 0.12); border-color: rgba(167, 139, 250, 0.25); }
+
+
+html[data-theme="dark"] .studio-header { background: linear-gradient(180deg, var(--bg2) 0%, rgba(13, 7, 24, 0.95) 100%); }

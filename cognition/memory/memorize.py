@@ -114,6 +114,8 @@ from .schema import (
     MEMORY_STATE_TAGS_ENABLED,
     MEMORY_SUPERSESSION_NARRATIVE,
     MEMORY_SUPERSESSION_NARRATIVE_MAX,
+    MEM_TYPE_EPISODIC,
+    MEM_TYPE_SEMANTIC,
     MEMORY_WRITE_IDLE_GRACE,
     MEMORY_WRITE_MAX_WAIT,
     MEMORY_WRITE_QUEUE_MAXSIZE,
@@ -141,11 +143,14 @@ from .schema import (
     _sqlite_get_vector,
     _sqlite_knn_search,
     _sqlite_pinned_ids,
+    _close_row_temporal,
     _sqlite_set_payload,
+    _validity_sql,
     ensure_episode_schema,
     ensure_l2_scene_schema,
     ensure_l3_schema_schema,
     ensure_phase_a_schema,
+    ensure_reconcile_schema,
     ensure_text_hash_schema,
     existing_columns,
     parse_json_array,
@@ -362,6 +367,7 @@ class _MemoryBackend:
             ensure_entity_relations_schema(self._conn)
             ensure_episode_schema(self._conn)
             ensure_text_hash_schema(self._conn)
+            ensure_reconcile_schema(self._conn)
 
     def _connect(self) -> sqlite3.Connection:
         return initialize_store_db(self._db_path, _DDL, user_id=self._user_id, vector=True)
@@ -640,6 +646,8 @@ class _MemoryBackend:
         llm_score: int | None = None,
         salience_hit: int | None = None,
         schema_sources: list[str] | None = None,
+        mem_type: str | None = None,
+        valid_from: str | None = None,
     ) -> None:
         """Insert one memory row (Phase A + L2 columns when present) + its
         vector, and best-effort co-mention edges for the entity graph.
@@ -657,9 +665,21 @@ class _MemoryBackend:
         ``schema_sources`` — Phase 21: for kind='schema' rows, the JSON list
         of source memory ids this gist was abstracted from (traceability +
         idempotency). Written only when the column exists.
+
+        ``mem_type`` — reconcile tier; defaults by kind: 'scene'/'episode'
+        -> 'episodic', everything else -> 'semantic'. ``valid_from`` defaults
+        to ``now`` (the fact becomes true when written). Both are written
+        only when their columns exist.
         """
         cols = existing_columns(self._conn)
         kind_val = kind or classify_kind(text, default=KIND_FACT)
+        if mem_type is not None:
+            mem_type_val = mem_type
+        elif kind_val in (KIND_SCENE, KIND_EPISODE):
+            mem_type_val = MEM_TYPE_EPISODIC
+        else:
+            mem_type_val = MEM_TYPE_SEMANTIC
+        valid_from_val = valid_from if valid_from is not None else now
         ents_list = entities if entities is not None else extract_entities(text)
         ents_json = entities_to_json(ents_list)
 
@@ -716,6 +736,12 @@ class _MemoryBackend:
         if "text_hash" in cols:
             ext_cols.append("text_hash")
             ext_vals.append(_exact_text_hash(text))
+        if "mem_type" in cols:
+            ext_cols.append("mem_type")
+            ext_vals.append(mem_type_val)
+        if "valid_from" in cols:
+            ext_cols.append("valid_from")
+            ext_vals.append(valid_from_val)
         all_cols = base_cols + ext_cols
         placeholders = ", ".join("?" * len(all_cols))
         self._conn.execute(
@@ -1024,6 +1050,65 @@ class _MemoryBackend:
             except Exception as exc:
                 log.warning("Confirmed memory supersession failed: %s", exc)
                 self._conn.rollback()
+                return None
+
+    def supersede_with_temporal(self, old_id: str, new_text: str, user_id: str, *,
+                                kind: str | None = None,
+                                mem_type: str | None = None,
+                                source: str = SOURCE_DREAM,
+                                commit: bool = True) -> str | None:
+        """Supersede one memory row with temporal-validity bookkeeping.
+
+        The old row is closed (status='superseded', valid_to=now,
+        superseded_by=new_id) and the replacement is inserted with
+        valid_from=now. The old row stays in the table as immutable history;
+        the currently-true view (persona/identity path) only reads rows with
+        valid_to IS NULL. Inherits kind/mem_type from the old row unless
+        overridden. Returns the new row id, or None on failure /
+        already-superseded.
+
+        ``commit=False`` leaves the transaction open for the caller (used by
+        the reconcile job's per-cluster atomic apply); failures re-raise in
+        that mode so the caller can roll back the whole cluster.
+        """
+        text = (new_text or "").strip()
+        if not old_id or not text or not user_id:
+            return None
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            vector = self._embed(text)
+        except Exception as exc:
+            log.warning("Temporal supersession embedding failed: %s", exc)
+            vector = None
+        with self._db_lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT id, pinned, kind, mem_type, status FROM memories "
+                    "WHERE id = ? AND user_id = ?",
+                    (old_id, user_id),
+                ).fetchone()
+                if not row or str(row["status"] or "active") == STATUS_SUPERSEDED:
+                    return None
+                new_id = str(uuid.uuid4())
+                self._insert_row(
+                    mem_id=new_id, user_id=user_id, text=text, now=now,
+                    vector=vector, pinned=int(row["pinned"] or 0),
+                    source=source, supersedes_id=old_id,
+                    kind=kind or row["kind"], mem_type=mem_type or row["mem_type"],
+                    valid_from=now,
+                )
+                _close_row_temporal(self._conn, old_id, new_id, user_id, now)
+                if commit:
+                    self._conn.commit()
+                return new_id
+            except Exception as exc:
+                log.warning("Temporal memory supersession failed: %s", exc)
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+                if not commit:
+                    raise
                 return None
 
     # ── vector backfill ────────────────────────────────────────────────────────
@@ -3248,13 +3333,24 @@ class AikoMemorize:
                 return None
         except Exception:
             return None
+        # Currently-true view: superseded/contradicted identity facts (valid_to
+        # closed) are excluded here. Episodic recall elsewhere is NOT filtered
+        # by validity — episodes are history. Column-guarded like the 'kind'
+        # check above so a pre-migration DB degrades to the old behavior.
+        validity_sql = ""
+        try:
+            if "valid_to" in existing_columns(self._conn):
+                validity_sql = _validity_sql("m")
+        except Exception:
+            validity_sql = ""
         with self._mem._db_lock:
             rows = self._conn.execute(
-                """
+                f"""
                 SELECT id, memory
                 FROM memories m
                 WHERE m.user_id = ? AND m.kind = ?
                   AND (m.status = 'active' OR m.status IS NULL)
+                  {validity_sql}
                 ORDER BY m.pinned DESC, m.access_count DESC, m.created_at ASC
                 LIMIT ?
                 """,
@@ -3475,9 +3571,11 @@ class AikoMemorize:
     MIN_CLEAR_INTERVAL: float = 0.5  # seconds — debounce window for cache invalidation
 
     def _clear_search_cache(self) -> None:
-        # The search-result cache lives on _MemoryBackend now (see _MemoryBackend.__init__).
-        # Delegate so we don't keep a separate copy on AikoMemorize that would
-        # silently desync from the one the search path actually reads/writes.
+        # AikoMemorize owns its own _search_cache (read by _search_top); the
+        # backend owns a separate one. Clear both so no stale search results
+        # survive a write — previously only the backend cache was cleared.
+        with self._search_cache_lock:
+            self._search_cache.clear()
         if self._mem_backend is not None:
             self._mem._clear_search_cache()
         # Persona blob is identity-derived; a new/changed identity fact must

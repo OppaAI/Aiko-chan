@@ -1624,6 +1624,16 @@ def register_system_handlers_only(
     except Exception:
         log.exception("Failed to attach episodic distill to dream().")
 
+    # Attach the sleep-time memory reconcile to the nightly dream pass
+    # (Letta-style consolidation + Mem0-style reconcile-before-write).
+    # Same fail-soft precedent as the EMC-4 attachment above: the scheduler
+    # thread must never break because the hook failed to attach.
+    try:
+        from cognition.consolidate.reconcile import attach_dream_hook as attach_reconcile_dream_hook
+        attach_reconcile_dream_hook()
+    except Exception:
+        log.exception("Failed to attach memory reconcile to dream().")
+
     try:
         register_system_handler("workspace_knowledge_scan", _workspace_scan_handler)
         register_system_handler("check_email", _check_email_handler)

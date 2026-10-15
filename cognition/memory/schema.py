@@ -194,6 +194,11 @@ KIND_EPISODE = "episode"  # reserved; true EMC lives in emc_* tables (episode.py
 # into a schema). It is searchable like any fact; its `schema_sources` JSON
 # column records the member memory ids it was abstracted from.
 KIND_SCHEMA = "schema"
+# Reconcile (sleep-time consolidation) memory-type tiers.
+MEM_TYPE_SEMANTIC = "semantic"      # stable facts / preferences
+MEM_TYPE_EPISODIC = "episodic"      # events / scenes
+MEM_TYPE_PROCEDURAL = "procedural"  # learned patterns / policies
+MEM_TYPES = (MEM_TYPE_SEMANTIC, MEM_TYPE_EPISODIC, MEM_TYPE_PROCEDURAL)
 SOURCE_CHAT = "chat"
 SOURCE_PIN = "pin"
 SOURCE_LEGACY = "legacy"
@@ -333,6 +338,106 @@ def ensure_episode_schema(conn: sqlite3.Connection) -> list[str]:
     return _ensure(conn)
 
 
+_RECONCILE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("mem_type", "TEXT NOT NULL DEFAULT 'semantic'"),
+    ("valid_from", "TEXT"),
+    ("valid_to", "TEXT"),
+    ("superseded_by", "TEXT"),
+    ("reconciled_at", "TEXT"),
+)
+
+
+def ensure_reconcile_schema(conn: sqlite3.Connection) -> list[str]:
+    """Idempotent ALTER TABLE for sleep-time reconcile columns + indexes.
+
+    - mem_type: semantic (stable facts/preferences) / episodic (events) /
+      procedural (learned patterns). One-time backfill (only when the column
+      is added by this call) sets 'episodic' where kind IN ('scene','episode').
+    - valid_from/valid_to: temporal validity window (Zep's idea, minus the
+      graph DB). Contradicted facts get valid_to closed, never deleted —
+      the "history is immutable" doctrine: episodes stay immutable, the
+      currently-true view is a query over open windows.
+    - superseded_by: forward pointer to the replacing memory id (complements
+      the existing supersedes_id back-pointer).
+    - reconciled_at: last time the reconcile job examined this row, so the
+      job makes progress and only re-scans after RESCAN_DAYS.
+
+    Calls ensure_phase_a_schema() first because the backfill reads 'kind'.
+    """
+    ensure_phase_a_schema(conn)
+    try:
+        cols = existing_columns(conn)
+    except sqlite3.Error:
+        return []
+    if "id" not in cols and "memory" not in cols:
+        return []
+
+    added: list[str] = []
+    for name, decl in _RECONCILE_COLUMNS:
+        if name in cols:
+            continue
+        try:
+            conn.execute(f"ALTER TABLE memories ADD COLUMN {name} {decl}")
+            added.append(name)
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).casefold():
+                raise
+    if "mem_type" in added and "kind" in existing_columns(conn):
+        try:
+            conn.execute(
+                "UPDATE memories SET mem_type = 'episodic' "
+                "WHERE kind IN ('scene', 'episode')"
+            )
+        except sqlite3.Error as e:
+            log.debug("memory reconcile backfill: %s", e)
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_user_memtype "
+            "ON memories(user_id, mem_type)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_user_valid "
+            "ON memories(user_id, valid_to)"
+        )
+        conn.commit()
+    except sqlite3.Error as e:
+        log.debug("memory reconcile index: %s", e)
+    if added:
+        log.info("memory reconcile schema: added columns %s", added)
+    return added
+
+
+def _close_row_temporal(
+    conn: sqlite3.Connection,
+    old_id: str,
+    new_id: str,
+    user_id: str,
+    now: str,
+) -> None:
+    """Close one memory row with temporal-validity bookkeeping.
+
+    Sets status='superseded', valid_to=now, superseded_by=new_id — each
+    column-guarded so it works on partially-migrated DBs. The row stays in
+    the table as immutable history. Caller owns commit/rollback.
+    """
+    cols = existing_columns(conn)
+    if "status" in cols:
+        conn.execute(
+            "UPDATE memories SET status = ? WHERE id = ? AND user_id = ?",
+            (STATUS_SUPERSEDED, old_id, user_id),
+        )
+    if "valid_to" in cols:
+        conn.execute(
+            "UPDATE memories SET valid_to = ? WHERE id = ? AND user_id = ?",
+            (now, old_id, user_id),
+        )
+    if "superseded_by" in cols:
+        conn.execute(
+            "UPDATE memories SET superseded_by = ? WHERE id = ? AND user_id = ?",
+            (new_id, old_id, user_id),
+        )
+
+
 def ensure_text_hash_schema(conn: sqlite3.Connection) -> list[str]:
     """Idempotent ALTER TABLE for the text_hash column + (user_id, text_hash) index.
 
@@ -384,6 +489,17 @@ def _active_sql(active_only: bool, alias: str = "m") -> str:
     if not active_only:
         return ""
     return f" AND ({alias}.status = 'active' OR {alias}.status IS NULL)"
+
+
+def _validity_sql(alias: str = "m") -> str:
+    """SQL fragment restricting a query to currently-true memories.
+
+    Mirrors _active_sql: the temporal-validity half of the currently-true
+    view. `alias` is the table alias used for `memories` in the calling
+    query. Apply ONLY to the identity/persona currently-true path —
+    episodic recall must NOT be filtered by validity (episodes are history).
+    """
+    return f" AND ({alias}.valid_to IS NULL)"
 
 _DDL = """
 PRAGMA journal_mode = WAL;
@@ -727,6 +843,10 @@ __all__ = [
     "MEMORY_STATE_TAGS_ENABLED",
     "MEMORY_SUPERSESSION_NARRATIVE",
     "MEMORY_SUPERSESSION_NARRATIVE_MAX",
+    "MEM_TYPES",
+    "MEM_TYPE_EPISODIC",
+    "MEM_TYPE_PROCEDURAL",
+    "MEM_TYPE_SEMANTIC",
     "MEMORY_WRITE_IDLE_GRACE",
     "MEMORY_WRITE_MAX_WAIT",
     "MEMORY_WRITE_QUEUE_MAXSIZE",
@@ -768,11 +888,14 @@ __all__ = [
     "_sqlite_is_pinned",
     "_sqlite_knn_search",
     "_sqlite_pinned_ids",
+    "_close_row_temporal",
     "_sqlite_set_payload",
+    "_validity_sql",
     "ensure_episode_schema",
     "ensure_l2_scene_schema",
     "ensure_l3_schema_schema",
     "ensure_phase_a_schema",
+    "ensure_reconcile_schema",
     "existing_columns",
     "parse_json_array",
     "vacuum_memory_db",

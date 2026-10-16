@@ -82,7 +82,9 @@ review, email, and safety rules.
 PER TICK:
 1. If {playground_dir}/loop/disabled exists, do nothing. If your human is active, wrap up now.
 2. Read {playground_dir}/GOALS.md; pick the top goal with no work/<slug>/REPORT.md yet.
-   Read its goal file + {playground_dir}/work/<slug>/CHECKPOINT.md if present.
+   Open its goal file DIRECTLY at {playground_dir}/goals/<slug>.md (the path is
+   listed in GOALS.md) + {playground_dir}/work/<slug>/CHECKPOINT.md if present.
+   Never spend tool calls searching for goal files — the paths are known.
 3. ONE goal, build ONLY in {playground_dir}/work/<slug>/. Keep context small: read only the
    files you need, keep tool outputs short, checkpoint often.
 4. On interruption or ANY error: write {playground_dir}/work/<slug>/CHECKPOINT.md with the

@@ -2177,7 +2177,18 @@ class AikoThink:
                 return label, None
             # Phase 2: shared module cache — identical (text, instruct) pairs
             # embed once per process instead of once per call site.
-            query_vec = reason.cached_embed_query(embedder, user_input, instruct=instruct)
+            try:
+                query_vec = reason.cached_embed_query(embedder, user_input, instruct=instruct)
+            except Exception as exc:
+                # A RAISING embedder (HTTP 500/timeout/circuit-open) must
+                # degrade exactly like a MISSING one: LLM classifier, no
+                # vector. Previously this bubbled and killed the whole turn
+                # (every Playground idle build died here during outages).
+                log.warning("[think] Embedder failed (%s) — intent routing via LLM only", exc)
+                label = self._classify_quaternary_intent_llm(user_input, allow_agentic=_AGENTIC_MODE_ON)
+                ctx.set(outputs={"intent": label, "vector": None, "method": "llm_fallback"},
+                        factors=["embedder error → fell back to LLM classifier"])
+                return label, None
             labels, example_vecs = self._semantic_example_vectors(_ROUTE_QUATERNARY_EXAMPLES, instruct)
             scores = reason.label_scores_topk(query_vec, labels, example_vecs, top_k=_SEMANTIC_LABEL_TOP_K)
 

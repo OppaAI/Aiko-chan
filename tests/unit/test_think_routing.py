@@ -54,6 +54,26 @@ def test_ternary_route_examples_exclude_greeting_label():
     assert set(examples) == {"agentic", "webchat", "localchat"}
 
 
+def test_route_intent_falls_back_to_llm_when_embedder_raises(monkeypatch):
+    """A RAISING embedder (HTTP 500/timeout/circuit-open) must degrade
+    exactly like a MISSING one — never kill the turn. Previously this
+    bubbled out of _route_intent and killed every Playground idle build
+    during embedding outages."""
+
+    class RaisingEmbedder:
+        def embed_query(self, text: str, instruct: str = ""):
+            raise RuntimeError("500 Server Error for url: /embedding")
+
+    think = _bare_think(RaisingEmbedder())
+    monkeypatch.setattr(
+        think, "_classify_quaternary_intent_llm",
+        lambda user_input, allow_agentic=True: "localchat",
+    )
+    intent, query_vec = think._route_intent("research the history of this project")
+    assert intent == "localchat"
+    assert query_vec is None
+
+
 def test_route_intent_can_return_greeting_from_semantic_scores(monkeypatch):
     embedder = FakeEmbedder()
     think = _bare_think(embedder)

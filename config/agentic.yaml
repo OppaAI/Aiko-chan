@@ -82,7 +82,7 @@ NEEDLE_WORKERS: '[{"id":"research","role":"researcher","base_url":"http://127.0.
 # graph+react enabled so the DAG studio palette picks them up.
 
 # -- Agent loop limits --
-MAX_AGENT_ITER: "6"  # Maximum tool/planning iterations per task; raise for complex tasks, lower for safety.
+MAX_AGENT_ITER: "10"  # Maximum tool/planning iterations per task; raise for complex tasks, lower for safety.
 AGENT_MAX_TOKENS: "512"  # Max model output tokens per agent step.
 LLM_TIMEOUT: "30"  # Per-request timeout (seconds) for agentic chat.completions calls (job-hunt enrich, synthesize_report, polish_text, ask_llm_json, etc.). Bounds stalled local/cloud backends so a single hang cannot block a graph node for the OpenAI SDK default (~600s).
 LLM_CTX_SIZE: "10240"  # Local llama-server context ceiling; used directly by agentic.py's context-budget guard now. Keep in sync with the actual llama-server --ctx-size.

@@ -118,6 +118,7 @@ _CAPABILITY_MAX_ITER: dict[str, int] = {
     "note_taking": 4,
     "weather": 4,
     "coding": 8,
+    "repo": 16,
     "everyday": 5,
     "multi_agent": 8,
 }

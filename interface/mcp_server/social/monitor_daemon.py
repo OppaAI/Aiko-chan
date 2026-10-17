@@ -166,7 +166,31 @@ def _bound_memorize():
     return _fallback_owner_memorize()
 
 
+_LAST_DB_CLEANUP = 0.0
+
+
+def _maybe_daily_cleanup() -> None:
+    """Run the social DB cleanup once every 24h.
+
+    MCPDatabase.cleanup() already carries the retention rules (tool_log 30d,
+    threads_posts 7d, rate_limits 7d, expired tokens/claims) but its only
+    caller was close(), which never fires in a long-running process -- so tool_log
+    grew unbounded (82MB). Hook it to the poll loop instead.
+    """
+    global _LAST_DB_CLEANUP
+    now = time.time()
+    if now - _LAST_DB_CLEANUP < 86400:
+        return
+    _LAST_DB_CLEANUP = now
+    try:
+        from interface.mcp_server.social.state import get_db
+        get_db().cleanup()
+    except Exception as exc:  # never let maintenance break the poll
+        log.warning("[social_daemon] daily cleanup failed: %s", exc)
+
+
 def _poll_threads() -> None:
+    _maybe_daily_cleanup()
     from interface.mcp_server.social.services.threads import monitor_threads_replies
     result = monitor_threads_replies(memorize=_bound_memorize())
     answered = result.get("answered", 0)

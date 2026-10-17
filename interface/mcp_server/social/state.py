@@ -491,6 +491,21 @@ class MCPDatabase:
         self._clean_expired_idempotency()
         cutoff = time.time() - 86400 * 30
         self._conn.execute("DELETE FROM tool_log WHERE created_at < ?", (cutoff,))
+        # The reply monitor only walks a 1-day window, so older rows in
+        # threads_posts are unreachable; trimming keeps the table bounded if
+        # that window is ever widened. The *_processed_replies / *_logged_replies
+        # dedup guards are deliberately NOT pruned -- losing those rows would let
+        # an already-answered item be answered twice.
+        self._conn.execute(
+            "DELETE FROM threads_posts WHERE created_at < ?", (time.time() - 86400 * 7,)
+        )
+        # rate_limits is bucketed by period string ('YYYY-MM-DD' or
+        # 'YYYY-MM-DD-HH') and only the current window is ever read, so past
+        # buckets are dead weight. ISO strings compare correctly as text.
+        self._conn.execute(
+            "DELETE FROM rate_limits WHERE period < ?",
+            (time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400 * 7)),),
+        )
         self._conn.execute("DELETE FROM access_tokens WHERE expires_at < ?", (time.time(),))
         self._conn.execute("DELETE FROM bluesky_reply_claims WHERE status = ? AND claimed_at < ?", ("completed", cutoff))
         self.cleanup_stale_bluesky_claims(max_age_seconds=300)

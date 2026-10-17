@@ -303,10 +303,21 @@ class MCPDatabase:
             )
             self._commit()
 
-    def list_threads_posts(self) -> list[str]:
-        rows = self._conn.execute(
-            "SELECT post_id FROM threads_posts ORDER BY created_at ASC"
-        ).fetchall()
+    def list_threads_posts(self, since: float | None = None) -> list[str]:
+        """Known post ids, oldest first.
+
+        ``since`` drops anything remembered before that unix timestamp so a
+        poller can walk a recent window instead of the whole table.
+        """
+        if since is None:
+            rows = self._conn.execute(
+                "SELECT post_id FROM threads_posts ORDER BY created_at ASC"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT post_id FROM threads_posts WHERE created_at >= ? ORDER BY created_at ASC",
+                (float(since),),
+            ).fetchall()
         return [str(row["post_id"]) for row in rows]
 
     def has_processed_threads_reply(self, reply_id: str) -> bool:

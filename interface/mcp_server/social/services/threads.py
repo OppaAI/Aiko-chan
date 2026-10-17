@@ -693,6 +693,20 @@ for example "*{_ai} considers the question.*". Do not use XML or colon labels.""
     return text[:500]
 
 
+# Cap how many remembered posts one poll cycle walks. The
+# threads_posts table grows without bound (825 rows and climbing), and the
+# loop fetches every post_id's conversation + root text at ~0.5s each, so a
+# full cycle grew past 7 minutes and the cycle never finished before the next
+# 180s tick -- new posts (checked last, oldest-first) were effectively never
+# reached. Keeping only the most recent posts restores ~3min detection.
+_THREADS_MAX_MONITOR_POSTS = 60
+
+# Only walk posts remembered within the last day. Older posts rarely
+# get new replies, and re-fetching every tracked conversation each
+# cycle is what exhausted the Graph rate limit.
+_THREADS_MONITOR_MAX_AGE_SECONDS = 24 * 60 * 60
+
+
 def _is_trigger(text: str) -> bool:
     mention = mention_trigger("THREADS_USERNAME") or "@oppa.ai.bot"
     return _identity_is_trigger(
@@ -931,7 +945,11 @@ def _monitor_threads_replies_locked(memorize=None) -> dict:
     if configured:
         post_ids = configured
     else:
-        post_ids = db.list_threads_posts()
+        # Newest-only window: the table is ordered oldest-first, so slicing
+        # the tail keeps the most recent posts and drops the ancient backlog.
+        post_ids = db.list_threads_posts(
+            since=time.time() - _THREADS_MONITOR_MAX_AGE_SECONDS
+        )[-_THREADS_MAX_MONITOR_POSTS:]
         own = _threads_get(f"{user_id}/threads", token, fields="id", limit=50)
         if own.get("ok"):
             discovered = [str(item.get("id")) for item in own["data"].get("data", []) if item.get("id")]

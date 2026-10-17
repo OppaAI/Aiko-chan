@@ -1095,7 +1095,7 @@ body::before {
 }
 #panel-collapse:hover { border-color: rgba(53,224,255,.5); box-shadow: 0 0 10px rgba(53,224,255,.2); }
 @media (min-width: 901px) {
-  body.panel-collapsed { grid-template-columns: minmax(0, 1fr) 72px !important; }
+  body.panel-collapsed { grid-template-columns: 264px minmax(0, 1fr) 72px !important; }
   body.panel-collapsed #panel-collapse { align-self: center; margin: 8px 0 0; }
   body.panel-collapsed #panel-top { margin: 8px 8px 0; }
   body.panel-collapsed #panel #companion-hud { display: none; }

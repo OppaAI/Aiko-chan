@@ -189,9 +189,10 @@ function switchToChat() {
 // ── chat rendering ────────────────────────────────────────────────────────
 let streamActive = false;
 let streamRawText = '';
-// Inner-thoughts box: thinking tags stripped from her spoken reply arrive as
-// {type:'thinking'} events and render in a collapsible box above her caption
-// for this turn only. Cleared when a new turn starts.
+// Inner thoughts: thinking tags stripped from her spoken reply arrive as
+// {type:'thinking'} events and accumulate in pendingThinking for the turn.
+// When the turn commits, commitThinking() moves the text into the right
+// sidebar's "Thinking" panel as one expandable per-turn entry.
 let pendingThinking = "";
 let streamExprApplied = null;  // expression name applied once per stream turn
 let sourcesRow = null;
@@ -260,6 +261,406 @@ let currentPresence = 'idle';
 const transcriptLog = [];
 let transcriptVisible = false;
 
+// ── conversation history · ideas · goals (left sidebar, localStorage) ──
+// Every transcript entry is mirrored into the active history record so no
+// conversation is ever lost between sessions ("save every history there").
+const HIST_KEY = 'aiko-histories';
+const IDEA_KEY = 'aiko-ideas';
+const GOAL_KEY = 'aiko-goals';
+const MAX_HISTORIES = 50;
+const MAX_ENTRIES_PER_HISTORY = 500;
+let histories = [];
+let activeHistoryId = null;
+let histSaveTimer = null;
+
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+function loadJSON(key, fallback) {
+  try {
+    const v = JSON.parse(localStorage.getItem(key));
+    return Array.isArray(v) ? v : fallback;
+  } catch (_) { return fallback; }
+}
+function ensureActiveHistory() {
+  let h = histories.find(x => x.id === activeHistoryId);
+  if (!h) {
+    h = { id: uid(), title: '', startedAt: Date.now(), entries: [] };
+    histories.unshift(h);
+    activeHistoryId = h.id;
+  }
+  return h;
+}
+function pushTranscript(entry) {
+  transcriptLog.push(entry);
+  const h = ensureActiveHistory();
+  h.entries.push({ sender: entry.sender, emoji: entry.emoji, text: entry.text,
+                   action: entry.action, nonVerbal: entry.nonVerbal, t: entry.t });
+  if (h.entries.length > MAX_ENTRIES_PER_HISTORY) {
+    h.entries.splice(0, h.entries.length - MAX_ENTRIES_PER_HISTORY);
+  }
+  if (!h.title && entry.sender === 'you' && entry.text) {
+    h.title = entry.text.length > 42 ? entry.text.slice(0, 42) + '…' : entry.text;
+  }
+  scheduleHistorySave();
+  renderHistoryList();
+}
+function scheduleHistorySave() {
+  clearTimeout(histSaveTimer);
+  histSaveTimer = setTimeout(saveHistoriesNow, 800);
+}
+function saveHistoriesNow() {
+  clearTimeout(histSaveTimer);
+  try {
+    while (histories.length > MAX_HISTORIES) histories.pop();
+    localStorage.setItem(HIST_KEY, JSON.stringify(histories));
+  } catch (_) { /* quota — keep the live log, drop persistence */ }
+}
+function historyTitle(h) {
+  return h.title || ('Chat ' + new Date(h.startedAt).toLocaleDateString());
+}
+function historySub(h) {
+  const d = new Date(h.startedAt);
+  const date = d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return `${date} · ${h.entries.length} msgs`;
+}
+function renderHistoryList() {
+  const ul = document.getElementById('history-list');
+  if (!ul) return;
+  ul.replaceChildren();
+  if (!histories.length) {
+    const li = document.createElement('li');
+    li.className = 'lb-empty';
+    li.textContent = 'No saved conversations yet.';
+    ul.appendChild(li);
+    return;
+  }
+  for (const h of histories) {
+    const li = document.createElement('li');
+    li.className = 'hist-item' + (h.id === activeHistoryId ? ' active' : '');
+    const main = document.createElement('div');
+    main.className = 'hist-main';
+    const title = document.createElement('div');
+    title.className = 'hist-title';
+    title.textContent = historyTitle(h);
+    const sub = document.createElement('div');
+    sub.className = 'hist-sub';
+    sub.textContent = historySub(h);
+    main.appendChild(title);
+    main.appendChild(sub);
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'hist-del';
+    del.title = 'Delete conversation';
+    del.textContent = '✕';
+    del.addEventListener('click', (e) => {
+      e.stopPropagation();
+      histories = histories.filter(x => x.id !== h.id);
+      if (activeHistoryId === h.id) activeHistoryId = null;
+      saveHistoriesNow();
+      renderHistoryList();
+    });
+    li.appendChild(main);
+    li.appendChild(del);
+    li.addEventListener('click', () => loadHistory(h.id));
+    ul.appendChild(li);
+  }
+}
+function clearChatRows() {
+  document.querySelectorAll('#chat-panel .transcript-row, #chat-panel .msg-sys')
+    .forEach(el => el.remove());
+}
+function renderUserRow(text) {
+  const { row, bubble } = createMessageRow('you');
+  row.classList.add('transcript-row');
+  const prefix = document.createElement('span');
+  prefix.className = 'msg-prefix';
+  prefix.textContent = window.currentUsername || 'You';
+  bubble.appendChild(prefix);
+  const body = document.createElement('div');
+  body.innerHTML = esc(text).replace(/\n/g, '<br>');
+  bubble.appendChild(body);
+  chatPanel.insertBefore(row, toolStatus);
+  scrollBottom();
+}
+function loadHistory(id) {
+  saveHistoriesNow();
+  const h = histories.find(x => x.id === id);
+  if (!h) return;
+  activeHistoryId = id;
+  transcriptLog.length = 0;
+  for (const e of h.entries) transcriptLog.push({ ...e });
+  clearChatRows();
+  for (const e of transcriptLog) {
+    if (e.sender === 'you') renderUserRow(e.text);
+  }
+  renderHistoryList();
+  setTranscriptVisible(true); // show the loaded entries in the transcript view
+}
+function newChat() {
+  saveHistoriesNow();
+  activeHistoryId = null; // fresh history is created lazily on the first message
+  transcriptLog.length = 0;
+  clearChatRows();
+  renderHistoryList();
+  if (transcriptVisible) renderTranscript();
+}
+
+// ── left sidebar nav / views ──
+function switchLeftView(name) {
+  document.querySelectorAll('.lb-nav').forEach(b =>
+    b.classList.toggle('active', b.dataset.view === name));
+  document.querySelectorAll('.lb-view').forEach(v => { v.hidden = true; });
+  const view = document.getElementById('lb-view-' + name);
+  if (view) view.hidden = false;
+  if (name === 'chat') renderHistoryList();
+  if (name === 'search') { renderSearch(document.getElementById('search-input').value); }
+  if (name === 'ideas') renderIdeas();
+  if (name === 'goals') renderGoals();
+}
+
+// ── ideas (simple localStorage list) ──
+let ideas = [];
+function saveIdeas() { try { localStorage.setItem(IDEA_KEY, JSON.stringify(ideas)); } catch (_) {} }
+function renderIdeas() {
+  const ul = document.getElementById('idea-list');
+  if (!ul) return;
+  ul.replaceChildren();
+  if (!ideas.length) {
+    const li = document.createElement('li');
+    li.className = 'lb-empty';
+    li.textContent = 'No ideas yet — jot one down.';
+    ul.appendChild(li);
+    return;
+  }
+  for (const it of ideas) {
+    const li = document.createElement('li');
+    li.className = 'idea-item';
+    const sp = document.createElement('span');
+    sp.textContent = it.text;
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'hist-del';
+    del.title = 'Dismiss idea';
+    del.textContent = '✕';
+    del.addEventListener('click', () => {
+      ideas = ideas.filter(x => x.id !== it.id);
+      saveIdeas();
+      renderIdeas();
+    });
+    li.appendChild(sp);
+    li.appendChild(del);
+    ul.appendChild(li);
+  }
+}
+
+// ── goals (simple localStorage list with progress + done) ──
+let goals = [];
+function saveGoals() { try { localStorage.setItem(GOAL_KEY, JSON.stringify(goals)); } catch (_) {} }
+function renderGoals() {
+  const ul = document.getElementById('goal-list');
+  if (!ul) return;
+  ul.replaceChildren();
+  if (!goals.length) {
+    const li = document.createElement('li');
+    li.className = 'lb-empty';
+    li.textContent = 'No goals yet — set one.';
+    ul.appendChild(li);
+    return;
+  }
+  for (const g of goals) {
+    const li = document.createElement('li');
+    li.className = 'goal-item';
+    const done = document.createElement('input');
+    done.type = 'checkbox';
+    done.className = 'goal-done';
+    done.checked = !!g.done;
+    done.title = 'Mark done';
+    done.setAttribute('aria-label', 'Mark goal done');
+    const sp = document.createElement('span');
+    sp.className = 'goal-text' + (g.done ? ' done' : '');
+    sp.textContent = g.text;
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'hist-del';
+    del.title = 'Delete goal';
+    del.textContent = '✕';
+    del.addEventListener('click', () => {
+      goals = goals.filter(x => x.id !== g.id);
+      saveGoals();
+      renderGoals();
+    });
+    const prog = document.createElement('div');
+    prog.className = 'goal-prog';
+    const range = document.createElement('input');
+    range.type = 'range';
+    range.min = '0';
+    range.max = '100';
+    range.value = String(g.progress || 0);
+    range.setAttribute('aria-label', 'Goal progress');
+    const pct = document.createElement('span');
+    pct.className = 'goal-pct';
+    pct.textContent = (g.progress || 0) + '%';
+    range.addEventListener('input', () => {
+      g.progress = Number(range.value);
+      pct.textContent = g.progress + '%';
+      saveGoals();
+    });
+    done.addEventListener('change', () => {
+      g.done = done.checked;
+      if (g.done) { g.progress = 100; range.value = '100'; pct.textContent = '100%'; }
+      saveGoals();
+      renderGoals();
+    });
+    prog.appendChild(range);
+    prog.appendChild(pct);
+    li.appendChild(done);
+    li.appendChild(sp);
+    li.appendChild(del);
+    li.appendChild(prog);
+    ul.appendChild(li);
+  }
+}
+
+// ── search across histories, ideas, goals ──
+function renderSearch(q) {
+  const box = document.getElementById('search-results');
+  if (!box) return;
+  box.replaceChildren();
+  q = (q || '').trim().toLowerCase();
+  if (!q) {
+    box.innerHTML = '<div class="lb-empty">Type to search conversations, ideas and goals.</div>';
+    return;
+  }
+  const groups = [];
+  const hHits = histories.filter(h =>
+    historyTitle(h).toLowerCase().includes(q) ||
+    h.entries.some(e => (e.text || '').toLowerCase().includes(q)));
+  if (hHits.length) groups.push(['Conversations', hHits.map(h => ({
+    label: historyTitle(h), go: () => { switchLeftView('chat'); loadHistory(h.id); }
+  }))]);
+  const iHits = ideas.filter(i => i.text.toLowerCase().includes(q));
+  if (iHits.length) groups.push(['Ideas', iHits.map(i => ({
+    label: i.text, go: () => switchLeftView('ideas')
+  }))]);
+  const gHits = goals.filter(g => g.text.toLowerCase().includes(q));
+  if (gHits.length) groups.push(['Goals', gHits.map(g => ({
+    label: g.text, go: () => switchLeftView('goals')
+  }))]);
+  if (!groups.length) {
+    box.innerHTML = '<div class="lb-empty">No matches.</div>';
+    return;
+  }
+  for (const [name, hits] of groups) {
+    const grp = document.createElement('div');
+    grp.className = 'search-group';
+    const h4 = document.createElement('h4');
+    h4.textContent = name;
+    grp.appendChild(h4);
+    for (const hit of hits.slice(0, 8)) {
+      const d = document.createElement('div');
+      d.className = 'search-hit';
+      d.textContent = hit.label;
+      d.title = hit.label;
+      d.addEventListener('click', hit.go);
+      grp.appendChild(d);
+    }
+    box.appendChild(grp);
+  }
+}
+
+// ── thinking panel (right sidebar): per-turn history, newest first ──
+// {type:'thinking'} WS events accumulate in pendingThinking during a turn;
+// when the turn commits, the text moves here as one expandable entry.
+const thinkingHistory = [];
+const MAX_THINKING = 20;
+function commitThinking() {
+  if (!pendingThinking) return;
+  thinkingHistory.push({ t: Date.now(), text: pendingThinking });
+  if (thinkingHistory.length > MAX_THINKING) {
+    thinkingHistory.splice(0, thinkingHistory.length - MAX_THINKING);
+  }
+  pendingThinking = '';
+  renderThinkingPanel();
+}
+function renderThinkingPanel() {
+  const list = document.getElementById('thinking-list');
+  const count = document.getElementById('thinking-count');
+  if (!list) return;
+  if (count) count.textContent = String(thinkingHistory.length);
+  list.replaceChildren();
+  if (!thinkingHistory.length) {
+    const d = document.createElement('div');
+    d.className = 'lb-empty';
+    d.textContent = 'Her inner thoughts will appear here.';
+    list.appendChild(d);
+    return;
+  }
+  for (const e of [...thinkingHistory].reverse()) {
+    const det = document.createElement('details');
+    det.className = 'thinking-entry';
+    const sum = document.createElement('summary');
+    sum.textContent = new Date(e.t).toLocaleTimeString();
+    const body = document.createElement('div');
+    body.className = 'thinking-body';
+    body.textContent = e.text;
+    det.appendChild(sum);
+    det.appendChild(body);
+    list.appendChild(det);
+  }
+}
+
+// ── leftbar wiring (runs once the DOM is ready) ──
+function initLeftbar() {
+  // Prune empty histories left by sessions where nothing was said.
+  histories = loadJSON(HIST_KEY, []).filter(h => h.entries && h.entries.length > 0);
+  ideas = loadJSON(IDEA_KEY, []);
+  goals = loadJSON(GOAL_KEY, []);
+  renderHistoryList();
+  renderThinkingPanel();
+  document.querySelectorAll('.lb-nav').forEach(b =>
+    b.addEventListener('click', () => switchLeftView(b.dataset.view)));
+  const newBtn = document.getElementById('new-chat-btn');
+  if (newBtn) newBtn.addEventListener('click', newChat);
+  const si = document.getElementById('search-input');
+  if (si) si.addEventListener('input', () => renderSearch(si.value));
+  const ideaForm = document.getElementById('idea-form');
+  if (ideaForm) ideaForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const inp = document.getElementById('idea-input');
+    const text = inp.value.trim();
+    if (!text) return;
+    ideas.unshift({ id: uid(), text, t: Date.now() });
+    saveIdeas();
+    renderIdeas();
+    inp.value = '';
+  });
+  const goalForm = document.getElementById('goal-form');
+  if (goalForm) goalForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const inp = document.getElementById('goal-input');
+    const text = inp.value.trim();
+    if (!text) return;
+    goals.unshift({ id: uid(), text, progress: 0, done: false, t: Date.now() });
+    saveGoals();
+    renderGoals();
+    inp.value = '';
+  });
+  const thHead = document.getElementById('thinking-head');
+  if (thHead) thHead.addEventListener('click', () => {
+    const panel = document.getElementById('thinking-panel');
+    const collapsed = panel.classList.toggle('collapsed');
+    thHead.setAttribute('aria-expanded', String(!collapsed));
+  });
+  const lbToggle = document.getElementById('leftbar-toggle');
+  if (lbToggle) lbToggle.addEventListener('click', () =>
+    document.body.classList.toggle('leftbar-open'));
+  window.addEventListener('beforeunload', saveHistoriesNow);
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initLeftbar);
+} else {
+  initLeftbar();
+}
+
 function captionShow() {
   if (!captionBox) return;
   captionBox.classList.remove('caption-hidden');
@@ -289,27 +690,8 @@ function captionRender(dialogue, emoji) {
   captionTextEl.scrollTop = captionTextEl.scrollHeight;
   captionShow();
 }
-function renderThinkingBox() {
-  if (!captionBox) return;
-  const old = document.getElementById('thinking-box');
-  if (old) old.remove();
-  if (!pendingThinking) return;
-  const details = document.createElement('details');
-  details.id = 'thinking-box';
-  details.className = 'thinking-box';
-  details.open = true;
-  const summary = document.createElement('summary');
-  summary.textContent = '\u{1F4AD} inner thoughts';
-  const body = document.createElement('div');
-  body.className = 'thinking-body';
-  body.textContent = pendingThinking;
-  details.appendChild(summary);
-  details.appendChild(body);
-  captionBox.insertBefore(details, captionBox.firstChild);
-  pendingThinking = "";
-}
 function captionCommit(dialogue, emoji, holdMs = 14000) {
-  renderThinkingBox();
+  commitThinking();
   captionRender(dialogue, emoji);
   clearTimeout(captionHideTimer);
   captionHideTimer = setTimeout(() => {
@@ -361,7 +743,7 @@ function deliverAikoMessage(parsed) {
   if (!aikoCommitFresh(parsed.dialogueText)) return;
   if (parsed.emoji) applyAikoEmotion(parsed.emoji);
   captionCommit(parsed.dialogueText, parsed.emoji);
-  transcriptLog.push({ t: Date.now(), sender: 'aiko', emoji: parsed.emoji, text: parsed.dialogueText,
+  pushTranscript({ t: Date.now(), sender: 'aiko', emoji: parsed.emoji, text: parsed.dialogueText,
                        action: parsed.action, nonVerbal: parsed.nonVerbalText });
   if (transcriptVisible) renderTranscript();
   postResponseBehavior(parsed);
@@ -767,18 +1149,9 @@ function addMessage(sender, text) {
   hideTypingIndicator();
   let insertEl;
   if (sender === 'you') {
-    const { row, bubble } = createMessageRow('you');
-    transcriptLog.push({ t: Date.now(), sender: 'you', text });
-    row.classList.add('transcript-row');
+    pushTranscript({ t: Date.now(), sender: 'you', text });
     if (transcriptVisible) renderTranscript();
-    const prefix = document.createElement('span');
-    prefix.className = 'msg-prefix';
-    prefix.textContent = window.currentUsername || 'You';
-    bubble.appendChild(prefix);
-    const body = document.createElement('div');
-    body.innerHTML = esc(text).replace(/\n/g, '<br>');
-    bubble.appendChild(body);
-    insertEl = row;
+    insertEl = renderUserRow(text);
   } else if (sender === 'aiko') {
     deliverAikoMessage(parseAikoMessage(text));
     return;   // her words live in the caption; the chat stays a slim log
@@ -836,7 +1209,7 @@ function flushStream() {
     if (!aikoCommitFresh(parsed.dialogueText)) { streamActive = false; streamRawText = ''; streamExprApplied = null; toolStatus.textContent = ''; return; }
     if (parsed.emoji && parsed.emoji !== streamExprApplied) applyAikoEmotion(parsed.emoji);
     captionCommit(parsed.dialogueText, parsed.emoji);
-    transcriptLog.push({ t: Date.now(), sender: 'aiko', emoji: parsed.emoji, text: parsed.dialogueText,
+    pushTranscript({ t: Date.now(), sender: 'aiko', emoji: parsed.emoji, text: parsed.dialogueText,
                          action: parsed.action, nonVerbal: parsed.nonVerbalText });
     if (transcriptVisible) renderTranscript();
     postResponseBehavior(parsed);
@@ -1213,8 +1586,6 @@ function submitInput() {
   window.dispatchEvent(new CustomEvent('aiko:msg-sent'));
   clearAuxRows();
   pendingThinking = "";
-  const staleThink = document.getElementById('thinking-box');
-  if (staleThink) staleThink.remove();
   flushStream();
   showTypingIndicator();
   ws.send(JSON.stringify({ type: 'user_input', text }));

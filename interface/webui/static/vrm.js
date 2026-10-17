@@ -1565,6 +1565,10 @@ function applyBlink(dt) {
   }
 }
 
+// ── avatar circle: headshot state (declared before animate() runs) ──
+let lastAvatarT = -1;
+let avatarLive = false;
+
 function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.05);
@@ -1579,8 +1583,57 @@ function animate() {
     vrm.update(dt);        // humanoid + spring bones LAST, on this frame's pose
   }
   renderer.render(scene, camera);
+  // Live headshot for the right-rail avatar circle (~10fps throttle).
+  if (t - lastAvatarT > 0.1) { lastAvatarT = t; updateAvatarCircle(); }
 }
 animate();
+
+// ── avatar circle: headshot crop of the VRM, head + a bit of shoulder ──
+// Projects the head bone to screen space, then crops a square sized at 46%
+// of the canvas height, biased 12% of the crop height BELOW the head center
+// so the framing is a headshot with shoulders — never just hair.
+function drawAvatarPlaceholder() {
+  const ac = document.getElementById('avatar-circle');
+  if (!ac || avatarLive === 'placeholder') return;
+  avatarLive = 'placeholder';
+  const ctx = ac.getContext('2d');
+  const g = ctx.createLinearGradient(0, 0, ac.width, ac.height);
+  g.addColorStop(0, '#3a4a2e');
+  g.addColorStop(1, '#c8813a');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, ac.width, ac.height);
+  ctx.fillStyle = 'rgba(244,240,230,0.92)';
+  ctx.font = `700 ${ac.width * 0.32}px Georgia, serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('A', ac.width / 2, ac.height / 2 + ac.width * 0.03);
+}
+function updateAvatarCircle() {
+  const ac = document.getElementById('avatar-circle');
+  if (!ac) return;
+  const head = vrm?.humanoid?.getRawBoneNode('head');
+  if (!head) { drawAvatarPlaceholder(); return; }
+  const v = new THREE.Vector3();
+  head.getWorldPosition(v);
+  v.project(camera);
+  // Behind the camera or fully off-screen → placeholder.
+  if (v.z > 1 || v.z < -1) { drawAvatarPlaceholder(); return; }
+  const src = renderer.domElement;
+  const cw = src.width, ch = src.height;
+  if (!cw || !ch) { drawAvatarPlaceholder(); return; }
+  const hx = (v.x * 0.5 + 0.5) * cw;
+  const hy = (-v.y * 0.5 + 0.5) * ch;
+  const s = ch * 0.46;                       // crop height = 46% of canvas
+  let cx = hx;
+  let cy = hy + s * 0.12;                    // bias below head → shoulders in
+  cx = Math.min(Math.max(cx, s / 2), cw - s / 2);
+  cy = Math.min(Math.max(cy, s / 2), ch - s / 2);
+  const ctx = ac.getContext('2d');
+  ctx.clearRect(0, 0, ac.width, ac.height);
+  ctx.drawImage(src, cx - s / 2, cy - s / 2, s, s, 0, 0, ac.width, ac.height);
+  avatarLive = 'live';
+}
+drawAvatarPlaceholder();
 
 // ── VRM load ─────────────────────────────────────────────────────────────────
 const loader = new GLTFLoader();

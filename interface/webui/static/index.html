@@ -109,6 +109,35 @@
     <div id="load-msg">loading model…</div>
   </div>
 
+  <!-- ── left sidebar (Muse-style nav + history) ────────────────────────────── -->
+  <aside id="leftbar" aria-label="Navigation and history">
+    <div id="leftbar-brand">Aiko-chan</div>
+    <nav id="leftbar-nav" aria-label="Sections">
+      <button type="button" class="lb-nav active" data-view="chat"><span class="lb-ico">💬</span><span class="lb-txt">Chat</span></button>
+      <button type="button" class="lb-nav" data-view="search"><span class="lb-ico">🔍</span><span class="lb-txt">Search</span></button>
+      <button type="button" class="lb-nav" data-view="ideas"><span class="lb-ico">💡</span><span class="lb-txt">Ideas</span></button>
+      <button type="button" class="lb-nav" data-view="goals"><span class="lb-ico">🎯</span><span class="lb-txt">Goals</span></button>
+    </nav>
+    <div id="leftbar-body">
+      <section class="lb-view" id="lb-view-chat" aria-label="Conversation history">
+        <button type="button" id="new-chat-btn">+ New chat</button>
+        <ul id="history-list" aria-label="Saved conversations"></ul>
+      </section>
+      <section class="lb-view" id="lb-view-search" aria-label="Search" hidden>
+        <input id="search-input" type="search" placeholder="Search histories, ideas, goals…" aria-label="Search" autocomplete="off">
+        <div id="search-results" aria-live="polite"></div>
+      </section>
+      <section class="lb-view" id="lb-view-ideas" aria-label="Ideas" hidden>
+        <form id="idea-form"><input id="idea-input" maxlength="200" placeholder="New idea…" aria-label="New idea" autocomplete="off"><button type="submit" aria-label="Add idea">+</button></form>
+        <ul id="idea-list"></ul>
+      </section>
+      <section class="lb-view" id="lb-view-goals" aria-label="Goals" hidden>
+        <form id="goal-form"><input id="goal-input" maxlength="200" placeholder="New goal…" aria-label="New goal" autocomplete="off"><button type="submit" aria-label="Add goal">+</button></form>
+        <ul id="goal-list"></ul>
+      </section>
+    </div>
+  </aside>
+
   <!-- ── VRM side ─────────────────────────────────────────────────────────── -->
   <div id="vrm-side">
     <canvas id="canvas"></canvas>
@@ -146,6 +175,7 @@
       <button id="screen-btn" class="input-btn ghost" title="Share one screen frame with Aiko" aria-label="Share screen with Aiko">▣</button>
       <button id="send-btn" class="input-btn send" aria-label="Send message">➤</button>
     </div>
+    <button type="button" id="leftbar-toggle" aria-label="Toggle navigation sidebar" title="Navigation">☰</button>
 
     <div id="stage-osbar" aria-hidden="true">
       <span class="osbar-left">— AIKO COMPANION OS v2.7.1 —</span>
@@ -218,6 +248,42 @@
   <!-- ── right panel ──────────────────────────────────────────────────────── -->
   <div id="panel">
     <button type="button" id="panel-collapse" aria-label="Collapse sidebar" title="Collapse sidebar">&#10218;</button>
+
+    <!-- live headshot avatar + thinking panel (Muse-style right rail) -->
+    <div id="rail-head">
+      <div id="avatar-wrap">
+        <canvas id="avatar-circle" width="336" height="336" aria-label="Aiko live avatar"></canvas>
+        <div id="avatar-name">Aiko</div>
+      </div>
+      <script>
+      // Avatar placeholder: drawn immediately (non-module) so the circle is
+      // never blank, even if the three.js/VRM module fails to load. vrm.js
+      // overwrites it with the live headshot once the model is ready.
+      (function () {
+        var ac = document.getElementById('avatar-circle');
+        if (!ac) return;
+        var ctx = ac.getContext('2d');
+        var g = ctx.createLinearGradient(0, 0, ac.width, ac.height);
+        g.addColorStop(0, '#3a4a2e');
+        g.addColorStop(1, '#c8813a');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, ac.width, ac.height);
+        ctx.fillStyle = 'rgba(244,240,230,0.92)';
+        ctx.font = '700 ' + Math.round(ac.width * 0.32) + 'px Georgia, serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('A', ac.width / 2, ac.height / 2 + ac.width * 0.03);
+      })();
+      </script>
+      <section id="thinking-panel" aria-label="Aiko thinking">
+        <button type="button" id="thinking-head" aria-expanded="true">
+          <span class="th-title">💭 Thinking</span>
+          <span id="thinking-count" class="count-badge">0</span>
+          <span class="th-chev">▾</span>
+        </button>
+        <div id="thinking-list" aria-live="polite"></div>
+      </section>
+    </div>
 
     <div id="panel-top">
     <section id="companion-hud" aria-label="Aiko companion controls">

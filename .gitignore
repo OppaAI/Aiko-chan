@@ -269,3 +269,4 @@ conscience-lab/.venv-train/
 conscience-lab/**/__pycache__/
 ft2-ckpt.tgz
 gtp_logs/
+mcp.social.db.bak

@@ -425,6 +425,18 @@ function renderTranscript() {
       + (sender === 'aiko' && entry.emoji ? ' ' + entry.emoji : '')
       + (sender === 'you' ? ' ' + (window.currentUsername || 'You') : '');
     bubble.appendChild(head);
+    if (sender === 'aiko' && entry.nonVerbal) {
+      const nv = document.createElement('div');
+      nv.className = 'msg-non-verbal';
+      nv.innerHTML = esc(entry.nonVerbal).replace(/\n/g, '<br>');
+      bubble.appendChild(nv);
+    }
+    if (sender === 'aiko' && entry.action && entry.action.toLowerCase() !== 'none') {
+      const act = document.createElement('div');
+      act.className = 'msg-action';
+      act.innerHTML = esc(entry.action).replace(/\n/g, '<br>');
+      bubble.appendChild(act);
+    }
     const body = document.createElement('div');
     body.innerHTML = esc(entry.text).replace(/\n/g, '<br>');
     bubble.appendChild(body);

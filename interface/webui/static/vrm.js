@@ -132,6 +132,13 @@ function getBone(name) {
 }
 
 // ── gesture state ─────────────────────────────────────────────────────────────
+// 2026-10-16: arm lifts disabled for now — Oppa will design better arm
+// animations later. While false, thinking poses and event gestures cannot
+// raise her arms: composePose pins arm bones to REST (+ breathing sway).
+// Flip to true to re-enable arm animation.
+const ARM_LIFT_ENABLED = false;
+const ARM_BONES = new Set(['leftUpperArm', 'rightUpperArm',
+  'leftLowerArm', 'rightLowerArm', 'leftHand', 'rightHand']);
 let gestureState = 'none';
 let gestureT = 0;
 let gestureDuration = 0;
@@ -1447,6 +1454,10 @@ function composePose() {
       fx = Math.max(-0.7, Math.min(1.7, fx));
       fz = Math.max(-1.3, Math.min(1.3, fz));
     }
+    if (!ARM_LIFT_ENABLED && ARM_BONES.has(name)) {
+      // arms stay at rest (+ breathing); deliberate state/gesture lifts off
+      fx = r.x + v.x; fy = r.y + v.y; fz = r.z + v.z;
+    }
     bone.rotation.set(fx, fy, fz);
   }
   // Hips: rotation + translation (weight shifts, bounce). Rest height is
@@ -1475,7 +1486,9 @@ function composePose() {
   setEye(h.getRawBoneNode('leftEye'));
   setEye(h.getRawBoneNode('rightEye'));
   // lookAtHand: true head tracking, resolved after the arm pose is composed.
-  if (gestureLookAt !== 0) {
+  // (disabled while arm lifts are off — the hand stays at rest, so there is
+  // nothing to track)
+  if (gestureLookAt !== 0 && ARM_LIFT_ENABLED) {
     const P = gestureLookAt < 0 ? 'left' : 'right';
     const handBone = h.getRawBoneNode(P + 'Hand');
     const headBone = h.getRawBoneNode('head');

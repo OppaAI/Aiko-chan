@@ -92,3 +92,57 @@ def test_audible_halt_stays_synchronous(speak, monkeypatch):
     monkeypatch.setattr(speak, "_load_sd", lambda: FakeSD())
     speak.stop()
     assert calls == ["sd.stop"]  # happened before stop() returned
+
+
+def test_stop_speech_stream_halts_word_emission(speak):
+    """Regression: stop_speech_stream() must synchronously halt the worker's
+    on_word emission. Previously it only queued the poison pill, so the worker
+    kept emitting for the full in-flight chunk while the calling thread wrote
+    the refusal note — word-level interleave corruption on one callback."""
+    import queue
+
+    emitted = []
+    q = queue.Queue()
+
+    def worker():
+        # Mimic _speech_stream_worker: block on the queue, then paced word
+        # emission honoring _stop_flag exactly as _emit_words_timed does.
+        while not speak._stop_flag.is_set():
+            try:
+                chunk = q.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if chunk is None:
+                break
+            for w in chunk.split():
+                if speak._stop_flag.is_set():
+                    return
+                emitted.append(w)
+                time.sleep(0.02)
+
+    t = threading.Thread(target=worker, daemon=True)
+    speak._stream_thread = t
+    speak._streaming_active = True
+    speak._stream_queue = q
+    t.start()
+    q.put("alpha beta gamma delta epsilon zeta eta theta")
+    deadline = time.monotonic() + 2.0
+    while not emitted and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert emitted, "worker never started emitting"
+    n_before = len(emitted)
+    t0 = time.monotonic()
+    speak.stop_speech_stream()
+    dt = time.monotonic() - t0
+    assert dt < 5.0, f"stop_speech_stream() blocked {dt:.2f}s"
+    assert not t.is_alive(), "worker still alive after stop_speech_stream()"
+    assert speak._stop_flag.is_set()
+    time.sleep(0.3)  # grace window: any post-stop emission would land here
+    assert len(emitted) == n_before, (
+        f"worker emitted after stop: {emitted[n_before:]}"
+    )
+
+
+def test_stop_speech_stream_idempotent(speak):
+    speak.stop_speech_stream()  # not streaming -> no-op, no raise
+    assert not speak._stop_flag.is_set()

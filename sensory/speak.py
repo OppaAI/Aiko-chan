@@ -1040,7 +1040,14 @@ class AikoSpeak:
                     self._stream_queue.put(clean)
 
     def stop_speech_stream(self) -> None:
-        """Finish the current sentence-level TTS stream."""
+        """Finish the current sentence-level TTS stream.
+
+        Sets _stop_flag so the worker stops emitting words promptly — even
+        mid-chunk — then joins it with a bounded timeout. "Stop" is therefore
+        synchronous for word emission: after this returns, no further on_word
+        calls will fire, so a refusal note (or anything else) emitted on the
+        calling thread can no longer word-interleave with the stream.
+        """
         with self._lock:
             if not self._streaming_active:
                 return
@@ -1049,8 +1056,16 @@ class AikoSpeak:
             self._stream_on_word = None
             stream_queue = self._stream_queue
             self._stream_queue = None
+            stream_thread = self._stream_thread
+            self._stream_thread = None
+        # Flag first: _emit_words_timed checks it per word, so emission halts
+        # promptly even for the in-flight chunk. The pill then releases a
+        # worker blocked in queue.get().
+        self._stop_flag.set()
         if stream_queue is not None:
             stream_queue.put(None)
+        if stream_thread is not None and stream_thread is not threading.current_thread():
+            stream_thread.join(timeout=5.0)
 
     def is_playing(self) -> bool:
         return self._playing.is_set()

@@ -3519,7 +3519,7 @@ class AikoThink:
                 log.warning("[think] sentence-stream review failed; aborting early audio: %s", exc)
                 state["aborted"] = True
                 try:
-                    speak.stop_speech_stream()
+                    speak.stop_speech_stream(cancel=True)
                 except Exception:
                     pass
                 return False
@@ -3527,7 +3527,7 @@ class AikoThink:
                 log.warning("[think] sentence-stream: sentence failed local review; aborting early audio")
                 state["aborted"] = True
                 try:
-                    speak.stop_speech_stream()
+                    speak.stop_speech_stream(cancel=True)
                 except Exception:
                     pass
                 return False
@@ -3560,7 +3560,7 @@ class AikoThink:
                     log.warning("[think] sentence-stream: gate_speak refused a sentence; aborting early audio")
                     state["aborted"] = True
                     try:
-                        speak.stop_speech_stream()
+                        speak.stop_speech_stream(cancel=True)
                     except Exception:
                         pass
                     return False
@@ -3582,7 +3582,7 @@ class AikoThink:
                 log.warning("[think] sentence-stream gate_speak failed; aborting early audio: %s", exc)
                 state["aborted"] = True
                 try:
-                    speak.stop_speech_stream()
+                    speak.stop_speech_stream(cancel=True)
                 except Exception:
                     pass
                 return False
@@ -3598,7 +3598,7 @@ class AikoThink:
                 log.warning("[think] sentence-stream feed failed; aborting early audio: %s", exc)
                 state["aborted"] = True
                 try:
-                    speak.stop_speech_stream()
+                    speak.stop_speech_stream(cancel=True)
                 except Exception:
                     pass
                 return False

@@ -1048,17 +1048,23 @@ class AikoSpeak:
                 if self._stream_queue is not None:
                     self._stream_queue.put(clean)
 
-    def stop_speech_stream(self) -> None:
+    def stop_speech_stream(self, cancel: bool = False) -> None:
         """Finish the current sentence-level TTS stream.
 
-        Sets _stop_flag so the worker stops emitting words promptly — even
-        mid-chunk — then joins it with a bounded timeout. When the join
-        completes, "stop" is synchronous for word emission: no further
-        on_word calls will fire, so a refusal note (or anything else)
-        emitted on the calling thread can no longer word-interleave with
-        the stream. If the worker is wedged and the join times out, the
-        flag stays set and the thread handle is retained so a later stop()
-        can reap it; the worker exits on its own as soon as it unsticks.
+        Default (cancel=False) is graceful: the worker drains already-queued
+        sentences, then exits on the pill. Normal completion must never drop
+        the tail — in sentence-stream mode the display itself is driven by
+        the worker, so cancelled-but-fed sentences would vanish.
+
+        cancel=True aborts: sets _stop_flag (under the lock) so the worker
+        stops emitting words promptly — even mid-chunk — then joins it with
+        a bounded timeout. When the join completes, "stop" is synchronous
+        for word emission: no further on_word calls will fire, so a refusal
+        note (or anything else) emitted on the calling thread can no longer
+        word-interleave with the stream. If the worker is wedged and the
+        join times out, the flag stays set and the thread handle is retained
+        so a later stop() can reap it; the worker exits on its own as soon
+        as it unsticks.
         """
         with self._lock:
             if not self._streaming_active:
@@ -1070,15 +1076,18 @@ class AikoSpeak:
             self._stream_queue = None
             stream_thread = self._stream_thread
             self._stream_thread = None
-            # Set under the lock: start_speech_stream() clears the flag
-            # under the same lock, so a new stream cannot slip in between
-            # the state transition and this set and get its fresh flag
-            # clobbered by a stale stop request.
-            self._stop_flag.set()
-        # The pill releases a worker blocked in queue.get().
+            if cancel:
+                # Set under the lock: start_speech_stream() clears the flag
+                # under the same lock, so a new stream cannot slip in between
+                # the state transition and this set and get its fresh flag
+                # clobbered by a stale stop request.
+                self._stop_flag.set()
+        # The pill releases a worker blocked in queue.get(); on the drain
+        # path it lands behind already-queued sentences so they still play.
         if stream_queue is not None:
             stream_queue.put(None)
-        if stream_thread is not None and stream_thread is not threading.current_thread():
+        if cancel and stream_thread is not None \
+                and stream_thread is not threading.current_thread():
             stream_thread.join(timeout=5.0)
             if stream_thread.is_alive():
                 # Wedged (e.g. hung synth HTTP): don't discard the only

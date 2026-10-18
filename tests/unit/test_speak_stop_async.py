@@ -131,7 +131,7 @@ def test_stop_speech_stream_halts_word_emission(speak):
         time.sleep(0.01)
     assert emitted, "worker never started emitting"
     t0 = time.monotonic()
-    speak.stop_speech_stream()
+    speak.stop_speech_stream(cancel=True)
     dt = time.monotonic() - t0
     assert dt < 5.0, f"stop_speech_stream() blocked {dt:.2f}s"
     assert not t.is_alive(), "worker still alive after stop_speech_stream()"
@@ -170,7 +170,7 @@ def test_stop_speech_stream_retains_wedged_worker(speak):
     speak._stream_queue = q
     t.start()
     t0 = time.monotonic()
-    speak.stop_speech_stream()
+    speak.stop_speech_stream(cancel=True)
     dt = time.monotonic() - t0
     assert dt < 6.0, f"stop_speech_stream() blocked {dt:.2f}s on a wedged worker"
     assert t.is_alive(), "wedged worker unexpectedly exited"
@@ -180,3 +180,39 @@ def test_stop_speech_stream_retains_wedged_worker(speak):
     # A later stop() detaches the retained handle for background reaping.
     speak.stop()
     assert speak._stream_thread is None
+
+
+def test_stop_speech_stream_drains_by_default(speak):
+    """Default stop is graceful: queued sentences drain before the worker
+    exits on the pill. Normal completion must not drop the tail — in
+    sentence-stream mode the display itself is worker-driven, so a
+    cancelled-but-fed sentence would vanish."""
+    import queue
+
+    spoken = []
+    q = queue.Queue()
+
+    def worker():
+        # Simplified drain loop mirroring _speech_stream_worker: no flag
+        # is set on a drain stop, so every queued chunk is processed.
+        while not speak._stop_flag.is_set():
+            try:
+                chunk = q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if chunk is None:
+                break
+            spoken.append(chunk)
+
+    t = threading.Thread(target=worker, daemon=True)
+    speak._stream_thread = t
+    speak._streaming_active = True
+    speak._stream_queue = q
+    t.start()
+    q.put("sentence one")
+    q.put("sentence two")
+    speak.stop_speech_stream()  # default: drain, not cancel
+    assert not speak._stop_flag.is_set(), "drain stop must not set the flag"
+    t.join(timeout=5.0)
+    assert not t.is_alive(), "worker did not exit after draining"
+    assert spoken == ["sentence one", "sentence two"], f"dropped: {spoken}"

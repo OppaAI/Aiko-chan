@@ -263,6 +263,13 @@ def web_fetch(
             if tavily and len(tavily) > len(text):
                 text = tavily
         elif strategy == "crawl4ai":
+            # _optional_import is defined in research.py, which imports this
+            # module at load time (research -> websearch), so a module-level
+            # import here would be circular. Import lazily at call time: both
+            # modules are fully loaded by the time a fetch runs. Without this,
+            # the crawl4ai fallback raised NameError: name '_optional_import'
+            # is not defined (seen in deep_study_window, 2026-10-17).
+            from agentic.toolkit.research import _optional_import
             if _optional_import("crawl4ai") is None:
                 fetch_heal.record(url, "crawl4ai", False)
                 last_error = "[fetch failed: crawl4ai is not installed]"

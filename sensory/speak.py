@@ -54,6 +54,12 @@ MIOTTS_PRESET  = os.getenv("MIOTTS_PRESET",   "jp_female")
 MIOTTS_DEVICE  = env_int("MIOTTS_DEVICE", -1)
 
 MIOTTS_MAX_TOKENS         = env_int("MIOTTS_MAX_TOKENS", 300)
+# Client-side HTTP timeout. Measured on-device: a 300-char chunk costs
+# ~7s warm and ~17s cold, but under load (llm-router jobs, concurrent
+# chat) MioTTS stretches past 30s and the whole chunk was discarded --
+# 15 dropped chunks on 2026-10-17. TTS runs on a background thread, so a
+# longer wait is strictly better than losing the audio entirely.
+MIOTTS_TIMEOUT            = env_int("MIOTTS_TIMEOUT", 90)
 MIOTTS_TEMPERATURE        = env_float("MIOTTS_TEMPERATURE", 0.8)
 MIOTTS_TOP_P              = env_float("MIOTTS_TOP_P", 1.0)
 MIOTTS_REPETITION_PENALTY = env_float("MIOTTS_REPETITION_PENALTY", 1.15)
@@ -564,7 +570,7 @@ class AikoSpeak:
             if abs(self._speech_pitch) > 0.01:
                 payload_data["pitch"] = round(self._speech_pitch, 3)
 
-        timeout = 60 if MIOTTS_BEST_OF_N_ENABLED else 30
+        timeout = MIOTTS_TIMEOUT
         try:
             # /mio/tts/stream returns the WAV bytes inline (audio/wav,
             # chunked) — no server-side file, no read+unlink round-trip.

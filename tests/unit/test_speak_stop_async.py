@@ -130,19 +130,53 @@ def test_stop_speech_stream_halts_word_emission(speak):
     while not emitted and time.monotonic() < deadline:
         time.sleep(0.01)
     assert emitted, "worker never started emitting"
-    n_before = len(emitted)
     t0 = time.monotonic()
     speak.stop_speech_stream()
     dt = time.monotonic() - t0
     assert dt < 5.0, f"stop_speech_stream() blocked {dt:.2f}s"
     assert not t.is_alive(), "worker still alive after stop_speech_stream()"
     assert speak._stop_flag.is_set()
+    # Snapshot AFTER stop returns: only emissions past this point count
+    # against the shutdown guarantee (the worker may legally emit between
+    # an earlier snapshot and the stop request).
+    n_after_stop = len(emitted)
     time.sleep(0.3)  # grace window: any post-stop emission would land here
-    assert len(emitted) == n_before, (
-        f"worker emitted after stop: {emitted[n_before:]}"
+    assert len(emitted) == n_after_stop, (
+        f"worker emitted after stop: {emitted[n_after_stop:]}"
     )
 
 
 def test_stop_speech_stream_idempotent(speak):
     speak.stop_speech_stream()  # not streaming -> no-op, no raise
     assert not speak._stop_flag.is_set()
+
+
+def test_stop_speech_stream_retains_wedged_worker(speak):
+    """If the bounded join times out, the worker handle must be retained
+    (not discarded) so a later stop() can reap it — and the flag stays set
+    so the worker can't emit once it unsticks."""
+    import queue
+
+    q = queue.Queue()
+    release = threading.Event()
+
+    def worker():
+        # Wedged: ignores the pill, blocks past the 5s join timeout.
+        release.wait(30)
+
+    t = threading.Thread(target=worker, daemon=True)
+    speak._stream_thread = t
+    speak._streaming_active = True
+    speak._stream_queue = q
+    t.start()
+    t0 = time.monotonic()
+    speak.stop_speech_stream()
+    dt = time.monotonic() - t0
+    assert dt < 6.0, f"stop_speech_stream() blocked {dt:.2f}s on a wedged worker"
+    assert t.is_alive(), "wedged worker unexpectedly exited"
+    assert speak._stream_thread is t, "wedged worker handle was discarded"
+    assert speak._stop_flag.is_set(), "flag must stay set for the wedged worker"
+    release.set()
+    # A later stop() detaches the retained handle for background reaping.
+    speak.stop()
+    assert speak._stream_thread is None

@@ -4167,7 +4167,8 @@ class AikoThink:
             # already streamed; the decision governs history + memory.
             _ask_flags = list(ask_flags or [])
             _final_escalated = _fverdict is not None and _fverdict.decision == _ESCALATE
-            if _ask_out is not None and (_final_escalated or _ask_flags):
+            _was_refused = _fverdict is not None and _fverdict.decision == _REFUSE
+            if _ask_out is not None and not _was_refused and (_final_escalated or _ask_flags):
                 _turn_id = (_fverdict.escalation_id if _final_escalated and _fverdict.escalation_id
                             else (_ask_flags[0].get("escalation_id") if _ask_flags else None))
                 if _turn_id:

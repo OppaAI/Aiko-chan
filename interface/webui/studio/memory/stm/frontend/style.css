@@ -593,16 +593,16 @@ a[style*="#1a1028"] {
 
 
 /* ── dark variant: hardcoded light surfaces → dark ── */
-html[data-theme="dark"] .back { background: #2a3322; }
-html[data-theme="dark"] .btn { background: #1e2417; }
-html[data-theme="dark"] .btn.danger { color: #c86a4a; }
-html[data-theme="dark"] .budget-track { background: #2a3322; }
-html[data-theme="dark"] .stage { background: radial-gradient(ellipse at 45% 45%, #232b1a 0%, #141a10 70%); }
-html[data-theme="dark"] .mem { background: radial-gradient(circle at 40% 35%, #2a3322 0%, #1e2417 70%); }
-html[data-theme="dark"] .mem svg circle.track { stroke: #2a3322; }
-html[data-theme="dark"] .evict-item { background: rgba(30, 36, 23, 0.9); color: #e6dfd0; }
+html[data-theme="dark"] .back { background: #241a3e; }
+html[data-theme="dark"] .btn { background: #211738; }
+html[data-theme="dark"] .btn.danger { color: #d96a5e; }
+html[data-theme="dark"] .budget-track { background: #241a3e; }
+html[data-theme="dark"] .stage { background: radial-gradient(ellipse at 45% 45%, #241a3e 0%, #0d0718 70%); }
+html[data-theme="dark"] .mem { background: radial-gradient(circle at 40% 35%, #241a3e 0%, #211738 70%); }
+html[data-theme="dark"] .mem svg circle.track { stroke: #241a3e; }
+html[data-theme="dark"] .evict-item { background: rgba(33, 23, 56, 0.9); color: #ded3f7; }
 
 
-html[data-theme="dark"] .evict-zone { background: rgba(30, 36, 23, 0.9); }
-html[data-theme="dark"] textarea { background: #1e2417; }
-html[data-theme="dark"] .pill.merged { background: linear-gradient(135deg, #2a3322, #1e2417); }
+html[data-theme="dark"] .evict-zone { background: rgba(33, 23, 56, 0.9); }
+html[data-theme="dark"] textarea { background: #211738; }
+html[data-theme="dark"] .pill.merged { background: linear-gradient(135deg, #241a3e, #211738); }

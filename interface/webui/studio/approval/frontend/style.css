@@ -557,84 +557,87 @@ body {
    The head script sets html[data-theme] synchronously before CSS loads, so there
    is no flash of the wrong theme. Higher specificity than :root wins over every
    panel-local light token definition. ── */
-/* ── dark variant: the field-journal at night. Follows the main WebUI theme
-   flag (localStorage 'aiko-theme'). The head script sets html[data-theme]
-   synchronously before CSS loads, so there is no flash of the wrong theme.
-   Higher specificity than :root wins over every panel-local light token
-   definition. Zero purple/violet/pink/teal. ── */
+/* ── dark variant: the WebUI purple glass theme. Follows the main WebUI
+   theme flag (localStorage 'aiko-theme'). The head script sets
+   html[data-theme] synchronously before CSS loads, so there is no flash
+   of the wrong theme. Higher specificity than :root wins over every
+   panel-local light token definition. ── */
 html[data-theme="dark"] {
   color-scheme: dark;
-  /* site palette translated to dark */
-  --cream: #e6dfd0;
-  --parch: #232b1a;
-  --moss: #b3c49a;
-  --sage: #9aa88a;
-  --fern: #b3c49a;
-  --bark: #141a10;
-  --soil: #d8d0bd;
-  --ink: #0e120b;
-  --amber: #c8813a;
-  --rust: #c87a4a;
-  --mist: #2a3322;
-  --circuit: #8aa864;
+  /* site palette translated to dark: the WebUI purple glass theme
+     (style-dark.css). Surfaces and primary accents are violet glass;
+     semantic hues stay distinct — green, cyan, amber and red keep
+     their meaning, brightened for the deep-purple ground. */
+  --cream: #ded3f7;
+  --parch: #241a3e;
+  --moss: #c4b5fd;
+  --sage: #9a82c4;
+  --fern: #c4b5fd;
+  --bark: #0d0718;
+  --soil: #d8bcff;
+  --ink: #090511;
+  --amber: #d9a05b;
+  --rust: #d98a5e;
+  --mist: #241a3e;
+  --circuit: #8b6fd8;
   /* legacy / shared names */
-  --bg: #141a10;
-  --bg2: #1a2013;
-  --panel: #1e2417;
-  --slot: #1e2417;
-  --border: rgba(179, 196, 154, 0.18);
-  --line: rgba(179, 196, 154, 0.12);
-  --pink: #c8813a;
-  --purple: #b3c49a;
-  --accent: #b3c49a;
-  --accent2: #8aa864;
-  --mauve: #9aa88a;
-  --cyan: #8aa864;
-  --gold: #c8813a;
-  --dim: #9aa88a;
-  --dimmer: rgba(179, 196, 154, 0.08);
-  --dim-text: #9aa88a;
-  --muted: #9aa88a;
-  --text: #e6dfd0;
-  --brown: #c87a4a;
-  --orange: #c8813a;
-  --green: #8aa864;
-  --violet: #9aa88a;
-  --danger: #c86a4a;
-  --glass: rgba(30, 36, 23, 0.9);
-  --glass-bg: rgba(30, 36, 23, 0.9);
-  --glass-border: rgba(179, 196, 154, 0.18);
-  --glass-highlight: rgba(255, 255, 255, 0.04);
+  --bg: #0d0718;
+  --bg2: #150d26;
+  --panel: #211738;
+  --slot: #211738;
+  --border: rgba(196, 181, 253, 0.16);
+  --line: rgba(196, 181, 253, 0.10);
+  --pink: #d8bcff;
+  --purple: #a78bfa;
+  --accent: #c4b5fd;
+  --accent2: #8b6fd8;
+  --mauve: #d8bcff;
+  --cyan: #7fd1c8;
+  --gold: #d9a05b;
+  --dim: #9a82c4;
+  --dimmer: #241a3e;
+  --dim-text: #9a82c4;
+  --muted: #9a82c4;
+  --text: #ded3f7;
+  --brown: #c98a5e;
+  --orange: #d98a5e;
+  --green: #93c98a;
+  --violet: #a78bfa;
+  --danger: #f08d9e;
+  --glass: rgba(33, 23, 56, 0.72);
+  --glass-bg: rgba(33, 23, 56, 0.55);
+  --glass-border: rgba(196, 181, 253, 0.16);
+  --glass-highlight: rgba(255, 255, 255, 0.07);
   /* panel-local tokens (defined under :root in panel sheets) */
-  --red: #c86a4a;
-  --red-bright: #d4845f;
-  --orange-bright: #d8953f;
-  --dim-bright: #aab896;
-  --purple-bright: #b3c49a;
-  --green-bright: #8aa864;
-  --cyan-bright: #8aa864;
-  --meta: #9aa88a;
-  --neg: #8aa864;
-  --pos: #c8813a;
-  --neutral: #9aa88a;
-  --entity: #b3c49a;
-  --episode: #8aa864;
-  --n8n-card: rgba(30, 36, 23, 0.9);
-  --n8n-card-border: rgba(179, 196, 154, 0.18);
-  --n8n-dot: #2a3322;
-  --n8n-green: #8aa864;
-  --n8n-red: #c86a4a;
-  --n8n-orange: #c87a4a;
-  --n8n-sub: #9aa88a;
+  --red: #d96a5e;
+  --red-bright: #e88a7a;
+  --orange-bright: #e8a55f;
+  --dim-bright: #b3a1d9;
+  --purple-bright: #c4b5fd;
+  --green-bright: #a5d69c;
+  --cyan-bright: #9fe0d8;
+  --meta: #9a82c4;
+  --neg: #93c98a;
+  --pos: #d9a05b;
+  --neutral: #9a82c4;
+  --entity: #c4b5fd;
+  --episode: #8b6fd8;
+  --n8n-card: rgba(33, 23, 56, 0.72);
+  --n8n-card-border: rgba(196, 181, 253, 0.16);
+  --n8n-dot: #241a3e;
+  --n8n-green: #93c98a;
+  --n8n-red: #d96a5e;
+  --n8n-orange: #d98a5e;
+  --n8n-sub: #9a82c4;
 }
 
 /* approval's own hardcoded light rules → dark */
 html[data-theme="dark"] .btn-primary:hover,
 html[data-theme="dark"] .btn-success:hover,
 html[data-theme="dark"] .btn-danger:hover,
-html[data-theme="dark"] .btn-warning:hover { color: #141a10; }
-html[data-theme="dark"] .content-area { background: radial-gradient(ellipse at center, #232b1a 0%, #141a10 70%); }
-html[data-theme="dark"] .status-badge.enriched { background: rgba(179, 196, 154, 0.12); border-color: rgba(179, 196, 154, 0.25); }
+html[data-theme="dark"] .btn-warning:hover { color: #0d0718; }
+html[data-theme="dark"] .content-area { background: radial-gradient(ellipse at center, #241a3e 0%, #0d0718 70%); }
+html[data-theme="dark"] .status-badge.enriched { background: rgba(196, 181, 253, 0.12); border-color: rgba(196, 181, 253, 0.25); }
 
 
-html[data-theme="dark"] .studio-header { background: linear-gradient(180deg, var(--bg2) 0%, rgba(20, 26, 16, 0.95) 100%); }
+html[data-theme="dark"] .studio-header { background: linear-gradient(180deg, var(--bg2) 0%, rgba(13, 7, 24, 0.95) 100%); }

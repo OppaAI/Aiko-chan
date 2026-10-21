@@ -137,5 +137,5 @@ a[style*="#1a1028"] {
 
 /* ── dark variant: hardcoded light text → dark ── */
 html[data-theme="dark"] .btn-primary,
-html[data-theme="dark"] .memory-studio-tab.active { color: #141a10; }
-html[data-theme="dark"] .val-neg { color: #8aa864; }
+html[data-theme="dark"] .memory-studio-tab.active { color: #0d0718; }
+html[data-theme="dark"] .val-neg { color: #93c98a; }

@@ -33,17 +33,62 @@ def _check_name(name: str) -> Path:
     if name == ".env.age": return _state_paths()[1]
     if name not in _yaml_names(): raise HTTPException(status_code=404, detail="Unknown settings file")
     return (_root() / "config" / name).resolve()
-def _setting_entries(data: dict[str, Any], prefix: str = "") -> list[dict[str, Any]]:
+
+def _yaml_metadata(path: Path) -> dict[str, dict[str, Any]]:
+    """Collect friendly groups, descriptions, choices, and ranges from comments."""
+    metadata: dict[str, dict[str, Any]] = {}
+    group = "General"
+    pending: list[str] = []
+    stack: list[tuple[int, str]] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("#"):
+            comment = stripped[1:].strip()
+            if comment.startswith("--") or (comment and comment.endswith("--")):
+                group = comment.strip("- ").strip()
+                pending = []
+            elif comment:
+                pending.append(comment)
+            continue
+        match = re.match(r"^(\s*)([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$", raw)
+        if not match:
+            continue
+        indent, key, remainder = len(match.group(1)), match.group(2), match.group(3)
+        while stack and indent <= stack[-1][0]: stack.pop()
+        setting_path = ".".join(item[1] for item in stack + [(indent, key)])
+        inline = ""
+        if "#" in remainder: remainder, inline = remainder.split("#", 1)
+        description = " ".join(pending + ([inline.strip()] if inline.strip() else []))
+        options: list[str] = []
+        choice_match = re.search(r"(?:options?|choices?)\s*:?\s*([^.;]+)", description, re.I)
+        if choice_match:
+            options = [x.strip(" `\"") for x in re.split(r"\s*[|/,]\s*", choice_match.group(1)) if x.strip()]
+        if not options:
+            pipe_match = re.search(r"([A-Za-z][\w-]*(?:\s*\|\s*[A-Za-z][\w-]*)+)", description)
+            if pipe_match:
+                options = [x.strip() for x in pipe_match.group(1).split("|")]
+        range_match = re.search(r"(?:range|clamp(?:ed)?)\s*[: ]\s*(-?\d+(?:\.\d+)?)\s*(?:-|\.\.|to)\s*(-?\d+(?:\.\d+)?)", description, re.I)
+        metadata[setting_path] = {"group": group, "description": description, "options": options, "range": [float(range_match.group(1)), float(range_match.group(2))] if range_match else None}
+        if remainder.strip() == "": stack.append((indent, key))
+        pending = []
+    return metadata
+def _setting_entries(data: dict[str, Any], prefix: str = "", metadata: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     entries = []
     for key, value in data.items():
         path = prefix + "." + str(key) if prefix else str(key)
         if isinstance(value, dict):
-            entries.extend(_setting_entries(value, path))
+            entries.extend(_setting_entries(value, path, metadata))
             continue
         kind = "text"
         if isinstance(value, bool) or (isinstance(value, str) and value.lower() in ("0", "1", "true", "false", "yes", "no", "on", "off")): kind = "toggle"
         elif isinstance(value, (int, float)) or (isinstance(value, str) and re.fullmatch(r"-?\d+(\.\d+)?", value.strip())): kind = "scale" if 0 <= float(value) <= 1 else "number"
-        entries.append({"path": path, "key": str(key), "value": value, "kind": kind})
+        info = (metadata or {}).get(path, {})
+        numeric = isinstance(value, (int, float)) or (isinstance(value, str) and re.fullmatch(r"-?\d+(\.\d+)?", value.strip()))
+        if info.get("options"): kind = "select"
+        minimum, maximum = (info.get("range") or [None, None])
+        if numeric and minimum is None:
+            number = float(value); minimum = 0 if number >= 0 else number * 2; maximum = max(number * 2, 1) if number >= 0 else 0
+        entries.append({"path": path, "key": str(key), "value": value, "kind": kind, "group": info.get("group", prefix.split(".")[0] if prefix else "General"), "description": info.get("description", ""), "options": info.get("options", []), "min": minimum, "max": maximum})
     return entries
 
 def _set_path(data: dict[str, Any], path: str, value: Any) -> None:
@@ -93,7 +138,7 @@ async def read_settings_file(name: str) -> dict[str, Any]:
         try: return {"name": name, "kind": "env", "values": _read_env()}
         except (FileNotFoundError, RuntimeError) as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not path.exists(): raise HTTPException(status_code=404, detail="Settings file is missing")
-    return {"name": name, "kind": "yaml", "settings": _setting_entries(_load_yaml_mapping(path))}
+    return {"name": name, "kind": "yaml", "settings": _setting_entries(_load_yaml_mapping(path), metadata=_yaml_metadata(path))}
 @router.put("/file/{name}")
 async def write_settings_file(name: str, payload: dict[str, Any]) -> dict[str, str]:
     path = _check_name(name)

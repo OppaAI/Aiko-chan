@@ -15,8 +15,8 @@
   <link rel="stylesheet" href="./hud-cyber.css">
   <script>
     (function () {
-      var dark = false;
-      try { dark = localStorage.getItem('aiko-theme') === 'dark'; } catch (e) { }
+      var dark = true
+      try { dark = localStorage.getItem('aiko-theme') !== 'light'; } catch (e) { }
       document.documentElement.dataset.theme = dark ? 'dark' : 'light';
       document.getElementById('theme-style-light').disabled = dark;
       document.getElementById('theme-style-dark').disabled = !dark;
@@ -267,6 +267,7 @@
       <a class="sbtn" href="/studio/spec/" target="_blank" rel="noopener" title="Spec Studio"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="7" height="7" rx="1"/><rect x="13.5" y="3.5" width="7" height="7" rx="1"/><rect x="3.5" y="13.5" width="7" height="7" rx="1"/><rect x="13.5" y="13.5" width="7" height="7" rx="1"/></svg><span class="sbtn-label">Spec Studio</span></a>
       <a class="sbtn" href="/studio/log/" target="_blank" rel="noopener" title="Log Studio"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h14v16H5z"/><path d="M8.5 8.5h7M8.5 12h7M8.5 15.5h4.5"/></svg><span class="sbtn-label">Log Studio</span></a>
       <a class="sbtn" href="/studio/codebase/" target="_blank" rel="noopener" title="Codebase Studio"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.5 7L4 12l4.5 5M15.5 7L20 12l-4.5 5"/></svg><span class="sbtn-label">Codebase Studio</span></a>
+      <a class="sbtn" href="/settings/" target="_blank" rel="noopener" title="Aiko settings"><span class="sbtn-label">⚙ Settings</span></a>
     </nav>
     </div>
 

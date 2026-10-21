@@ -456,6 +456,16 @@ async def require_accepted_session(session: dict = Depends(require_session)) -> 
     return session
 
 
+async def require_settings_access(session: dict = Depends(require_accepted_session)) -> dict:
+    allowed = {item.strip() for item in os.getenv("SETTINGS_ALLOWED_USERS", "OppaAI").split(",") if item.strip()}
+    if session.get("user_id") not in allowed:
+        raise HTTPException(status_code=403, detail="Settings are restricted to the configured owner")
+    return session
+
+from interface.webui.settings import router as settings_router
+app.include_router(settings_router, dependencies=[Depends(require_settings_access)])
+
+
 # ── public config ─────────────────────────────────────────────────────────────
 
 @app.get("/api/auth/config")

@@ -258,11 +258,11 @@ a[style*="#1a1028"] {
 /* ── dark variant: hardcoded light surfaces → dark ── */
 html[data-theme="dark"] .sidebar input[type=number],
 html[data-theme="dark"] .sidebar input[type=text],
-html[data-theme="dark"] .sidebar select { background: #1e2417; }
-html[data-theme="dark"] .btn { background: #2a3322; }
-html[data-theme="dark"] #canvas { background: radial-gradient(ellipse at 50% 40%, #232b1a 0%, #141a10 70%); }
-html[data-theme="dark"] .details { background: #1e2417; }
-html[data-theme="dark"] .memory-studio-tab { background: #1e2417; }
+html[data-theme="dark"] .sidebar select { background: #211738; }
+html[data-theme="dark"] .btn { background: #241a3e; }
+html[data-theme="dark"] #canvas { background: radial-gradient(ellipse at 50% 40%, #241a3e 0%, #0d0718 70%); }
+html[data-theme="dark"] .details { background: #211738; }
+html[data-theme="dark"] .memory-studio-tab { background: #211738; }
 
 
-html[data-theme="dark"] .pill.merged { background: linear-gradient(135deg, #2a3322, #1e2417); }
+html[data-theme="dark"] .pill.merged { background: linear-gradient(135deg, #241a3e, #211738); }

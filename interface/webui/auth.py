@@ -116,6 +116,13 @@ try:
 except ImportError as e:
     log.warning(f"Could not mount Log studio: {e}")
 
+# Settings Studio — tabbed editor for config/*.yaml + .env.age secrets
+try:
+    from interface.webui.studio.settings.backend.api import app as settings_studio_app
+    app.mount("/studio/settings", settings_studio_app)
+except Exception as e:
+    log.warning(f"Could not mount Settings studio: {e}")
+
 # Fly Circuit Studio — NeuralState motif graph
 try:
     import os, sys

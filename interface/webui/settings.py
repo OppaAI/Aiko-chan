@@ -72,6 +72,30 @@ def _yaml_metadata(path: Path) -> dict[str, dict[str, Any]]:
         if remainder.strip() == "": stack.append((indent, key))
         pending = []
     return metadata
+def _friendly_group(path: str, section: str = "") -> str:
+    """Map detailed YAML sections into a small, stable settings taxonomy."""
+    name = path.upper()
+    rules = (
+        ("Vision", ("VISION", "CAMERA", "IMAGE")),
+        ("Voice", ("ASR", "LISTEN", "VAD", "TTS", "SPEAK", "AUDIO", "BARGE")),
+        ("Interface", ("WEBUI", "HTTP_", "WS_", "SSL", "RENDER", "STREAM", "LATENCY", "FLY_", "PYTHONPATH")),
+        ("Memory", ("MEMORY", "KNOWLEDGE", "RECALL", "EPISOD", "ENTITY", "VECTOR", "LORE")),
+        ("Social", ("SOCIAL", "THREADS", "DISCORD", "TELEGRAM", "MASTODON", "BLUESKY", "PIXELFED", "PROTON")),
+        ("Games", ("SHOGI", "YANEURAOU", "SELFPLAY", "GO_", "KOI_")),
+        ("Conscience", ("CCC", "CONSCIENCE", "CANON", "MORAL")),
+        ("Identity", ("AI_NAME", "USER_SPACE", "AGE_KEY", "ENV_AGE", "TIMEZONE", "OWNER")),
+        ("Agentic", ("WIKI", "SKILL", "AGENT", "SEARCH", "JOB_", "ROUTER", "PLAYBOOK", "TOOL")),
+    )
+    for group, prefixes in rules:
+        if any(token in name for token in prefixes):
+            return group
+    section_name = section.upper()
+    if any(token in section_name for token in ("MODEL", "THINK", "REFLECT", "INNER SPEECH", "COGNITION")):
+        return "Agentic"
+    if any(token in section_name for token in ("SYSTEM", "SCHEDULE", "LOGGING", "BACKUP")):
+        return "System"
+    return "System"
+
 def _setting_entries(data: dict[str, Any], prefix: str = "", metadata: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     entries = []
     for key, value in data.items():
@@ -88,7 +112,7 @@ def _setting_entries(data: dict[str, Any], prefix: str = "", metadata: dict[str,
         minimum, maximum = (info.get("range") or [None, None])
         if numeric and minimum is None:
             number = float(value); minimum = 0 if number >= 0 else number * 2; maximum = max(number * 2, 1) if number >= 0 else 0
-        entries.append({"path": path, "key": str(key), "value": value, "kind": kind, "group": info.get("group", prefix.split(".")[0] if prefix else "General"), "description": info.get("description", ""), "options": info.get("options", []), "min": minimum, "max": maximum})
+        entries.append({"path": path, "key": str(key), "value": value, "kind": kind, "group": _friendly_group(path, info.get("group", "")), "description": info.get("description", ""), "options": info.get("options", []), "min": minimum, "max": maximum})
     return entries
 
 def _set_path(data: dict[str, Any], path: str, value: Any) -> None:

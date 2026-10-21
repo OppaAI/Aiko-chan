@@ -33,6 +33,33 @@ def _check_name(name: str) -> Path:
     if name == ".env.age": return _state_paths()[1]
     if name not in _yaml_names(): raise HTTPException(status_code=404, detail="Unknown settings file")
     return (_root() / "config" / name).resolve()
+def _setting_entries(data: dict[str, Any], prefix: str = "") -> list[dict[str, Any]]:
+    entries = []
+    for key, value in data.items():
+        path = prefix + "." + str(key) if prefix else str(key)
+        if isinstance(value, dict):
+            entries.extend(_setting_entries(value, path))
+            continue
+        kind = "text"
+        if isinstance(value, bool) or (isinstance(value, str) and value.lower() in ("0", "1", "true", "false", "yes", "no", "on", "off")): kind = "toggle"
+        elif isinstance(value, (int, float)) or (isinstance(value, str) and re.fullmatch(r"-?\d+(\.\d+)?", value.strip())): kind = "scale" if 0 <= float(value) <= 1 else "number"
+        entries.append({"path": path, "key": str(key), "value": value, "kind": kind})
+    return entries
+
+def _set_path(data: dict[str, Any], path: str, value: Any) -> None:
+    target = data
+    parts = path.split(".")
+    for part in parts[:-1]: target = target.setdefault(part, {})
+    target[parts[-1]] = value
+
+def _coerce(value: Any, original: Any) -> Any:
+    if isinstance(original, bool): return bool(value)
+    if isinstance(original, int) and not isinstance(original, bool): return int(float(value))
+    if isinstance(original, float): return float(value)
+    if isinstance(original, str) and original.lower() in ("0", "1", "true", "false", "yes", "no", "on", "off"): return "1" if str(value).lower() in ("1", "true", "yes", "on") else "0"
+    if isinstance(original, list): return json.loads(value) if isinstance(value, str) else value
+    return str(value) if isinstance(original, str) else value
+
 def _read_env() -> dict[str, str]:
     identity, encrypted = _state_paths()
     return {} if not encrypted.exists() else _decrypt_env(encrypted, identity)
@@ -66,7 +93,7 @@ async def read_settings_file(name: str) -> dict[str, Any]:
         try: return {"name": name, "kind": "env", "values": _read_env()}
         except (FileNotFoundError, RuntimeError) as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not path.exists(): raise HTTPException(status_code=404, detail="Settings file is missing")
-    return {"name": name, "kind": "yaml", "content": path.read_text(encoding="utf-8")}
+    return {"name": name, "kind": "yaml", "settings": _setting_entries(_load_yaml_mapping(path))}
 @router.put("/file/{name}")
 async def write_settings_file(name: str, payload: dict[str, Any]) -> dict[str, str]:
     path = _check_name(name)
@@ -74,12 +101,18 @@ async def write_settings_file(name: str, payload: dict[str, Any]) -> dict[str, s
         values = payload.get("values")
         if not isinstance(values, dict): raise HTTPException(status_code=400, detail="Environment settings must be an object")
         _encrypt_env(_dotenv(values)); return {"status": "saved"}
-    content = payload.get("content")
-    if not isinstance(content, str) or not content.strip(): raise HTTPException(status_code=400, detail="YAML content cannot be empty")
-    try: parsed = _load_yaml_mapping_from_text(content)
-    except Exception as exc: raise HTTPException(status_code=400, detail=f"Invalid YAML: {exc}") from exc
-    if not isinstance(parsed, dict): raise HTTPException(status_code=400, detail="YAML must contain a mapping")
-    path.write_text(content, encoding="utf-8"); return {"status": "saved"}
+    settings = payload.get("settings")
+    if not isinstance(settings, list): raise HTTPException(status_code=400, detail="Settings must be a list")
+    try:
+        data = _load_yaml_mapping(path)
+        originals = {entry["path"]: entry.get("value") for entry in _setting_entries(data)}
+        for entry in settings:
+            if not isinstance(entry, dict) or entry.get("path") not in originals: raise ValueError("unknown setting path")
+            _set_path(data, entry["path"], _coerce(entry.get("value"), originals[entry["path"]]))
+        import yaml
+        path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    except Exception as exc: raise HTTPException(status_code=400, detail=f"Could not save settings: {exc}") from exc
+    return {"status": "saved"}
 def _load_yaml_mapping_from_text(content: str) -> dict[str, Any]:
     try:
         import yaml

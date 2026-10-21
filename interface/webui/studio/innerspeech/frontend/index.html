@@ -6,27 +6,41 @@
 <title>Inner Speech Studio — Aiko's thought journal (read-only)</title>
 <script>try{var __t=localStorage.getItem('aiko-theme')||'light';document.documentElement.dataset.theme=(__t==='dark'?'dark':'light');window.addEventListener('storage',function(e){if(e&&e.key==='aiko-theme'){document.documentElement.dataset.theme=(e.newValue==='dark'?'dark':'light');}});}catch(__e){document.documentElement.dataset.theme='light';}</script>
 <style>
-  :root { color-scheme: dark; }
-  body { font-family: system-ui, sans-serif; background: #14161c; color: #dfe3ee;
+  /* Theme follows the main WebUI toggle (localStorage 'aiko-theme', read by
+     the head script): light = moss paper, dark = purple glass — the same
+     palettes as the shared studio sheets. */
+  :root {
+    color-scheme: light;
+    --bg: #f4f0e6; --text: #4a3728; --muted: #7a8f68;
+    --panel: #faf8f1; --card: #f7f3e9; --border: rgba(58, 74, 46, 0.16);
+    --badge: #e8e2d4; --cons-bg: rgba(91, 122, 78, 0.16); --cons-fg: #3a4a2e;
+  }
+  html[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0d0718; --text: #ded3f7; --muted: #9a82c4;
+    --panel: #211738; --card: #1d1332; --border: rgba(196, 181, 253, 0.16);
+    --badge: #241a3e; --cons-bg: rgba(147, 201, 138, 0.15); --cons-fg: #a5d69c;
+  }
+  body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text);
          margin: 0; padding: 24px; max-width: 860px; }
   h1 { font-size: 1.3rem; margin: 0 0 4px; }
-  .sub { color: #8b93a8; font-size: 0.85rem; margin-bottom: 16px; }
+  .sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 16px; }
   .stats { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
-  .stat { background: #1d2029; border: 1px solid #2b2f3c; border-radius: 8px;
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
           padding: 8px 12px; font-size: 0.85rem; }
   .stat b { font-size: 1.1rem; }
   .controls { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
-  input, select { background: #1d2029; color: #dfe3ee; border: 1px solid #2b2f3c;
+  input, select { background: var(--panel); color: var(--text); border: 1px solid var(--border);
                   border-radius: 6px; padding: 6px 10px; font-size: 0.85rem; }
-  .thought { background: #1a1d25; border: 1px solid #2b2f3c; border-radius: 10px;
+  .thought { background: var(--card); border: 1px solid var(--border); border-radius: 10px;
              padding: 12px 14px; margin-bottom: 10px; }
   .thought .text { font-size: 0.95rem; line-height: 1.45; white-space: pre-wrap; }
-  .meta { margin-top: 8px; font-size: 0.75rem; color: #8b93a8; display: flex;
+  .meta { margin-top: 8px; font-size: 0.75rem; color: var(--muted); display: flex;
           gap: 10px; flex-wrap: wrap; }
-  .badge { background: #2b2f3c; border-radius: 4px; padding: 1px 7px; }
-  .badge.consolidated { background: #2c4a38; color: #9fe0b4; }
-  .empty { color: #8b93a8; padding: 32px 0; text-align: center; }
-  .note { font-size: 0.75rem; color: #6b7280; margin-top: 24px; }
+  .badge { background: var(--badge); border-radius: 4px; padding: 1px 7px; }
+  .badge.consolidated { background: var(--cons-bg); color: var(--cons-fg); }
+  .empty { color: var(--muted); padding: 32px 0; text-align: center; }
+  .note { font-size: 0.75rem; color: var(--muted); margin-top: 24px; }
 </style>
 </head>
 <body>

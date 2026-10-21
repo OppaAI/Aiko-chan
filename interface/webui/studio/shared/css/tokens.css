@@ -57,25 +57,54 @@
    The head script sets html[data-theme] synchronously before CSS loads, so there
    is no flash of the wrong theme. Higher specificity than :root wins over every
    panel-local light token definition. ── */
-/* ── dark variant: the WebUI purple glass theme. Follows the main WebUI theme
+/* ── dark variant: the field-journal at night. Follows the main WebUI theme
    flag (localStorage 'aiko-theme'). The head script sets html[data-theme]
    synchronously before CSS loads, so there is no flash of the wrong theme.
    Higher specificity than :root wins over every panel-local light token
    definition. Zero purple/violet/pink/teal. ── */
 html[data-theme="dark"] {
   color-scheme: dark;
-  --cream: #ded3f7; --parch: #241a3e; --moss: #c4b5fd; --sage: #9a82c4;
-  --fern: #c4b5fd; --bark: #0d0718; --soil: #d8bcff; --ink: #090511;
-  --amber: #a78bfa; --rust: #d8bcff; --mist: #241a3e; --circuit: #a78bfa;
+  /* site palette translated to dark */
+  --cream: #e6dfd0;
+  --parch: #232b1a;
+  --moss: #b3c49a;
+  --sage: #9aa88a;
+  --fern: #b3c49a;
+  --bark: #141a10;
+  --soil: #d8d0bd;
+  --ink: #0e120b;
+  --amber: #c8813a;
+  --rust: #c87a4a;
+  --mist: #2a3322;
+  --circuit: #8aa864;
   /* legacy / shared names */
-  --bg: #0d0718; --bg2: #150d26; --panel: #211738; --slot: #211738;
-  --border: rgba(196, 181, 253, 0.16); --line: rgba(196, 181, 253, 0.10);
-  --pink: #d8bcff; --purple: #a78bfa; --accent: #c4b5fd; --accent2: #8b6fd8;
-  --mauve: #d8bcff; --cyan: #a78bfa; --gold: #a78bfa; --dim: #9a82c4;
-  --dimmer: #241a3e; --dim-text: #9a82c4; --muted: #9a82c4; --text: #ded3f7;
-  --brown: #d8bcff; --orange: #a78bfa; --green: #8b6fd8; --violet: #a78bfa;
-  --danger: #f08d9e; --glass: rgba(33, 23, 56, 0.72); --glass-bg: rgba(33, 23, 56, 0.55);
-  --glass-border: rgba(196, 181, 253, 0.16); --glass-highlight: rgba(255, 255, 255, 0.07);
+  --bg: #141a10;
+  --bg2: #1a2013;
+  --panel: #1e2417;
+  --slot: #1e2417;
+  --border: rgba(179, 196, 154, 0.18);
+  --line: rgba(179, 196, 154, 0.12);
+  --pink: #c8813a;
+  --purple: #b3c49a;
+  --accent: #b3c49a;
+  --accent2: #8aa864;
+  --mauve: #9aa88a;
+  --cyan: #8aa864;
+  --gold: #c8813a;
+  --dim: #9aa88a;
+  --dimmer: rgba(179, 196, 154, 0.08);
+  --dim-text: #9aa88a;
+  --muted: #9aa88a;
+  --text: #e6dfd0;
+  --brown: #c87a4a;
+  --orange: #c8813a;
+  --green: #8aa864;
+  --violet: #9aa88a;
+  --danger: #c86a4a;
+  --glass: rgba(30, 36, 23, 0.9);
+  --glass-bg: rgba(30, 36, 23, 0.9);
+  --glass-border: rgba(179, 196, 154, 0.18);
+  --glass-highlight: rgba(255, 255, 255, 0.04);
   /* panel-local tokens (defined under :root in panel sheets) */
   --red: #c86a4a;
   --red-bright: #d4845f;

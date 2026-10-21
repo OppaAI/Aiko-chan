@@ -218,22 +218,6 @@ html[data-theme="dark"] {
   --n8n-orange: #c87a4a;
   --n8n-sub: #9aa88a;
 }
-
-/* Keep the shared studio shell on the same purple glass palette as WebUI. */
-html[data-theme="dark"] {
-  --bg: #0d0718; --bg2: #150d26; --panel: #211738; --slot: #211738;
-  --text: #ded3f7; --muted: #9a82c4; --dim: #9a82c4;
-  --accent: #c4b5fd; --accent2: #8b6fd8; --purple: #a78bfa;
-  --pink: #d8bcff; --cyan: #a78bfa; --orange: #a78bfa; --gold: #a78bfa;
-  --green: #8b6fd8; --violet: #a78bfa; --danger: #f08d9e;
-  --border: rgba(196,181,253,.16); --line: rgba(196,181,253,.10);
-  --dimmer: #241a3e; --glass: rgba(33,23,56,.72); --glass-bg: rgba(33,23,56,.55);
-  --glass-border: rgba(196,181,253,.16); --glass-highlight: rgba(255,255,255,.07);
-}
-html[data-theme="dark"] body {
-  background-color: #0d0718;
-  background-image: radial-gradient(ellipse 60% 45% at 12% 0%, rgba(124,93,211,.13), transparent 70%), linear-gradient(rgba(196,181,253,.025) 1px, transparent 1px), linear-gradient(90deg, rgba(196,181,253,.025) 1px, transparent 1px);
-}
 /* inline-style neutralizers were light-only; dark-appropriate values for dark mode.
    (Beats the panel-local !important rules on specificity.) */
 html[data-theme="dark"] #back-btn[style*="#1a1028"],
@@ -277,14 +261,3 @@ html[data-theme="dark"] body {
 html[data-theme="dark"] .btn:hover { background: rgba(179, 196, 154, 0.14); }
 html[data-theme="dark"] .btn-primary { color: #141a10; }
 html[data-theme="dark"] .btn-primary:hover { background: #8aa864; border-color: #8aa864; color: #141a10; }
-
-/* Final WebUI palette override for legacy per-studio dark rules above. */
-html[data-theme="dark"] body { background-color:#0d0718; background-image:radial-gradient(1200px 800px at 72% -10%,rgba(124,93,211,.13),transparent 60%),radial-gradient(900px 700px at 8% 110%,rgba(88,60,160,.10),transparent 55%); }
-html[data-theme="dark"] .btn-primary { background:#a78bfa; border-color:#a78bfa; color:#0d0718; }
-html[data-theme="dark"] .btn-primary:hover { background:#c4b5fd; border-color:#c4b5fd; color:#0d0718; }
-
-html[data-theme="dark"] body{background-color:#0d0718;background-image:radial-gradient(1200px 800px at 72% -10%,rgba(124,93,211,.13),transparent 60%),radial-gradient(900px 700px at 8% 110%,rgba(88,60,160,.10),transparent 55%)}
-html[data-theme="dark"] .btn-primary{background:#a78bfa;border-color:#a78bfa;color:#0d0718}
-html[data-theme="dark"] .btn-primary:hover{background:#c4b5fd;border-color:#c4b5fd;color:#0d0718}
-html[data-theme="dark"] .content-area,html[data-theme="dark"] .canvas-area{background:radial-gradient(ellipse at center,#241a3e 0%,#0d0718 70%)}
-html[data-theme="dark"] #back-btn{background:#241a3e}

@@ -781,6 +781,7 @@ class TypewriterSync:
         self.precise = speak is not None and hasattr(speak, "set_chunk_playback_callback")
         if self.precise:
             speak.set_chunk_playback_callback(self._on_chunk_start)
+        self.karaoke_sync = KARAOKE_SYNC  # instance state, toggled via /karaoke command
 
     def start(self) -> None:
         """Begin a fresh reveal for a new turn — call right before think.route()."""
@@ -1017,7 +1018,7 @@ def run_session(ui, args) -> None:
             ui._draw(buf=[])
             return
 
-        if KARAOKE_SYNC and tts_enabled and typewriter is not None:
+        if typewriter is not None and typewriter.karaoke_sync and tts_enabled:
             _sentence_buf.append(token)
             joined = "".join(_sentence_buf)
             parts = _SENTENCE_END_RE.split(joined)
@@ -1596,9 +1597,12 @@ def run_session(ui, args) -> None:
                     f'Proactive idle check-ins: {"ON  🌸" if proactive.is_enabled() else "OFF 💤"}')
 
             elif cmd == '/karaoke':
-                globals()['KARAOKE_SYNC'] = not KARAOKE_SYNC
-                ui.add_message('sys',
-                    f'Karaoke text sync: {"ON  🎤📝" if KARAOKE_SYNC else "OFF (instant stream)"}')
+                if typewriter is None:
+                    ui.add_message('sys', 'Karaoke text sync unavailable (no TTS backend).')
+                else:
+                    typewriter.karaoke_sync = not typewriter.karaoke_sync
+                    ui.add_message('sys',
+                        f'Karaoke text sync: {"ON  🎤📝" if typewriter.karaoke_sync else "OFF (instant stream)"}')
 
             elif cmd == '/help':
                 for line in [

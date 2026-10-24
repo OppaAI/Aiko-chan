@@ -281,6 +281,10 @@ ACTIVATION_TIMEOUT_S = float(os.getenv("ACTIVATION_TIMEOUT_S", "3600"))  # match
 _CHUNK_SAMPLES_VAD = 512                                             # at 16 kHz, ~32 ms
 _CHUNK_MS_ACTUAL   = (_CHUNK_SAMPLES_VAD / SAMPLE_RATE) * 1000.0      # 32.0 ms — the real, non-configurable chunk size
 _MAX_CHUNKS        = int(MAX_RECORD_SECONDS * 1000 / _CHUNK_MS_ACTUAL)
+# Per-read deadline for sounddevice: stream.read() blocks until frames are
+# available with no per-read timeout of its own, so a stalled mic can wedge
+# a turn for up to LISTEN_MAX_SECONDS. _READ_TIMEOUT_S bounds each read.
+_READ_TIMEOUT_S    = 5.0
 # NOTE: CHUNK_DURATION_MS (LISTEN_CHUNK_MS in sensory.yaml) is NOT used to
 # compute _MAX_CHUNKS anymore — Silero's chunk size is fixed at 512 samples
 # (32ms @ 16kHz) regardless of that config value, so using it here silently
@@ -1267,7 +1271,16 @@ class AikoListen:
                         break
                     chunk = np.frombuffer(raw, dtype=np.float32).copy()
                 else:
-                    # Read from sounddevice (blocking read with timeout via blocksize)
+                    # Read from sounddevice with a per-read deadline so a
+                    # stalled mic can't wedge the turn loop indefinitely
+                    # (sounddevice.read() blocks until frames are available,
+                    # with no per-read timeout of its own).
+                    read_deadline = time.monotonic() + _READ_TIMEOUT_S
+                    while stream.read_available < samples_per_chunk:
+                        if time.monotonic() >= read_deadline:
+                            _cb(status_callback, "__IDLE__")
+                            return None, False
+                        time.sleep(0.005)
                     data, overflowed = stream.read(samples_per_chunk)
                     if overflowed:
                         log.warning("[listen] input overflow")

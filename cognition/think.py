@@ -400,6 +400,11 @@ KNOWLEDGE_RECALL_LIMIT = env_int("KNOWLEDGE_RECALL_LIMIT", 3)
 # Recall hard-timeout — a slow local embed (llama.cpp) must not block the turn.
 # On expiry the memory/KB recall is skipped (empty) rather than stalling.
 MEMORY_RECALL_TIMEOUT = env_float("MEMORY_RECALL_TIMEOUT", 5.0)
+# LLM circuit breaker — after N consecutive failures to llama-server, stop
+# paying the full LLM_TIMEOUT on every turn. The circuit half-opens after
+# COOLDOWN seconds to allow one trial call; success closes it, failure re-opens.
+_LLM_CIRCUIT_THRESHOLD = env_int("LLM_CIRCUIT_THRESHOLD", 3)
+_LLM_CIRCUIT_COOLDOWN_S = env_float("LLM_CIRCUIT_COOLDOWN_S", 30.0)
 # Minimum recall score (see _MemoryBackend._rank_and_score's final_score in
 # memory/memorize.py for the formula) a memory must clear to be included in
 # context. Same numeric scale as memorize.py's MEMORY_RECALL_SCORE_THRESHOLD
@@ -1057,6 +1062,56 @@ class AikoThink:
         # by _note_user_activity() on every normal turn.
         self._proactive_lock = threading.Lock()
         self._proactive_resting = False
+
+        # ── LLM circuit breaker ──────────────────────────────────────────
+        # Tracks consecutive llama-server failures so a wedged or restarting
+        # model server doesn't consume the full LLM_TIMEOUT on every turn.
+        self._llm_failures = 0
+        self._llm_circuit_open_until = 0.0
+        self._llm_circuit_lock = threading.Lock()
+
+        # Patch chat.completions.create so every LLM call (chat, intent,
+        # conscience gate, warmup, fallback) passes through the circuit
+        # breaker. A wedged llama-server fails fast instead of blocking the
+        # full LLM_TIMEOUT on each turn.
+        _orig_create = self._client.chat.completions.create
+
+        def _create_with_circuit(**kwargs):
+            if not self._llm_circuit_ok():
+                raise RuntimeError("LLM circuit breaker is open — llama-server may be down")
+            try:
+                result = _orig_create(**kwargs)
+                self._llm_record_success()
+                return result
+            except Exception:
+                self._llm_record_failure()
+                raise
+
+        self._client.chat.completions.create = _create_with_circuit
+
+    def _llm_circuit_ok(self) -> bool:
+        """Return True if LLM calls are allowed (circuit closed or cooldown expired)."""
+        with self._llm_circuit_lock:
+            if self._llm_failures < _LLM_CIRCUIT_THRESHOLD:
+                return True
+            if time.monotonic() >= self._llm_circuit_open_until:
+                return True  # half-open: allow one trial call
+            return False
+
+    def _llm_record_success(self) -> None:
+        with self._llm_circuit_lock:
+            self._llm_failures = 0
+            self._llm_circuit_open_until = 0.0
+
+    def _llm_record_failure(self) -> None:
+        with self._llm_circuit_lock:
+            self._llm_failures += 1
+            if self._llm_failures >= _LLM_CIRCUIT_THRESHOLD:
+                self._llm_circuit_open_until = time.monotonic() + _LLM_CIRCUIT_COOLDOWN_S
+                log.warning(
+                    "[think] LLM circuit breaker open after %d consecutive failures — "
+                    "retrying in %.0fs", self._llm_failures, _LLM_CIRCUIT_COOLDOWN_S
+                )
 
     def _warmup_llm(self) -> None:
         try:

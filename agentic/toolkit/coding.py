@@ -70,9 +70,11 @@ def _confine(relative_path: str) -> Path:
     cleaned = (relative_path or "").strip().lstrip("/\\")
     if not cleaned:
         raise ValueError("relative_path required")
-    path = (REPO_ROOT / cleaned).resolve()
+    requested = Path((relative_path or "").strip())
+    path = (requested if requested.is_absolute() else REPO_ROOT / cleaned).resolve()
     if path != REPO_ROOT and REPO_ROOT not in path.parents:
-        raise ValueError(f"path escapes repository: {relative_path}")
+        from system.playground import playground_work_path
+        return playground_work_path(str(path))
     return path
 
 
@@ -86,7 +88,11 @@ def _check_writable(path: Path, relative: str) -> str | None:
     try:
         rel_parts = path.relative_to(REPO_ROOT).parts
     except ValueError:
-        return "path escapes repository"
+        try:
+            from system.playground import playground_dir, playground_work_path
+            rel_parts = playground_work_path(str(path)).relative_to(playground_dir().resolve()).parts
+        except ValueError:
+            return "path escapes repository"
     if any(part in _SKIP_DIRS for part in rel_parts):
         return "cannot write to restricted directory"
     return None
@@ -352,9 +358,7 @@ def sandbox_run(relative_path: str, args: str = "", timeout: int = SANDBOX_TIMEO
         for bad in (";", "&", "|", "`", "$", "(", ")", "<", ">", "\n"):
             if bad in rel or bad in (args or ""):
                 return json_block("sandbox_run", {"ok": False, "error": "shell metachars not allowed"})
-        path = (REPO_ROOT / rel.lstrip("/\\")).resolve()
-        if path != REPO_ROOT and REPO_ROOT not in path.parents:
-            return json_block("sandbox_run", {"ok": False, "error": "path escapes repository"})
+        path = _confine(rel)
         if not path.is_file() or path.suffix.lower() != ".py":
             return json_block("sandbox_run", {"ok": False, "error": "not a Python file in repo"})
         timeout = max(1, min(int(timeout or SANDBOX_TIMEOUT), 120))
@@ -362,14 +366,36 @@ def sandbox_run(relative_path: str, args: str = "", timeout: int = SANDBOX_TIMEO
         if (args or "").strip():
             cmd.extend((args or "").strip().split()[:20])  # max 20 args
 
+        cwd = REPO_ROOT
+        playground_run = REPO_ROOT not in path.parents
+        if playground_run:
+            from system.playground import playground_dir
+            cwd = playground_dir().resolve()
+            runner = (cwd / "sandbox" / "run.py").resolve()
+            if runner.parent != cwd / "sandbox" or not runner.is_file():
+                raise ValueError("Playground sandbox/run.py is missing or outside the checkout")
+            cmd = [sys.executable, str(runner), str(path), "--timeout", str(timeout), "--", *cmd[2:]]
+
         env = dict(__import__("os").environ)
         env["PYTHONSAFEPATH"] = "1"
         env["PYTHONDONTWRITEBYTECODE"] = "1"
 
         start = time.monotonic()
-        proc = subprocess.run(cmd, cwd=str(REPO_ROOT), env=env,
-                              capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(cmd, cwd=str(cwd), env=env,
+                              capture_output=True, text=True, timeout=timeout + 5 if playground_run else timeout)
         elapsed = round(time.monotonic() - start, 1)
+        if playground_run:
+            # The Playground runner exits zero even when the script fails.
+            # Its JSON result, not the wrapper exit status, proves success.
+            summary = json.loads(proc.stdout)
+            return json_block("sandbox_run", {
+                "ok": proc.returncode == 0 and summary.get("ok") is True and summary.get("returncode") == 0,
+                "returncode": summary.get("returncode"),
+                "timed_out": summary.get("timed_out", False),
+                "elapsed_s": elapsed,
+                "stdout": str(summary.get("stdout", ""))[-SANDBOX_OUTPUT_CHARS:],
+                "stderr": str(summary.get("stderr", summary.get("error", "")))[-SANDBOX_OUTPUT_CHARS:],
+            })
         return json_block("sandbox_run", {
             "ok": proc.returncode == 0,
             "returncode": proc.returncode,

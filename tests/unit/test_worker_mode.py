@@ -52,7 +52,9 @@ def test_worker_tools_coding_only():
     assert "final_answer" in tools
     assert "code_apply_patch" in tools
     assert "repo_read_file" in tools
-    assert "code_run_tests" in tools
+    assert "repo_write_file" in tools  # new goals need a file-creation tool
+    assert "sandbox_run" in tools
+    assert "code_run_tests" not in tools  # goal tests must use sandbox/run.py
     # No chat/social/research tools in the worker's fixed set.
     assert "adaptive_search" not in tools
     assert "deep_research" not in tools

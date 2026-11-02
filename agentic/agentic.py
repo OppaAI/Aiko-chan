@@ -31,7 +31,7 @@ import os
 import re
 import threading
 import time
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -127,7 +127,7 @@ WORKER_TOOLS = frozenset({
     "repo_search_text",
     "codebase_search",
     "code_apply_patch",
-    "code_run_tests",
+    "repo_write_file",
     "sandbox_run",
     "final_answer",
 })
@@ -136,6 +136,9 @@ WORKER_SYSTEM_PROMPT = (
     "RULES: Use tools to act — never describe or simulate tool results. "
     "Read only the files you need; keep tool calls small. "
     "Build and test ONLY inside the work directory given in the task. "
+    "Use repo_write_file to create files, code_apply_patch to edit, and "
+    "sandbox_run to run Python scripts/tests through Playground's runner. "
+    "Write small files/patches (about 1200 characters per call); page reads. "
     "When done or blocked, write CHECKPOINT.md describing the state, "
     "then call final_answer with a short summary."
 )
@@ -507,6 +510,7 @@ class AgentContext:
     run_id: str | None = None
     approval_bypass: frozenset[str] = frozenset()
     conscience_bypass: frozenset[str] = frozenset()
+    worker_root: Path | None = None
 
 
 def _agent_context(owner=None, *, run_id: str | None = None) -> AgentContext:
@@ -1300,6 +1304,22 @@ def execute_tool_with_policy(name: str, args: dict, state: TaskState, owner=None
     """Validate, guard, run, retry, and ledger one tool call."""
     ctx = ctx or (owner if isinstance(owner, AgentContext) else _agent_context(owner))
     _append_step_trace(ctx, "tool_call", {"tool": name, "args": args})
+    worker_authorized = False
+    if ctx.worker_root is not None:
+        try:
+            from system.playground import playground_work_path
+            if name not in WORKER_TOOLS:
+                raise ValueError("tool is not available to the coding worker")
+            if (ctx.worker_root / "loop" / "disabled").exists():
+                raise ValueError("Playground worker is disabled")
+            if name in {"repo_write_file", "code_apply_patch", "sandbox_run"}:
+                path = playground_work_path(args.get("relative_path", ""), ctx.worker_root)
+                args = {**args, "relative_path": str(path)}
+                worker_authorized = True
+        except (ValueError, TypeError) as exc:
+            result = ToolResult(ok=False, tool=name, args=args, content=str(exc), error_type="worker_scope", retryable=False)
+            state.record(result)
+            return result
     spec = registry.get(name)
     for guard in (guards or _PRE_TOOL_GUARDRAILS):
         verdict = guard(name, args, state)
@@ -1318,7 +1338,7 @@ def execute_tool_with_policy(name: str, args: dict, state: TaskState, owner=None
         return validation
 
     preference_gate = _preference_requires_approval(name)
-    if ((spec and spec.needs_approval) or preference_gate) and name not in ctx.approval_bypass:
+    if (preference_gate or (spec and spec.needs_approval and not worker_authorized)) and name not in ctx.approval_bypass:
         _persist_pending_approval(ctx, name, args, state)
         draft_dir = args.get("draft_dir") if isinstance(args, dict) else None
         wait_payload = {"status": "waiting_for_approval", "run_id": ctx.run_id, "instruction": f"Reply with approve {ctx.run_id} to run {name}."}
@@ -1413,6 +1433,28 @@ def _compact_processed_tool_context(messages: list[dict], preview_chars: int = 1
     just adaptive_search/deep_research, so this now applies uniformly
     to any tool-role message over _COMPACTABLE_MIN_CHARS.
     """
+    completed = {m.get("tool_call_id") for m in messages if m.get("role") == "tool"}
+    for message in messages[:-1]:
+        if message.get("role") != "assistant":
+            continue
+        for call in message.get("tool_calls") or []:
+            function = call.get("function", {})
+            arguments = function.get("arguments", "")
+            if call.get("id") not in completed or len(arguments) < _COMPACTABLE_MIN_CHARS:
+                continue
+            # Generated source is already on disk. Keeping it again in every
+            # historical tool call crowds an 8K worker out of its own context.
+            try:
+                parsed = json.loads(arguments)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            function["arguments"] = json.dumps({
+                "_context_compacted": True,
+                "relative_path": parsed.get("relative_path", ""),
+                "note": "Earlier arguments omitted; read the file for current source.",
+            })
     for message in messages:
         if message.get("role") != "tool":
             continue
@@ -1776,15 +1818,32 @@ def _fit_messages_to_context(
         if len(content) > 400:
             message["content"] = f"[older tool output omitted to fit context: {len(content)} chars]"
 
-    # 3. Drop the oldest non-system turns.
+    # 3. Drop old turns together with their linked tool results. Never
+    # orphan a tool result or discard the task just because a tool is last.
+    task_index = next((i for i in range(len(working) - 1, -1, -1)
+                       if working[i].get("role") == "user"), None)
+    task_message = working[task_index] if task_index is not None else None
     while _estimate_messages_tokens(working, tool_schemas) > budget:
         candidates = [
             i for i, m in enumerate(working)
-            if m.get("role") != "system" and i < len(working) - 1
+            if m.get("role") != "system" and m is not task_message and i < len(working) - 1
         ]
         if not candidates:
             break
-        del working[candidates[0]]
+        victim = working[candidates[0]]
+        call_ids = {call.get("id") for call in victim.get("tool_calls") or []}
+        if victim.get("role") == "tool":
+            # Results may only be removed with the assistant call that owns
+            # them, including any siblings in a parallel tool batch.
+            parent = next((m for m in working if any(
+                c.get("id") == victim.get("tool_call_id") for c in m.get("tool_calls") or []
+            )), None)
+            if parent is not None:
+                victim = parent
+                call_ids = {call.get("id") for call in parent.get("tool_calls") or []}
+        working = [m for m in working if m is not victim and not (
+            m.get("role") == "tool" and m.get("tool_call_id") in call_ids
+        )]
 
     return working, True
 
@@ -2224,6 +2283,9 @@ def _run_agentic_chat_inner(
         default_research_budget=AGENT_RESEARCH_MAX_CALLS,
     )
     trace_ctx = _agent_context(owner, run_id=f"run-{int(time.time() * 1000)}")
+    if worker_mode:
+        from system.playground import playground_dir
+        trace_ctx = replace(trace_ctx, worker_root=playground_dir().resolve())
     _append_step_trace(trace_ctx, "llm_step", {
         "step": 0,
         "matched_capabilities": _matched_caps,

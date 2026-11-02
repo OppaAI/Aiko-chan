@@ -2647,16 +2647,19 @@ class AikoThink:
                     include_history=include_history,
                 )
 
-            memorize = self._get_memorize()
-            mem_inner = getattr(memorize, "_mem", None) if memorize is not None else None
-            embedder = getattr(mem_inner, "_embedder", None)
-            # Phase 2: shared module cache — identical (text, instruct) pairs
-            # embed once per process instead of once per call site.
-            cap_vec = reason.cached_embed_query(
-                embedder,
-                user_input,
-                instruct="Which capability/tool domain applies to this task?",
-            ) if embedder is not None and hasattr(embedder, "embed_query") else None
+            cap_vec = None
+            if not worker_mode:
+                memorize = self._get_memorize()
+                mem_inner = getattr(memorize, "_mem", None) if memorize is not None else None
+                embedder = getattr(mem_inner, "_embedder", None)
+                # Workers already have a fixed coding toolset; embedding the
+                # scheduled prompt cannot change routing and needlessly makes
+                # an idle build depend on the memory/embedding service.
+                cap_vec = reason.cached_embed_query(
+                    embedder,
+                    user_input,
+                    instruct="Which capability/tool domain applies to this task?",
+                ) if embedder is not None and hasattr(embedder, "embed_query") else None
             if system_note and system_note.strip():
                 # Agentic prompt plumbing lives in run_agentic_chat; carry the
                 # notices as marked situational context so drained notes are

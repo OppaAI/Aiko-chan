@@ -91,7 +91,10 @@ def extra_jail_roots() -> list[Path]:
     # second. Path.home() follows the passwd DB, which disagrees with $HOME
     # on multi-checkout dev boxes — never let it shadow the real location.
     default = ["/home/oppa-ai/Aiko-Playground", str(Path.home() / "Aiko-Playground")]
-    candidates = explicit or default
+    from system.playground import playground_dir
+    default.insert(0, str(playground_dir()))
+    configured = os.getenv("AIKO_PLAYGROUND_DIR", "").strip()
+    candidates = ([configured] if configured else []) + (explicit or default)
     roots = []
     for c in candidates:
         try:

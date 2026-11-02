@@ -61,7 +61,7 @@ def repo_file_tree(prefix: str = "", limit: int = 100) -> str:
             "root": str(REPO_ROOT),
             "prefix": prefix or ".",
             "count": len(files),
-            "files": [str(p.relative_to(REPO_ROOT)) for p in files],
+            "files": [str(p.relative_to(REPO_ROOT)) if REPO_ROOT in p.parents else str(p) for p in files],
         })
     except Exception as e:
         return f"[repo tree failed: {e}]"
@@ -149,7 +149,7 @@ def repo_search_text(query: str, prefix: str = "", limit: int = 10) -> str:
                 for lineno, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
                     if needle in line.casefold():
                         matches.append({
-                            "file": str(path.relative_to(REPO_ROOT)),
+                            "file": str(path.relative_to(REPO_ROOT)) if REPO_ROOT in path.parents else str(path),
                             "line": lineno,
                             "text": line.strip()[:240],
                         })
@@ -168,7 +168,8 @@ def repo_search_text(query: str, prefix: str = "", limit: int = 10) -> str:
 def _repo_confine_path(jail_path: str) -> Path:
     """Normalize path (resolve symlinks, `..`) and confine within REPO_ROOT; raise if it escapes."""
     cleaned = jail_path.strip().lstrip("/\\")                      # strip out leading slash symbol
-    path = (REPO_ROOT / cleaned).resolve()                         # add repo path in front
+    requested = Path(jail_path.strip())
+    path = (requested if requested.is_absolute() else REPO_ROOT / cleaned).resolve()
     if path != REPO_ROOT and REPO_ROOT not in path.parents:        # if resolved path not within repo,
         from agentic.toolkit.common import resolve_extra_jail
         extra = resolve_extra_jail(cleaned)                        # sibling-checkout fallback (Playground)
@@ -181,12 +182,12 @@ def _repo_confine_path(jail_path: str) -> Path:
 def _repo_iter_path(root: Path = REPO_ROOT):
     """Recursively yield allowed text files, skipping excluded directories."""
     for path in root.rglob("*"):                                                    # recursively walk everything under repo root
-        if any(part in _SKIP_DIRS for part in path.relative_to(REPO_ROOT).parts):   # if any part of the path's hierarchy is blacklisted,
+        if any(part in _SKIP_DIRS for part in path.relative_to(root).parts):
             continue                                                                # skip
         if not path.is_file():                                                      # if path is not a file,
             continue                                                                # skip
         resolved = path.resolve()                                                   # grab the resolved path
-        if resolved != REPO_ROOT and REPO_ROOT not in resolved.parents:             # safeguard against escaped path
+        if resolved != root and root not in resolved.parents:
             continue                                                                # skip
         if resolved.suffix.lower() in _ALLOWED_TEXT_SUFFIXES:                       # if path has file suffix that allowed access
             yield resolved                                                          # yield the resolved path

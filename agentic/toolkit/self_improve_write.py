@@ -24,7 +24,8 @@ _SKIP_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules"}
 
 def _repo_confine_path(jail_path: str) -> Path:
     cleaned = jail_path.strip().lstrip("/\\")
-    path = (REPO_ROOT / cleaned).resolve()
+    requested = Path(jail_path.strip())
+    path = (requested if requested.is_absolute() else REPO_ROOT / cleaned).resolve()
     if path != REPO_ROOT and REPO_ROOT not in path.parents:
         from agentic.toolkit.common import resolve_extra_jail
         extra = resolve_extra_jail(cleaned)

@@ -517,3 +517,17 @@ def test_intent_llm_cache_key_is_stable_and_scoped():
         "hello!", model="router", allow_agentic=True, include_greeting=True
     )
     assert len({key1, other_flag, other_model, other_input}) == 4
+
+
+def test_worker_entry_skips_memory_and_capability_embedding(monkeypatch):
+    from unittest.mock import Mock
+    think = _bare_think()
+    monkeypatch.setattr(think, '_get_memorize', Mock(side_effect=AssertionError('worker fetched memory')))
+    runner = Mock(return_value='checkpoint saved')
+    monkeypatch.setattr(think_module, 'run_agentic_chat', runner)
+    out = think.agentic_chat('Build one small Playground step', worker_mode=True,
+                            gate_result=(True, 'authorized idle job', 'proceed'))
+    assert out == 'checkpoint saved'
+    think._get_memorize.assert_not_called()
+    assert runner.call_args.kwargs['worker_mode'] is True
+    assert runner.call_args.kwargs['cap_vec'] is None

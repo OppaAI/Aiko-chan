@@ -16,6 +16,7 @@ Covers:
 from __future__ import annotations
 
 import os
+import json
 import sys
 
 import pytest
@@ -232,3 +233,41 @@ def test_tool_result_cap_uses_active_limit(monkeypatch):
         assert AG._tool_result_max_chars.get() == 100
     finally:
         AG._tool_result_max_chars.reset(token)
+
+
+def test_fit_keeps_task_and_removes_complete_tool_batches(monkeypatch):
+    monkeypatch.setattr(AG, 'LLM_CTX_SIZE', 1800)
+    monkeypatch.setattr(AG, '_effective_max_tokens_safe', lambda: 256)
+    messages = [{'role': 'system', 'content': 'worker'}, {'role': 'user', 'content': 'BUILD THIS GOAL'}]
+    for i in range(8):
+        messages.extend([
+            {'role': 'assistant', 'tool_calls': [
+                {'id': f'call-{i}', 'type': 'function', 'function': {
+                    'name': 'repo_write_file', 'arguments': json.dumps({'content': 'x' * 2200})}},
+            ]},
+            {'role': 'tool', 'tool_call_id': f'call-{i}', 'content': 'written'},
+        ])
+    fitted, trimmed = AG._fit_messages_to_context(messages)
+    assert trimmed
+    assert any(m.get('content') == 'BUILD THIS GOAL' for m in fitted)
+    calls = {c['id'] for m in fitted for c in m.get('tool_calls', [])}
+    results = {m['tool_call_id'] for m in fitted if m['role'] == 'tool'}
+    assert calls == results
+    assert AG._estimate_messages_tokens(fitted) + 256 <= int(1800 * AG.AGENT_REQUEST_BUDGET_RATIO)
+
+
+def test_compact_generated_source_after_tool_result():
+    messages = [
+        {'role': 'assistant', 'tool_calls': [
+            {'id': 'write', 'function': {'name': 'repo_write_file', 'arguments': json.dumps({
+                'relative_path': 'work/g/main.py', 'content': 'print(1)\n' * 1000})}},
+        ]},
+        {'role': 'tool', 'tool_call_id': 'write', 'content': 'written'},
+        {'role': 'assistant', 'content': 'Now run the file'},
+    ]
+    before = AG._estimate_messages_tokens(messages)
+    AG._compact_processed_tool_context(messages)
+    assert AG._estimate_messages_tokens(messages) < before // 2
+    args = json.loads(messages[0]['tool_calls'][0]['function']['arguments'])
+    assert args['relative_path'] == 'work/g/main.py'
+    assert args['_context_compacted'] is True

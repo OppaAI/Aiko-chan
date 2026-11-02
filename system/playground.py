@@ -61,7 +61,30 @@ def playground_dir() -> Path:
     configured = os.environ.get("AIKO_PLAYGROUND_DIR", "").strip()
     if configured:
         return Path(configured).expanduser()
+    sibling = Path(__file__).resolve().parents[2] / "Aiko-Playground"
+    if (sibling / "GOALS.md").is_file():
+        return sibling
     return Path.home() / "Aiko-Playground"
+
+
+def playground_work_path(value: str, root: Path | None = None) -> Path:
+    """Resolve a worker output under work/<goal>/, including symlink checks."""
+    root = (root or playground_dir()).resolve()
+    if not (root / "GOALS.md").is_file():
+        raise ValueError("Playground checkout is missing GOALS.md")
+    if (root / "loop" / "disabled").exists():
+        raise ValueError("Playground worker is disabled")
+    requested = Path(value)
+    path = (requested if requested.is_absolute() else root / requested).resolve()
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        raise ValueError("worker path escapes Playground") from None
+    if len(parts) < 3 or parts[0] != "work" or parts[1].startswith("."):
+        raise ValueError("worker outputs must stay in work/<goal>/")
+    if any(part in {".git", ".venv", "venv", "node_modules", "__pycache__", ".cert"} for part in parts):
+        raise ValueError("worker path contains a restricted directory")
+    return path
 
 
 PLAYGROUND_WORKER_SKILL = """\
@@ -73,6 +96,10 @@ Repo: {playground_dir} | Time box: {max_minutes} min.
 All repo_* file tools accept absolute paths under that repo dir above
 (relative paths resolve against a different checkout — always use the
 absolute {playground_dir}/... form).
+Create plans, new code, tests and checkpoints with repo_write_file;
+use code_apply_patch for existing files. Run Python scripts and test scripts
+with sandbox_run (it invokes this repo's sandbox/run.py). These scoped work
+operations are preauthorized for the idle worker; other repos stay protected.
 
 PROCEDURE (on disk, not in this prompt): read
 {playground_dir}/loop/WORKER.md first and follow it exactly. It holds

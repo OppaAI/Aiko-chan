@@ -1691,100 +1691,100 @@ def run_session(ui, args) -> None:
             ui._draw()
             continue
 
-        from system.userspace import current_user_id
-        turn_uid = current_user_id()
-        if turn_uid != last_bound_uid:
-            # Think history is process-local; never carry one identity's chat
-            # turns into another identity's prompt.
-            think.reset_context()
-            if memorize is not None:
-                if not memorize.switch_user(turn_uid):
-                    log.error("turn skipped: memory switch to %r failed — "
-                              "refusing to read the wrong user's store.", turn_uid)
-                    ui.add_message('sys', 'Turn skipped: memory was busy switching users. Please retry your message.')
-                    ui._draw()
-                    continue
-            last_bound_uid = turn_uid
-
-        # Drain per-user runtime notices (TTS/ASR/memory failures) so the
-        # LLM can acknowledge them this turn. Destructive by design — if a
-        # soft gate below answers without the LLM, the notes are dropped
-        # (the underlying failure will re-push next turn if it persists).
         try:
-            from system.notice import get_notice_bus
-            _drained = get_notice_bus(turn_uid).drain()
-        except Exception:
-            _drained = []
-        system_note = "\n".join(f"[system notice] {n}" for n in _drained) if _drained else None
+            from system.userspace import current_user_id
+            turn_uid = current_user_id()
+            if turn_uid != last_bound_uid:
+                # Think history is process-local; never carry one identity's chat
+                # turns into another identity's prompt.
+                think.reset_context()
+                if memorize is not None:
+                    if not memorize.switch_user(turn_uid):
+                        log.error("turn skipped: memory switch to %r failed — "
+                                  "refusing to read the wrong user's store.", turn_uid)
+                        ui.add_message('sys', 'Turn skipped: memory was busy switching users. Please retry your message.')
+                        ui._draw()
+                        continue
+                last_bound_uid = turn_uid
 
-        current_latency = {
-            "mode": "voice" if (listen and asr_enabled and voice_info) else "text",
-            "submitted_at": time.monotonic(),
-        }
-        if voice_info:
-            current_latency["listen_started_at"] = voice_info.get("listen_started_at")
-            current_latency["voice_recording_stopped_at"] = voice_info.get("recording_stopped_at")
-            if voice_info.get("asr_done_at") is not None:
-                current_latency["asr_done_at"] = voice_info["asr_done_at"]
+            # Drain per-user runtime notices (TTS/ASR/memory failures) so the
+            # LLM can acknowledge them this turn. Destructive by design — if a
+            # soft gate below answers without the LLM, the notes are dropped
+            # (the underlying failure will re-push next turn if it persists).
+            try:
+                from system.notice import get_notice_bus
+                _drained = get_notice_bus(turn_uid).drain()
+            except Exception:
+                _drained = []
+            system_note = "\n".join(f"[system notice] {n}" for n in _drained) if _drained else None
 
-        if args.debug:
-            system_prompt = getattr(think, "_persona", None) or ""
-            current_latency["system_prompt_tokens"] = _count_tokens(system_prompt)
+            current_latency = {
+                "mode": "voice" if (listen and asr_enabled and voice_info) else "text",
+                "submitted_at": time.monotonic(),
+            }
+            if voice_info:
+                current_latency["listen_started_at"] = voice_info.get("listen_started_at")
+                current_latency["voice_recording_stopped_at"] = voice_info.get("recording_stopped_at")
+                if voice_info.get("asr_done_at") is not None:
+                    current_latency["asr_done_at"] = voice_info["asr_done_at"]
 
-        ui.add_message('you', user_input)
-        ui.turn_start()
-        session_active.set()
-        ui._draw()
+            if args.debug:
+                system_prompt = getattr(think, "_persona", None) or ""
+                current_latency["system_prompt_tokens"] = _count_tokens(system_prompt)
 
-        _brain_trace.begin_turn(f"mode={current_latency.get('mode', 'text')}")
-        _brain_trace.record_step(
-            "transport.receive",
-            layer="transport",
-            inputs={"raw_input": user_input, "user_id": turn_uid},
-            outputs={"normalized_input": user_input},
-            factors=["received from ui.get_input() or ASR pipeline"],
-        )
+            ui.add_message('you', user_input)
+            ui.turn_start()
+            session_active.set()
+            ui._draw()
 
-        # Fly behavioral priors (GF interrupt, LH context, circadian) → NeuralState.
-        # Live GF interrupt: mark turn + inject system_note so route prefers brief non-agentic path.
-        _fly_priors = {}
-        try:
-            from cognition.fly_behavior import apply_turn_priors
-            # Phase 6: voice prosody (if this turn came through ASR) becomes
-            # neural activity in the sensory pathways.
-            _prosody = voice_info.get("prosody") if isinstance(voice_info, dict) else None
-            _fly_priors = apply_turn_priors(user_input, user_id=turn_uid, prosody=_prosody) or {}
-            if _fly_priors.get("interrupt"):
-                current_latency["fly_interrupt"] = True
-                note = (
-                    "[system notice] An explicit stop command or critical interrupt was received. "
-                    "Answer in 1-3 short sentences. Do not call tools or start multi-step agent plans."
-                )
-                system_note = f"{system_note}\n{note}".strip() if system_note else note
-        except Exception:
-            _fly_priors = {}
-
-        # Optional bounded connectome telemetry runs off the conversational hot path.
-        try:
-            from cognition.fly_runtime import observe_background
-            from cognition.fly_runtime.adapters import SensoryObservation
-            salience = min(1.0, max(0.15, len(user_input.strip()) / 240.0))
-            observe_background(
-                turn_uid,
-                SensoryObservation("text", salience, consented=True),
-                seed_types=("sensory", "auditory", "input", "INPUT", "visual"),
+            _brain_trace.begin_turn(f"mode={current_latency.get('mode', 'text')}")
+            _brain_trace.record_step(
+                "transport.receive",
+                layer="transport",
+                inputs={"raw_input": user_input, "user_id": turn_uid},
+                outputs={"normalized_input": user_input},
+                factors=["received from ui.get_input() or ASR pipeline"],
             )
-        except Exception:
-            pass
 
-        if typewriter is not None:
-            typewriter.start()
-            _sentence_buf = []
+            # Fly behavioral priors (GF interrupt, LH context, circadian) → NeuralState.
+            # Live GF interrupt: mark turn + inject system_note so route prefers brief non-agentic path.
+            _fly_priors = {}
+            try:
+                from cognition.fly_behavior import apply_turn_priors
+                # Phase 6: voice prosody (if this turn came through ASR) becomes
+                # neural activity in the sensory pathways.
+                _prosody = voice_info.get("prosody") if isinstance(voice_info, dict) else None
+                _fly_priors = apply_turn_priors(user_input, user_id=turn_uid, prosody=_prosody) or {}
+                if _fly_priors.get("interrupt"):
+                    current_latency["fly_interrupt"] = True
+                    note = (
+                        "[system notice] An explicit stop command or critical interrupt was received. "
+                        "Answer in 1-3 short sentences. Do not call tools or start multi-step agent plans."
+                    )
+                    system_note = f"{system_note}\n{note}".strip() if system_note else note
+            except Exception:
+                _fly_priors = {}
 
-        if speak is not None and hasattr(speak, "reset_synth_timer"):
-            speak.reset_synth_timer()
+            # Optional bounded connectome telemetry runs off the conversational hot path.
+            try:
+                from cognition.fly_runtime import observe_background
+                from cognition.fly_runtime.adapters import SensoryObservation
+                salience = min(1.0, max(0.15, len(user_input.strip()) / 240.0))
+                observe_background(
+                    turn_uid,
+                    SensoryObservation("text", salience, consented=True),
+                    seed_types=("sensory", "auditory", "input", "INPUT", "visual"),
+                )
+            except Exception:
+                pass
 
-        try:
+            if typewriter is not None:
+                typewriter.start()
+                _sentence_buf = []
+
+            if speak is not None and hasattr(speak, "reset_synth_timer"):
+                speak.reset_synth_timer()
+
             reply_text = think.route(user_input, token_callback=token_cb, system_note=system_note)
             last_turn = (user_input, reply_text or "")
             current_latency["assistant_done_at"] = time.monotonic()
@@ -1963,7 +1963,9 @@ def run_session(ui, args) -> None:
                     abort_turn()
             except Exception:
                 log.debug("turn abort cleanup failed", exc_info=True)
-            session_active.clear()
-            proactive.touch()
-            current_latency = None
-            release_busy()
+            try:
+                session_active.clear()
+                proactive.touch()
+                current_latency = None
+            finally:
+                release_busy()

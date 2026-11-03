@@ -37,6 +37,8 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 - Fatal cognition startup skips the optional Fly catalog warmup.
 - Shutdown continues remaining cleanup when an individual subsystem fails.
 - Proactive check-in failures clear the active-session marker.
+- The shared turn gate is released when memory switching fails or turn setup
+  raises, including failures before inference begins.
 - Session shutdown requests scheduler stop before draining memory writes and
   detaches the stopped scheduler from the notification registry. In-flight jobs
   are not forcibly cancelled.

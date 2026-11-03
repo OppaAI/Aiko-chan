@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 
-def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flush=None, scheduler_stop=None):
+def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flush=None, scheduler_stop=None, memory=None, reset_context=None):
     import system.orchestrate as orchestrate
     import system.wakeup as wakeup
     import system.schedule as schedule
@@ -17,12 +17,13 @@ def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flus
     backends = []
     inputs = iter(commands)
     think = SimpleNamespace(
+        reset_context=reset_context or (lambda: None),
         set_speak=lambda backend: None,
         set_proactive_resting=lambda resting: None,
         wait_for_memory=memory_flush or (lambda: None),
     )
     ui = SimpleNamespace(
-        _boot_result=SimpleNamespace(think=think, memorize=None, speak=None, listen=None),
+        _boot_result=SimpleNamespace(think=think, memorize=memory, speak=None, listen=None),
         _spin_loop=lambda stop: stop.wait(),
         _stats={},
         add_message=lambda role, text: messages.append(text),
@@ -50,6 +51,28 @@ def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flus
 
     orchestrate.run_session(ui, SimpleNamespace(text=True, no_asr=True, debug=False, cli=True))
     return ui, messages, backends
+
+
+def test_failed_memory_switch_releases_turn_gate(monkeypatch):
+    import system.orchestrate as orchestrate
+    events = []
+    monkeypatch.setattr(orchestrate, "acquire_busy", lambda **kw: events.append("acquire") or True)
+    monkeypatch.setattr(orchestrate, "release_busy", lambda: events.append("release"))
+    memory = SimpleNamespace(switch_user=lambda uid: False)
+    _run_commands(monkeypatch, ["hello", "/quit"], memory=memory)
+    assert events == ["acquire", "release"]
+
+
+def test_failed_context_reset_releases_turn_gate(monkeypatch):
+    import system.orchestrate as orchestrate
+    events = []
+    monkeypatch.setattr(orchestrate, "acquire_busy", lambda **kw: True)
+    monkeypatch.setattr(orchestrate, "release_busy", lambda: events.append("release"))
+    def fail_reset():
+        raise RuntimeError("context reset failed")
+    with pytest.raises(RuntimeError, match="context reset failed"):
+        _run_commands(monkeypatch, ["hello"], reset_context=fail_reset)
+    assert events == ["release"]
 
 
 def test_shutdown_requests_scheduler_stop_before_memory_flush(monkeypatch):

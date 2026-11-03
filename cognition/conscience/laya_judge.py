@@ -344,6 +344,7 @@ class LayaJudge:
         except Exception:  # noqa: BLE001 - filter degrades to passthrough
             self._canon = None
         self._lock = threading.Lock()
+        self._score_lock = threading.RLock()
         self._consecutive_failures = 0
         self.last_bands: dict[str, str] = {}
         self.last_uncertain: bool = False
@@ -380,6 +381,27 @@ class LayaJudge:
         canon_block: str = "",
         parties: list[Party] | None = None,
     ) -> tuple[float, float, float, list[str], list[str]] | None:
+        with self._score_lock:
+            return self._score(situation, canon_block, parties)
+
+    def score_with_metadata(self, situation: str, canon_block: str = "", parties=None):
+        """Capture the bands belonging to this call, not another user's call."""
+        with self._score_lock:
+            result = self.score(situation, canon_block, parties)
+            metadata = {}
+            if result is not None:
+                for name in ("last_uncertain", "last_negative", "last_scheme",
+                             "last_confidence", "last_bands", "last_p_violation"):
+                    value = getattr(self, name)
+                    metadata[name] = dict(value) if isinstance(value, dict) else value
+            return result, metadata
+
+    def _score(
+        self,
+        situation: str,
+        canon_block: str = "",
+        parties: list[Party] | None = None,
+    ) -> tuple[float, float, float, list[str], list[str]] | None:
         """Returns (vertical, horizontal, confidence, reasons, cited) or None.
 
         Never raises: an unreachable or malformed endpoint returns None so the
@@ -389,6 +411,10 @@ class LayaJudge:
         # leave clean attributes, otherwise a failed call would leak the
         # previous turn's band decision / uncertainty into this verdict.
         self.last_uncertain = False
+        self.last_bands = {}
+        self.last_negative = {}
+        self.last_confidence = {}
+        self.last_scheme = "legacy"
         self.last_p_violation = None
         self.last_band_decision = ""
         if not self.available:

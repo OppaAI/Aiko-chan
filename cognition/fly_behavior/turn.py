@@ -28,6 +28,9 @@ def _fullbrain_step_bg(fb, kc, kc_body_ids, user_id) -> None:
     for the next turn to consume. Releases the overlap guard on exit."""
     try:
         import time as _time
+        from cognition.flymemory.fullbrain import should_step
+        if not should_step():
+            return
         _t0 = _time.perf_counter()
         step = fb.step(kc, kc_body_ids)
         _ms = (_time.perf_counter() - _t0) * 1000.0
@@ -328,6 +331,10 @@ def apply_turn_priors(
                     decisiveness=float(st.decisiveness or 0.5),
                     affect=float(st.valence or 0.0),
                 )
+                if mb_mode == "live" and out.get("whole_brain"):
+                    drv = dict(drv)
+                    drv["rate_mult"] = max(0.5, min(1.5,
+                        float(drv.get("rate_mult", 1.0)) * float(out.get("motor_vigor", 1.0))))
                 out["motor_vigor"] = drv.get("rate_mult", 1.0)
                 out["dn_drive"] = {
                     k: drv.get(k)
@@ -412,8 +419,10 @@ def apply_turn_priors(
             log.debug("persona trace skipped: %s", exc)
 
         bits: list[str] = []
-        if st.interrupt or st.urgency >= 0.65:
-            bits.append("user signaled urgency — answer briefly, acknowledge stop/wait")
+        if st.interrupt:
+            bits.append("user requested a stop — acknowledge briefly")
+        elif st.urgency >= 0.65:
+            bits.append("user signaled urgency — answer directly and prioritize the request")
         if st.avoidance > 0.3:
             bits.append("slightly cautious tone")
         if st.approach > 0.3 and st.context_familiarity > 0.6:

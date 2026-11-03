@@ -522,7 +522,7 @@ def test_failed_score_clears_stale_band_state():
     uncertainty into this verdict's band data."""
     from cognition.conscience.laya_judge import LayaJudge
 
-    judge = LayaJudge.__new__(LayaJudge)
+    judge = LayaJudge(base_url="")
     judge._base_url = ""  # unavailable
     judge._consecutive_failures = 0
     # Simulate stale state from a prior successful call.
@@ -533,3 +533,39 @@ def test_failed_score_clears_stale_band_state():
     assert judge.last_uncertain is False
     assert judge.last_p_violation is None
     assert judge.last_band_decision == ""
+
+
+def test_failed_judge_does_not_reuse_previous_negative_bands(judge, monkeypatch):
+    monkeypatch.setattr(lj, 'JUDGE_SCHEME', '2x2')
+    monkeypatch.setattr(judge, '_post', lambda payload: _payload('not-permitted', 'harm')['answers'])
+    result, old = judge.score_with_metadata('a harmful act')
+    assert result is not None and old['last_negative']
+    monkeypatch.setattr(judge, '_post', lambda payload: None)
+    result, metadata = judge.score_with_metadata('an unrelated normal conversation')
+    assert result is None and metadata == {}
+    assert judge.last_negative == {}
+    assert judge.last_bands == {}
+    assert judge.last_confidence == {}
+    assert judge.last_scheme == 'legacy'
+    # An earlier snapshot remains immutable as subsequent calls update state.
+    assert old['last_negative']
+
+
+def test_concurrent_judge_calls_keep_their_own_metadata(judge, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+    def score(situation, *_):
+        judge.last_bands = {'category': situation}
+        judge.last_uncertain = situation == 'uncertain'
+        time.sleep(.01)
+        return (0., 0., .8, [], [])
+    monkeypatch.setattr(judge, '_score', score)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(judge.score_with_metadata, 'uncertain')
+        second = pool.submit(judge.score_with_metadata, 'ordinary')
+        _, a = first.result(timeout=2)
+        _, b = second.result(timeout=2)
+    assert a['last_bands'] == {'category': 'uncertain'}
+    assert a['last_uncertain'] is True
+    assert b['last_bands'] == {'category': 'ordinary'}
+    assert b['last_uncertain'] is False

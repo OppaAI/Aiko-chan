@@ -319,3 +319,30 @@ def test_neutral_deliberation_preserves_tier2_uncertainty(monkeypatch):
         llm_client=object(),
     )
     assert verdict.decision == "escalate", (verdict.decision, verdict.reasons)
+
+
+def test_confident_deliberation_can_resolve_weak_lexical_suspicion(monkeypatch):
+    core = _deliberating_core(monkeypatch, [(0.3, _prohibition('T-weak'))],
+                              (0.4, 0.6, 0.95, ['deliberation: ordinary help'], []))
+    verdict = core.evaluate(act='respond', content='introduce yourself please',
+                            llm_client=object())
+    assert verdict.decision == 'allow', verdict.reasons
+    assert 'deliberate' in verdict.layers_run
+
+
+def test_unconfident_deliberation_does_not_clear_weak_suspicion(monkeypatch):
+    core = _deliberating_core(monkeypatch, [(0.3, _prohibition('T-weak'))],
+                              (0.4, 0.6, 0.1, ['deliberation: unsure'], []))
+    verdict = core.evaluate(act='respond', content='introduce yourself please',
+                            llm_client=object())
+    assert verdict.decision != 'allow'
+
+
+def test_failed_tier2_cannot_apply_stale_negative_metadata(monkeypatch):
+    core = _core(monkeypatch, [(0.3, _good('G-weak'))])
+    monkeypatch.setattr(judge_mod, 'get_tier2', lambda: SimpleNamespace(
+        available=True, score=lambda *a: None, last_scheme='2x2',
+        last_negative={'vertical': True}, last_confidence={'vertical': .9},
+        last_uncertain=True))
+    verdict = core.evaluate(act='respond', content='hello there friend')
+    assert verdict.decision == 'allow', verdict.reasons

@@ -12,7 +12,7 @@ Modes (MEMORY_FLYGF_MODE): off | shadow | live
 from __future__ import annotations
 
 import re
-from system.config import env_str
+from system.config import env_str, env_float
 
 _URGENCY_RE = re.compile(
     r"\b(stop|abort|cancel|emergency|urgent|help|now|wait|halt|freeze)\b",
@@ -22,6 +22,22 @@ _SAFETY_RE = re.compile(
     r"\b(don'?t|never|unsafe|danger|harm|kill|delete everything)\b",
     re.I,
 )
+
+# A request ABOUT stopping something is not a request to stop Aiko. Keep
+# attention/urgency cues separate from commands that cancel ongoing work.
+_STOP_COMMAND_RE = re.compile(
+    r"^\s*(?:aiko[,! ]+)?(?:please\s+)?(?:"
+    r"(?:stop|abort|cancel|halt|freeze|wait)"
+    r"(?:\s+(?:talking|speaking|generating|working|responding|that|it|"
+    r"(?:this|the current)\s+(?:task|response|reply|plan|operation|generation)))?"
+    r"(?:\s+(?:now|please|a moment|a second))?"
+    r"|やめて|止まって|待って|中止して|그만|멈춰|잠깐)\s*[.!！。]*\s*$",
+    re.I,
+)
+
+
+def cancel_threshold() -> float:
+    return max(0.75, min(1.0, env_float("MEMORY_FLYGF_CANCEL_THRESHOLD", 0.85)))
 
 
 def _mode() -> str:
@@ -60,9 +76,13 @@ def assess_interrupt(
     t = text or ""
     sources: dict[str, float] = {}
     u = 0.0
+    stop_command = bool(_STOP_COMMAND_RE.fullmatch(t))
+    if stop_command:
+        sources["stop_command"] = 1.0
+        u = 1.0
     if system_error:
-        sources["system_error"] = 0.85
-        u = max(u, 0.85)
+        sources["system_error"] = 0.9
+        u = max(u, 0.9)
     if _URGENCY_RE.search(t):
         sources["keyword"] = 0.7
         u = max(u, 0.7)
@@ -86,17 +106,20 @@ def assess_interrupt(
     vu = max(0.0, min(1.0, float(voice_urgency or 0.0)))
     if vu > 0:
         # Loud voice is a nudge, never an interrupt by itself (capped at
-        # 0.45 upstream — below the 0.65 interrupt line).
+        # 0.45 upstream — advisory rather than a cancellation command).
         sources["voice"] = round(vu, 4)
         u = max(u, vu)
 
-    interrupt = u >= 0.65
+    # Motion, loudness, semantic urgency and its decaying CX trace may guide
+    # attention, but must not independently suppress replies or tool calls.
+    interrupt = stop_command or max(0.9 if system_error else 0.0, pr) >= cancel_threshold()
     return {
         "mode": mode,
         "urgency": round(u, 4),
         "interrupt": interrupt and mode == "live",
         "would_interrupt": interrupt,
         "sources": sources,
+        "cancel_threshold": cancel_threshold(),
     }
 
 
@@ -110,6 +133,6 @@ def should_abort_plan(user_id: str | None = None) -> bool:
         st = peek_neural_state(user_id)
         if st is None:
             return False
-        return bool(st.interrupt) or float(st.urgency or 0.0) >= 0.65
+        return bool(st.interrupt)
     except Exception:
         return False

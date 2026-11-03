@@ -37,6 +37,7 @@ from . import judge as judge_mod
 from .ledger import HITL_APPROVED, HITL_DENIED, ledger_for
 from .schema import (
     ACT_RESPOND,
+    ACT_SPEAK,
     ACT_TOOL,
     ALLOW,
     apply_negative_ladder,
@@ -204,7 +205,11 @@ class ConscienceCircuitCore:
         # A miss is not a safety problem. `known_safe_class` returns None for
         # UNKNOWN, which falls through to the judge exactly as before.
         allow_class = allowlist.known_safe_class(text)
-        if allow_class is not None and allowlist.allows_act(act):
+        tool_name = str(ctx.get("tool") or "")
+        allow_class = allow_class or allowlist.local_read_class(
+            act, tool_name, str(ctx.get("scope") or "local"), text,
+        )
+        if allow_class is not None and allowlist.allows_act(act, tool_name):
             log.info("[ccc] allowlist cleared act=%s class=%s", act, allow_class)
             cleared = Verdict(decision=ALLOW, gate=GATE_JUDGE, confidence=0.95,
                               layers_run=["reflex", "allowlist"],
@@ -249,23 +254,26 @@ class ConscienceCircuitCore:
         slm_result = None
         tier2_uncertain = False
         band_info: dict = {}
+        judge_metadata: dict = {}
         if tier2 is not None:
-            slm_result = tier2.score(self._situation(act, text, ctx), canon_block, parties)
+            slm_result, judge_metadata = judge_mod.score_tier2(
+                tier2, self._situation(act, text, ctx), canon_block, parties,
+            )
             # `uncertain` ("a neighbour may be affected but I cannot score it")
             # must reach decide(). Blending collapses it to 0.0, which reads as
             # "no moral signal" and ALLOWS -- the single defect that let 47% of
             # clearly-wrong content through.
-            tier2_uncertain = bool(getattr(tier2, "last_uncertain", False))
+            tier2_uncertain = bool(judge_metadata.get("last_uncertain"))
             # Triage band signal for the ask-UX: P(violation) + suggested
             # category ride on the verdict so the gate, the owner notice,
             # and the ledger never have to parse reason strings.
             # Only after a successful score: on failure the judge's
             # per-call attributes retain the previous turn's values, and
             # attaching those would mislabel this verdict.
-            if slm_result is not None and getattr(tier2, "last_scheme", "legacy") == "triage":
+            if slm_result is not None and judge_metadata.get("last_scheme") == "triage":
                 band_info = {
-                    "p_violation": getattr(tier2, "last_p_violation", None),
-                    "category": (getattr(tier2, "last_bands", {}) or {}).get("category") or "",
+                    "p_violation": judge_metadata.get("last_p_violation"),
+                    "category": (judge_metadata.get("last_bands") or {}).get("category") or "",
                 }
 
         vertical, horizontal, confidence, reasons, cited = judge_mod.blend(slm_result, lexical)
@@ -284,12 +292,12 @@ class ConscienceCircuitCore:
         # Only for a judge trained on the 2x2/3x2 vocabulary. A legacy 3-band
         # checkpoint's `contrary` is not `not-permitted`, and treating it as one
         # escalated traffic the old path cleared.
-        if tier2 is not None and getattr(tier2, "last_scheme", "legacy") != "legacy":
-            neg = getattr(tier2, "last_negative", None)
+        if slm_result is not None and judge_metadata.get("last_scheme", "legacy") != "legacy":
+            neg = judge_metadata.get("last_negative")
             if neg:
                 ladder_decision, ladder_why = apply_negative_ladder(
                     decision, negative=neg,
-                    confidence=getattr(tier2, "last_confidence", {}) or {},
+                    confidence=judge_metadata.get("last_confidence") or {},
                 )
                 # REFUSE is stricter than ESCALATE, so honouring the ladder
                 # unconditionally could turn a canon refusal into an ask --
@@ -320,8 +328,16 @@ class ConscienceCircuitCore:
                     # against the fast judge would only dilute the better
                     # answer. The axis floor below still prevents it from
                     # erasing a hard signal.
-                    vertical = min(vertical, d_v) if d_v < 0 or vertical < 0 else d_v
-                    horizontal = min(horizontal, d_h) if d_h < 0 or horizontal < 0 else d_h
+                    resolved_weak_reading = (
+                        self._best_prohibition(retrieved) < _TRIGGER_LEVEL
+                        and judge_mod.calibrate(d_c, evidence) >= DELIBERATE_THRESHOLD
+                        and min(d_v, d_h) >= 0.0 and max(d_v, d_h) > 0.0
+                    )
+                    if resolved_weak_reading:
+                        vertical, horizontal = d_v, d_h
+                    else:
+                        vertical = min(vertical, d_v) if d_v < 0 or vertical < 0 else d_v
+                        horizontal = min(horizontal, d_h) if d_h < 0 or horizontal < 0 else d_h
                     confidence = judge_mod.calibrate(d_c, evidence)
                     reasons = list(dict.fromkeys([*d_reasons, *reasons]))[:5]
                     cited = list(dict.fromkeys([*d_cited, *cited]))[:10]
@@ -490,6 +506,7 @@ class ConscienceCircuitCore:
             verdict.reasons.insert(0, f"{tool} is on the always-approve list")
             return verdict
         external = str(ctx.get("scope") or "").lower() in ("external", "public", "network")
+        aversion_can_gate = external and tool not in allowlist.INFORMATION_TOOLS
         if (
             ESCALATE_IRREVERSIBLE_EXTERNAL
             and verdict.decision in (ALLOW, CAUTION)
@@ -523,7 +540,7 @@ class ConscienceCircuitCore:
                 fly_vote.get("veto")
                 and fly_vote.get("mode") == "live"
                 and verdict.decision == ALLOW
-                and external
+                and aversion_can_gate
             ):
                 verdict.decision = CAUTION
                 verdict.gate = GATE_MB_VALENCE
@@ -544,7 +561,7 @@ class ConscienceCircuitCore:
                 mb_v is not None
                 and float(mb_v) <= -0.5
                 and verdict.decision == ALLOW
-                and external
+                and aversion_can_gate
             ):
                 verdict.decision = CAUTION
                 verdict.gate = GATE_MB_VALENCE
@@ -629,7 +646,11 @@ class ConscienceCircuitCore:
     @staticmethod
     def _situation(act: str, text: str, ctx: dict) -> str:
         head = {
-            "respond": "Aiko is about to reply to this user turn.",
+            "respond": (
+                "Aiko is about to reply to this user turn. Judge the act of "
+                "answering, not the user's past conduct. Acknowledging an apology, "
+                "listening, or discussing everyday plans is ordinary conversation."
+            ),
             "speak": "Aiko has drafted this reply and is about to say it.",
             "tool": "Aiko is about to invoke a tool.",
             "remember": "Aiko is about to write this to long-term memory.",
@@ -643,7 +664,10 @@ class ConscienceCircuitCore:
         if "reversible" in ctx:
             extras.append(f"reversible={bool(ctx['reversible'])}")
         suffix = f" ({', '.join(extras)})" if extras else ""
-        return f"{head}{suffix}\n\n{text[:1600]}"
+        user_context = ""
+        if act == ACT_SPEAK and ctx.get("user_input"):
+            user_context = f"\nUser turn (context for the reply): {str(ctx['user_input'])[:400]}\n"
+        return f"{head}{suffix}{user_context}\n\n{text[:1600]}"
 
     @staticmethod
     def _best_prohibition(retrieved) -> float:

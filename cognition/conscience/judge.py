@@ -374,6 +374,16 @@ def get_tier2():
     return laya if laya.available else get_slm()
 
 
+def score_tier2(judge, situation: str, canon_block: str, parties: list[Party]):
+    """Use a per-call metadata snapshot when the judge provides one."""
+    snapshot = getattr(judge, "score_with_metadata", None)
+    if callable(snapshot):
+        return snapshot(situation, canon_block, parties)
+    result = judge.score(situation, canon_block, parties)
+    names = ("last_uncertain", "last_negative", "last_scheme", "last_confidence", "last_bands", "last_p_violation")
+    return result, ({name: getattr(judge, name, None) for name in names} if result is not None else {})
+
+
 # ── L3: deliberation with the main model ──────────────────────────────────────
 
 _DELIBERATE_SYSTEM = (

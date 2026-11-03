@@ -41,7 +41,9 @@ class FakeFullbrain:
 
 
 @pytest.fixture(autouse=True)
-def _clean_state():
+def _clean_state(monkeypatch):
+    monkeypatch.setenv("AIKO_FULLBRAIN_EVERY_N", "1")
+    monkeypatch.setenv("AIKO_FULLBRAIN_MIN_INTERVAL_S", "0")
     # Isolate module-level background state between tests.
     with turn_module._fullbrain_latest_lock:
         turn_module._fullbrain_latest.clear()
@@ -159,3 +161,44 @@ def test_thread_start_failure_releases_guard(monkeypatch):
     assert not turn_module._fullbrain_bg_lock.locked()
     # No bg thread was marked started.
     assert out.get("whole_brain_bg") is None
+
+
+def test_background_wiring_honors_configured_fullbrain_throttle(monkeypatch):
+    from cognition.flymemory import fullbrain
+    monkeypatch.setenv('AIKO_FULLBRAIN_EVERY_N', '3')
+    monkeypatch.setattr(fullbrain, '_step_count', 0)
+    fb = FakeFullbrain()
+    _run_bg_step(fb)
+    _run_bg_step(fb)
+    assert fb.calls == 0
+    _run_bg_step(fb)
+    assert fb.calls == 1
+    assert not turn_module._fullbrain_bg_lock.locked()
+
+
+@pytest.mark.parametrize('mb_mode,expected', [('live', 1.08), ('shadow', .9)])
+def test_fullbrain_vigor_reaches_dn_bus_only_in_live_mode(monkeypatch, mb_mode, expected):
+    from cognition.neural_state import clear_neural_state, get_neural_state
+    from cognition.flysense import dn
+    uid = 'fullbrain-dn-wiring-' + mb_mode
+    clear_neural_state(uid)
+    monkeypatch.setenv('MEMORY_FLYMB_MODE', mb_mode)
+    monkeypatch.setenv('MEMORY_FLYDN_MODE', 'live')
+    fake_mb = MagicMock()
+    fake_mb.encode.return_value = np.zeros(8, dtype=np.float32)
+    fake_mb.valence_bias.return_value = 0.0
+    fake_mb.kc_body_ids = np.arange(8)
+    with turn_module._fullbrain_latest_lock:
+        turn_module._fullbrain_latest[uid] = dict(motor_vigor=1.2, clock_drive=.1,
+                                                brain_arousal=.5, whole_brain_ms=10)
+    monkeypatch.setattr(dn.FlyDN, 'drive', lambda *a, **k: {'rate_mult': .9, 'arousal': .5})
+    assert turn_module._fullbrain_bg_lock.acquire(blocking=False)
+    try:
+        with patch('cognition.fly_registry.get_flymb', return_value=fake_mb), \
+             patch('cognition.fly_registry.get_fullbrain', return_value=FakeFullbrain()):
+            out = turn_module.apply_turn_priors('hello', user_id=uid)
+        assert out['motor_vigor'] == pytest.approx(expected)
+        assert get_neural_state(uid).motor_vigor == pytest.approx(expected)
+    finally:
+        turn_module._fullbrain_bg_lock.release()
+        clear_neural_state(uid)

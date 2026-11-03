@@ -48,6 +48,18 @@ import re
 # not belong here: the content rules in guardrails.py run first and would have
 # blocked it anyway, but the allowlist must not be the thing that noticed.
 _ALLOWLIST: tuple[tuple[str, str, re.Pattern[str]], ...] = (
+    # An apology is an opening for a response, not a request to repeat or
+    # endorse the past act. Whole-turn matches prevent appended requests
+    # from inheriting this classification.
+    ("personal_apology", "acknowledge a personal apology",
+     r"^\s*(?:i(?:'m| am)\s+)?sorry[,.! ]*(?:i\s+(?:think\s+i\s+)?"
+     r"(?:did something wrong|made a mistake|messed up))?[.! ]*\s*$"),
+    ("ordinary_activity_choice", "discuss a choice of everyday activities",
+     r"^\s*(?:i|we)\s+(?:will|could|can|might)\s+(?:bring|take)\s+"
+     r"(?:her|you|aiko)\s+to\s+see\s+(?:the\s+)?(?:autumn|fall)\s+leaves"
+     r"(?:\s+tomorrow)?\s*[, ]+or\s+(?:if\s+)?(?:she|you|aiko)\s+"
+     r"(?:wanna|want(?:s)?\s+to|would\s+like\s+to)\s+stay\s+home"
+     r"(?:\s+to\s+(?:do\s+)?coding)?\s*[?.!]*\s*$"),
     # ── weather / time / calendar ─────────────────────────────────────────
     ("weather", "weather lookup",
      r"\b(?:check|look ?up|get|what'?s|whats|how'?s|what is|forecast)\b"
@@ -531,7 +543,23 @@ _CLEARABLE_ACTS = frozenset({
 _CLEARABLE_TOOLS = frozenset({
     "read_logs", "tail_log", "grep_log", "search", "list_files", "read_file",
     "get_weather", "get_time", "calendar_read", "memory_recall", "status",
+    "repo_read_file", "repo_file_tree", "repo_search_text", "codebase_search",
+    "read_workspace_file", "read_notes",
 })
+
+# These still pass the content/judge layers; only learned fly aversion is
+# advisory for information retrieval, rather than a hard tool veto.
+INFORMATION_TOOLS = _CLEARABLE_TOOLS | frozenset({
+    "adaptive_search", "deep_research", "deep_read", "web_search", "web_fetch",
+    "fetch_from_url", "search_memory", "kb_search",
+})
+
+
+def local_read_class(act: str, tool_name: str, scope: str, text: str) -> str | None:
+    if (act == "tool" and tool_name in _CLEARABLE_TOOLS
+            and scope == "local" and not _vetoed(text)):
+        return "local_read_only_tool"
+    return None
 
 
 def allows_act(act: str, tool_name: str | None = None) -> bool:

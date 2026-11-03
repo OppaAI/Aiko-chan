@@ -1748,7 +1748,7 @@ def run_session(ui, args) -> None:
             if _fly_priors.get("interrupt"):
                 current_latency["fly_interrupt"] = True
                 note = (
-                    "[system notice] User signaled STOP/urgency. "
+                    "[system notice] An explicit stop command or critical interrupt was received. "
                     "Answer in 1-3 short sentences. Do not call tools or start multi-step agent plans."
                 )
                 system_note = f"{system_note}\n{note}".strip() if system_note else note

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -87,6 +88,9 @@ def test_tool_vote_records_resolved_user_and_arguments_but_shadow_veto_is_observ
     assert "vote-user" not in action_select._last_action
 
     monkeypatch.setattr(action_select, "_MODE", "live")
+    live = core._apply_tool_policy(Verdict(decision=ALLOW), context)
+    assert live.decision == ALLOW  # Read-only search records aversion without blocking.
+    context["tool"] = "external_effect"
     live = core._apply_tool_policy(Verdict(decision=ALLOW), context)
     assert live.decision == CAUTION
     assert live.gate == GATE_MB_VALENCE
@@ -590,3 +594,44 @@ def test_execute_tool_with_policy_does_not_persist_conscience_skip(monkeypatch):
     )
     assert result.error_type == "conscience_skip"
     assert persisted == []
+
+
+def test_local_repository_read_clears_without_moral_model(monkeypatch):
+    from cognition.conscience import judge
+    monkeypatch.setattr(judge, 'get_tier2', lambda: (_ for _ in ()).throw(AssertionError('unnecessary judge call')))
+    core = ConscienceCircuitCore('local-read-test')
+    verdict = core.evaluate(act='tool', content='tool=repo_read_file args={"relative_path":"main.py"}',
+                            context={'tool': 'repo_read_file', 'scope': 'local'})
+    assert verdict.decision == ALLOW, verdict.reasons
+    assert 'allowlist' in verdict.layers_run
+
+
+def test_fly_aversion_does_not_block_information_retrieval(monkeypatch):
+    from cognition.fly_behavior import action_select
+    monkeypatch.setattr(action_select, 'score_tool_call', lambda **kwargs: {
+        'veto': True, 'mode': 'live', 'votes': {'mb': -1}})
+    core = ConscienceCircuitCore('read-aversion-test')
+    verdict = core._apply_tool_policy(Verdict(decision=ALLOW), {
+        'tool': 'adaptive_search', 'scope': 'network', 'mb_valence': -.9})
+    assert verdict.decision == ALLOW
+
+
+def test_speak_judge_receives_the_conversation_context():
+    text = ConscienceCircuitCore._situation('speak', 'It is okay to talk about it.', {
+        'user_input': 'Sorry I did something wrong.'})
+    assert 'Sorry I did something wrong.' in text
+    assert 'It is okay to talk about it.' in text
+
+
+@pytest.mark.parametrize('text', [
+    'Sorry I did something wrong.',
+    'I will bring her to see autumn leaves tomorrow , or if she wanna stay home to do coding?',
+])
+def test_reported_benign_turns_do_not_reach_an_overstrict_judge(monkeypatch, text):
+    from cognition.conscience import judge
+    def unexpected_judge():
+        raise AssertionError('routine conversation unnecessarily reached moral judge')
+    monkeypatch.setattr(judge, 'get_tier2', unexpected_judge)
+    verdict = ConscienceCircuitCore('benign-conversation-test').evaluate(act='respond', content=text)
+    assert verdict.decision == ALLOW, verdict.reasons
+    assert 'allowlist' in verdict.layers_run

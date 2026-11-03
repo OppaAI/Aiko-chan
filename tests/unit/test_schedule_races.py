@@ -5,6 +5,58 @@ from types import ModuleType
 import sys
 
 
+def test_stopped_scheduler_does_not_start_catchup_workers(monkeypatch):
+    import system.schedule as schedule
+    monkeypatch.setattr(schedule.ScheduleRunner, "_missing_reflection_dates", lambda self: [])
+    monkeypatch.setattr(schedule.ScheduleRunner, "_monthly_catchup_needed", lambda self: False)
+    runner = schedule.ScheduleRunner(user_id="github_alice", memorize=object(),
+                                     generate_and_post_fn=lambda: None, consolidate_fn=lambda: None)
+    runner._catchup_dates = [datetime.now(timezone.utc)]
+    runner._monthly_catchup_needed_flag = True
+    created = []
+    monkeypatch.setattr(schedule.threading, "Thread", lambda **kw: created.append(kw))
+    runner.stop()
+    runner.start()
+    assert created == []
+
+
+def test_concurrent_start_creates_only_one_polling_worker(monkeypatch):
+    import threading
+    import system.schedule as schedule
+    real_thread = threading.Thread
+    monkeypatch.setattr(schedule.ScheduleRunner, "_missing_reflection_dates", lambda self: [])
+    monkeypatch.setattr(schedule.ScheduleRunner, "_monthly_catchup_needed", lambda self: False)
+    runner = schedule.ScheduleRunner(user_id="github_alice")
+    entered = threading.Event()
+    release = threading.Event()
+    created = []
+
+    class Worker:
+        def __init__(self, **kwargs):
+            self.alive = False
+            created.append(kwargs["name"])
+        def is_alive(self):
+            return self.alive
+        def start(self):
+            entered.set()
+            release.wait(2)
+            self.alive = True
+
+    monkeypatch.setattr(schedule.threading, "Thread", Worker)
+    callers = [real_thread(target=runner.start) for _ in range(2)]
+    try:
+        callers[0].start()
+        assert entered.wait(1)
+        callers[1].start()
+    finally:
+        release.set()
+        for caller in callers:
+            if caller.ident is not None:
+                caller.join(2)
+    assert all(not caller.is_alive() for caller in callers)
+    assert created == ["aiko-schedule"]
+
+
 def test_guest_boot_defers_catchup_checks_until_owner_resolution(monkeypatch):
     import system.schedule as schedule
     checks = []

@@ -2030,6 +2030,7 @@ class ScheduleRunner:
         self._wakeup               = threading.Event()
         self._stop                 = threading.Event()
         self._thread: threading.Thread | None = None
+        self._lifecycle_lock = threading.Lock()
         self._catchup_lock          = threading.Lock()
         # In-flight schedule-graph guard: a graph whose run outlasts the
         # fire tick must not stack a second concurrent run. Keyed by
@@ -2191,41 +2192,45 @@ class ScheduleRunner:
 
     def start(self) -> None:
         """Start the daemon scheduler thread if it is not already running."""
-        if self._thread and self._thread.is_alive():
-            return
-        self._thread = threading.Thread(target=self._run, name="aiko-schedule", daemon=True)
-        self._thread.start()
-        log.info(
-            "Scheduler started — daily_reflect_and_dream at %02d:%02d, "
-            "monthly_consolidate on 1st at %02d:%02d.",
-            DAILY_JOB_HOUR, DAILY_JOB_MINUTE,
-            MONTHLY_JOB_HOUR, MONTHLY_JOB_MINUTE,
-        )
-        if self._catchup_dates and self._memorize and self._generate_and_post_fn:
+        with self._lifecycle_lock:
+            if self._stop.is_set():
+                return
+            if self._thread and self._thread.is_alive():
+                return
+            self._thread = threading.Thread(target=self._run, name="aiko-schedule", daemon=True)
+            self._thread.start()
             log.info(
-                "Scheduler: running %d missed daily reflect+dream job(s) on startup.",
-                len(self._catchup_dates),
+                "Scheduler started — daily_reflect_and_dream at %02d:%02d, "
+                "monthly_consolidate on 1st at %02d:%02d.",
+                DAILY_JOB_HOUR, DAILY_JOB_MINUTE,
+                MONTHLY_JOB_HOUR, MONTHLY_JOB_MINUTE,
             )
-            catchup_thread = threading.Thread(
-                target=self._run_catchup_backfill,
-                name="aiko-schedule-catchup",
-                daemon=True,
-            )
-            catchup_thread.start()
+            if self._catchup_dates and self._memorize and self._generate_and_post_fn:
+                log.info(
+                    "Scheduler: running %d missed daily reflect+dream job(s) on startup.",
+                    len(self._catchup_dates),
+                )
+                catchup_thread = threading.Thread(
+                    target=self._run_catchup_backfill,
+                    name="aiko-schedule-catchup",
+                    daemon=True,
+                )
+                catchup_thread.start()
 
-        if self._monthly_catchup_needed_flag and self._memorize and self._consolidate_fn:
-            log.info("Scheduler: running missed monthly_consolidate on startup.")
-            monthly_catchup_thread = threading.Thread(
-                target=self._run_monthly_consolidate,
-                name="aiko-schedule-monthly-catchup",
-                daemon=True,
-            )
-            monthly_catchup_thread.start()
+            if self._monthly_catchup_needed_flag and self._memorize and self._consolidate_fn:
+                log.info("Scheduler: running missed monthly_consolidate on startup.")
+                monthly_catchup_thread = threading.Thread(
+                    target=self._run_monthly_consolidate,
+                    name="aiko-schedule-monthly-catchup",
+                    daemon=True,
+                )
+                monthly_catchup_thread.start()
 
     def stop(self) -> None:
-        """Request scheduler shutdown."""
-        self._stop.set()
-        self._wakeup.set()
+        """Request shutdown; a stopped runner must be replaced, not restarted."""
+        with self._lifecycle_lock:
+            self._stop.set()
+            self._wakeup.set()
 
     def _run(self) -> None:
         while not self._stop.is_set():

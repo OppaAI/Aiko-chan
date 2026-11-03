@@ -46,6 +46,9 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
   are not forcibly cancelled.
 - Guest scheduler startup defers reflection and consolidation catch-up checks
   until a real owner is resolved, avoiding redundant checks against guest state.
+- Scheduler start/stop operations are serialized; concurrent starts cannot
+  duplicate the polling worker, and stopped runners cannot spawn new catch-up
+  workers through start().
 - Version remains 0.2.0. Jetson Orin Nano 8 GB performance measurements and the
   remaining lifecycle and duplication review are still pending.
 

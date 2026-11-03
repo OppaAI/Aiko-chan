@@ -53,9 +53,12 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
   workers through start().
 - Owner assignment is atomic, and owner resolution cannot launch catch-up
   workers after shutdown, including when shutdown arrives during its scan.
+- The RSS fallback no longer opens an unused proc file, and regression coverage
+  checks conversion with a 64 KB system page size.
 - Version remains 0.2.0. Jetson Orin Nano 8 GB performance measurements and the
   remaining lifecycle and duplication review are still pending.
 
-The latest full run completed with 2,095 unit tests and 30 integration tests
-passing. These results are a baseline for the systematic review, not a claim
-that the repository has no remaining bugs.
+The latest combined verification completed with 2,112 unit tests and 30
+integration tests passing (5 unit tests skipped). These results cover the
+current accumulated changes, not a claim that the repository has no remaining
+bugs.

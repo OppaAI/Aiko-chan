@@ -8,6 +8,18 @@ from types import ModuleType, SimpleNamespace
 import system.resource as ram
 
 
+def test_rss_fallback_only_needs_statm_and_uses_system_page_size(monkeypatch):
+    from io import StringIO
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    def read_proc(path):
+        if path == "/proc/self/statm":
+            return StringIO("8192 2048 0 0 0 0 0")
+        raise OSError("unavailable proc entry")
+    monkeypatch.setattr(ram, "open", read_proc, raising=False)
+    monkeypatch.setattr(ram.os, "sysconf", lambda key: 65536)
+    assert ram.rss_mb() == 128.0
+
+
 def test_release_ram_reports_and_throttles(monkeypatch):
     monkeypatch.setenv("RAM_RELEASE_MIN_INTERVAL_S", "300")
     ram._last_release_at = 0.0

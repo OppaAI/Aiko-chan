@@ -58,14 +58,11 @@ def rss_mb() -> float | None:
     try:
         with open("/proc/self/statm") as handle:
             pages = int(handle.read().split()[1])
-        with open("/proc/self/stat") as handle:
-            page_size = 4096
-            try:
-                import os
-
-                page_size = os.sysconf("SC_PAGE_SIZE")
-            except Exception:
-                pass
+        page_size = 4096
+        try:
+            page_size = os.sysconf("SC_PAGE_SIZE")
+        except Exception:
+            pass
         return pages * page_size / (1024 * 1024)
     except Exception:
         return None

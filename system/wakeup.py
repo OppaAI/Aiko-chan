@@ -397,21 +397,12 @@ class AikoWakeup:
         # at boot instead of mid-conversation. Best-effort: never blocks boot.
         def _warm_fly_catalog() -> None:
             try:
-                import os as _os
-
-                if (_os.getenv("AIKO_FLY_RUNTIME_MODE", "off") or "off").strip().lower() not in {"shadow", "live"}:
-                    return
-                if not (_os.getenv("AIKO_FLY_CATALOG_PATH", "") or "").strip():
-                    return
                 from cognition.fly_runtime.service import _configured_catalog
 
                 _configured_catalog()
                 log.info("[wakeup] fly catalog warmed")
             except Exception as exc:
                 log.debug("[wakeup] fly catalog warmup skipped: %s", exc)
-
-        _fly_warm = threading.Thread(target=_warm_fly_catalog, name="aiko-fly-warmup", daemon=True)
-        _fly_warm.start()
 
         # ── MCP client boot (ran in parallel; non-fatal) ──────────────────────
         # bootstrap_mcp() spawns a subprocess + handshake; it used to run
@@ -433,6 +424,12 @@ class AikoWakeup:
                 exc_info=think_exc,
             )
             raise RuntimeError("AikoThink boot failed") from think_exc                        # chain from previous error point so callers/tracebacks still see the root cause
+
+        # Do not start the potentially large catalog load during a failed boot.
+        import os as _os
+        if ((_os.getenv("AIKO_FLY_RUNTIME_MODE", "off") or "off").strip().lower() in {"shadow", "live"}
+                and (_os.getenv("AIKO_FLY_CATALOG_PATH", "") or "").strip()):
+            threading.Thread(target=_warm_fly_catalog, name="aiko-fly-warmup", daemon=True).start()
 
         # Live Grasp working-memory hub: now owned by AikoMemorize (wm_* API)
         # — no boot-time install step. think.py injects/records via memorize

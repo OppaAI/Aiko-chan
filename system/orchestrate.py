@@ -1060,6 +1060,39 @@ def run_session(ui, args) -> None:
     # per browser connection inside AikoWeb._ws_handler; the CLI resolves its
     # identity in run_cli() before run_session() is ever called.
 
+    think = memorize = speak = listen = None
+    proactive = typewriter = None
+    background_adapters = []
+    shutdown_done = False
+
+    def _shutdown():
+        """Clean up completed or partial session setup once."""
+        nonlocal shutdown_done
+        if shutdown_done:
+            return
+        shutdown_done = True
+        def cleanup(label, fn):
+            try:
+                fn()
+            except Exception:
+                log.exception("Failed to stop %s", label)
+
+        if proactive is not None:
+            cleanup("proactive runner", proactive.stop)
+        from system.schedule import stop_scheduler
+        cleanup("scheduler", stop_scheduler)
+        for adapter in background_adapters:
+            try:
+                adapter.stop()
+            except Exception:
+                log.exception("Failed to stop background messenger adapter %s", getattr(adapter, "name", adapter.__class__.__name__))
+        if typewriter is not None:
+            cleanup("typewriter", lambda: typewriter.stop(flush=True))
+        if listen is not None:
+            cleanup("listening monitor", listen.stop_barge_in_monitor)
+        if think is not None:
+            cleanup("pending memory writes", think.wait_for_memory)
+
     # ── init spin ─────────────────────────────────────────────────────────────
 
     spin_stop = threading.Event()
@@ -1171,8 +1204,12 @@ def run_session(ui, args) -> None:
         _wire_speak_sink(speak)
 
     except BaseException:
-        if hasattr(ui, "status_failed"):
-            ui.status_failed()
+        _shutdown()
+        try:
+            if hasattr(ui, "status_failed"):
+                ui.status_failed()
+        except Exception:
+            log.debug("Startup failure display failed", exc_info=True)
         raise
     finally:
         spin_stop.set()
@@ -1182,204 +1219,187 @@ def run_session(ui, args) -> None:
 
     # ── transition to chat ────────────────────────────────────────────────────
 
-    ui.status_finish()
-    ui._draw()
+    try:
+        ui.status_finish()
+        ui._draw()
 
-    tts_enabled = not args.text
-    asr_enabled = not args.text and not args.no_asr
-    if hasattr(ui, "_stats"):
-        ui._stats['tts_on'] = tts_enabled
-        ui._stats['asr_on'] = asr_enabled
+        tts_enabled = not args.text
+        asr_enabled = not args.text and not args.no_asr
+        if hasattr(ui, "_stats"):
+            ui._stats['tts_on'] = tts_enabled
+            ui._stats['asr_on'] = asr_enabled
 
-    current_latency: dict | None = None
+        current_latency: dict | None = None
 
-    def _latency_mark(name: str) -> None:
-        if current_latency is not None and name not in current_latency:
-            current_latency[name] = time.monotonic()
+        def _latency_mark(name: str) -> None:
+            if current_latency is not None and name not in current_latency:
+                current_latency[name] = time.monotonic()
 
-    typewriter = TypewriterSync(ui, speak) if speak is not None else None
+        typewriter = TypewriterSync(ui, speak) if speak is not None else None
 
-    def _on_first_audio():
-        _latency_mark("first_audio_at")
-        if typewriter is not None:
-            typewriter.on_first_audio()
+        def _on_first_audio():
+            _latency_mark("first_audio_at")
+            if typewriter is not None:
+                typewriter.on_first_audio()
 
-    if speak is not None and hasattr(speak, "set_first_audio_callback"):
-        speak.set_first_audio_callback(_on_first_audio)
+        if speak is not None and hasattr(speak, "set_first_audio_callback"):
+            speak.set_first_audio_callback(_on_first_audio)
 
-    def _latency_seconds(timing: dict, start: str, end: str) -> float | None:
-        if timing.get(start) is None or timing.get(end) is None:
-            return None
-        return max(0.0, timing[end] - timing[start])
+        def _latency_seconds(timing: dict, start: str, end: str) -> float | None:
+            if timing.get(start) is None or timing.get(end) is None:
+                return None
+            return max(0.0, timing[end] - timing[start])
 
-    def _fmt_latency(value) -> str:
-        if value is None:
-            return "n/a"
-        if isinstance(value, int):
-            return str(value)
-        return f"{value:.3f}s"
+        def _fmt_latency(value) -> str:
+            if value is None:
+                return "n/a"
+            if isinstance(value, int):
+                return str(value)
+            return f"{value:.3f}s"
 
-    def _latency_parts(timing: dict) -> dict:
-        gen_time = _latency_seconds(timing, "first_assistant_token_at", "assistant_done_at")
-        out_tok = timing.get("output_tokens")
-        tok_per_sec = (out_tok / gen_time) if (out_tok and gen_time and gen_time > 0) else None
-        asr_time = _latency_seconds(timing, "voice_recording_stopped_at", "asr_done_at")
+        def _latency_parts(timing: dict) -> dict:
+            gen_time = _latency_seconds(timing, "first_assistant_token_at", "assistant_done_at")
+            out_tok = timing.get("output_tokens")
+            tok_per_sec = (out_tok / gen_time) if (out_tok and gen_time and gen_time > 0) else None
+            asr_time = _latency_seconds(timing, "voice_recording_stopped_at", "asr_done_at")
 
-        parts = {
-            "voice_end_to_submit":           _latency_seconds(timing, "voice_recording_stopped_at", "submitted_at"),
-            "asr_inference":                 asr_time,
-            "agentic_intent":                _latency_seconds(timing, "intent_start_at", "intent_done_at"),
-            "web_search":                    _latency_seconds(timing, "search_start_at", "search_done_at"),
-            "submit_to_first_token":         _latency_seconds(timing, "submitted_at", "first_assistant_token_at"),
-            "llm_inference":                 gen_time,
-            "tts_inference":                 timing.get("tts_synth_total"),
-            "submit_to_assistant_done":      _latency_seconds(timing, "submitted_at", "assistant_done_at"),
-            "assistant_done_to_first_audio": _latency_seconds(timing, "assistant_done_at", "first_audio_at"),
-            "voice_end_to_first_audio":      _latency_seconds(timing, "voice_recording_stopped_at", "first_audio_at"),
-            "submit_to_first_audio":         _latency_seconds(timing, "submitted_at", "first_audio_at"),
-            "submit_to_turn_done":           _latency_seconds(timing, "submitted_at", "turn_done_at"),
-            "input_tokens":                  timing.get("input_tokens"),
-            "output_tokens":                 out_tok,
-            "total_tokens":                  timing.get("total_tokens"),
-            "tokens_per_second":             round(tok_per_sec, 1) if tok_per_sec is not None else None,
-        }
+            parts = {
+                "voice_end_to_submit":           _latency_seconds(timing, "voice_recording_stopped_at", "submitted_at"),
+                "asr_inference":                 asr_time,
+                "agentic_intent":                _latency_seconds(timing, "intent_start_at", "intent_done_at"),
+                "web_search":                    _latency_seconds(timing, "search_start_at", "search_done_at"),
+                "submit_to_first_token":         _latency_seconds(timing, "submitted_at", "first_assistant_token_at"),
+                "llm_inference":                 gen_time,
+                "tts_inference":                 timing.get("tts_synth_total"),
+                "submit_to_assistant_done":      _latency_seconds(timing, "submitted_at", "assistant_done_at"),
+                "assistant_done_to_first_audio": _latency_seconds(timing, "assistant_done_at", "first_audio_at"),
+                "voice_end_to_first_audio":      _latency_seconds(timing, "voice_recording_stopped_at", "first_audio_at"),
+                "submit_to_first_audio":         _latency_seconds(timing, "submitted_at", "first_audio_at"),
+                "submit_to_turn_done":           _latency_seconds(timing, "submitted_at", "turn_done_at"),
+                "input_tokens":                  timing.get("input_tokens"),
+                "output_tokens":                 out_tok,
+                "total_tokens":                  timing.get("total_tokens"),
+                "tokens_per_second":             round(tok_per_sec, 1) if tok_per_sec is not None else None,
+            }
 
-        if "system_prompt_tokens" in timing:
-            mem_tok_list = timing.get("memory_entry_tokens", [])
-            agentic_tok = timing.get("agentic_tokens", 0)
-            out_tok_val = out_tok or 0
-            web_tok = timing.get("web_prompt_tokens", 0)
-            agentic_prompt_tok = timing.get("agentic_prompt_tokens", agentic_tok)
-            memory_prompt_tok = timing.get("memory_prompt_tokens", sum(mem_tok_list))
-            previous_chat_tok = timing.get("previous_chat_tokens", 0)
-            user_turn_tok = timing.get("user_turn_tokens", 0)
-            total = timing.get("total_tokens") or (
-                timing["system_prompt_tokens"]
-                + web_tok
-                + agentic_prompt_tok
-                + memory_prompt_tok
-                + previous_chat_tok
-                + user_turn_tok
-                + out_tok_val
+            if "system_prompt_tokens" in timing:
+                mem_tok_list = timing.get("memory_entry_tokens", [])
+                agentic_tok = timing.get("agentic_tokens", 0)
+                out_tok_val = out_tok or 0
+                web_tok = timing.get("web_prompt_tokens", 0)
+                agentic_prompt_tok = timing.get("agentic_prompt_tokens", agentic_tok)
+                memory_prompt_tok = timing.get("memory_prompt_tokens", sum(mem_tok_list))
+                previous_chat_tok = timing.get("previous_chat_tokens", 0)
+                user_turn_tok = timing.get("user_turn_tokens", 0)
+                total = timing.get("total_tokens") or (
+                    timing["system_prompt_tokens"]
+                    + web_tok
+                    + agentic_prompt_tok
+                    + memory_prompt_tok
+                    + previous_chat_tok
+                    + user_turn_tok
+                    + out_tok_val
+                )
+                parts["token_breakdown"] = {
+                    "system_prompt_tokens": timing["system_prompt_tokens"],
+                    "web_prompt_tokens":    web_tok,
+                    "agentic_prompt_tokens": agentic_prompt_tok,
+                    "memory_prompt_tokens": memory_prompt_tok,
+                    "memory_entry_tokens":  mem_tok_list,
+                    "memory_entry_count":   timing.get("memory_entry_count", len(mem_tok_list)),
+                    "previous_chat_tokens": timing.get("previous_chat_tokens", 0),
+                    "previous_chat_message_count": timing.get("previous_chat_message_count", 0),
+                    "user_turn_tokens":     user_turn_tok,
+                    "output_tokens":        out_tok_val,
+                    "total_tokens":         total,
+                }
+                parts["total_tokens"] = total
+
+            return parts
+
+        def _update_latency_stats(timing: dict) -> None:
+            if not hasattr(ui, "set_latency_stats"):
+                return
+            parts = _latency_parts(timing)
+            if args.debug:
+                display = {
+                    k: (_fmt_latency(v) if k not in (
+                            "input_tokens", "output_tokens", "total_tokens", "tokens_per_second", "token_breakdown"
+                        ) else v)
+                    for k, v in parts.items()
+                }
+                ui.set_latency_stats(display)
+            else:
+                ui.set_latency_stats({
+                    "voice_end_to_first_audio": _fmt_latency(parts["voice_end_to_first_audio"]),
+                })
+
+        def _log_latency(timing: dict) -> None:
+            if not LATENCY_LOG_ENABLED:
+                return
+            mode = timing.get("mode", "text")
+            p = _latency_parts(timing)
+            log.info(
+                "[latency] mode=%s in_tok=%s out_tok=%s tok/s=%s | "
+                "asr=%s intent=%s search=%s llm=%s tts=%s | "
+                "voice→submit=%s submit→1st_tok=%s submit→done=%s "
+                "done→1st_audio=%s voice→1st_audio=%s submit→turn_done=%s",
+                mode,
+                p["input_tokens"] if p["input_tokens"] is not None else "n/a",
+                p["output_tokens"] if p["output_tokens"] is not None else "n/a",
+                p["tokens_per_second"] if p["tokens_per_second"] is not None else "n/a",
+                _fmt_latency(p["asr_inference"]),
+                _fmt_latency(p["agentic_intent"]),
+                _fmt_latency(p["web_search"]),
+                _fmt_latency(p["llm_inference"]),
+                _fmt_latency(p["tts_inference"]),
+                _fmt_latency(p["voice_end_to_submit"]),
+                _fmt_latency(p["submit_to_first_token"]),
+                _fmt_latency(p["submit_to_assistant_done"]),
+                _fmt_latency(p["assistant_done_to_first_audio"]),
+                _fmt_latency(p["voice_end_to_first_audio"]),
+                _fmt_latency(p["submit_to_turn_done"]),
             )
-            parts["token_breakdown"] = {
-                "system_prompt_tokens": timing["system_prompt_tokens"],
-                "web_prompt_tokens":    web_tok,
-                "agentic_prompt_tokens": agentic_prompt_tok,
-                "memory_prompt_tokens": memory_prompt_tok,
-                "memory_entry_tokens":  mem_tok_list,
-                "memory_entry_count":   timing.get("memory_entry_count", len(mem_tok_list)),
-                "previous_chat_tokens": timing.get("previous_chat_tokens", 0),
-                "previous_chat_message_count": timing.get("previous_chat_message_count", 0),
-                "user_turn_tokens":     user_turn_tok,
-                "output_tokens":        out_tok_val,
-                "total_tokens":         total,
-            }
-            parts["total_tokens"] = total
 
-        return parts
+        # ── shutdown helper ───────────────────────────────────────────────────────
 
-    def _update_latency_stats(timing: dict) -> None:
-        if not hasattr(ui, "set_latency_stats"):
-            return
-        parts = _latency_parts(timing)
-        if args.debug:
-            display = {
-                k: (_fmt_latency(v) if k not in (
-                        "input_tokens", "output_tokens", "total_tokens", "tokens_per_second", "token_breakdown"
-                    ) else v)
-                for k, v in parts.items()
-            }
-            ui.set_latency_stats(display)
-        else:
-            ui.set_latency_stats({
-                "voice_end_to_first_audio": _fmt_latency(parts["voice_end_to_first_audio"]),
-            })
+        session_active = threading.Event()
 
-    def _log_latency(timing: dict) -> None:
-        if not LATENCY_LOG_ENABLED:
-            return
-        mode = timing.get("mode", "text")
-        p = _latency_parts(timing)
-        log.info(
-            "[latency] mode=%s in_tok=%s out_tok=%s tok/s=%s | "
-            "asr=%s intent=%s search=%s llm=%s tts=%s | "
-            "voice→submit=%s submit→1st_tok=%s submit→done=%s "
-            "done→1st_audio=%s voice→1st_audio=%s submit→turn_done=%s",
-            mode,
-            p["input_tokens"] if p["input_tokens"] is not None else "n/a",
-            p["output_tokens"] if p["output_tokens"] is not None else "n/a",
-            p["tokens_per_second"] if p["tokens_per_second"] is not None else "n/a",
-            _fmt_latency(p["asr_inference"]),
-            _fmt_latency(p["agentic_intent"]),
-            _fmt_latency(p["web_search"]),
-            _fmt_latency(p["llm_inference"]),
-            _fmt_latency(p["tts_inference"]),
-            _fmt_latency(p["voice_end_to_submit"]),
-            _fmt_latency(p["submit_to_first_token"]),
-            _fmt_latency(p["submit_to_assistant_done"]),
-            _fmt_latency(p["assistant_done_to_first_audio"]),
-            _fmt_latency(p["voice_end_to_first_audio"]),
-            _fmt_latency(p["submit_to_turn_done"]),
-        )
-
-    # ── shutdown helper ───────────────────────────────────────────────────────
-
-    session_active = threading.Event()
-
-    def _generate_proactive_checkin(prompt_hint: str) -> str:
-        session_active.set()
-        muted = False
-        original_speak = None
-        try:
-            if listen is not None and hasattr(listen, "extend_activation"):
-                listen.extend_activation()
-            original_speak = think._get_speak()
-            if not tts_enabled or not PROACTIVE_SPEAK:
-                think.set_speak(None)
-                muted = True
-            return think.proactive_checkin(prompt_hint)
-        finally:
+        def _generate_proactive_checkin(prompt_hint: str) -> str:
+            session_active.set()
+            muted = False
+            original_speak = None
             try:
-                if muted:
-                    # Preserve a newer /voice change while the check-in ran.
-                    think.compare_and_set_speak(None, original_speak)
+                if listen is not None and hasattr(listen, "extend_activation"):
+                    listen.extend_activation()
+                original_speak = think._get_speak()
+                if not tts_enabled or not PROACTIVE_SPEAK:
+                    think.set_speak(None)
+                    muted = True
+                return think.proactive_checkin(prompt_hint)
             finally:
-                session_active.clear()
-                if hasattr(think, "_last_chat_time"):
-                    think._last_chat_time = time.time()
+                try:
+                    if muted:
+                        # Preserve a newer /voice change while the check-in ran.
+                        think.compare_and_set_speak(None, original_speak)
+                finally:
+                    session_active.clear()
+                    if hasattr(think, "_last_chat_time"):
+                        think._last_chat_time = time.time()
 
-    proactive = ProactiveIdleRunner(
-        ui,
-        speak,
-        speak_enabled_fn=lambda: tts_enabled,
-        active_turn=session_active,
-        generate_fn=_generate_proactive_checkin,
-        on_rest_change=think.set_proactive_resting,
-    )
-    proactive.start()
+        proactive = ProactiveIdleRunner(
+            ui,
+            speak,
+            speak_enabled_fn=lambda: tts_enabled,
+            active_turn=session_active,
+            generate_fn=_generate_proactive_checkin,
+            on_rest_change=think.set_proactive_resting,
+        )
+        proactive.start()
 
-    def _shutdown():
-        """Stop background daemons and flush memory writes before exit."""
-        def cleanup(label, fn):
-            try:
-                fn()
-            except Exception:
-                log.exception("Failed to stop %s", label)
-
-        cleanup("proactive runner", proactive.stop)
-        from system.schedule import stop_scheduler
-        cleanup("scheduler", stop_scheduler)
-        for adapter in background_adapters:
-            try:
-                adapter.stop()
-            except Exception:
-                log.exception("Failed to stop background messenger adapter %s", getattr(adapter, "name", adapter.__class__.__name__))
-        if typewriter is not None:
-            cleanup("typewriter", lambda: typewriter.stop(flush=True))
-        if listen is not None:
-            cleanup("listening monitor", listen.stop_barge_in_monitor)
-        cleanup("pending memory writes", think.wait_for_memory)
+    except BaseException:
+        _shutdown()
+        raise
 
     # ── main loop ─────────────────────────────────────────────────────────────
 

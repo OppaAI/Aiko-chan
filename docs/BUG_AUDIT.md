@@ -48,6 +48,9 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 - Shutdown continues remaining cleanup when an individual subsystem fails.
 - A shared setup guard stops the startup spinner even when frontend wiring
   raises before the session input loop begins.
+- Partial frontend setup and ready-display failures use the shared shutdown
+  path to stop the scheduler and created adapters and drain memory writes.
+  Cleanup tolerates missing resources and runs once per session.
 - WebUI boot and the plain CLI share a line-based console progress renderer:
   parallel steps retain their own state, completed steps show timings, and
   redirected/dumb terminals receive plain lines. Animation is disabled when

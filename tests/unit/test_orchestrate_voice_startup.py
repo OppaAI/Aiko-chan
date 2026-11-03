@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 
-def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flush=None, scheduler_stop=None, memory=None, reset_context=None, spin_loop=None, wire_backends=None):
+def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flush=None, scheduler_stop=None, memory=None, reset_context=None, spin_loop=None, wire_backends=None, finish_status=None, background_adapters=None):
     import system.orchestrate as orchestrate
     import system.wakeup as wakeup
     import system.schedule as schedule
@@ -33,7 +33,7 @@ def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flus
         _stats={},
         add_message=lambda role, text: messages.append(text),
         set_voice_backends=wire_backends or (lambda output, input_backend: backends.append((output, input_backend))),
-        status_finish=lambda: None,
+        status_finish=finish_status or (lambda: None),
         _draw=lambda **kwargs: None,
         get_input=get_input,
         get_voice_input=lambda input_backend, **kwargs: "/quit",
@@ -45,7 +45,7 @@ def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flus
     monkeypatch.setattr(wakeup, "start_speak", lambda: speak)
     monkeypatch.setattr(wakeup, "start_listen", lambda: listen)
     adapters = ModuleType("interface.adapter")
-    adapters.start_background_adapters = lambda *args: []
+    adapters.start_background_adapters = lambda *args: background_adapters or []
     monkeypatch.setitem(sys.modules, "interface.adapter", adapters)
     monitors = ModuleType("interface.mcp_server.social.monitor_daemon")
     monitors.start_threads_monitor_daemon = lambda: None
@@ -69,6 +69,29 @@ def test_setup_failure_stops_startup_spinner(monkeypatch):
     with pytest.raises(RuntimeError, match="frontend wiring failed"):
         _run_commands(monkeypatch, [], spin_loop=spin, wire_backends=fail_wiring)
     assert finished.is_set()
+
+
+def test_frontend_setup_failure_stops_scheduler_and_flushes_memory(monkeypatch):
+    events = []
+    def fail(*args):
+        raise RuntimeError("frontend setup failed")
+    with pytest.raises(RuntimeError, match="frontend setup failed"):
+        _run_commands(monkeypatch, [], wire_backends=fail,
+                      scheduler_stop=lambda: events.append("stop"),
+                      memory_flush=lambda: events.append("flush"))
+    assert events == ["stop", "flush"]
+
+
+def test_ready_display_failure_stops_already_started_adapters(monkeypatch):
+    events = []
+    def fail():
+        raise RuntimeError("ready display failed")
+    adapter = SimpleNamespace(stop=lambda: events.append("adapter"))
+    with pytest.raises(RuntimeError, match="ready display failed"):
+        _run_commands(monkeypatch, [], finish_status=fail, background_adapters=[adapter],
+                      scheduler_stop=lambda: events.append("scheduler"),
+                      memory_flush=lambda: events.append("memory"))
+    assert events == ["scheduler", "adapter", "memory"]
 
 
 def test_stalled_startup_spinner_does_not_prevent_chat(monkeypatch):

@@ -102,3 +102,79 @@ class StartupConsole:
             self._active.clear()
             status = "FAILED" if failed else "READY"
             self._write(f"\n  {status}  {message}  ({time.monotonic() - self._started:.1f}s)\n\n")
+
+
+class ChatConsole:
+    """Scrolling chat with readable diagnostics; no screen or cursor management."""
+    PALETTE = {"you": "36", "aiko": "35", "system": "2", "trace": "34",
+               "thinking": "33", "inner": "33", "tools": "33", "web": "36",
+               "mem": "35", "memory": "35", "kb": "36", "knowledge": "36",
+               "voice": "36", "debug": "2", "sys": "2", "metrics": "2", "warning": "33", "error": "31"}
+
+    def __init__(self, stream=None):
+        import re
+        self.stream = stream if stream is not None else sys.stdout
+        self.color = bool(self.stream.isatty()) and os.getenv("TERM") != "dumb" and "NO_COLOR" not in os.environ
+        self._ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+        self._lock = threading.RLock()
+        self._line_open = False
+        self._need_label = True
+
+    def begin(self):
+        self.commit()
+        self._need_label = True
+
+    def clean(self, text):
+        return self._ansi.sub("", str(text))
+
+    def _paint(self, category, text):
+        code = self.PALETTE.get(category, "2")
+        return f"\033[{code}m{text}\033[0m" if self.color else text
+
+    def _write(self, text):
+        self.stream.write(text)
+        self.stream.flush()
+
+    def prompt(self):
+        return "\n  " + self._paint("you", "You > ")
+
+    def message(self, role, text):
+        text = self.clean(text)
+        category = role
+        label = {"you": "You", "aiko": "Aiko"}.get(role, "System")
+        if role == "sys":
+            category = "system"
+            if text.startswith("🧠"):
+                category, label = "trace", "Trace"
+                text = text.removeprefix("🧠").strip()
+            elif text.startswith("[") and "]" in text:
+                tag, text = text[1:].split("]", 1)
+                category, label = tag.lower(), tag.title()
+                text = text.lstrip()
+            elif any(word in text.lower() for word in ("failed", "unavailable", "error")):
+                category, label = "warning", "Warning"
+        with self._lock:
+            if self._line_open:
+                self._write("\n")
+                self._line_open = False
+            self._need_label = True
+            prefix = "  " + self._paint(category, f"{label} > ")
+            # Keep diagnostic continuation lines visually subordinate.
+            lines = text.splitlines() or [""]
+            self._write(prefix + lines[0] + "\n")
+            for line in lines[1:]:
+                self._write("    " + line + "\n")
+
+    def token(self, text):
+        with self._lock:
+            if self._need_label:
+                self._write("\n  " + self._paint("aiko", "Aiko > "))
+                self._need_label = False
+            self._write(text)
+            self._line_open = not text.endswith("\n")
+
+    def commit(self):
+        with self._lock:
+            if self._line_open:
+                self._write("\n")
+            self._line_open = False

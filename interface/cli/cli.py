@@ -32,7 +32,7 @@ import time
 from pathlib import Path
 
 from system.log import get_logger
-from system.orchestrate import _c, _CTX_COLORS, _ctx_preview
+from system.orchestrate import _ctx_preview
 from system.wakeup import AikoWakeup
 
 log = get_logger(__name__)
@@ -53,13 +53,6 @@ def handle_logout() -> None:
     _get_cli_auth().logout()
 
 
-_CLI_ROLE_PREFIX = {
-    "you":  "You",
-    "aiko": "Aiko",
-    "sys":  "·",
-}
-
-
 class AikoSimpleCLI:
     def __init__(self, no_voice: bool = False, debug: bool = False) -> None:
         self.no_voice = no_voice
@@ -69,8 +62,10 @@ class AikoSimpleCLI:
         self._streaming = False
         self._stream_buf: list[str] = []
         self._latency_stats: dict = {}
-        from interface.console import StartupConsole
+        from interface.console import StartupConsole, ChatConsole
         self._startup = StartupConsole(AikoWakeup.ALL_BOOT_LABELS, mode="CLI")
+        self._console = ChatConsole()
+        self._last_typed = None
         # per-instance agentic step counter for __THINKING__ rendering
         # (previously a module global in main.py — instance state is
         # cleaner and doesn't leak across AikoSimpleCLI instances)
@@ -114,13 +109,16 @@ class AikoSimpleCLI:
         pass
 
     def add_message(self, role: str, text: str) -> None:
-        prefix = _CLI_ROLE_PREFIX.get(role, role)
-        print(f"{prefix}: {text}")
+        if role == "you" and text == self._last_typed:
+            self._last_typed = None
+            return
+        self._console.message(role, text)
 
     def turn_start(self) -> None:
         self._streaming = True
         self._stream_buf = []
-        print("Aiko: ", end="", flush=True)
+        self._agent_step = 0
+        self._console.begin()
 
     def stream_token(self, token: str) -> None:
         """
@@ -138,17 +136,17 @@ class AikoSimpleCLI:
 
         if stripped == "__THINKING__":
             self._agent_step += 1
-            self.add_message('sys', _c(_CTX_COLORS["thinking"], f"[thinking] step {self._agent_step}"))
+            self.add_message('sys', f"[thinking] step {self._agent_step}")
             return
 
         if stripped.startswith("__THINKING__:"):
             payload = stripped[len("__THINKING__:"):].strip()
-            self.add_message('sys', _c(_CTX_COLORS["thinking"], f"[inner] {_ctx_preview(payload, 300)}"))
+            self.add_message('sys', f"[inner] {_ctx_preview(payload, 300)}")
             return
 
         if stripped.startswith("__SEARCHING__:"):
             query = stripped[len("__SEARCHING__:"):].strip()
-            self.add_message('sys', _c(_CTX_COLORS["web"], f"[web] {_ctx_preview(query, 300)}"))
+            self.add_message('sys', f"[web] {_ctx_preview(query, 300)}")
             return
 
         if stripped.startswith("__TOOL__:"):
@@ -161,15 +159,14 @@ class AikoSimpleCLI:
                     display = f"{name}({_ctx_preview(args_raw, 200)})"
             else:
                 display = _ctx_preview(payload, 300)
-            self.add_message('sys', _c(_CTX_COLORS["tools"], f"[tools] {display}"))
+            self.add_message('sys', f"[tools] {display}")
             return
 
         self._stream_buf.append(token)
-        print(token, end="", flush=True)
+        self._console.token(token)
 
     def stream_commit(self) -> None:
-        if self._streaming:
-            print()  # newline after streamed reply
+        self._console.commit()
         self._streaming = False
         self._stream_buf = []
 
@@ -182,7 +179,7 @@ class AikoSimpleCLI:
         self._latency_stats = stats
         v_to_a = stats.get("voice_end_to_first_audio")
         if v_to_a and v_to_a != "n/a":
-            print(f"  ⏱  V→A (voice end → Aiko's first audio): {v_to_a}")
+            self.add_message("sys", f"[metrics] Voice to first audio: {v_to_a}")
         if not self.debug:
             return
         tok_s = stats.get("tokens_per_second", "n/a")
@@ -193,13 +190,14 @@ class AikoSimpleCLI:
         asr = stats.get("asr_inference", "n/a")
         intent = stats.get("agentic_intent", "n/a")
         search = stats.get("web_search", "n/a")
-        print(f"  ⚡ {tok_s} tok/s  |  in/out/total: {in_t}/{out_t}/{total}  "
+        self.add_message("sys", f"[metrics] {tok_s} tok/s  |  tokens in/out/total: {in_t}/{out_t}/{total}  "
               f"|  asr={asr} intent={intent} search={search} llm={gen}")
 
     # ── input ────────────────────────────────────────────────────────────
     def get_input(self):
         try:
-            text = input("You: ").strip()
+            text = input(self._console.prompt()).strip()
+            self._last_typed = text
         except EOFError:
             return "/quit"
         return text
@@ -229,7 +227,7 @@ class AikoSimpleCLI:
         for method_name in ("listen_once", "transcribe_once", "listen"):
             method = getattr(listen, method_name, None)
             if callable(method):
-                print("🎤 listening... (speak now)")
+                self.add_message("sys", "[voice] Listening... speak now")
                 listen_started_at = time.monotonic()
                 # Bound the blocking mic read: on a headless session with no
                 # mic, listen() never returns and typed input is never read.
@@ -246,11 +244,11 @@ class AikoSimpleCLI:
                 _voice_thread.start()
                 _voice_thread.join(timeout=self._VOICE_LISTEN_TIMEOUT_S)
                 if _voice_thread.is_alive() or not _voice_box:
-                    print(f"  [voice input timed out after {self._VOICE_LISTEN_TIMEOUT_S:.0f}s — type instead; /listen toggles voice attempts]")
+                    self.add_message("sys", f"[warning] voice input timed out after {self._VOICE_LISTEN_TIMEOUT_S:.0f}s — type instead; /listen toggles voice attempts")
                     return self.get_input()
                 result = _voice_box[0]
                 if isinstance(result, Exception):
-                    print(f"  [voice input failed: {result}]")
+                    self.add_message("sys", f"[warning] voice input failed: {result}")
                     return self.get_input()
                 recording_stopped_at = time.monotonic()
                 asr_done_at = recording_stopped_at
@@ -265,13 +263,11 @@ class AikoSimpleCLI:
                     # input instead.
                     if not self._voice_error_shown:
                         self._voice_error_shown = True
-                        print(f"  [voice unavailable: {info['voice_error']}]")
-                        print("  [voice unavailable — type instead; /listen toggles voice attempts]")
+                        self.add_message("sys", f"[warning] voice unavailable: {info['voice_error']}")
+                        self.add_message("sys", "[warning] voice unavailable — type instead; /listen toggles voice attempts")
                     else:
-                        print("  [voice unavailable — type instead]")
+                        self.add_message("sys", "[warning] voice unavailable — type instead")
                     return self.get_input()
-                if text:
-                    print(f"You (voice): {text}")
                 return text, {
                     "listen_started_at": listen_started_at,
                     "recording_stopped_at": recording_stopped_at,

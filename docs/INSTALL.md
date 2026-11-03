@@ -259,10 +259,10 @@ uv run python main.py
 # Simple authenticated local CLI
 uv run python main.py --cli
 
-# Keyboard-first, ASR/TTS loaded but initially toggled off
+# Keyboard-first; voice backends start later via /voice and /listen
 uv run python main.py --text
 
-# Keyboard input, TTS on and ASR loaded but toggled off
+# Keyboard input with TTS; skip ASR at boot
 uv run python main.py --no-asr
 
 # Debug memory hits each turn
@@ -273,6 +273,18 @@ uv run python main.py --clear-mem
 ```
 
 In-app commands include `/quit`, `/reset`, `/memory`, `/clear`, `/remember`, `/think <question>`, `/web <query>`, `/voice`, `/listen`, and `/help`.
+
+The CLI uses scrolling output rather than a full-screen TUI. Cyan identifies
+your messages and web/voice activity; magenta identifies Aiko and memory;
+yellow identifies thinking, tools, and warnings; blue identifies turn traces.
+Metrics and ordinary system notices use quieter styling. Labels remain visible
+without color. CLI rendering honors `NO_COLOR=1`, dumb terminals, and redirected
+output.
+
+Use `--cli --trace` for turn traces or `--cli --debug` for detailed diagnostics
+and context/token timing. To keep detailed CLI context while disabling the
+console log stream, use `--cli --debug --no-console`. Status lines interrupt
+streamed replies on a new line, then the reply resumes under its Aiko label.
 
 ### Optional Needle 3 ReAct worker
 

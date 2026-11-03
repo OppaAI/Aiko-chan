@@ -1772,12 +1772,16 @@ def ensure_deep_study_window_jobs(timezone: str | None = None, user_id: str | No
 # ── scheduler instance registry ───────────────────────────────────────────────
 
 _scheduler_instance: ScheduleRunner | None = None
+_scheduler_registry_lock = threading.Lock()
 
 
 def register_scheduler(scheduler: ScheduleRunner) -> None:
     """Register the active scheduler instance so tools can notify it of new jobs."""
     global _scheduler_instance
-    _scheduler_instance = scheduler
+    with _scheduler_registry_lock:
+        if _scheduler_instance is not None and _scheduler_instance is not scheduler:
+            _scheduler_instance.stop()
+        _scheduler_instance = scheduler
 
 
 def stop_scheduler() -> None:
@@ -1786,18 +1790,19 @@ def stop_scheduler() -> None:
     This stops future polling; it does not forcibly cancel an in-flight job.
     """
     global _scheduler_instance
-    scheduler = _scheduler_instance
-    if scheduler is not None:
-        scheduler.stop()
-        if _scheduler_instance is scheduler:
+    with _scheduler_registry_lock:
+        if _scheduler_instance is not None:
+            _scheduler_instance.stop()
             _scheduler_instance = None
 
 
 
 def notify_scheduler_new_job() -> None:
     """Notify the scheduler that a new job was added, so it wakes early to pick it up."""
-    if _scheduler_instance is not None:
-        _scheduler_instance.notify_new_job()
+    with _scheduler_registry_lock:
+        scheduler = _scheduler_instance
+    if scheduler is not None:
+        scheduler.notify_new_job()
 
 
 # ── system handler registry ───────────────────────────────────────────────────

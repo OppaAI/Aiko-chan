@@ -6,6 +6,20 @@ import sys
 import pytest
 
 
+def test_registering_replacement_scheduler_stops_previous_runner(monkeypatch):
+    from types import SimpleNamespace
+    import system.schedule as schedule
+    events = []
+    old = SimpleNamespace(stop=lambda: events.append("old-stop"))
+    new = SimpleNamespace(stop=lambda: events.append("new-stop"), notify_new_job=lambda: events.append("notify"))
+    monkeypatch.setattr(schedule, "_scheduler_instance", old)
+    schedule.register_scheduler(new)
+    schedule.register_scheduler(new)
+    schedule.notify_scheduler_new_job()
+    assert events == ["old-stop", "notify"]
+    assert schedule._scheduler_instance is new
+
+
 @pytest.mark.parametrize("start_before_owner", [False, True])
 def test_startup_and_owner_resolution_launch_catchup_once(monkeypatch, start_before_owner):
     from types import SimpleNamespace

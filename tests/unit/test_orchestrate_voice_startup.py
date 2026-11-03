@@ -7,7 +7,25 @@ from unittest.mock import MagicMock
 import pytest
 
 
-def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flush=None, scheduler_stop=None, memory=None, reset_context=None, spin_loop=None, wire_backends=None, finish_status=None, background_adapters=None):
+def test_proactive_reply_finishing_after_stop_is_not_displayed():
+    from system.orchestrate import ProactiveIdleRunner
+    messages = []
+    ui = SimpleNamespace(add_message=lambda *args: messages.append(args))
+    import threading
+    runner = ProactiveIdleRunner(ui, None, lambda: False, threading.Event())
+    runner._prompt_due = lambda now: ("checkin_prompt", "hello")
+    def generate(hint):
+        runner._stop.set()
+        return "late reply"
+    runner._generate_fn = generate
+    try:
+        runner._loop()
+        assert messages == []
+    finally:
+        runner.stop()
+
+
+def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flush=None, scheduler_stop=None, memory=None, reset_context=None, spin_loop=None, wire_backends=None, finish_status=None, background_adapters=None, proactive_action=None):
     import system.orchestrate as orchestrate
     import system.wakeup as wakeup
     import system.schedule as schedule
@@ -22,6 +40,9 @@ def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flus
             raise value
         return value
     think = SimpleNamespace(
+        _get_speak=lambda: None,
+        compare_and_set_speak=lambda *args: None,
+        proactive_checkin=lambda hint: "Hello from Aiko",
         reset_context=reset_context or (lambda: None),
         set_speak=lambda backend: None,
         set_proactive_resting=lambda resting: None,
@@ -39,7 +60,11 @@ def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flus
         get_voice_input=lambda input_backend, **kwargs: "/quit",
     )
     proactive = SimpleNamespace(start=lambda: None, stop=lambda: None, touch=lambda: None, set_speak=lambda backend: None)
-    monkeypatch.setattr(orchestrate, "ProactiveIdleRunner", lambda *args, **kwargs: proactive)
+    def make_proactive(*args, **kwargs):
+        if proactive_action is not None:
+            proactive.start = lambda: proactive_action(kwargs["generate_fn"])
+        return proactive
+    monkeypatch.setattr(orchestrate, "ProactiveIdleRunner", make_proactive)
     monkeypatch.setattr(orchestrate, "_brain_trace", MagicMock())
     monkeypatch.setattr(orchestrate.time, "sleep", lambda seconds: None)
     monkeypatch.setattr(wakeup, "start_speak", lambda: speak)
@@ -56,6 +81,18 @@ def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flus
 
     orchestrate.run_session(ui, SimpleNamespace(text=True, no_asr=True, debug=False, cli=True))
     return ui, messages, backends
+
+
+@pytest.mark.parametrize("available", [False, True])
+def test_proactive_generation_obeys_shared_turn_gate(monkeypatch, available):
+    import system.orchestrate as orchestrate
+    events = []
+    monkeypatch.setattr(orchestrate, "acquire_busy", lambda **kw: events.append("acquire") or available)
+    monkeypatch.setattr(orchestrate, "release_busy", lambda: events.append("release"))
+    replies = []
+    _run_commands(monkeypatch, ["/quit"], proactive_action=lambda generate: replies.append(generate("hello")))
+    assert replies == ["Hello from Aiko" if available else None]
+    assert events == (["acquire", "release"] if available else ["acquire"])
 
 
 def test_setup_failure_stops_startup_spinner(monkeypatch):

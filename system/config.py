@@ -225,6 +225,9 @@ def load_config(*, override: bool = False) -> None:
     2. Non-secret YAML constants from config/*.yaml.
     3. Values from .env.age that YAML did not already define.
 
+    With ``override=True``, loading order wins: secrets are processed last
+    and replace YAML values as well as existing environment values.
+
     This keeps stale constants in .env.age from shadowing the YAML files
     while preserving .env.age as the local place for tokens, keys, URLs,
     DSNs, and other deployment-specific values whose names may not follow a

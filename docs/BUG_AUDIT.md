@@ -9,7 +9,7 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 
 | # | Area | Main code | Status |
 |---|---|---|---|
-| 1 | Startup, shutdown, and session orchestration | `main.py`, `system/wakeup.py`, `system/orchestrate.py`, `system/schedule.py` | In progress; memory readiness and shutdown cleanup fixes shipped; Jetson 8 GB review ongoing |
+| 1 | Startup, shutdown, and session orchestration | `main.py`, `system/wakeup.py`, `system/orchestrate.py`, `system/schedule.py` | Code review completed; final validation recorded below; physical Jetson checks pending |
 | 2 | Conversation routing, context assembly, and response streaming | `cognition/think.py`, `cognition/deep_think.py`, `cognition/inner_speech.py` | Not started |
 | 3 | Conscience, refusal gates, and user preferences | `cognition/conscience/`, `cognition/policy.py`, `cognition/attention.py` | Focused false-refusal fixes shipped; broad review not started |
 | 4 | Agentic tasks, tools, and self-coding | `agentic/`, `Aiko-Playground` integration | Focused self-coding fixes shipped; broad review not started |
@@ -82,20 +82,46 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
   be delayed simply because the next daily or monthly job is later.
 - The RSS fallback no longer opens an unused proc file, and regression coverage
   checks conversion with a 64 KB system page size.
-- Version remains 0.2.0. Jetson Orin Nano 8 GB performance measurements and the
-  remaining lifecycle and duplication review are still pending.
+- WebUI startup distinguishes bound/ready from failed or timed-out HTTP startup;
+  configuration errors close the event loop and release startup waiters.
+- WebUI exits request HTTP server shutdown, and failed post-boot WebUI startup
+  stops the scheduler and idle learner and drains memory writes.
+- Idle-learner waits are interruptible; shutdown prevents new idle studies.
+- Proactive generation uses the shared turn gate and skips a contended check-in;
+  replies finishing after a stop request are not displayed.
+- Karaoke pacing is interruptible and cannot replace a still-running worker.
+- Replacing the registered scheduler stops the old runner, and registry access
+  is synchronized with shutdown and notifications.
+- Launcher exit paths share one Fly-state flush in finally. SIGTERM unwinds
+  through normal cleanup, while the existing two-stage SIGINT behavior remains.
+- Reviewed launcher/configuration contracts: corrected the --name help text,
+  documented override=True precedence, removed duplicated exit and catch-up
+  launch logic, and checked imports for unused names in the four core files.
+- Version remains 0.2.0. No device performance claims are inferred from cloud
+  tests; Jetson measurement instructions are in JETSON_AREA1_VALIDATION.md.
 
-Remaining review blocks (not counts of undiscovered bugs):
+## Area 1 completion boundary
 
-1. Failures during session setup before the input-loop cleanup guard, and
-   ownership of resources created during failed boot.
-2. Remaining dead code and configuration inconsistencies in the launcher and
-   orchestration paths.
-3. Peak RAM, concurrent model loading, and latency measurements on the actual
-   Jetson Orin Nano 8 GB.
+The code-side pass covers startup success/failure, frontend setup, shared job
+gates, repeated worker startup, owner resolution, shutdown, console rendering,
+launcher/configuration consistency, and resource telemetry. It includes the
+supporting frontend, idle-learning, and resource call sites required by those
+lifecycles. This is a completed review pass, not a guarantee of zero bugs.
 
-Combined verification at `abee4b82` completed with 2,112 unit tests and 30
-integration tests passing (5 unit tests skipped). These results cover the
-changes through that commit. Later catch-up and wakeup changes passed their
-focused scheduler suites; these checks are not a claim that the repository
-has no remaining bugs.
+The only remaining validation item in this pass requires the physical Jetson:
+peak RAM/swap, concurrent model loading, latency, and restart observations under
+the actual 8 GB device's models and configuration. The cloud host is x86_64 and
+cannot supply those results. Follow [the device checklist](JETSON_AREA1_VALIDATION.md).
+
+Deliberate lifecycle limits: in-flight model work may finish after a stop request;
+the runtime does not forcibly kill Python/C workers, close SQLite underneath
+them, or unload externally managed inference servers. Unrecoverable boot failure
+requires process exit/restart. Unattached memory is disposed where ownership is
+known; attached or potentially active memory is retained to avoid unsafe closes.
+
+Final combined verification for this code-side pass: 2,160 unit tests passed,
+5 unit tests skipped, and 30 integration tests passed. There were 13 warnings
+and 34 passing subtests. One existing web-fetch test used a fragile 50 ms
+wall-clock assertion; it now verifies concurrency using a four-worker barrier.
+These results are not a claim that the repository has no remaining bugs or
+that the physical Jetson has been validated.

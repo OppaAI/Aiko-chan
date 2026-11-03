@@ -9,8 +9,74 @@ import sys
 import threading
 import time
 import types
+import pytest
 
 from interface.webui import webui as W
+
+
+def test_start_servers_resets_flag_after_startup_error(monkeypatch):
+    inst = W.AikoWeb.__new__(W.AikoWeb)
+    inst._lock = threading.Lock()
+    inst._server_start_lock = threading.Lock()
+    inst._servers_started = False
+    def fail():
+        raise RuntimeError("bind failed")
+    monkeypatch.setattr(inst, "_start_servers", fail)
+    with pytest.raises(RuntimeError, match="bind failed"):
+        inst.start_servers()
+    assert not inst._servers_started
+
+
+@pytest.mark.parametrize("started", [False, True])
+def test_startup_caller_requires_actual_http_readiness(monkeypatch, started):
+    inst = W.AikoWeb.__new__(W.AikoWeb)
+    inst._loop_ready = threading.Event()
+    inst._http_server = None
+    monkeypatch.setattr(W, "_make_ssl_context", lambda *args: None)
+    monkeypatch.setattr("socket.gethostbyname", lambda host: "127.0.0.1")
+    def fake_http():
+        inst._http_started = started
+        inst._http_error = RuntimeError("bind failed") if not started else None
+        inst._loop_ready.set()
+    monkeypatch.setattr(inst, "_run_http", fake_http)
+    if started:
+        inst._start_servers()
+    else:
+        with pytest.raises(RuntimeError, match="listener failed"):
+            inst._start_servers()
+    inst._http_thread.join(2)
+
+
+def test_http_config_failure_still_releases_waiter_and_closes_loop(monkeypatch):
+    def bad_config(*args, **kwargs):
+        raise ValueError("bad HTTP configuration")
+    monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(Config=bad_config))
+    inst = W.AikoWeb.__new__(W.AikoWeb)
+    inst._ssl_context = None
+    inst._loop_ready = threading.Event()
+    loop = asyncio.new_event_loop()
+    monkeypatch.setattr(asyncio, "new_event_loop", lambda: loop)
+    with pytest.raises(ValueError, match="bad HTTP configuration"):
+        inst._run_http()
+    assert inst._loop_ready.is_set()
+    assert loop.is_closed()
+
+
+def test_stop_servers_signals_server_and_joins_thread():
+    inst = W.AikoWeb.__new__(W.AikoWeb)
+    inst._lock = threading.Lock()
+    inst._servers_started = True
+    inst._http_server = types.SimpleNamespace(should_exit=False)
+    def serve():
+        deadline = time.monotonic() + 2
+        while not inst._http_server.should_exit and time.monotonic() < deadline:
+            time.sleep(0.01)
+    inst._http_thread = threading.Thread(target=serve)
+    inst._http_thread.start()
+    inst.stop_servers()
+    assert inst._http_server.should_exit
+    assert not inst._http_thread.is_alive()
+    assert not inst._servers_started
 
 
 def _install_fake_uvicorn(monkeypatch):

@@ -199,8 +199,13 @@ def idle_learner_loop(owner, check_interval: float = IDLE_LEARNER_CHECK_INTERVAL
     already studied this session or already in memory, then run
     quick_studying on it and persist the distilled result.
     """
+    stop = getattr(owner, "_idle_learner_stop", None)
     while True:
-        time.sleep(check_interval)
+        if stop is not None:
+            if stop.wait(check_interval):
+                return
+        else:
+            time.sleep(check_interval)
 
         chat_idle_long_enough = (time.time() - owner._last_chat_time) >= IDLE_LEARN_SECONDS
 

@@ -715,11 +715,16 @@ class ProactiveIdleRunner:
                 log.info("[proactive] idle %s: %s", "rest" if rest else "check-in", payload)
                 try:
                     if kind.endswith("_prompt") and self._generate_fn is not None:
-                        text = (self._generate_fn(payload) or "").strip()
+                        generated = self._generate_fn(payload)
+                        if generated is None:
+                            continue  # Contended or shutting down: skip this check-in.
+                        text = (generated or "").strip()
                         if not text:
                             text = PROACTIVE_REST_MESSAGE if rest else self._next_message()
                     else:
                         text = payload
+                    if self._stop.is_set():
+                        return
                     self._ui.add_message("aiko", text)
                     if (
                         not kind.endswith("_prompt")
@@ -785,6 +790,10 @@ class TypewriterSync:
 
     def start(self) -> None:
         """Begin a fresh reveal for a new turn — call right before think.route()."""
+        if self._thread is not None and self._thread.is_alive():
+            self.stop(flush=False)
+            if self._thread.is_alive():
+                raise RuntimeError("Previous typewriter worker has not stopped")
         self._stop.clear()
         self._fallback_buf = []
         self._first_audio_fired = False
@@ -801,6 +810,13 @@ class TypewriterSync:
         the UI immediately (used on interrupt/quit so nothing is silently
         swallowed); otherwise assumes the queue is already empty (normal
         end-of-turn, after speak.wait() has returned)."""
+        self._stop.set()
+        self._q.put(None)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+            if self._thread.is_alive():
+                log.warning("Typewriter worker is still running; deferring flush")
+                return
         if flush:
             if self._fallback_buf:
                 leftover = " ".join(self._fallback_buf)
@@ -816,10 +832,6 @@ class TypewriterSync:
                 except queue.Empty:
                     break
                 self._ui.stream_token(word + " ")
-        self._stop.set()
-        self._q.put(None)
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.0)
 
     # ── feed path: token_cb calls this as complete sentences accumulate ────
     def feed_sentence(self, sentence: str) -> None:
@@ -868,7 +880,8 @@ class TypewriterSync:
             word, delay = item
             self._ui.stream_token(word + " ")
             self._ui._draw(buf=[])
-            time.sleep(delay)
+            if self._stop.wait(delay):
+                return
 
 
 # ── voice command map ─────────────────────────────────────────────────────────
@@ -1088,9 +1101,13 @@ def run_session(ui, args) -> None:
                 log.exception("Failed to stop background messenger adapter %s", getattr(adapter, "name", adapter.__class__.__name__))
         if typewriter is not None:
             cleanup("typewriter", lambda: typewriter.stop(flush=True))
+        if speak is not None and hasattr(speak, "stop"):
+            cleanup("speech playback", speak.stop)
         if listen is not None:
             cleanup("listening monitor", listen.stop_barge_in_monitor)
         if think is not None:
+            if hasattr(think, "stop_idle_learner"):
+                cleanup("idle learner", think.stop_idle_learner)
             cleanup("pending memory writes", think.wait_for_memory)
 
     # ── init spin ─────────────────────────────────────────────────────────────
@@ -1365,27 +1382,35 @@ def run_session(ui, args) -> None:
 
         session_active = threading.Event()
 
-        def _generate_proactive_checkin(prompt_hint: str) -> str:
-            session_active.set()
-            muted = False
-            original_speak = None
+        def _generate_proactive_checkin(prompt_hint: str) -> str | None:
+            if shutdown_done or not acquire_busy(owner="proactive-checkin", timeout=0.1):
+                return None
             try:
-                if listen is not None and hasattr(listen, "extend_activation"):
-                    listen.extend_activation()
-                original_speak = think._get_speak()
-                if not tts_enabled or not PROACTIVE_SPEAK:
-                    think.set_speak(None)
-                    muted = True
-                return think.proactive_checkin(prompt_hint)
-            finally:
+                if shutdown_done:
+                    return None
+                session_active.set()
+                muted = False
+                original_speak = None
                 try:
-                    if muted:
-                        # Preserve a newer /voice change while the check-in ran.
-                        think.compare_and_set_speak(None, original_speak)
+                    if listen is not None and hasattr(listen, "extend_activation"):
+                        listen.extend_activation()
+                    original_speak = think._get_speak()
+                    if not tts_enabled or not PROACTIVE_SPEAK:
+                        think.set_speak(None)
+                        muted = True
+                    return think.proactive_checkin(prompt_hint)
                 finally:
-                    session_active.clear()
-                    if hasattr(think, "_last_chat_time"):
-                        think._last_chat_time = time.time()
+                    try:
+                        if muted:
+                            # Preserve a newer /voice change while the check-in ran.
+                            think.compare_and_set_speak(None, original_speak)
+                    finally:
+                        session_active.clear()
+                        if hasattr(think, "_last_chat_time"):
+                            think._last_chat_time = time.time()
+
+            finally:
+                release_busy()
 
         proactive = ProactiveIdleRunner(
             ui,

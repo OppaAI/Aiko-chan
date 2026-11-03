@@ -9,8 +9,6 @@ from unittest import mock
 
 import pytest
 
-sys.path.insert(0, "/home/hatch/workspace/repos/Aiko-chan")
-
 from cognition.memory import learn as learn_mod
 
 
@@ -76,6 +74,7 @@ def test_curriculum_topic_ingests_to_knowledge_db(user_dir, tmp_path, monkeypatc
     monkeypatch.setenv("AIKO_PLAYGROUND_DIR", str(pg))
 
     fake_owner = mock.MagicMock()
+    fake_owner._idle_learner_stop = None
     fake_owner._history = []
     fake_owner._history_lock = mock.MagicMock()
     fake_owner._history_lock.__enter__ = mock.MagicMock(return_value=None)
@@ -150,3 +149,18 @@ def test_stop_grace_ignores_fresh_session():
     m._started_at = time.monotonic() - 3600
     m.stop()
     assert m._stop_event.is_set(), "old session must honor stop"
+
+
+def test_idle_learner_stop_interrupts_wait_without_starting_study():
+    import threading
+    from cognition.think import AikoThink
+    owner = AikoThink.__new__(AikoThink)
+    owner._idle_learner_stop = threading.Event()
+    worker = threading.Thread(target=learn_mod.idle_learner_loop, args=(owner, 3600), daemon=True)
+    owner._idle_learner_thread = worker
+    worker.start()
+    owner.stop_idle_learner()
+    assert not worker.is_alive()
+    # A terminal stop cannot silently create a replacement worker.
+    owner.start_idle_learner()
+    assert owner._idle_learner_thread is worker

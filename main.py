@@ -137,8 +137,7 @@ def _install_os_exit_trap(log: logging.Logger, enabled: bool) -> None:
             _original_os_exit(code)                              # exit with the saved reference of the real hard exit.
 
     os._exit = _logged_os_exit     # patch applied; anything that bound os._exit before this bypasses logging
-    # NOTE: Not idempotent — calling this twice double-wraps os._exit (harmless
-    # but noisy). Currently called once, gated on --debug, in main().
+    # The wrapper always delegates to the original function captured above.
 
 
 def _install_two_stage_sigint(log: logging.Logger) -> None:
@@ -170,6 +169,19 @@ def _console_enabled() -> bool:
     # exists because LOG_CONSOLE isn't set until _apply_debug_trace_env() runs later in main(), after argparse
     return os.environ.get("LOG_CONSOLE") == "1"                 # console logging is on if the env var LOG_CONSOLE == "1"
                                                                 # NOTE: this is the value set by _apply_debug_trace_env(), not the env var itself
+
+
+def _install_sigterm_handler(log: logging.Logger) -> None:
+    """Let service-manager shutdown unwind session cleanup and flush state."""
+    import signal
+
+    def terminate(signum, frame):
+        raise SystemExit(0)
+
+    try:
+        signal.signal(signal.SIGTERM, terminate)
+    except (ValueError, OSError, AttributeError):
+        log.debug("[main] SIGTERM handler unavailable", exc_info=True)
 
 def _clear_dream_scratch(log: logging.Logger, user_id: str) -> bool:
     """Delete deep-study scratch DBs for the given user (transient work files).
@@ -438,7 +450,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cli",  action="store_true",               # store_true = flag only, no value after it
                    help="terminal chat front end instead of the WebUI")
     p.add_argument("--name", metavar="NAME", default="",        # default "" (not None) — truthiness test below works either way,
-                   help="companion name for this session (requires --cli)")   # and consumers get a str, never None
+                   help="your display name for this session (requires --cli)")   # and consumers get a str, never None
     p.add_argument("--text",   action="store_true",             # quiet-mode preset: ASR + TTS both off
                    help="keyboard input, TTS AND ASR both off (implies --no-asr); voice subsystems are skipped at boot and /voice and /listen start them on demand")
     p.add_argument("--no-asr", action="store_true",             # narrower preset: only ASR off, TTS stays on
@@ -555,6 +567,7 @@ def main() -> int:
     # heavy-debug territory; a --trace run keeps the console clean.
     _install_os_exit_trap(log, args.debug)
     _install_two_stage_sigint(log)
+    _install_sigterm_handler(log)
 
     if args.clear_mem:                                  # if clear memory argument set
         return _handle_clear_mem(log)
@@ -580,17 +593,15 @@ def main() -> int:
             log.exception("[main] SystemExit(%r) escaped the session loop", e.code)
         else:                                           # exit(0) or exit() = clean shutdown
             log.info("[main] clean exit")
-        _flush_fly_plasticity(log)
         raise                                           # preserve original exit behavior
     except KeyboardInterrupt:                           # graceful interrupt handling
-        _flush_fly_plasticity(log)
         log.info("[main] KeyboardInterrupt")
         raise
     except Exception:                                   # any other fatal error (not BaseException to avoid catching asyncio cancels)
-        _flush_fly_plasticity(log)
         log.exception("[main] fatal error escaped the session loop")  # full traceback to aiko.log
         raise                                           # re-raise after logging
-    _flush_fly_plasticity(log)
+    finally:
+        _flush_fly_plasticity(log)
     return 0
 
 

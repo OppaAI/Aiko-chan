@@ -262,11 +262,16 @@ class AikoWeb:
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_ready = threading.Event()
+        self._http_started = False
+        self._http_error = None
+        self._http_thread = None
+        self._http_server = None
         self._ssl_context: ssl.SSLContext | None = None
 
         import interface.webui.auth
         interface.webui.auth.aiko_web_instance = self
 
+        self._server_start_lock = threading.Lock()
         self._servers_started = False                 # start_servers() idempotence guard
         if not defer_servers:                         # default: server up immediately (old behaviour);
             self.start_servers()                      # run_webui now passes defer_servers=True so boot
@@ -276,11 +281,23 @@ class AikoWeb:
         """Open the HTTP/WS listener. Idempotent; called by __init__ unless
         constructed with defer_servers=True (then run_webui calls it after
         wakeup.boot() completes — browsers never see a half-booted Aiko)."""
-        with self._lock:
+        with self._server_start_lock:
             if self._servers_started:
                 return
+            self._start_servers()
             self._servers_started = True
-        self._start_servers()
+
+    def stop_servers(self) -> None:
+        """Request HTTP shutdown and wait briefly for its daemon thread."""
+        server = getattr(self, "_http_server", None)
+        if server is not None:
+            server.should_exit = True
+        thread = getattr(self, "_http_thread", None)
+        if thread is not None and thread.ident is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+        with self._lock:
+            if thread is None or not thread.is_alive():
+                self._servers_started = False
 
     def set_boot_result(self, result: BootResult):
         """Called by main.py AFTER wakeup.boot() finishes (now before login).
@@ -353,7 +370,11 @@ class AikoWeb:
     def _start_servers(self) -> None:
         import socket
         hostname = socket.gethostname()
-        host_ip = socket.gethostbyname(hostname)
+        try:
+            host_ip = socket.gethostbyname(hostname)
+        except socket.gaierror:
+            host_ip = "127.0.0.1"
+            log.warning("[aiko-web] Cannot resolve local hostname; using loopback for the startup address.")
         self._ssl_context = _make_ssl_context(hostname, host_ip)
 
         from interface.webui.auth import app as auth_app
@@ -364,53 +385,68 @@ class AikoWeb:
             auth_app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
 
         http_t = threading.Thread(target=self._run_http, daemon=True, name="aiko-http")
+        self._loop_ready.clear()
+        self._http_started = False
+        self._http_error = None
+        self._http_thread = http_t
         http_t.start()
 
         # _loop_ready now fires only after uvicorn's server.started event (socket
         # bound) or serve() dying outright (bind failure) — start_servers()
         # no longer returns while nothing is listening.
-        self._loop_ready.wait(timeout=5)
+        if not self._loop_ready.wait(timeout=5):
+            server = self._http_server
+            if server is not None:
+                server.should_exit = True
+            raise TimeoutError("WebUI listener did not become ready within 5s")
+        if not self._http_started:
+            raise RuntimeError("WebUI listener failed to start") from self._http_error
 
     def _run_http(self) -> None:
         import uvicorn
         from interface.webui.auth import app as auth_app
 
+        self._http_started = False
+        self._http_error = None
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
 
-        cert_path = Path(SSL_CERT) if SSL_CERT else Path(__file__).parent / ".cert" / "webui.crt"
-        key_path = Path(SSL_KEY) if SSL_KEY else Path(__file__).parent / ".cert" / "webui.key"
-
-        config = uvicorn.Config(
-            auth_app,
-            host="0.0.0.0",
-            port=HTTP_PORT,
-            ssl_keyfile=str(key_path) if self._ssl_context else None,
-            ssl_certfile=str(cert_path) if self._ssl_context else None,
-            log_level="warning",
-            loop="asyncio"
-        )
-        server = uvicorn.Server(config)
-
-        async def _serve_and_signal() -> None:
-            serve_task = asyncio.ensure_future(server.serve())
-            # Signal _loop_ready only once the socket is actually bound (or
-            # serve() has died trying) — it previously fired before serve()
-            # even started, so start_servers() could return while nothing was
-            # listening yet.
-            # NOTE: uvicorn>=0.30 made Server.started a plain bool (was an
-            # asyncio.Event). Poll it — pyproject floors uvicorn at 0.50.2,
-            # so the old Event API can't come back via a downgrade.
-            while not server.started and not serve_task.done():
-                await asyncio.sleep(0.05)
-            self._loop_ready.set()
-            # Re-raises serve() failures (e.g. port already in use) instead
-            # of swallowing them; on the happy path runs until shutdown.
-            await serve_task
-
         try:
+            cert_path = Path(SSL_CERT) if SSL_CERT else Path(__file__).parent / ".cert" / "webui.crt"
+            key_path = Path(SSL_KEY) if SSL_KEY else Path(__file__).parent / ".cert" / "webui.key"
+
+            config = uvicorn.Config(
+                auth_app,
+                host="0.0.0.0",
+                port=HTTP_PORT,
+                ssl_keyfile=str(key_path) if self._ssl_context else None,
+                ssl_certfile=str(cert_path) if self._ssl_context else None,
+                log_level="warning",
+                loop="asyncio"
+            )
+            server = uvicorn.Server(config)
+            self._http_server = server
+
+            async def _serve_and_signal() -> None:
+                serve_task = asyncio.ensure_future(server.serve())
+                # Signal _loop_ready only once the socket is actually bound (or
+                # serve() has died trying) — it previously fired before serve()
+                # even started, so start_servers() could return while nothing was
+                # listening yet.
+                # NOTE: uvicorn>=0.30 made Server.started a plain bool (was an
+                # asyncio.Event). Poll it — pyproject floors uvicorn at 0.50.2,
+                # so the old Event API can't come back via a downgrade.
+                while not server.started and not serve_task.done():
+                    await asyncio.sleep(0.05)
+                self._http_started = bool(server.started)
+                self._loop_ready.set()
+                # Re-raises serve() failures (e.g. port already in use) instead
+                # of swallowing them; on the happy path runs until shutdown.
+                await serve_task
+
             self._loop.run_until_complete(_serve_and_signal())
-        except (SystemExit, Exception):
+        except (SystemExit, Exception) as exc:
+            self._http_error = exc
             # Uvicorn raises SystemExit (not Exception) on bind failure; it
             # escapes run_until_complete before _serve_and_signal() resumes,
             # so without this the 5s _loop_ready wait would always time out.
@@ -1242,7 +1278,10 @@ def run_webui(args) -> None:
     ui = AikoWeb(no_voice=args.text, debug=args.debug, defer_servers=True)
     _register_webui(ui)
 
-    host_ip = socket.gethostbyname(socket.gethostname())
+    try:
+        host_ip = socket.gethostbyname(socket.gethostname())
+    except socket.gaierror:
+        host_ip = "127.0.0.1"
     scheme = "https" if WEBUI_HTTPS else "http"
 
     from interface.console import StartupConsole
@@ -1250,6 +1289,7 @@ def run_webui(args) -> None:
     stop = threading.Event()
     spinner = threading.Thread(target=progress.spin, args=(stop,), name="aiko-console-startup", daemon=True)
     spinner.start()
+    result = None
     try:
         result = AikoWakeup().boot(
             on_loading=progress.loading,
@@ -1263,6 +1303,19 @@ def run_webui(args) -> None:
         ui.start_servers()
         progress.done("web_server")
     except BaseException:
+        callbacks = [("WebUI server", ui.stop_servers)]
+        if result is not None:
+            from system.schedule import stop_scheduler
+            callbacks.append(("scheduler", stop_scheduler))
+            if result.think is not None:
+                if hasattr(result.think, "stop_idle_learner"):
+                    callbacks.append(("idle learner", result.think.stop_idle_learner))
+                callbacks.append(("memory writes", result.think.wait_for_memory))
+        for label, callback in callbacks:
+            try:
+                callback()
+            except Exception:
+                log.exception("[aiko-web] Failed to clean up %s after startup failure", label)
         progress.finish("Startup failed; see logs for details", failed=True)
         raise
     else:
@@ -1271,4 +1324,7 @@ def run_webui(args) -> None:
         stop.set()
         spinner.join(timeout=2.0)
 
-    run_session(ui, args)
+    try:
+        run_session(ui, args)
+    finally:
+        ui.stop_servers()

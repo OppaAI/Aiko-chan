@@ -397,21 +397,20 @@ class TestFetchAndScorePipeline:
 
     def test_parallel_fetch(self):
         """Multiple URLs fetched in parallel."""
+        import threading
         urls = [f"https://example.com/{i}" for i in range(4)]
+        concurrent_fetches = threading.Barrier(4, timeout=3)
 
         def mock_fetch(url, max_chars=4000):
-            time.sleep(0.01)  # Simulate network
+            # All fetches must be active together. A serial implementation
+            # breaks the barrier instead of depending on host timing.
+            concurrent_fetches.wait()
             return f"Content from {url}"
 
         with patch("agentic.toolkit.websearch.web_fetch", side_effect=mock_fetch) as mock_fetch_fn:
-            start = time.monotonic()
             scored, pages, outcomes = _fetch_and_score_pipeline(
                 urls, "query", FakeEmbedder(), 1000, max_workers=4, fetch_fn=mock_fetch_fn
             )
-            elapsed = time.monotonic() - start
-
-        # With 4 workers, should take ~10ms not 40ms
-        assert elapsed < 0.05
         assert len(pages) == 4
         assert len(scored) > 0
 

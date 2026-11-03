@@ -1051,6 +1051,7 @@ class AikoThink:
         self.last_prompt_debug: dict = {}
         self._last_chat_time = time.time()
 
+        self._idle_learner_stop = threading.Event()
         self._idle_learner_thread: threading.Thread | None = None
         self._warmup_thread: threading.Thread | None = None
 
@@ -1146,7 +1147,7 @@ class AikoThink:
         """Start the background idle-learning loop. Call only after
         set_memorize() has been called — the loop reads self._memorize
         on its first iteration."""
-        if self._idle_learner_thread is not None:
+        if self._idle_learner_stop.is_set() or self._idle_learner_thread is not None:
             return
         if self._get_memorize() is None:
             log.warning("[think] Memory unavailable — idle learner not started.")
@@ -1155,6 +1156,13 @@ class AikoThink:
             target=learn.idle_learner_loop, args=(self,), daemon=True
         )
         self._idle_learner_thread.start()
+
+    def stop_idle_learner(self) -> None:
+        """Stop future idle studies; an in-flight study is allowed to finish."""
+        self._idle_learner_stop.set()
+        worker = self._idle_learner_thread
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=2.0)
 
     def _persona_core(self) -> str:
         """Stable identity core: persona text + owner block.

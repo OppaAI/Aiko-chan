@@ -53,3 +53,21 @@ class TestTwoStageSigint:
         with patch.dict("sys.modules", {"signal": BadSignal}):
             # Must not raise — shutdown shortcut is best-effort.
             main_module._install_two_stage_sigint(MagicMock())
+
+
+def test_sigterm_unwinds_through_system_exit(monkeypatch):
+    import signal
+    installed = {}
+    monkeypatch.setattr(signal, 'signal', lambda sig, handler: installed.update({sig: handler}))
+    main_module._install_sigterm_handler(MagicMock())
+    with pytest.raises(SystemExit) as exc:
+        installed[signal.SIGTERM](signal.SIGTERM, None)
+    assert exc.value.code == 0
+
+
+def test_sigterm_installation_unavailable_off_main_thread(monkeypatch):
+    import signal
+    def unavailable(*args):
+        raise ValueError('not the main thread')
+    monkeypatch.setattr(signal, 'signal', unavailable)
+    main_module._install_sigterm_handler(MagicMock())

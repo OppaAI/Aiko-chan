@@ -205,3 +205,18 @@ class TestMainReturnCode:
              patch.dict(sys.modules, {"interface.cli.cli": MagicMock(run_cli=MagicMock(side_effect=KeyboardInterrupt))}):
             with pytest.raises(KeyboardInterrupt):
                 main_module.main()
+
+
+@pytest.mark.parametrize('failure', [None, RuntimeError('failed'), KeyboardInterrupt(), SystemExit(2)])
+def test_runtime_always_flushes_fly_state_once(monkeypatch, failure):
+    monkeypatch.setattr(sys, 'argv', _argv('--cli'))
+    monkeypatch.setattr(main_module, '_install_two_stage_sigint', lambda log: None)
+    with patch('system.config.load_config'), patch('system.log.get_logger', return_value=MagicMock()), \
+         patch.dict(sys.modules, {'interface.cli.cli': MagicMock(run_cli=MagicMock(side_effect=failure))}), \
+         patch.object(main_module, '_flush_fly_plasticity') as flush:
+        if failure is None:
+            assert main_module.main() == 0
+        else:
+            with pytest.raises(type(failure)):
+                main_module.main()
+        flush.assert_called_once()

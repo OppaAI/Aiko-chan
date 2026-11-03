@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 
-def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flush=None, scheduler_stop=None, memory=None, reset_context=None):
+def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flush=None, scheduler_stop=None, memory=None, reset_context=None, spin_loop=None):
     import system.orchestrate as orchestrate
     import system.wakeup as wakeup
     import system.schedule as schedule
@@ -29,7 +29,7 @@ def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flus
     )
     ui = SimpleNamespace(
         _boot_result=SimpleNamespace(think=think, memorize=memory, speak=None, listen=None),
-        _spin_loop=lambda stop: stop.wait(),
+        _spin_loop=spin_loop or (lambda stop: stop.wait()),
         _stats={},
         add_message=lambda role, text: messages.append(text),
         set_voice_backends=lambda output, input_backend: backends.append((output, input_backend)),
@@ -56,6 +56,22 @@ def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flus
 
     orchestrate.run_session(ui, SimpleNamespace(text=True, no_asr=True, debug=False, cli=True))
     return ui, messages, backends
+
+
+def test_stalled_startup_spinner_does_not_prevent_chat(monkeypatch):
+    import threading
+    release = threading.Event()
+    finished = threading.Event()
+    def spin(stop):
+        release.wait(5)
+        finished.set()
+    try:
+        _, messages, _ = _run_commands(monkeypatch, ["/quit"], spin_loop=spin)
+        assert any("Already leaving" in text for text in messages)
+        assert not finished.is_set()
+    finally:
+        release.set()
+        assert finished.wait(2)
 
 
 def test_failed_memory_switch_releases_turn_gate(monkeypatch):

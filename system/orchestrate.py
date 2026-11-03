@@ -1177,7 +1177,9 @@ def run_session(ui, args) -> None:
     # ── transition to chat ────────────────────────────────────────────────────
 
     spin_stop.set()
-    spin_t.join()
+    spin_t.join(timeout=2.0)
+    if spin_t.is_alive():
+        log.warning("Startup spinner did not stop within 2s; continuing without waiting for it.")
     ui.status_finish()
     ui._draw()
 

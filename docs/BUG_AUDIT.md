@@ -35,6 +35,8 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 - Thinking and the returned boot result use the same memory startup decision.
 - Memory that finishes after its startup timeout is closed after cleanup.
 - Fatal cognition startup skips the optional Fly catalog warmup.
+- Transition from startup to chat uses a bounded spinner join so a stalled
+  UI spinner cannot prevent the input loop from starting.
 - Shutdown continues remaining cleanup when an individual subsystem fails.
 - A single session-loop cleanup guard covers normal returns, input failures,
   command failures, and turn exceptions, while preserving error propagation.

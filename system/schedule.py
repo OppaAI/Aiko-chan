@@ -2024,6 +2024,7 @@ class ScheduleRunner:
         # _user_id, by contrast, remains a transient pointer that _run()
         # flips per due job while iterating all_user_ids() — see _run().
         self._owner_user_id        = self._user_id
+        self._owner_lock           = threading.Lock()
         self._owner_promoted       = threading.Event()
         if self._owner_user_id and self._owner_user_id != "guest":
             self._owner_promoted.set()
@@ -2153,11 +2154,14 @@ class ScheduleRunner:
         scheduler that boots pre-login doesn't just silently lose its
         first catch-up window.
         """
-        if self._owner_promoted.is_set():
-            return
-        was_guest = self._owner_user_id in (None, "guest")
-        self._owner_user_id = user_id
-        self._owner_promoted.set()
+        with self._owner_lock:
+            if self._stop.is_set():
+                return
+            if self._owner_promoted.is_set():
+                return
+            was_guest = self._owner_user_id in (None, "guest")
+            self._owner_user_id = user_id
+            self._owner_promoted.set()
         log.info("[scheduler] system-job owner resolved to %s", user_id)
         if not was_guest:
             return
@@ -2165,26 +2169,29 @@ class ScheduleRunner:
         self._catchup_dates = self._missing_reflection_dates()
         self._monthly_catchup_needed_flag = self._monthly_catchup_needed()
 
-        if self._owner_promoted.is_set() and self._catchup_dates and self._memorize and self._generate_and_post_fn:
-            log.info(
-                "Scheduler: running %d missed daily reflect+dream job(s) after owner resolution.",
-                len(self._catchup_dates),
-            )
-            threading.Thread(
-                target=self._run_catchup_backfill,
-                name="aiko-schedule-catchup-late",
-                daemon=True,
-            ).start()
+        with self._lifecycle_lock:
+            if self._stop.is_set():
+                return
+            if self._owner_promoted.is_set() and self._catchup_dates and self._memorize and self._generate_and_post_fn:
+                log.info(
+                    "Scheduler: running %d missed daily reflect+dream job(s) after owner resolution.",
+                    len(self._catchup_dates),
+                )
+                threading.Thread(
+                    target=self._run_catchup_backfill,
+                    name="aiko-schedule-catchup-late",
+                    daemon=True,
+                ).start()
 
-        if self._monthly_catchup_needed_flag and self._memorize and self._consolidate_fn:
-            log.info("Scheduler: running missed monthly_consolidate after owner resolution.")
-            threading.Thread(
-                target=self._run_monthly_consolidate,
-                name="aiko-schedule-monthly-catchup-late",
-                daemon=True,
-            ).start()
+            if self._monthly_catchup_needed_flag and self._memorize and self._consolidate_fn:
+                log.info("Scheduler: running missed monthly_consolidate after owner resolution.")
+                threading.Thread(
+                    target=self._run_monthly_consolidate,
+                    name="aiko-schedule-monthly-catchup-late",
+                    daemon=True,
+                ).start()
 
-        self.notify_new_job()
+            self.notify_new_job()
 
     def notify_new_job(self) -> None:
         """Interrupt the sleep early so a newly added job is picked up immediately."""

@@ -5,6 +5,32 @@ from types import ModuleType
 import sys
 
 
+def test_owner_resolution_cannot_start_workers_after_stop(monkeypatch):
+    import system.schedule as schedule
+    runner = schedule.ScheduleRunner(user_id="guest", memorize=object(),
+                                     generate_and_post_fn=lambda: None, consolidate_fn=lambda: None)
+    def scan(self):
+        self.stop()  # Shutdown arrives while the catch-up scan is in progress.
+        return [datetime.now(timezone.utc)]
+    monkeypatch.setattr(schedule.ScheduleRunner, "_missing_reflection_dates", scan)
+    monkeypatch.setattr(schedule.ScheduleRunner, "_monthly_catchup_needed", lambda self: True)
+    created = []
+    monkeypatch.setattr(schedule.threading, "Thread", lambda **kw: created.append(kw))
+    runner.set_owner("github_alice")
+    assert created == []
+
+
+def test_stopped_guest_runner_does_not_resolve_owner(monkeypatch):
+    import system.schedule as schedule
+    runner = schedule.ScheduleRunner(user_id="guest")
+    checks = []
+    monkeypatch.setattr(schedule.ScheduleRunner, "_missing_reflection_dates", lambda self: checks.append(True))
+    runner.stop()
+    runner.set_owner("github_alice")
+    assert runner._owner_user_id == "guest"
+    assert checks == []
+
+
 def test_stopped_scheduler_does_not_start_catchup_workers(monkeypatch):
     import system.schedule as schedule
     monkeypatch.setattr(schedule.ScheduleRunner, "_missing_reflection_dates", lambda self: [])

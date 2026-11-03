@@ -235,6 +235,8 @@ class AikoWakeup:
         start them on demand via start_speak()/start_listen().
         """
         mem_ready_evt  = threading.Event()                           # thread-safe boolean flag for blocking until memory system is ready
+        mem_cleanup_done = threading.Event()
+        mem_cleanup_done.set()
 
         # ── parallel boot ─────────────────────────────────────────────────────
 
@@ -285,6 +287,18 @@ class AikoWakeup:
                 # must not hang here on an unattended boot — run degraded.
                 on_skip('think_inject')
                 log.warning("[wakeup] mem_ready_evt timed out after %ds — think continuing without memory.", _MEM_BOOT_TIMEOUT_S)
+                def dispose_late_memory(future: Future) -> None:
+                    def dispose() -> None:
+                        try:
+                            late_memory = future.result()
+                            if late_memory is not None:
+                                mem_cleanup_done.wait()
+                                late_memory.close()
+                        except Exception:
+                            log.exception("[wakeup] Failed to close memory that finished after startup timeout")
+                    threading.Thread(target=dispose, name="aiko-boot-mem-dispose", daemon=True).start()
+
+                mem_future.add_done_callback(dispose_late_memory)
             # NOTE: semantic-cache prewarm moved to system/prepare.run_post_auth() —
             # as guest it couldn't persist per-user npz caches anyway, and post-login
             # it loads the real user's existing disk cache instead of recomputing.
@@ -318,8 +332,15 @@ class AikoWakeup:
 
                 # Fire-and-forget: cleanup must never block boot or wedge the
                 # ready barrier, no matter how large the store has grown.
+                def run_cleanup():
+                    try:
+                        _boot_step('mem_cleanup', _mem_cleanup_if_real_user)
+                    finally:
+                        mem_cleanup_done.set()
+
+                mem_cleanup_done.clear()
                 threading.Thread(
-                    target=lambda: _boot_step('mem_cleanup', _mem_cleanup_if_real_user),
+                    target=run_cleanup,
                     name="aiko-boot-mem-cleanup", daemon=True,
                 ).start()
 

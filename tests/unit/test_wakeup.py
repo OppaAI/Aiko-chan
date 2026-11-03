@@ -224,6 +224,43 @@ def test_late_memory_does_not_produce_mismatched_boot_result(monkeypatch):
     assert result.think._memorize is None
 
 
+def test_late_memory_is_closed_after_its_cleanup(monkeypatch):
+    constructed = threading.Event()
+    finish_construction = threading.Event()
+    cleanup_started = threading.Event()
+    finish_cleanup = threading.Event()
+    closed = threading.Event()
+
+    class LateMemory(FakeMemorize):
+        def __init__(self, silent=True):
+            super().__init__(silent=silent)
+            constructed.set()
+            finish_construction.wait(3)
+
+        def cleanup(self):
+            cleanup_started.set()
+            finish_cleanup.wait(3)
+
+        def close(self):
+            closed.set()
+
+    _patch_common(monkeypatch, memorize_cls=LateMemory)
+    monkeypatch.setattr(wakeup_module, "_MEM_BOOT_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(wakeup_module, "_THINK_BOOT_TIMEOUT_S", 1)
+    try:
+        result = AikoWakeup().boot(_noop, _noop, _noop, enable_tts=False, enable_asr=False)
+        assert constructed.is_set()
+        assert result.memorize is None
+        finish_construction.set()
+        assert cleanup_started.wait(2)
+        assert not closed.is_set()
+        finish_cleanup.set()
+        assert closed.wait(2)
+    finally:
+        finish_construction.set()
+        finish_cleanup.set()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Tier 1 -- boot label integrity, pure, no mocking needed
 # ─────────────────────────────────────────────────────────────────────────────

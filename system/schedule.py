@@ -2374,6 +2374,7 @@ class ScheduleRunner:
             if self._owner_promoted.is_set():
                 candidates.append(self._next_ledger_prune)
                 candidates.append(self._next_fly_replay)
+                candidates.append(self._next_monthly_verify)
             for uid in all_user_ids():
                 for j in _read_all(user_id=uid):
                     if j.get("enabled", True) and j.get("next_due"):

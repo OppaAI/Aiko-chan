@@ -55,12 +55,15 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
   workers after shutdown, including when shutdown arrives during its scan.
 - Daily catch-up checks shutdown after acquiring the turn gate and retains
   pending dates when stopped or when switching memory users fails.
+- Monthly verification is included in scheduler wakeup timing, so it cannot
+  be delayed simply because the next daily or monthly job is later.
 - The RSS fallback no longer opens an unused proc file, and regression coverage
   checks conversion with a 64 KB system page size.
 - Version remains 0.2.0. Jetson Orin Nano 8 GB performance measurements and the
   remaining lifecycle and duplication review are still pending.
 
-The latest combined verification completed with 2,112 unit tests and 30
+Combined verification at `abee4b82` completed with 2,112 unit tests and 30
 integration tests passing (5 unit tests skipped). These results cover the
-current accumulated changes, not a claim that the repository has no remaining
-bugs.
+changes through that commit. Later catch-up and wakeup changes passed their
+focused scheduler suites; these checks are not a claim that the repository
+has no remaining bugs.

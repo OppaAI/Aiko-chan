@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import ModuleType
 import sys
+import pytest
 
 
 def test_catchup_preserves_dates_when_stopped_waiting_for_gate(monkeypatch):
@@ -275,7 +276,8 @@ def test_new_owner_email_poll_uses_configured_interval(monkeypatch, tmp_path):
     assert datetime.fromisoformat(email["next_due"]) == now + timedelta(seconds=73)
 
 
-def test_ledger_prunes_every_persistent_user_on_each_start(monkeypatch):
+@pytest.mark.parametrize("verify_seconds, expected_sleep", [(30 * 86400, 7 * 86400), (60, 60)])
+def test_ledger_prunes_every_persistent_user_on_each_start(monkeypatch, verify_seconds, expected_sleep):
     import system.schedule as schedule
 
     now = datetime(2026, 9, 24, 12, tzinfo=timezone.utc)
@@ -300,6 +302,7 @@ def test_ledger_prunes_every_persistent_user_on_each_start(monkeypatch):
     # Phase 8: keep the nightly replay job out of the way so ledger-prune
     # stays the soonest system target, as this test intends.
     monkeypatch.setattr(schedule, "_next_fly_replay", lambda: now + timedelta(days=30))
+    monkeypatch.setattr(schedule, "_next_monthly_verify", lambda: now + timedelta(seconds=verify_seconds))
 
     for _ in range(2):
         runner = schedule.ScheduleRunner(user_id="github_alice")
@@ -313,7 +316,7 @@ def test_ledger_prunes_every_persistent_user_on_each_start(monkeypatch):
         monkeypatch.setattr(schedule.bioclock, "wait_seconds", wait_seconds)
         runner._run()
         assert runner._next_ledger_prune == now + timedelta(days=7)
-        assert sleeps == [7 * 86400]
+        assert sleeps == [expected_sleep]
 
     assert pruned == ["github_alice", "github_bob"] * 2
 

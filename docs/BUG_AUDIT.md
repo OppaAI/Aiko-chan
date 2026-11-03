@@ -36,6 +36,8 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 - Memory that finishes after its startup timeout is closed after cleanup.
 - Fatal cognition startup skips the optional Fly catalog warmup.
 - Shutdown continues remaining cleanup when an individual subsystem fails.
+- A single session-loop cleanup guard covers normal returns, input failures,
+  command failures, and turn exceptions, while preserving error propagation.
 - Proactive check-in failures clear the active-session marker.
 - The shared turn gate is released when memory switching fails or turn setup
   raises, including failures before inference begins.

@@ -1381,591 +1381,592 @@ def run_session(ui, args) -> None:
 
     last_turn: tuple[str, str] | None = None
     last_bound_uid: str | None = None
-    while True:
-        try:
-            voice_info = None
-            if listen and asr_enabled:
-                result = ui.get_voice_input(
-                    listen,
-                    speak   = speak if tts_enabled else None,
-                    wait_fn = None,
-                )
-                user_input = result[0] if isinstance(result, tuple) else result
-                voice_info = result[1] if isinstance(result, tuple) and len(result) > 1 and isinstance(result[1], dict) else None
-                if voice_info:
-                    try:
-                        from cognition.attention import for_identity
-                        from system.userspace import current_user_id
-                        started = voice_info.get("listen_started_at")
-                        stopped = voice_info.get("recording_stopped_at")
-                        asr_done = voice_info.get("asr_done_at")
-                        for_identity(current_user_id()).record_perception(
-                            "voice",
-                            duration_s=voice_info.get("duration_s") or ((stopped - started) if started is not None and stopped is not None else None),
-                            latency_s=(asr_done - stopped) if asr_done is not None and stopped is not None else None,
-                            prosody=voice_info.get("prosody"),
-                        )
-                    except Exception:
-                        pass
-            else:
-                result = ui.get_input()
-                user_input = result[0] if isinstance(result, tuple) else result
-        except KeyboardInterrupt:
-            ui.add_message('sys', "Fine... I'll be here when you come back.")
-            ui._draw()
-            _shutdown()
-            time.sleep(0.8)
-            return
-
-        if not user_input:
-            continue
-
-        proactive.touch()
-
-        if listen and asr_enabled and not user_input.startswith('/'):
-            matched = _match_voice_command(user_input)
-            if matched:
-                user_input = matched
-
-        # ── commands ──────────────────────────────────────────────────────────
-
-        if user_input.startswith('/'):
-            cmd = user_input.lower().strip()
-
-            if cmd in ('/quit', '/exit'):
-                ui.add_message('sys', 'Already leaving? ...Be safe out there.')
+    try:
+        while True:
+            try:
+                voice_info = None
+                if listen and asr_enabled:
+                    result = ui.get_voice_input(
+                        listen,
+                        speak   = speak if tts_enabled else None,
+                        wait_fn = None,
+                    )
+                    user_input = result[0] if isinstance(result, tuple) else result
+                    voice_info = result[1] if isinstance(result, tuple) and len(result) > 1 and isinstance(result[1], dict) else None
+                    if voice_info:
+                        try:
+                            from cognition.attention import for_identity
+                            from system.userspace import current_user_id
+                            started = voice_info.get("listen_started_at")
+                            stopped = voice_info.get("recording_stopped_at")
+                            asr_done = voice_info.get("asr_done_at")
+                            for_identity(current_user_id()).record_perception(
+                                "voice",
+                                duration_s=voice_info.get("duration_s") or ((stopped - started) if started is not None and stopped is not None else None),
+                                latency_s=(asr_done - stopped) if asr_done is not None and stopped is not None else None,
+                                prosody=voice_info.get("prosody"),
+                            )
+                        except Exception:
+                            pass
+                else:
+                    result = ui.get_input()
+                    user_input = result[0] if isinstance(result, tuple) else result
+            except KeyboardInterrupt:
+                ui.add_message('sys', "Fine... I'll be here when you come back.")
                 ui._draw()
-                _shutdown()
                 time.sleep(0.8)
                 return
 
-            elif cmd == '/reset':
-                think.reset_context()
-                ui.add_message('sys', 'Short-term context cleared.')
+            if not user_input:
+                continue
 
-            elif cmd == '/memory':
-                if memorize is None:
-                    ui.add_message('sys', 'Memory backend unavailable.')
-                else:
-                    all_mem = memorize.get_all()
-                    if not all_mem:
-                        ui.add_message('sys', 'No memories stored yet.')
+            proactive.touch()
+
+            if listen and asr_enabled and not user_input.startswith('/'):
+                matched = _match_voice_command(user_input)
+                if matched:
+                    user_input = matched
+
+            # ── commands ──────────────────────────────────────────────────────────
+
+            if user_input.startswith('/'):
+                cmd = user_input.lower().strip()
+
+                if cmd in ('/quit', '/exit'):
+                    ui.add_message('sys', 'Already leaving? ...Be safe out there.')
+                    ui._draw()
+                    time.sleep(0.8)
+                    return
+
+                elif cmd == '/reset':
+                    think.reset_context()
+                    ui.add_message('sys', 'Short-term context cleared.')
+
+                elif cmd == '/memory':
+                    if memorize is None:
+                        ui.add_message('sys', 'Memory backend unavailable.')
                     else:
-                        ui.add_message('sys', f'{len(all_mem)} memories stored:')
-                        for i, m in enumerate(all_mem, 1):
-                            ui.add_message('sys',
-                                f'  {i:02d}. {m.get("memory") or m.get("text") or m}')
+                        all_mem = memorize.get_all()
+                        if not all_mem:
+                            ui.add_message('sys', 'No memories stored yet.')
+                        else:
+                            ui.add_message('sys', f'{len(all_mem)} memories stored:')
+                            for i, m in enumerate(all_mem, 1):
+                                ui.add_message('sys',
+                                    f'  {i:02d}. {m.get("memory") or m.get("text") or m}')
 
-            elif cmd == '/clear':
-                if memorize is None:
-                    ui.add_message('sys', 'Memory backend unavailable.')
-                else:
-                    memorize.clear()
-                    ui.add_message('sys', 'All persistent memories cleared.')
-
-            elif cmd == '/remember':
-                if last_turn is None:
-                    ui.add_message('sys', 'Nothing to remember yet — send a message first.')
-                else:
-                    think.wait_for_memory()
-                    user_text, ai_text = last_turn
-                    msgs = [
-                        {"role": "user",      "content": user_text},
-                        {"role": "assistant", "content": ai_text},
-                    ]
-                    ok = memorize.pin(msgs)
-                    if ok:
-                        ui.add_message('sys', "Got it — I'll remember that forever.")
+                elif cmd == '/clear':
+                    if memorize is None:
+                        ui.add_message('sys', 'Memory backend unavailable.')
                     else:
-                        ui.add_message('sys', 'Failed to pin memory — check logs.')
+                        memorize.clear()
+                        ui.add_message('sys', 'All persistent memories cleared.')
 
-            elif cmd.startswith('/think'):
-                query = user_input[6:].strip()
-                if not query:
-                    ui.add_message('sys', 'Usage: /think <question>')
+                elif cmd == '/remember':
+                    if last_turn is None:
+                        ui.add_message('sys', 'Nothing to remember yet — send a message first.')
+                    else:
+                        think.wait_for_memory()
+                        user_text, ai_text = last_turn
+                        msgs = [
+                            {"role": "user",      "content": user_text},
+                            {"role": "assistant", "content": ai_text},
+                        ]
+                        ok = memorize.pin(msgs)
+                        if ok:
+                            ui.add_message('sys', "Got it — I'll remember that forever.")
+                        else:
+                            ui.add_message('sys', 'Failed to pin memory — check logs.')
+
+                elif cmd.startswith('/think'):
+                    query = user_input[6:].strip()
+                    if not query:
+                        ui.add_message('sys', 'Usage: /think <question>')
+                        ui._draw()
+                        continue
+
+                    # deep_think=True does everything set_reasoning(True) used to
+                    # (token budget scale) plus widens memory/knowledge recall and
+                    # injects the structured multi-angle reasoning scaffold — see
+                    # cognition.think's module docstring "Deep-think mode". Same
+                    # path a plain "think this through more carefully" message
+                    # takes via route()'s fast-path check.
+                    ui.add_message('you', f'[think] {query}')
+                    ui.turn_start()
+                    ui._draw()
+
+                    raw_chunks     = []
+                    in_think_block = False
+                    think_closed   = False
+
+                    # Bind raw_chunks as a default arg: this callback is defined inside
+                    # the REPL loop and the name is rebound every iteration. Today
+                    # think.chat() invokes it synchronously, so the closure would
+                    # be safe — but binding makes that guarantee structural, not
+                    # accidental, if the callback ever escapes to another thread.
+                    def _think_token_cb(token, _chunks=raw_chunks):
+                        nonlocal in_think_block, think_closed
+                        _chunks.append(token)
+                        assembled = "".join(_chunks)
+
+                        if not think_closed:
+                            if "<think>" in assembled and not in_think_block:
+                                in_think_block = True
+                            if in_think_block:
+                                if "</think>" in assembled:
+                                    in_think_block = False
+                                    think_closed   = True
+                                return
+
+                        ui.stream_token(token)
+                        ui._draw(buf=[])
+
+                    _, summary = think.chat(
+                        query,
+                        token_callback=_think_token_cb,
+                        deep_think=True,
+                        return_deep_think_summary=True,
+                    )
+
+                    # Prefer structured evidence summary over raw model CoT fragment.
+                    if summary:
+                        ui.add_message('sys', summary)
+                    else:
+                        assembled_full   = "".join(raw_chunks)
+                        scratchpad_match = re.search(r"<think>(.*?)</think>", assembled_full, re.DOTALL)
+                        if scratchpad_match:
+                            inner = scratchpad_match.group(1).strip()
+                            if inner:
+                                ui.add_message('sys',
+                                    f'[scratchpad] {inner[:300]}{"…" if len(inner) > 300 else ""}')
+
+                    ui.stream_commit()
                     ui._draw()
                     continue
 
-                # deep_think=True does everything set_reasoning(True) used to
-                # (token budget scale) plus widens memory/knowledge recall and
-                # injects the structured multi-angle reasoning scaffold — see
-                # cognition.think's module docstring "Deep-think mode". Same
-                # path a plain "think this through more carefully" message
-                # takes via route()'s fast-path check.
-                ui.add_message('you', f'[think] {query}')
-                ui.turn_start()
-                ui._draw()
+                elif cmd == '/voice':
+                    if speak is None:
+                        # --text skips TTS at boot; start it on demand (also retries
+                        # a boot-time failure — the MioTTS server may be up now).
+                        ui.add_message('sys', 'Starting voice output (TTS)…')
+                        from system.wakeup import start_speak
+                        speak = start_speak()
+                        if speak is None:
+                            ui.add_message('sys', 'TTS unavailable — voice subsystem failed to start.')
+                        else:
+                            think.set_speak(speak)
+                            proactive.set_speak(speak)
+                            _wire_speak_sink(speak)
+                            typewriter = TypewriterSync(ui, speak)
+                            if hasattr(speak, "set_first_audio_callback"):
+                                speak.set_first_audio_callback(_on_first_audio)
+                            if hasattr(ui, "set_voice_backends"):
+                                ui.set_voice_backends(speak, listen)
+                            tts_enabled = True
+                            ui._stats['tts_on'] = True
+                            ui.add_message('sys', 'Voice output (TTS): ON  🔊')
+                    else:
+                        tts_enabled = not tts_enabled
+                        think.set_speak(speak if tts_enabled else None)
+                        ui._stats['tts_on'] = tts_enabled
+                        ui.add_message('sys',
+                            f'Voice output (TTS): {"ON  🔊" if tts_enabled else "OFF 🔇"}')
 
-                raw_chunks     = []
-                in_think_block = False
-                think_closed   = False
+                elif cmd == '/listen':
+                    if listen is None:
+                        # --text/--no-asr skips ASR at boot; start it on demand.
+                        ui.add_message('sys', 'Starting voice input (ASR)…')
+                        from system.wakeup import start_listen
+                        listen = start_listen()
+                        if listen is None:
+                            ui.add_message('sys', 'ASR unavailable — voice subsystem failed to start.')
+                        else:
+                            listen.ensure_ready()
+                            if listen._voice_error:
+                                ui.add_message('sys', f'ASR unavailable — {listen._voice_error}')
+                                listen = None
+                                asr_enabled = False
+                                ui._stats['asr_on'] = False
+                            else:
+                                if hasattr(ui, "set_voice_backends"):
+                                    ui.set_voice_backends(speak, listen)
+                                asr_enabled = True
+                                ui._stats['asr_on'] = True
+                                ui.add_message('sys', 'Voice input  (ASR): ON  🎤')
+                    else:
+                        asr_enabled = not asr_enabled
+                        ui._stats['asr_on'] = asr_enabled
+                        ui.add_message('sys',
+                            f'Voice input  (ASR): {"ON  🎤" if asr_enabled else "OFF ⌨ "}')
 
-                # Bind raw_chunks as a default arg: this callback is defined inside
-                # the REPL loop and the name is rebound every iteration. Today
-                # think.chat() invokes it synchronously, so the closure would
-                # be safe — but binding makes that guarantee structural, not
-                # accidental, if the callback ever escapes to another thread.
-                def _think_token_cb(token, _chunks=raw_chunks):
-                    nonlocal in_think_block, think_closed
-                    _chunks.append(token)
-                    assembled = "".join(_chunks)
+                elif cmd == '/proactive':
+                    proactive.set_enabled(not proactive.is_enabled())
+                    ui.add_message('sys',
+                        f'Proactive idle check-ins: {"ON  🌸" if proactive.is_enabled() else "OFF 💤"}')
 
-                    if not think_closed:
-                        if "<think>" in assembled and not in_think_block:
-                            in_think_block = True
-                        if in_think_block:
-                            if "</think>" in assembled:
-                                in_think_block = False
-                                think_closed   = True
-                            return
+                elif cmd == '/karaoke':
+                    if typewriter is None:
+                        ui.add_message('sys', 'Karaoke text sync unavailable (no TTS backend).')
+                    else:
+                        typewriter.karaoke_sync = not typewriter.karaoke_sync
+                        ui.add_message('sys',
+                            f'Karaoke text sync: {"ON  🎤📝" if typewriter.karaoke_sync else "OFF (instant stream)"}')
 
-                    ui.stream_token(token)
-                    ui._draw(buf=[])
+                elif cmd == '/help':
+                    for line in [
+                        '/quit /exit              — end session',
+                        '/reset                   — clear short-term context',
+                        '/clear                   — wipe long-term memories',
+                        '/remember                — pin last turn forever (decay-proof)',
+                        '/memory                  — show stored memories',
+                        '/think <question>        — deep reasoning (wider recall, recency filter, evidence tags, scaffold)',
+                        '/web <query>             — web search',
+                        '/voice                   — toggle TTS on/off',
+                        '/listen                  — toggle ASR on/off',
+                        '/proactive               — toggle idle check-ins on/off',
+                        '/karaoke                 — toggle text-sync-to-voice reveal on/off',
+                        '/help                    — show this list',
+                        '',
+                        'Voice commands (say aloud in ASR mode):',
+                        '  "forget that"          → /reset',
+                        '  "remember this"        → /remember',
+                        '  "show memory"          → /memory',
+                        '  "clear memory"         → /clear',
+                        '  "mute" / "unmute"      → /voice',
+                        '  "stop" / "goodbye"     → /quit',
+                        '  "help"                 → /help',
+                    ]:
+                        ui.add_message('sys', line)
 
-                _, summary = think.chat(
-                    query,
-                    token_callback=_think_token_cb,
-                    deep_think=True,
-                    return_deep_think_summary=True,
-                )
+                elif cmd == '/web' or cmd.startswith('/web '):
+                    query = user_input[4:].strip() if cmd == '/web' else user_input[5:].strip()
+                    if not query:
+                        ui.add_message('sys', 'Usage: /web <query>')
+                    else:
+                        ui.add_message('sys', f'Searching: "{query}"')
+                        ui._draw()
+                        try:
+                            context = web_search_context(query)
+                        except Exception as e:
+                            ui.add_message('sys', f'Search failed: {e}')
+                            ui._draw()
+                            continue
+                        if not context:
+                            ui.add_message('sys', 'No search results found.')
+                            ui._draw()
+                            continue
+                        ui.turn_start()
+                        def _web_token_cb(token):
+                            ui.stream_token(token)
+                            ui._draw(buf=[])
+                        think.chat(
+                            f"<search_results query='{query}'>\n{context}\n\nAnswer ONLY using these search results.",
+                            token_callback=_web_token_cb,
+                        )
+                        ui.stream_commit()
+                    ui._draw()
 
-                # Prefer structured evidence summary over raw model CoT fragment.
-                if summary:
-                    ui.add_message('sys', summary)
                 else:
-                    assembled_full   = "".join(raw_chunks)
-                    scratchpad_match = re.search(r"<think>(.*?)</think>", assembled_full, re.DOTALL)
-                    if scratchpad_match:
-                        inner = scratchpad_match.group(1).strip()
-                        if inner:
-                            ui.add_message('sys',
-                                f'[scratchpad] {inner[:300]}{"…" if len(inner) > 300 else ""}')
+                    ui.add_message('sys', f'Unknown command: {user_input}')
 
-                ui.stream_commit()
                 ui._draw()
                 continue
 
-            elif cmd == '/voice':
-                if speak is None:
-                    # --text skips TTS at boot; start it on demand (also retries
-                    # a boot-time failure — the MioTTS server may be up now).
-                    ui.add_message('sys', 'Starting voice output (TTS)…')
-                    from system.wakeup import start_speak
-                    speak = start_speak()
-                    if speak is None:
-                        ui.add_message('sys', 'TTS unavailable — voice subsystem failed to start.')
-                    else:
-                        think.set_speak(speak)
-                        proactive.set_speak(speak)
-                        _wire_speak_sink(speak)
-                        typewriter = TypewriterSync(ui, speak)
-                        if hasattr(speak, "set_first_audio_callback"):
-                            speak.set_first_audio_callback(_on_first_audio)
-                        if hasattr(ui, "set_voice_backends"):
-                            ui.set_voice_backends(speak, listen)
-                        tts_enabled = True
-                        ui._stats['tts_on'] = True
-                        ui.add_message('sys', 'Voice output (TTS): ON  🔊')
-                else:
-                    tts_enabled = not tts_enabled
-                    think.set_speak(speak if tts_enabled else None)
-                    ui._stats['tts_on'] = tts_enabled
-                    ui.add_message('sys',
-                        f'Voice output (TTS): {"ON  🔊" if tts_enabled else "OFF 🔇"}')
+            # ── normal turn ───────────────────────────────────────────────────────
+            # Acquire the shared gate for the rest of this turn — released in the
+            # existing `finally:` below (see system/turngate.py). This blocks the
+            # scheduler daemon from firing a job against the same memorize/think
+            # singletons while this turn is in flight, and blocks a new turn from
+            # starting while a scheduled job is mid-run. Bind memory context to
+            # whichever user this turn belongs to before think.route() runs —
+            # get_input()/get_voice_input() only set the current_user_id
+            # contextvar; AikoMemorize needs the explicit switch_user() call to
+            # actually follow it (see memorize.py get_user_id()/switch_user()).
+            # The gate has a timeout (system/turngate.py): a wedged holder can no
+            # longer block turns forever — the turn is skipped loudly instead.
+            if not acquire_busy(owner="interactive-turn"):
+                log.error("turn skipped: busy gate timeout — %s", holder_desc())
+                ui.add_message('sys', 'Turn skipped because Aiko is busy. Please retry your message.')
+                ui._draw()
+                continue
 
-            elif cmd == '/listen':
-                if listen is None:
-                    # --text/--no-asr skips ASR at boot; start it on demand.
-                    ui.add_message('sys', 'Starting voice input (ASR)…')
-                    from system.wakeup import start_listen
-                    listen = start_listen()
-                    if listen is None:
-                        ui.add_message('sys', 'ASR unavailable — voice subsystem failed to start.')
-                    else:
-                        listen.ensure_ready()
-                        if listen._voice_error:
-                            ui.add_message('sys', f'ASR unavailable — {listen._voice_error}')
-                            listen = None
-                            asr_enabled = False
-                            ui._stats['asr_on'] = False
-                        else:
-                            if hasattr(ui, "set_voice_backends"):
-                                ui.set_voice_backends(speak, listen)
-                            asr_enabled = True
-                            ui._stats['asr_on'] = True
-                            ui.add_message('sys', 'Voice input  (ASR): ON  🎤')
-                else:
-                    asr_enabled = not asr_enabled
-                    ui._stats['asr_on'] = asr_enabled
-                    ui.add_message('sys',
-                        f'Voice input  (ASR): {"ON  🎤" if asr_enabled else "OFF ⌨ "}')
+            try:
+                from system.userspace import current_user_id
+                turn_uid = current_user_id()
+                if turn_uid != last_bound_uid:
+                    # Think history is process-local; never carry one identity's chat
+                    # turns into another identity's prompt.
+                    think.reset_context()
+                    if memorize is not None:
+                        if not memorize.switch_user(turn_uid):
+                            log.error("turn skipped: memory switch to %r failed — "
+                                      "refusing to read the wrong user's store.", turn_uid)
+                            ui.add_message('sys', 'Turn skipped: memory was busy switching users. Please retry your message.')
+                            ui._draw()
+                            continue
+                    last_bound_uid = turn_uid
 
-            elif cmd == '/proactive':
-                proactive.set_enabled(not proactive.is_enabled())
-                ui.add_message('sys',
-                    f'Proactive idle check-ins: {"ON  🌸" if proactive.is_enabled() else "OFF 💤"}')
+                # Drain per-user runtime notices (TTS/ASR/memory failures) so the
+                # LLM can acknowledge them this turn. Destructive by design — if a
+                # soft gate below answers without the LLM, the notes are dropped
+                # (the underlying failure will re-push next turn if it persists).
+                try:
+                    from system.notice import get_notice_bus
+                    _drained = get_notice_bus(turn_uid).drain()
+                except Exception:
+                    _drained = []
+                system_note = "\n".join(f"[system notice] {n}" for n in _drained) if _drained else None
 
-            elif cmd == '/karaoke':
-                if typewriter is None:
-                    ui.add_message('sys', 'Karaoke text sync unavailable (no TTS backend).')
-                else:
-                    typewriter.karaoke_sync = not typewriter.karaoke_sync
-                    ui.add_message('sys',
-                        f'Karaoke text sync: {"ON  🎤📝" if typewriter.karaoke_sync else "OFF (instant stream)"}')
+                current_latency = {
+                    "mode": "voice" if (listen and asr_enabled and voice_info) else "text",
+                    "submitted_at": time.monotonic(),
+                }
+                if voice_info:
+                    current_latency["listen_started_at"] = voice_info.get("listen_started_at")
+                    current_latency["voice_recording_stopped_at"] = voice_info.get("recording_stopped_at")
+                    if voice_info.get("asr_done_at") is not None:
+                        current_latency["asr_done_at"] = voice_info["asr_done_at"]
 
-            elif cmd == '/help':
-                for line in [
-                    '/quit /exit              — end session',
-                    '/reset                   — clear short-term context',
-                    '/clear                   — wipe long-term memories',
-                    '/remember                — pin last turn forever (decay-proof)',
-                    '/memory                  — show stored memories',
-                    '/think <question>        — deep reasoning (wider recall, recency filter, evidence tags, scaffold)',
-                    '/web <query>             — web search',
-                    '/voice                   — toggle TTS on/off',
-                    '/listen                  — toggle ASR on/off',
-                    '/proactive               — toggle idle check-ins on/off',
-                    '/karaoke                 — toggle text-sync-to-voice reveal on/off',
-                    '/help                    — show this list',
-                    '',
-                    'Voice commands (say aloud in ASR mode):',
-                    '  "forget that"          → /reset',
-                    '  "remember this"        → /remember',
-                    '  "show memory"          → /memory',
-                    '  "clear memory"         → /clear',
-                    '  "mute" / "unmute"      → /voice',
-                    '  "stop" / "goodbye"     → /quit',
-                    '  "help"                 → /help',
-                ]:
-                    ui.add_message('sys', line)
+                if args.debug:
+                    system_prompt = getattr(think, "_persona", None) or ""
+                    current_latency["system_prompt_tokens"] = _count_tokens(system_prompt)
 
-            elif cmd == '/web' or cmd.startswith('/web '):
-                query = user_input[4:].strip() if cmd == '/web' else user_input[5:].strip()
-                if not query:
-                    ui.add_message('sys', 'Usage: /web <query>')
-                else:
-                    ui.add_message('sys', f'Searching: "{query}"')
-                    ui._draw()
-                    try:
-                        context = web_search_context(query)
-                    except Exception as e:
-                        ui.add_message('sys', f'Search failed: {e}')
-                        ui._draw()
-                        continue
-                    if not context:
-                        ui.add_message('sys', 'No search results found.')
-                        ui._draw()
-                        continue
-                    ui.turn_start()
-                    def _web_token_cb(token):
-                        ui.stream_token(token)
-                        ui._draw(buf=[])
-                    think.chat(
-                        f"<search_results query='{query}'>\n{context}\n\nAnswer ONLY using these search results.",
-                        token_callback=_web_token_cb,
-                    )
-                    ui.stream_commit()
+                ui.add_message('you', user_input)
+                ui.turn_start()
+                session_active.set()
                 ui._draw()
 
-            else:
-                ui.add_message('sys', f'Unknown command: {user_input}')
-
-            ui._draw()
-            continue
-
-        # ── normal turn ───────────────────────────────────────────────────────
-        # Acquire the shared gate for the rest of this turn — released in the
-        # existing `finally:` below (see system/turngate.py). This blocks the
-        # scheduler daemon from firing a job against the same memorize/think
-        # singletons while this turn is in flight, and blocks a new turn from
-        # starting while a scheduled job is mid-run. Bind memory context to
-        # whichever user this turn belongs to before think.route() runs —
-        # get_input()/get_voice_input() only set the current_user_id
-        # contextvar; AikoMemorize needs the explicit switch_user() call to
-        # actually follow it (see memorize.py get_user_id()/switch_user()).
-        # The gate has a timeout (system/turngate.py): a wedged holder can no
-        # longer block turns forever — the turn is skipped loudly instead.
-        if not acquire_busy(owner="interactive-turn"):
-            log.error("turn skipped: busy gate timeout — %s", holder_desc())
-            ui.add_message('sys', 'Turn skipped because Aiko is busy. Please retry your message.')
-            ui._draw()
-            continue
-
-        try:
-            from system.userspace import current_user_id
-            turn_uid = current_user_id()
-            if turn_uid != last_bound_uid:
-                # Think history is process-local; never carry one identity's chat
-                # turns into another identity's prompt.
-                think.reset_context()
-                if memorize is not None:
-                    if not memorize.switch_user(turn_uid):
-                        log.error("turn skipped: memory switch to %r failed — "
-                                  "refusing to read the wrong user's store.", turn_uid)
-                        ui.add_message('sys', 'Turn skipped: memory was busy switching users. Please retry your message.')
-                        ui._draw()
-                        continue
-                last_bound_uid = turn_uid
-
-            # Drain per-user runtime notices (TTS/ASR/memory failures) so the
-            # LLM can acknowledge them this turn. Destructive by design — if a
-            # soft gate below answers without the LLM, the notes are dropped
-            # (the underlying failure will re-push next turn if it persists).
-            try:
-                from system.notice import get_notice_bus
-                _drained = get_notice_bus(turn_uid).drain()
-            except Exception:
-                _drained = []
-            system_note = "\n".join(f"[system notice] {n}" for n in _drained) if _drained else None
-
-            current_latency = {
-                "mode": "voice" if (listen and asr_enabled and voice_info) else "text",
-                "submitted_at": time.monotonic(),
-            }
-            if voice_info:
-                current_latency["listen_started_at"] = voice_info.get("listen_started_at")
-                current_latency["voice_recording_stopped_at"] = voice_info.get("recording_stopped_at")
-                if voice_info.get("asr_done_at") is not None:
-                    current_latency["asr_done_at"] = voice_info["asr_done_at"]
-
-            if args.debug:
-                system_prompt = getattr(think, "_persona", None) or ""
-                current_latency["system_prompt_tokens"] = _count_tokens(system_prompt)
-
-            ui.add_message('you', user_input)
-            ui.turn_start()
-            session_active.set()
-            ui._draw()
-
-            _brain_trace.begin_turn(f"mode={current_latency.get('mode', 'text')}")
-            _brain_trace.record_step(
-                "transport.receive",
-                layer="transport",
-                inputs={"raw_input": user_input, "user_id": turn_uid},
-                outputs={"normalized_input": user_input},
-                factors=["received from ui.get_input() or ASR pipeline"],
-            )
-
-            # Fly behavioral priors (GF interrupt, LH context, circadian) → NeuralState.
-            # Live GF interrupt: mark turn + inject system_note so route prefers brief non-agentic path.
-            _fly_priors = {}
-            try:
-                from cognition.fly_behavior import apply_turn_priors
-                # Phase 6: voice prosody (if this turn came through ASR) becomes
-                # neural activity in the sensory pathways.
-                _prosody = voice_info.get("prosody") if isinstance(voice_info, dict) else None
-                _fly_priors = apply_turn_priors(user_input, user_id=turn_uid, prosody=_prosody) or {}
-                if _fly_priors.get("interrupt"):
-                    current_latency["fly_interrupt"] = True
-                    note = (
-                        "[system notice] An explicit stop command or critical interrupt was received. "
-                        "Answer in 1-3 short sentences. Do not call tools or start multi-step agent plans."
-                    )
-                    system_note = f"{system_note}\n{note}".strip() if system_note else note
-            except Exception:
-                _fly_priors = {}
-
-            # Optional bounded connectome telemetry runs off the conversational hot path.
-            try:
-                from cognition.fly_runtime import observe_background
-                from cognition.fly_runtime.adapters import SensoryObservation
-                salience = min(1.0, max(0.15, len(user_input.strip()) / 240.0))
-                observe_background(
-                    turn_uid,
-                    SensoryObservation("text", salience, consented=True),
-                    seed_types=("sensory", "auditory", "input", "INPUT", "visual"),
+                _brain_trace.begin_turn(f"mode={current_latency.get('mode', 'text')}")
+                _brain_trace.record_step(
+                    "transport.receive",
+                    layer="transport",
+                    inputs={"raw_input": user_input, "user_id": turn_uid},
+                    outputs={"normalized_input": user_input},
+                    factors=["received from ui.get_input() or ASR pipeline"],
                 )
-            except Exception:
-                pass
 
-            if typewriter is not None:
-                typewriter.start()
-                _sentence_buf = []
+                # Fly behavioral priors (GF interrupt, LH context, circadian) → NeuralState.
+                # Live GF interrupt: mark turn + inject system_note so route prefers brief non-agentic path.
+                _fly_priors = {}
+                try:
+                    from cognition.fly_behavior import apply_turn_priors
+                    # Phase 6: voice prosody (if this turn came through ASR) becomes
+                    # neural activity in the sensory pathways.
+                    _prosody = voice_info.get("prosody") if isinstance(voice_info, dict) else None
+                    _fly_priors = apply_turn_priors(user_input, user_id=turn_uid, prosody=_prosody) or {}
+                    if _fly_priors.get("interrupt"):
+                        current_latency["fly_interrupt"] = True
+                        note = (
+                            "[system notice] An explicit stop command or critical interrupt was received. "
+                            "Answer in 1-3 short sentences. Do not call tools or start multi-step agent plans."
+                        )
+                        system_note = f"{system_note}\n{note}".strip() if system_note else note
+                except Exception:
+                    _fly_priors = {}
 
-            if speak is not None and hasattr(speak, "reset_synth_timer"):
-                speak.reset_synth_timer()
-
-            reply_text = think.route(user_input, token_callback=token_cb, system_note=system_note)
-            last_turn = (user_input, reply_text or "")
-            current_latency["assistant_done_at"] = time.monotonic()
-
-            usage = getattr(think, "last_usage", None) or {}
-            if usage.get("prompt_tokens") is not None:
-                current_latency["input_tokens"] = usage["prompt_tokens"]
-            if usage.get("completion_tokens") is not None:
-                current_latency["output_tokens"] = usage["completion_tokens"]
-            if usage.get("total_tokens") is not None:
-                current_latency["total_tokens"] = usage["total_tokens"]
-
-            if args.debug:
-                prompt_debug = getattr(think, "last_prompt_debug", None) or {}
-                system_prompt = prompt_debug.get("system_prompt") or system_prompt or ""
-                web_prompt = prompt_debug.get("web_prompt") or ""
-                memory_prompt = prompt_debug.get("memory_prompt") or ""
-                agentic_prompts = prompt_debug.get("agentic_prompts") or []
-                previous_chat_messages = prompt_debug.get("previous_chat_messages") or []
-                knowledge_prompt = prompt_debug.get("knowledge_prompt") or ""
-
-                previous_chat_texts = [
-                    f"{m.get('role', 'unknown')}: {m.get('content', '')}"
-                    for m in previous_chat_messages
-                    if isinstance(m, dict)
-                ]
-                prompt_messages = usage.get("prompt_messages") or []
-                completion_text = usage.get("completion_text") or ""
-
-                ctx_entries: list[tuple[str, float, int, str]] = []
-
-                sys_tok = _count_tokens(system_prompt)
-                ctx_entries.append(("sys", 0.0, sys_tok, system_prompt))
-
-                web_tok = _count_tokens(web_prompt)
-                if web_prompt:
-                    web_lat = _latency_seconds(current_latency, "search_start_at", "search_done_at")
-                    ctx_entries.append(("web", (web_lat or 0) * 1000, web_tok, web_prompt))
-
-                mem_tok = _count_tokens(memory_prompt)
-                if memory_prompt:
-                    ctx_entries.append(("mem", 0.0, mem_tok, memory_prompt))
-
-                kb_tok = _count_tokens(knowledge_prompt)
-                if knowledge_prompt:
-                    ctx_entries.append(("kb", 0.0, kb_tok, knowledge_prompt))
-
-                agentic_tok = 0
-                for item in agentic_prompts:
-                    lbl = item.get("label", "agentic") if isinstance(item, dict) else "agentic"
-                    content = item.get("content", "") if isinstance(item, dict) else str(item)
-                    if content:
-                        tok = _count_tokens(content)
-                        agentic_tok += tok
-                        ctx_entries.append((lbl, 0.0, tok, content))
-
-                chat_tok = sum(_count_tokens(t) for t in previous_chat_texts)
-                if chat_tok > 0:
-                    chat_content = "\n".join(previous_chat_texts)
-                    ctx_entries.append(("chat", 0.0, chat_tok, chat_content))
-
-                user_tok = _count_tokens(user_input)
-                ctx_entries.append(("input", 0.0, user_tok, user_input))
-
-                out_tok = current_latency.get("output_tokens") or (len(completion_text.split()) if completion_text else 0) or _count_tokens(completion_text)
-                llm_lat = _latency_seconds(current_latency, "first_assistant_token_at", "assistant_done_at")
-                if completion_text:
-                    ctx_entries.append(("output", (llm_lat or 0) * 1000, out_tok, completion_text))
-
-                def _ctx_group(label: str) -> str:
-                    for prefix, grp in (("sys","ctx"),("mem","ctx"),("kb","ctx"),
-                                        ("wiki","ctx"),("knowledge","ctx"),
-                                        ("exp","ctx"),("experience","ctx"),
-                                        ("agentic","inst"),("tool","inst"),
-                                        ("skill","inst"),("task","inst"),
-                                        ("web","web"),
-                                        ("chat","hist")):
-                        if label.startswith(prefix) or prefix in label:
-                            return grp
-                    return "turn"
-                _GROUP_LABEL = {"ctx":"context", "inst":"instructions",
-                                "web":"web results", "hist":"history",
-                                "turn":"current turn"}
-                _last_group = ""
-                for label, lat_ms, tok, content in ctx_entries:
-                    if not content:
-                        continue
-                    grp = _ctx_group(label)
-                    if grp != _last_group:
-                        _last_group = grp
-                        ui.add_message('sys',
-                                       _c(_DIM, f"── {_GROUP_LABEL.get(grp, grp)} ──"))
-                    ui.add_message('sys', _ctx_line(label, tok, lat_ms, content))
-
-                current_latency["system_prompt_tokens"] = sys_tok
-                current_latency["web_prompt_tokens"] = web_tok
-                current_latency["memory_prompt_tokens"] = mem_tok
-                current_latency["agentic_prompt_tokens"] = agentic_tok
-                current_latency["previous_chat_tokens"] = chat_tok
-                current_latency["previous_chat_message_count"] = len(previous_chat_texts)
-                current_latency["user_turn_tokens"] = user_tok
-
-                if current_latency.get("input_tokens") is None and prompt_messages:
-                    current_latency["input_tokens"] = sum(
-                        _count_tokens(str(m.get("content", "")))
-                        for m in prompt_messages
-                        if isinstance(m, dict)
+                # Optional bounded connectome telemetry runs off the conversational hot path.
+                try:
+                    from cognition.fly_runtime import observe_background
+                    from cognition.fly_runtime.adapters import SensoryObservation
+                    salience = min(1.0, max(0.15, len(user_input.strip()) / 240.0))
+                    observe_background(
+                        turn_uid,
+                        SensoryObservation("text", salience, consented=True),
+                        seed_types=("sensory", "auditory", "input", "INPUT", "visual"),
                     )
-                if current_latency.get("output_tokens") is None and completion_text:
-                    current_latency["output_tokens"] = _count_tokens(completion_text)
-                if current_latency.get("total_tokens") is None:
-                    in_tok_val = current_latency.get("input_tokens") or 0
-                    out_tok_val = current_latency.get("output_tokens") or 0
-                    current_latency["total_tokens"] = in_tok_val + out_tok_val
+                except Exception:
+                    pass
 
-                gantt_items: list[tuple[str, float, int, str]] = []
-                for label, lat_ms, tok, _content in ctx_entries:
-                    if tok > 0:
-                        gantt_items.append((label, lat_ms, tok, _ctx_color(label)))
-                turn_total_ms = _latency_seconds(current_latency, "submitted_at", "turn_done_at")
-                turn_total_ms = (turn_total_ms * 1000) if turn_total_ms is not None else None
-                for g_line in _gantt_lines(gantt_items, total_time_ms=turn_total_ms):
-                    ui.add_message('sys', g_line)
-                t_to_a = _latency_seconds(current_latency, "submitted_at", "first_audio_at")
-                if t_to_a is not None:
-                    ui.add_message('sys', _c(_DIM, f"  T→A (submit → first audio): {_fmt_latency(t_to_a)}"))
+                if typewriter is not None:
+                    typewriter.start()
+                    _sentence_buf = []
 
-                _log_ctx(log, "turn", 0, 0, f"mode={current_latency.get('mode','?')} "
-                         f"user={user_input[:200]}")
-                for label, lat_ms, tok, content in ctx_entries:
-                    _log_ctx(log, label, tok, lat_ms, content)
-                log.info("[ctx] gantt: %s",
-                         " | ".join(f"{label}={lat:.0f}ms/{t}tok"
-                                    for label, lat, t, _ in gantt_items))
+                if speak is not None and hasattr(speak, "reset_synth_timer"):
+                    speak.reset_synth_timer()
 
-            if typewriter is not None and _sentence_buf:
-                typewriter.feed_sentence("".join(_sentence_buf))
-                _sentence_buf = []
+                reply_text = think.route(user_input, token_callback=token_cb, system_note=system_note)
+                last_turn = (user_input, reply_text or "")
+                current_latency["assistant_done_at"] = time.monotonic()
 
-            if speak and tts_enabled:
-                speak.wait()
+                usage = getattr(think, "last_usage", None) or {}
+                if usage.get("prompt_tokens") is not None:
+                    current_latency["input_tokens"] = usage["prompt_tokens"]
+                if usage.get("completion_tokens") is not None:
+                    current_latency["output_tokens"] = usage["completion_tokens"]
+                if usage.get("total_tokens") is not None:
+                    current_latency["total_tokens"] = usage["total_tokens"]
 
-            if speak is not None and hasattr(speak, "pop_synth_time"):
-                current_latency["tts_synth_total"] = speak.pop_synth_time()
+                if args.debug:
+                    prompt_debug = getattr(think, "last_prompt_debug", None) or {}
+                    system_prompt = prompt_debug.get("system_prompt") or system_prompt or ""
+                    web_prompt = prompt_debug.get("web_prompt") or ""
+                    memory_prompt = prompt_debug.get("memory_prompt") or ""
+                    agentic_prompts = prompt_debug.get("agentic_prompts") or []
+                    previous_chat_messages = prompt_debug.get("previous_chat_messages") or []
+                    knowledge_prompt = prompt_debug.get("knowledge_prompt") or ""
 
-            if typewriter is not None:
-                typewriter.stop(flush=True)
+                    previous_chat_texts = [
+                        f"{m.get('role', 'unknown')}: {m.get('content', '')}"
+                        for m in previous_chat_messages
+                        if isinstance(m, dict)
+                    ]
+                    prompt_messages = usage.get("prompt_messages") or []
+                    completion_text = usage.get("completion_text") or ""
 
-            ui.stream_commit()
-            ui._draw()
-            current_latency["turn_done_at"] = time.monotonic()
-            _update_latency_stats(current_latency)
-            _log_latency(current_latency)
-            ui._draw()
-            try:
-                # Reply already delivered — sweep arenas while idle (throttled
-                # inside; no-op most turns). See system/resource.py.
-                from system.resource import release_ram
+                    ctx_entries: list[tuple[str, float, int, str]] = []
 
-                release_ram("turn")
-            except Exception:
-                pass
+                    sys_tok = _count_tokens(system_prompt)
+                    ctx_entries.append(("sys", 0.0, sys_tok, system_prompt))
 
-            _brain_trace.record_step(
-                "transport.commit",
-                layer="transport",
-                inputs={"reply_chars": len(reply_text or "")},
-                outputs={"latency_ms_total": int((current_latency["turn_done_at"] - current_latency["submitted_at"]) * 1000)},
-                factors=["LLM stream done", "TTS synthesized", "UI committed"],
-            )
-            _brain_trace.end_turn()
-        finally:
-            try:
-                abort_turn = getattr(ui, "turn_abort", None)
-                if abort_turn is not None:
-                    abort_turn()
-            except Exception:
-                log.debug("turn abort cleanup failed", exc_info=True)
-            try:
-                session_active.clear()
-                proactive.touch()
-                current_latency = None
+                    web_tok = _count_tokens(web_prompt)
+                    if web_prompt:
+                        web_lat = _latency_seconds(current_latency, "search_start_at", "search_done_at")
+                        ctx_entries.append(("web", (web_lat or 0) * 1000, web_tok, web_prompt))
+
+                    mem_tok = _count_tokens(memory_prompt)
+                    if memory_prompt:
+                        ctx_entries.append(("mem", 0.0, mem_tok, memory_prompt))
+
+                    kb_tok = _count_tokens(knowledge_prompt)
+                    if knowledge_prompt:
+                        ctx_entries.append(("kb", 0.0, kb_tok, knowledge_prompt))
+
+                    agentic_tok = 0
+                    for item in agentic_prompts:
+                        lbl = item.get("label", "agentic") if isinstance(item, dict) else "agentic"
+                        content = item.get("content", "") if isinstance(item, dict) else str(item)
+                        if content:
+                            tok = _count_tokens(content)
+                            agentic_tok += tok
+                            ctx_entries.append((lbl, 0.0, tok, content))
+
+                    chat_tok = sum(_count_tokens(t) for t in previous_chat_texts)
+                    if chat_tok > 0:
+                        chat_content = "\n".join(previous_chat_texts)
+                        ctx_entries.append(("chat", 0.0, chat_tok, chat_content))
+
+                    user_tok = _count_tokens(user_input)
+                    ctx_entries.append(("input", 0.0, user_tok, user_input))
+
+                    out_tok = current_latency.get("output_tokens") or (len(completion_text.split()) if completion_text else 0) or _count_tokens(completion_text)
+                    llm_lat = _latency_seconds(current_latency, "first_assistant_token_at", "assistant_done_at")
+                    if completion_text:
+                        ctx_entries.append(("output", (llm_lat or 0) * 1000, out_tok, completion_text))
+
+                    def _ctx_group(label: str) -> str:
+                        for prefix, grp in (("sys","ctx"),("mem","ctx"),("kb","ctx"),
+                                            ("wiki","ctx"),("knowledge","ctx"),
+                                            ("exp","ctx"),("experience","ctx"),
+                                            ("agentic","inst"),("tool","inst"),
+                                            ("skill","inst"),("task","inst"),
+                                            ("web","web"),
+                                            ("chat","hist")):
+                            if label.startswith(prefix) or prefix in label:
+                                return grp
+                        return "turn"
+                    _GROUP_LABEL = {"ctx":"context", "inst":"instructions",
+                                    "web":"web results", "hist":"history",
+                                    "turn":"current turn"}
+                    _last_group = ""
+                    for label, lat_ms, tok, content in ctx_entries:
+                        if not content:
+                            continue
+                        grp = _ctx_group(label)
+                        if grp != _last_group:
+                            _last_group = grp
+                            ui.add_message('sys',
+                                           _c(_DIM, f"── {_GROUP_LABEL.get(grp, grp)} ──"))
+                        ui.add_message('sys', _ctx_line(label, tok, lat_ms, content))
+
+                    current_latency["system_prompt_tokens"] = sys_tok
+                    current_latency["web_prompt_tokens"] = web_tok
+                    current_latency["memory_prompt_tokens"] = mem_tok
+                    current_latency["agentic_prompt_tokens"] = agentic_tok
+                    current_latency["previous_chat_tokens"] = chat_tok
+                    current_latency["previous_chat_message_count"] = len(previous_chat_texts)
+                    current_latency["user_turn_tokens"] = user_tok
+
+                    if current_latency.get("input_tokens") is None and prompt_messages:
+                        current_latency["input_tokens"] = sum(
+                            _count_tokens(str(m.get("content", "")))
+                            for m in prompt_messages
+                            if isinstance(m, dict)
+                        )
+                    if current_latency.get("output_tokens") is None and completion_text:
+                        current_latency["output_tokens"] = _count_tokens(completion_text)
+                    if current_latency.get("total_tokens") is None:
+                        in_tok_val = current_latency.get("input_tokens") or 0
+                        out_tok_val = current_latency.get("output_tokens") or 0
+                        current_latency["total_tokens"] = in_tok_val + out_tok_val
+
+                    gantt_items: list[tuple[str, float, int, str]] = []
+                    for label, lat_ms, tok, _content in ctx_entries:
+                        if tok > 0:
+                            gantt_items.append((label, lat_ms, tok, _ctx_color(label)))
+                    turn_total_ms = _latency_seconds(current_latency, "submitted_at", "turn_done_at")
+                    turn_total_ms = (turn_total_ms * 1000) if turn_total_ms is not None else None
+                    for g_line in _gantt_lines(gantt_items, total_time_ms=turn_total_ms):
+                        ui.add_message('sys', g_line)
+                    t_to_a = _latency_seconds(current_latency, "submitted_at", "first_audio_at")
+                    if t_to_a is not None:
+                        ui.add_message('sys', _c(_DIM, f"  T→A (submit → first audio): {_fmt_latency(t_to_a)}"))
+
+                    _log_ctx(log, "turn", 0, 0, f"mode={current_latency.get('mode','?')} "
+                             f"user={user_input[:200]}")
+                    for label, lat_ms, tok, content in ctx_entries:
+                        _log_ctx(log, label, tok, lat_ms, content)
+                    log.info("[ctx] gantt: %s",
+                             " | ".join(f"{label}={lat:.0f}ms/{t}tok"
+                                        for label, lat, t, _ in gantt_items))
+
+                if typewriter is not None and _sentence_buf:
+                    typewriter.feed_sentence("".join(_sentence_buf))
+                    _sentence_buf = []
+
+                if speak and tts_enabled:
+                    speak.wait()
+
+                if speak is not None and hasattr(speak, "pop_synth_time"):
+                    current_latency["tts_synth_total"] = speak.pop_synth_time()
+
+                if typewriter is not None:
+                    typewriter.stop(flush=True)
+
+                ui.stream_commit()
+                ui._draw()
+                current_latency["turn_done_at"] = time.monotonic()
+                _update_latency_stats(current_latency)
+                _log_latency(current_latency)
+                ui._draw()
+                try:
+                    # Reply already delivered — sweep arenas while idle (throttled
+                    # inside; no-op most turns). See system/resource.py.
+                    from system.resource import release_ram
+
+                    release_ram("turn")
+                except Exception:
+                    pass
+
+                _brain_trace.record_step(
+                    "transport.commit",
+                    layer="transport",
+                    inputs={"reply_chars": len(reply_text or "")},
+                    outputs={"latency_ms_total": int((current_latency["turn_done_at"] - current_latency["submitted_at"]) * 1000)},
+                    factors=["LLM stream done", "TTS synthesized", "UI committed"],
+                )
+                _brain_trace.end_turn()
             finally:
-                release_busy()
+                try:
+                    abort_turn = getattr(ui, "turn_abort", None)
+                    if abort_turn is not None:
+                        abort_turn()
+                except Exception:
+                    log.debug("turn abort cleanup failed", exc_info=True)
+                try:
+                    session_active.clear()
+                    proactive.touch()
+                    current_latency = None
+                finally:
+                    release_busy()
+    finally:
+        _shutdown()

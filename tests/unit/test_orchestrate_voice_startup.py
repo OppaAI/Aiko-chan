@@ -16,6 +16,11 @@ def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flus
     messages = []
     backends = []
     inputs = iter(commands)
+    def get_input():
+        value = next(inputs)
+        if isinstance(value, BaseException):
+            raise value
+        return value
     think = SimpleNamespace(
         reset_context=reset_context or (lambda: None),
         set_speak=lambda backend: None,
@@ -30,7 +35,7 @@ def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flus
         set_voice_backends=lambda output, input_backend: backends.append((output, input_backend)),
         status_finish=lambda: None,
         _draw=lambda **kwargs: None,
-        get_input=lambda: next(inputs),
+        get_input=get_input,
         get_voice_input=lambda input_backend, **kwargs: "/quit",
     )
     proactive = SimpleNamespace(start=lambda: None, stop=lambda: None, touch=lambda: None, set_speak=lambda backend: None)
@@ -80,6 +85,18 @@ def test_shutdown_requests_scheduler_stop_before_memory_flush(monkeypatch):
     _run_commands(monkeypatch, ["/quit"],
                   scheduler_stop=lambda: events.append("scheduler"),
                   memory_flush=lambda: events.append("memory"))
+    assert events == ["scheduler", "memory"]
+
+
+@pytest.mark.parametrize("commands", [[RuntimeError("input failed")], ["/reset"]])
+def test_exception_runs_session_cleanup(monkeypatch, commands):
+    events = []
+    def fail_reset():
+        raise RuntimeError("reset failed")
+    with pytest.raises(RuntimeError):
+        _run_commands(monkeypatch, commands, reset_context=fail_reset,
+                      scheduler_stop=lambda: events.append("scheduler"),
+                      memory_flush=lambda: events.append("memory"))
     assert events == ["scheduler", "memory"]
 
 

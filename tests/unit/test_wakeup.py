@@ -196,6 +196,25 @@ def _collecting_callbacks():
     return (loading.append, done.append, skip.append, loading, done, skip)
 
 
+def test_memory_ready_callback_stall_does_not_wedge_thinking(monkeypatch):
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(wakeup_module, "_MEM_BOOT_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(wakeup_module, "_THINK_BOOT_TIMEOUT_S", 1)
+    release = threading.Event()
+
+    def on_done(key):
+        if key == "mem_ready":
+            release.wait(2)
+
+    try:
+        result = AikoWakeup().boot(_noop, on_done, _noop, enable_tts=False, enable_asr=False)
+        assert result.think is not None
+        assert result.memorize is None
+        assert result.think._memorize is None
+    finally:
+        release.set()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Tier 1 -- boot label integrity, pure, no mocking needed
 # ─────────────────────────────────────────────────────────────────────────────

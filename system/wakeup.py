@@ -63,8 +63,8 @@ Flow:
 - think boots AikoThink, runs warmup, then blocks on mem_ready_evt.wait() until memory is
   done — then injects memory (set_memorize, may be None on failure) and starts the idle
   learner (no-ops if memory is None) before returning.
-- memorize sets up sqlite-vec, runs cleanup, then always signals mem_ready_evt.set() in a
-  finally — so think never hangs even if memory boot fails.
+- The memory worker signals mem_ready_evt after publishing its result, including
+  failures, so the thinking thread can consume it without an unbounded wait.
 - Join point — main thread waits for both think_future/mem_future to finish.
 - speak is constructed right after the join, but not wired into think until the voice
   stack is ready.
@@ -297,11 +297,8 @@ class AikoWakeup:
                 # real identity connects (webui._ws_handler / cli.py); cleanup
                 # for the real user runs in webui's post-login hook.
 
-                # Signal readiness as soon as the store is constructed.
-                # cleanup() is a full prune scan (maintenance, not readiness);
-                # gating the ready barrier on it made the think thread — and
-                # the whole boot join — wait out the slowest possible scan.
-                mem_ready_evt.set()
+                # Cleanup is scheduled in the background so it does not delay
+                # publishing the memory worker's result.
                 log.debug('[wakeup] memory worker reached ready barrier')
                 _boot_step('mem_ready')                                                       # mark the memory system ready
 
@@ -327,11 +324,8 @@ class AikoWakeup:
                 return memorize                                                               # return the live AikoMemorize object
             except Exception:                                                                 # if error, log failure once — single point, full traceback
                 log.exception("[wakeup] Memory boot failed — Aiko will run without persistent memory.")
-                mem_ready_evt.set()
                 on_skip('mem_ready')                                                          # resolve the marker step so the UI doesn't hang on it
                 return None                                                                   # return None to indicate failure
-            finally:                                                                          # whether success or failure,
-                mem_ready_evt.set()                                                           # signal memory ready; wake any waiting thread
 
         # ── parallel boot ─────────────────────────────────────────────────
         # Plain daemon threads (not ThreadPoolExecutor): a boot worker that
@@ -350,6 +344,12 @@ class AikoWakeup:
                 fut.set_result(fn())
             except BaseException as exc:                      # mirror ThreadPoolExecutor: capture everything, .result() re-raises
                 fut.set_exception(exc)
+            finally:
+                # The event must mean the future is complete: otherwise the
+                # thinking thread can block indefinitely on result() after
+                # passing its bounded readiness wait.
+                if fut is mem_future:
+                    mem_ready_evt.set()
 
         threading.Thread(target=_run_future, args=(mem_future, init_memorize),
                          name="aiko-boot-mem", daemon=True).start()

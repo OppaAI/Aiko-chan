@@ -9,7 +9,7 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 
 | # | Area | Main code | Status |
 |---|---|---|---|
-| 1 | Startup, shutdown, and session orchestration | `main.py`, `system/wakeup.py`, `system/orchestrate.py`, `system/schedule.py` | In progress; initial scan found no confirmed new defect |
+| 1 | Startup, shutdown, and session orchestration | `main.py`, `system/wakeup.py`, `system/orchestrate.py`, `system/schedule.py` | In progress; memory readiness and shutdown cleanup fixes shipped; Jetson 8 GB review ongoing |
 | 2 | Conversation routing, context assembly, and response streaming | `cognition/think.py`, `cognition/deep_think.py`, `cognition/inner_speech.py` | Not started |
 | 3 | Conscience, refusal gates, and user preferences | `cognition/conscience/`, `cognition/policy.py`, `cognition/attention.py` | Focused false-refusal fixes shipped; broad review not started |
 | 4 | Agentic tasks, tools, and self-coding | `agentic/`, `Aiko-Playground` integration | Focused self-coding fixes shipped; broad review not started |

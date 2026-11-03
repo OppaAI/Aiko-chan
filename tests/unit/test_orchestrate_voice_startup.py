@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 
-def _run_commands(monkeypatch, commands, *, speak=None, listen=None):
+def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flush=None):
     import system.orchestrate as orchestrate
     import system.wakeup as wakeup
 
@@ -17,7 +17,7 @@ def _run_commands(monkeypatch, commands, *, speak=None, listen=None):
     think = SimpleNamespace(
         set_speak=lambda backend: None,
         set_proactive_resting=lambda resting: None,
-        wait_for_memory=lambda: None,
+        wait_for_memory=memory_flush or (lambda: None),
     )
     ui = SimpleNamespace(
         _boot_result=SimpleNamespace(think=think, memorize=None, speak=None, listen=None),
@@ -48,6 +48,17 @@ def _run_commands(monkeypatch, commands, *, speak=None, listen=None):
 
     orchestrate.run_session(ui, SimpleNamespace(text=True, no_asr=True, debug=False, cli=True))
     return ui, messages, backends
+
+
+def test_shutdown_flushes_memory_even_if_listen_stop_fails(monkeypatch):
+    flushed = []
+    def fail_stop():
+        raise RuntimeError("listener failed to stop")
+    listen = SimpleNamespace(ensure_ready=lambda: None, _voice_error=None,
+                             stop_barge_in_monitor=fail_stop)
+    _run_commands(monkeypatch, ["/listen", "/quit"], listen=listen,
+                  memory_flush=lambda: flushed.append(True))
+    assert flushed == [True]
 
 
 def test_lazy_voice_wires_typewriter_and_first_audio(monkeypatch):

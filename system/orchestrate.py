@@ -1325,24 +1325,25 @@ def run_session(ui, args) -> None:
 
     def _generate_proactive_checkin(prompt_hint: str) -> str:
         session_active.set()
-        if listen is not None and hasattr(listen, "extend_activation"):
-            listen.extend_activation()
-
-        original_speak = think._get_speak()
-        muted = not tts_enabled or not PROACTIVE_SPEAK
-        if muted:
-            think.set_speak(None)
+        muted = False
+        original_speak = None
         try:
+            if listen is not None and hasattr(listen, "extend_activation"):
+                listen.extend_activation()
+            original_speak = think._get_speak()
+            if not tts_enabled or not PROACTIVE_SPEAK:
+                think.set_speak(None)
+                muted = True
             return think.proactive_checkin(prompt_hint)
         finally:
-            if muted:
-                # Only restore if _speak is still None (nobody, e.g. /voice,
-                # changed it while we were muted). If it changed, leave it —
-                # that change is more recent and should win.
-                think.compare_and_set_speak(None, original_speak)
-            session_active.clear()
-            if hasattr(think, "_last_chat_time"):
-                think._last_chat_time = time.time()
+            try:
+                if muted:
+                    # Preserve a newer /voice change while the check-in ran.
+                    think.compare_and_set_speak(None, original_speak)
+            finally:
+                session_active.clear()
+                if hasattr(think, "_last_chat_time"):
+                    think._last_chat_time = time.time()
 
     proactive = ProactiveIdleRunner(
         ui,
@@ -1356,17 +1357,23 @@ def run_session(ui, args) -> None:
 
     def _shutdown():
         """Stop background daemons and flush memory writes before exit."""
-        proactive.stop()
+        def cleanup(label, fn):
+            try:
+                fn()
+            except Exception:
+                log.exception("Failed to stop %s", label)
+
+        cleanup("proactive runner", proactive.stop)
         for adapter in background_adapters:
             try:
                 adapter.stop()
             except Exception:
                 log.exception("Failed to stop background messenger adapter %s", getattr(adapter, "name", adapter.__class__.__name__))
         if typewriter is not None:
-            typewriter.stop(flush=True)
+            cleanup("typewriter", lambda: typewriter.stop(flush=True))
         if listen is not None:
-            listen.stop_barge_in_monitor()
-        think.wait_for_memory()
+            cleanup("listening monitor", listen.stop_barge_in_monitor)
+        cleanup("pending memory writes", think.wait_for_memory)
 
     # ── main loop ─────────────────────────────────────────────────────────────
 

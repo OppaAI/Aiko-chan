@@ -1245,26 +1245,30 @@ def run_webui(args) -> None:
     host_ip = socket.gethostbyname(socket.gethostname())
     scheme = "https" if WEBUI_HTTPS else "http"
 
-    # Boot progress on stdout — no browsers connected yet to stream it to.
-    labels = AikoWakeup.ALL_BOOT_LABELS
-    def _on_loading(key: str) -> None:
-        print(f"  · {labels.get(key, key)} ...", flush=True)
-    def _on_done(key: str) -> None:
-        print("    ✓", flush=True)
-    def _on_skip(key: str) -> None:
-        print("    – skipped", flush=True)
-
-    print("\n  🌸 Aiko-chan is waking up — WebUI starts when boot finishes.\n")
-    result = AikoWakeup().boot(
-        on_loading=_on_loading,
-        on_done=_on_done,
-        on_skip=_on_skip,
-        enable_tts=not args.text,
-        enable_asr=not args.no_asr,
-    )
-    ui.set_boot_result(result)
-
-    ui.start_servers()                                # idempotent — opens HTTP/WS now that all subsystems are live
-    print(f"\n  🌸 Aiko-chan is ready → {scheme}://{host_ip}:{HTTP_PORT}/\n")
+    from interface.console import StartupConsole
+    progress = StartupConsole({**AikoWakeup.ALL_BOOT_LABELS, "web_server": "Start browser service"}, mode="WebUI")
+    stop = threading.Event()
+    spinner = threading.Thread(target=progress.spin, args=(stop,), name="aiko-console-startup", daemon=True)
+    spinner.start()
+    try:
+        result = AikoWakeup().boot(
+            on_loading=progress.loading,
+            on_done=progress.done,
+            on_skip=progress.skip,
+            enable_tts=not args.text,
+            enable_asr=not args.no_asr,
+        )
+        ui.set_boot_result(result)
+        progress.loading("web_server")
+        ui.start_servers()
+        progress.done("web_server")
+    except BaseException:
+        progress.finish("Startup failed; see logs for details", failed=True)
+        raise
+    else:
+        progress.finish(f"Open {scheme}://{host_ip}:{HTTP_PORT}/")
+    finally:
+        stop.set()
+        spinner.join(timeout=2.0)
 
     run_session(ui, args)

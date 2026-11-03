@@ -42,6 +42,10 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 - Shutdown continues remaining cleanup when an individual subsystem fails.
 - A shared setup guard stops the startup spinner even when frontend wiring
   raises before the session input loop begins.
+- WebUI boot and the plain CLI share a line-based console progress renderer:
+  parallel steps retain their own state, completed steps show timings, and
+  redirected/dumb terminals receive plain lines. Animation is disabled when
+  console logging is enabled to avoid competing with diagnostic output.
 - A single session-loop cleanup guard covers normal returns, input failures,
   command failures, and turn exceptions, while preserving error propagation.
 - Proactive check-in failures clear the active-session marker.

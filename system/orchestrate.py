@@ -1170,6 +1170,10 @@ def run_session(ui, args) -> None:
 
         _wire_speak_sink(speak)
 
+    except BaseException:
+        if hasattr(ui, "status_failed"):
+            ui.status_failed()
+        raise
     finally:
         spin_stop.set()
         spin_t.join(timeout=2.0)

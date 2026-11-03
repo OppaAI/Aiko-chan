@@ -69,10 +69,8 @@ class AikoSimpleCLI:
         self._streaming = False
         self._stream_buf: list[str] = []
         self._latency_stats: dict = {}
-        self._boot_total = len(AikoWakeup.ALL_BOOT_LABELS)
-        self._boot_done = 0
-        self._boot_current = ""
-        self._boot_lock = threading.Lock()
+        from interface.console import StartupConsole
+        self._startup = StartupConsole(AikoWakeup.ALL_BOOT_LABELS, mode="CLI")
         # per-instance agentic step counter for __THINKING__ rendering
         # (previously a module global in main.py — instance state is
         # cleaner and doesn't leak across AikoSimpleCLI instances)
@@ -84,68 +82,31 @@ class AikoSimpleCLI:
         self._voice_error_shown = False
 
     # ── boot / status ────────────────────────────────────────────────────
-    _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
-
     # Bound for one blocking mic read before falling back to typed input.
     # Headless sessions (SSH, no mic) would otherwise wait forever inside
     # listen() while typed input sits unread. Env-tunable.
     _VOICE_LISTEN_TIMEOUT_S = float(os.getenv("VOICE_LISTEN_TIMEOUT_S", "120") or 120)
 
     def _spin_loop(self, stop_event: threading.Event) -> None:
-        idx = 0
-        while not stop_event.is_set():
-            with self._boot_lock:
-                label = self._boot_current
-            frame = self._SPINNER_FRAMES[idx % len(self._SPINNER_FRAMES)]
-            print(f"\r  {frame} {label:<60}", end="", flush=True)
-            idx += 1
-            stop_event.wait(0.08)
+        self._startup.spin(stop_event)
 
     def step_loading(self, key: str) -> None:
-        if self._chat_started:
-            return
-        label = AikoWakeup.ALL_BOOT_LABELS.get(key, key)
-        with self._boot_lock:
-            if self._boot_current and self._boot_current != label:
-                print()                                                    # finalize previous line before starting a new one
-            self._boot_current = label
-            self._boot_done += 1
-        print(f"\r  ⠋ {label:<60}", end="", flush=True)                   # paint first spinner frame immediately
+        self._startup.loading(key)
 
     def step_done(self, key: str) -> None:
-        if self._chat_started:
-            return
-        label = AikoWakeup.ALL_BOOT_LABELS.get(key, key)
-        with self._boot_lock:
-            self._boot_done += 1
-            self._boot_current = ""
-            print(f"\r  ✓ {label:<60}")                                   # overwrite spinner line with ✓ then newline
+        self._startup.done(key)
 
     def step_skip(self, key: str) -> None:
-        if self._chat_started:
-            return
-        label = AikoWakeup.ALL_BOOT_LABELS.get(key, key)
-        with self._boot_lock:
-            self._boot_done += 1
-            self._boot_current = ""
-            print(f"\r  ✗ {label:<60}  (skipped)")                        # mark skipped distinctly
+        self._startup.skip(key)
 
-    def _render_progress(self) -> None:
-        pct = int(100 * self._boot_done / (self._boot_total or 1))
-        print(f"\r  [{pct:3d}%] {self._boot_current:<50}", end="", flush=True)
+    def status_failed(self) -> None:
+        self._startup.finish("Startup failed; see logs for details", failed=True)
 
     def status_finish(self) -> None:
         self._chat_started = True
-        # Keep trace state set by run_cli; don't override with unrelated flags
         if not self.trace_enabled:
             self.trace_enabled = bool(self.debug)
-        # Plain scrolling CLI — trace steps stream as regular '·' sys lines
-        # via add_message() below (brain_trace sink is wired in
-        # system/orchestrate.run_session). No fixed box / ANSI cursor
-        # positioning here: it swallows trace content and breaks with
-        # plain input()/scrolling stdout.
-        print("\r" + " " * 70 + "\r", end="", flush=True)
-        print("\n🌸 Aiko-chan is ready. Type a message, or /help for commands.\n")
+        self._startup.finish("Type a message · /help for commands · /quit to exit")
 
     # ── rendering ────────────────────────────────────────────────────────
     def _draw(self, buf: list | None = None) -> None:

@@ -25,7 +25,7 @@ CA_ERROR = OSError(
 )
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def clean_tls_env(monkeypatch):
     monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
     monkeypatch.delenv("CURL_CA_BUNDLE", raising=False)
@@ -154,3 +154,37 @@ def test_resolve_logs_when_certifi_missing(monkeypatch, caplog):
     with caplog.at_level(logging.DEBUG, logger="system.tls"):
         tls.resolve_ca_bundle()
     assert any("certifi" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize('first_kind', ['missing', 'excluded', 'directory'])
+def test_resolve_tries_curl_override_when_requests_override_is_unusable(monkeypatch, tmp_path, first_kind):
+    first = tmp_path / 'requests-ca.pem'
+    if first_kind == 'excluded':
+        first.touch()
+    elif first_kind == 'directory':
+        first.mkdir()
+    fallback = tmp_path / 'curl-ca.pem'
+    fallback.touch()
+    monkeypatch.setenv('REQUESTS_CA_BUNDLE', str(first))
+    monkeypatch.setenv('CURL_CA_BUNDLE', str(fallback))
+    excluded = (str(first),) if first_kind == 'excluded' else ()
+    assert tls.resolve_ca_bundle(exclude=excluded) == str(fallback)
+
+
+def test_resolve_keeps_requests_override_precedence(monkeypatch, tmp_path):
+    first = tmp_path / 'requests-ca.pem'
+    second = tmp_path / 'curl-ca.pem'
+    first.touch()
+    second.touch()
+    monkeypatch.setenv('REQUESTS_CA_BUNDLE', str(first))
+    monkeypatch.setenv('CURL_CA_BUNDLE', str(second))
+    assert tls.resolve_ca_bundle() == str(first)
+
+
+def test_resolve_rejects_directory_as_a_ca_bundle(monkeypatch, tmp_path):
+    monkeypatch.setenv('REQUESTS_CA_BUNDLE', str(tmp_path))
+    fake = types.ModuleType('certifi')
+    fake.where = lambda: str(tmp_path)
+    monkeypatch.setitem(sys.modules, 'certifi', fake)
+    monkeypatch.setattr(tls, '_SYSTEM_BUNDLES', (str(tmp_path),))
+    assert tls.resolve_ca_bundle() is None

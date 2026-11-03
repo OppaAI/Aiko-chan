@@ -62,6 +62,7 @@ class FakeSpeak:
         self.started = 0
         self.fed = []
         self.stopped = 0
+        self.cancelled = []
 
     def start_speech_stream(self, token_callback=None):
         self.started += 1
@@ -69,8 +70,9 @@ class FakeSpeak:
     def feed_speech_stream(self, text):
         self.fed.append(text)
 
-    def stop_speech_stream(self):
+    def stop_speech_stream(self, cancel=False):
         self.stopped += 1
+        self.cancelled.append(cancel)
 
 
 def _bare_think(monkeypatch, review_flags=(), gate_result="keep"):
@@ -118,6 +120,7 @@ def test_sentence_sink_aborts_on_review_flags(monkeypatch):
     assert sink("Shady sentence.") is False
     assert speak.fed == []
     assert speak.stopped == 1
+    assert speak.cancelled == [True]
     assert state["aborted"] is True
     # further sentences are refused once aborted
     assert sink("Another.") is False
@@ -128,6 +131,8 @@ def test_sentence_sink_aborts_on_gate_refusal(monkeypatch):
     _, speak, state, sink = _sink_parts(monkeypatch, gate_result="I should hold that thought.")
     assert sink("Borderline sentence.") is False
     assert speak.fed == []
+    assert speak.stopped == 1
+    assert speak.cancelled == [True]
     assert state["aborted"] is True
 
 

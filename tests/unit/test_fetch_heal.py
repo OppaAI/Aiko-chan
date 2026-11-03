@@ -9,6 +9,7 @@ user_state_dir.
 from __future__ import annotations
 
 import json
+import socket
 import time
 
 import pytest
@@ -87,6 +88,21 @@ class TestRecord:
         assert len(data) <= 3
 
 
+@pytest.fixture
+def public_example_dns(monkeypatch):
+    """Keep extraction tests independent of DNS while retaining the SSRF guard."""
+    original = socket.getaddrinfo
+
+    def resolve(hostname, *args, **kwargs):
+        if hostname == "example.com":
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+                     "", ("93.184.216.34", 0))]
+        return original(hostname, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+
+
+@pytest.mark.usefixtures("public_example_dns")
 class TestWebFetchHealing:
     def test_healed_order_skips_dead_default(self, ledger_dir, monkeypatch):
         import agentic.toolkit.websearch as ws
@@ -118,3 +134,9 @@ class TestWebFetchHealing:
         out = ws.web_fetch("https://example.com/good", use_cache=False)
         assert not out.startswith("[fetch failed")
         assert calls == [], "vendor fallback must not fire on good extraction"
+
+
+def test_fixture_preserves_private_address_rejection(public_example_dns):
+    from agentic.toolkit.ingest import _check_host_ssrf
+    assert not _check_host_ssrf('example.com')
+    assert _check_host_ssrf('127.0.0.1')

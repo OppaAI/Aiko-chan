@@ -119,17 +119,18 @@ def flycx_state_for_record(state: "EdgeCognitiveState", user: str) -> dict | Non
     log.debug("flycx mode=%s id=%s heading=%.0f sharp=%.2f decis=%.2f sleep=%.2f",
               MEMORY_FLYCX_MODE, identity or "default", out["heading_deg"], out["sharpness"],
               out["decisiveness"], out["sleep_pressure"])
-    try:
-        from cognition.neural_state import get_neural_state
-        get_neural_state(identity).publish_cx(
-            heading_deg=out["heading_deg"],
-            sharpness=out["sharpness"],
-            decisiveness=out["decisiveness"],
-            sleep_pressure=out["sleep_pressure"],
-            source="attention",
-        )
-    except Exception:
-        pass
+    if MEMORY_FLYCX_MODE == "live":
+        try:
+            from cognition.neural_state import get_neural_state
+            get_neural_state(identity).publish_cx(
+                heading_deg=out["heading_deg"],
+                sharpness=out["sharpness"],
+                decisiveness=out["decisiveness"],
+                sleep_pressure=out["sleep_pressure"],
+                source="attention",
+            )
+        except Exception:
+            pass
     return out
 
 
@@ -372,6 +373,7 @@ def should_attempt(
     intent_confidence: float = 0.0,
     intent_success_prob: float = 0.5,
     enabled: bool = True,
+    user_id: str | None = None,
 ) -> tuple[bool, str, str]:
     """Return (ok, reason, action) with action in proceed|degrade_chat|defer|clarify."""
     if not enabled:
@@ -399,14 +401,14 @@ def should_attempt(
         return False, "multiple degrading trends detected; prefer lighter path", "degrade_chat"
 
     intent_conf = max(0.0, min(1.0, float(intent_confidence or 0.0)))
-    intent_prob = max(0.0, min(1.0, float(intent_success_prob or 0.5)))
+    intent_prob = max(0.0, min(1.0, float(0.5 if intent_success_prob is None else intent_success_prob)))
     if MEMORY_FLYCX_MODE == "live":
         # PFL steering: a decisive compass commits, a torn one clarifies.
-        dec = flycx_decisiveness_for_text(text, uncertainty)
+        dec = flycx_decisiveness_for_text(text, uncertainty, user_id=user_id)
         if dec is not None:
             intent_conf = max(0.0, min(1.0, intent_conf + MEMORY_FLYCX_ATTEMPT_W * (dec - 0.5) * 2.0))
     elif MEMORY_FLYCX_MODE == "shadow":
-        flycx_decisiveness_for_text(text, uncertainty)  # log-only
+        flycx_decisiveness_for_text(text, uncertainty, user_id=user_id)  # log-only
     if soft and intent_conf > 0.65 and intent_prob < 0.35:
         return False, f"intent classifier: low success probability ({intent_prob:.1%})", "clarify"
 
@@ -1707,7 +1709,7 @@ class EdgeCognitiveState:
         return should_attempt(
             user_input=user_input,
             mode=mode,
-            energy=float(snap.get("energy") or 0.5),
+            energy=float(snap.get("energy", 0.5)),
             uncertainty=float(snap.get("uncertainty") or 0.0),
             tool_outcomes=list(snap.get("tool_outcomes") or []),
             contradictions=list(snap.get("contradictions") or []),
@@ -1717,6 +1719,7 @@ class EdgeCognitiveState:
             intent_confidence=intent_conf,
             intent_success_prob=will_succeed,
             enabled=env_flag("EDGE_ATTEMPT_GATE", "1"),
+            user_id=self._identity or None,
         )
 
     def priming_context(self, query: str = "") -> str:

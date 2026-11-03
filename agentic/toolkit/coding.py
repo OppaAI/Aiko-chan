@@ -35,9 +35,12 @@ import difflib
 import io
 import json
 import locale
+import os
 import selectors
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -60,6 +63,28 @@ TEST_TAIL_CHARS = 800
 _ALLOWED_CODE_SUFFIXES = {".py", ".md", ".json", ".txt", ".sh", ".html", ".css", ".js", ".yaml", ".yml", ".toml"}
 _FORBIDDEN_SUBSTRINGS = (".env", "secret", "token", "private_key", ".pem", ".key", "credentials")
 _SKIP_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules", ".cert"}
+
+
+def _atomic_write_text(path: Path, content: str, *, mode: int | None = None) -> None:
+    """Replace an already-confined path without following file aliases.
+
+    A random staging file avoids collisions with user files such as a
+    predictable ``name.py.tmp``. Replacing the directory entry also keeps
+    writes from changing other names that hard-link the old destination.
+    """
+    if mode is None and path.exists():
+        mode = stat.S_IMODE(path.stat().st_mode)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            if mode is not None:
+                os.fchmod(stream.fileno(), mode)
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def _spec(name: str, description: str):
@@ -95,6 +120,8 @@ def _check_writable(path: Path, relative: str) -> str | None:
             return "path escapes repository"
     if any(part in _SKIP_DIRS for part in rel_parts):
         return "cannot write to restricted directory"
+    if any(s in "/".join(rel_parts).lower() for s in _FORBIDDEN_SUBSTRINGS):
+        return "refusing to touch secrets/credentials path"
     return None
 
 
@@ -199,18 +226,17 @@ def code_apply_patch(relative_path: str = "", old_text: str = "", new_text: str 
             return json_block("code_apply_patch", {"ok": False, "error": err})
         if not path.exists() or not path.is_file():
             return json_block("code_apply_patch", {"ok": False, "error": f"file not found: {relative}"})
-        content = path.read_text(encoding="utf-8", errors="replace")
+        content = path.read_text(encoding="utf-8")
         if old_text not in content:
             return json_block("code_apply_patch", {"ok": False, "error": "old_text not found in file"})
         updated = content.replace(old_text, new_text, 1)
         backup = path.with_suffix(path.suffix + ".bak")
-        try:
-            backup.write_text(content, encoding="utf-8")
-        except OSError as e:
-            log.warning("code_apply_patch backup failed: %s", e)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(updated, encoding="utf-8")
-        tmp.replace(path)
+        if backup.is_symlink():
+            raise ValueError("backup path must not be a symlink")
+        mode = stat.S_IMODE(path.stat().st_mode)
+        # A patch must not proceed unless its recovery copy succeeded.
+        _atomic_write_text(backup, content, mode=mode)
+        _atomic_write_text(path, updated, mode=mode)
         return json_block("code_apply_patch", {"ok": True, "path": relative,
                                                "bytes": len(updated), "backup": backup.name})
     except Exception as e:

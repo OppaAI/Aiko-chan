@@ -26,13 +26,13 @@ def test_apology_triggers_hands_clasp():
                      intensity=0.4) == "handsClasp"
 
 
-def test_greeting_and_farewell_wave():
+def test_greeting_wave_and_farewell_blow_kiss():
     d = _director()
     assert d.suggest("hello Aiko!", emotion="warm",
                      intensity=0.5) == "wave"
     d.reset_cooldowns()
     assert d.suggest("goodnight, see you tomorrow", emotion="calm",
-                     intensity=0.4) == "wave"
+                     intensity=0.4) == "blowKiss"
 
 
 def test_celebration_triggers_dance():
@@ -78,7 +78,7 @@ def test_per_gesture_cooldown():
 
 
 def test_suggested_gestures_are_known():
-    assert {"clap", "dance", "wave", "giggle", "bow"} <= KNOWN_GESTURES
+    assert {"clap", "dance", "wave", "blowKiss", "giggle", "bow"} <= KNOWN_GESTURES
 
 
 def test_on_listening_start():

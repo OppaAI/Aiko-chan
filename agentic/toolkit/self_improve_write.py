@@ -20,7 +20,8 @@ from agentic.registry import TOOLS, tool
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _ALLOWED_WRITE_EXTENSIONS = {".py", ".md", ".json", ".txt", ".sh", ".html", ".css", ".js"}
-_SKIP_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules"}
+_SKIP_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules", ".cert"}
+_FORBIDDEN_SUBSTRINGS = (".env", "secret", "token", "private_key", ".pem", ".key", "credentials")
 
 def _repo_confine_path(jail_path: str) -> Path:
     cleaned = jail_path.strip().lstrip("/\\")
@@ -71,6 +72,18 @@ def _path_parts(path: Path) -> tuple:
     return path.parts
 
 
+def _write_path_error(path: Path, requested: str) -> str | None:
+    """Validate both the caller's spelling and its resolved destination."""
+    parts = _path_parts(path)
+    if any(s in requested.lower() or s in "/".join(parts).lower() for s in _FORBIDDEN_SUBSTRINGS):
+        return "refusing secrets/credentials path"
+    if any(part in _SKIP_DIRS for part in parts):
+        return "cannot write to restricted directories"
+    if path.suffix.lower() not in _ALLOWED_WRITE_EXTENSIONS:
+        return f"unsupported file type: {path.suffix}"
+    return None
+
+
 @tool(
     TOOLS.get("repo_write_file", "repo_write_file"),
     description="Write content to a file in the repository. Restricted to safe text formats. APPROVAL REQUIRED — prefer code_diff_preview + code_apply_patch.",
@@ -84,17 +97,14 @@ def repo_write_file(relative_path: str, content: str) -> str:
     try:
         if len(content or "") > 50000:
             return "[repo write failed: content exceeds 50000 chars; use code_apply_patch for small edits]"
-        low = (relative_path or "").lower()
-        if any(s in low for s in (".env", "secret", "token", "private_key", ".pem", ".key", "credentials")):
-            return "[repo write failed: refusing secrets/credentials path]"
         path = _repo_confine_path(relative_path)
-        if any(part in _SKIP_DIRS for part in _path_parts(path)):
-            return "[repo write failed: cannot write to restricted directories]"
-        if path.suffix.lower() not in _ALLOWED_WRITE_EXTENSIONS:
-            return f"[repo write failed: unsupported file type: {path.suffix}]"
+        error = _write_path_error(path, relative_path)
+        if error:
+            return f"[repo write failed: {error}]"
         
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        from agentic.toolkit.coding import _atomic_write_text
+        _atomic_write_text(path, content)
         
         return json_block("repo_write_file", {
             "path": _display_path(path),
@@ -116,21 +126,20 @@ def repo_write_file(relative_path: str, content: str) -> str:
 def repo_replace_text(relative_path: str, old_text: str, new_text: str) -> str:
     """Replace occurrences of old_text with new_text in a file."""
     try:
-        low = (relative_path or "").lower()
-        if any(s in low for s in (".env", "secret", "token", "private_key", ".pem", ".key", "credentials")):
-            return "[repo replace failed: refusing secrets/credentials path]"
         path = _repo_confine_path(relative_path)
+        error = _write_path_error(path, relative_path)
+        if error:
+            return f"[repo replace failed: {error}]"
         if not path.exists() or not path.is_file():
             return f"[repo replace failed: file not found: {relative_path}]"
-        if path.suffix.lower() not in _ALLOWED_WRITE_EXTENSIONS:
-            return f"[repo replace failed: unsupported file type: {path.suffix}]"
             
         content = path.read_text(encoding="utf-8")
         if old_text not in content:
             return "[repo replace failed: old_text not found in file]"
             
         updated = content.replace(old_text, new_text)
-        path.write_text(updated, encoding="utf-8")
+        from agentic.toolkit.coding import _atomic_write_text
+        _atomic_write_text(path, updated)
         
         return json_block("repo_replace_text", {
             "path": _display_path(path),

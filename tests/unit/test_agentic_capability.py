@@ -43,7 +43,7 @@ class FakeEmbedder:
     def embed_query(self, text: str, instruct: str = "") -> np.ndarray:
         self.call_count += 1
         self.last_text = text
-        h = hash(text + instruct) % 1000
+        h = 1 + hash(text + instruct) % 1000
         return np.array([float(h) / 1000.0] * 384, dtype=np.float32)
 
 
@@ -107,6 +107,12 @@ class TestTriggerEmbeddingCache:
 
     def test_different_capabilities_different_vectors(self):
         embedder = FakeEmbedder()
+        # Constant-component vectors become identical after normalization.
+        # Use two genuinely different directions to exercise the cache keys.
+        embedder.embed_query = MagicMock(side_effect=[
+            np.array([1.0, 0.0], dtype=np.float32),
+            np.array([0.0, 1.0], dtype=np.float32),
+        ])
         _trigger_embed_cache.clear()
 
         vec_research = _get_trigger_embedding(CAPABILITIES["research"], embedder)
@@ -114,6 +120,7 @@ class TestTriggerEmbeddingCache:
 
         # Should be different (different trigger texts)
         assert not np.array_equal(vec_research, vec_scheduling)
+        assert embedder.embed_query.call_count == 2
 
 
 class TestMatchCapabilities:
@@ -324,3 +331,130 @@ class TestCapabilityPlaybookConsistency:
             assert set(cap.tool_domains) & tags, (
                 f"{cid}: domains {cap.tool_domains} match no registered tool"
             )
+
+
+@pytest.fixture
+def harrier_cache(tmp_path, monkeypatch):
+    from cognition.memory.vecstore import HarrierEmbedder
+    monkeypatch.setenv('CAP_VECTOR_CACHE_DIR', str(tmp_path / 'vectors'))
+    monkeypatch.setenv('MEMORY_FLYAL_MODE', 'off')
+    _trigger_embed_cache.clear()
+
+    def make(*, base_url='http://first.local', model='model-a', dims=2):
+        # Override transport so these tests never call an embedding server.
+        embedder = object.__new__(HarrierEmbedder)
+        embedder.base_url = base_url
+        embedder.model = model
+        embedder.dims = dims
+        embedder.embed_query = MagicMock(return_value=np.eye(1, dims, dtype=np.float32)[0])
+        return embedder
+
+    yield make
+    _trigger_embed_cache.clear()
+
+
+def test_memory_cache_isolates_foreign_embedder_instances():
+    from agentic.capability import _capability_vector_cache_path
+    first, second = FakeEmbedder(), FakeEmbedder()
+    first.embed_query = MagicMock(return_value=np.array([1., 0.]))
+    second.embed_query = MagicMock(return_value=np.array([0., 1., 0.]))
+    cap = CAPABILITIES['research']
+    assert _get_trigger_embedding(cap, first).shape == (2,)
+    assert _get_trigger_embedding(cap, second).shape == (3,)
+    assert first.embed_query.call_count == second.embed_query.call_count == 1
+    assert _capability_vector_cache_path(cap, first) is None
+
+
+def test_memory_cache_includes_trigger_text():
+    embedder = FakeEmbedder()
+    embedder.embed_query = MagicMock(side_effect=[np.array([1., 0.]), np.array([0., 1.])])
+    first = _get_trigger_embedding(Capability('same-id', ('first trigger',)), embedder)
+    second = _get_trigger_embedding(Capability('same-id', ('edited trigger',)), embedder)
+    assert not np.array_equal(first, second)
+    assert embedder.embed_query.call_count == 2
+
+
+@pytest.mark.parametrize('change', ['base_url', 'model', 'dims', 'flyal'])
+def test_memory_and_disk_keys_follow_real_embedding_geometry(harrier_cache, monkeypatch, change):
+    from agentic.capability import _capability_vector_cache_path
+    embedder = harrier_cache()
+    cap = CAPABILITIES['research']
+    first_path = _capability_vector_cache_path(cap, embedder)
+    first = _get_trigger_embedding(cap, embedder)
+    if change == 'flyal':
+        monkeypatch.setenv('MEMORY_FLYAL_MODE', 'live')
+    elif change == 'dims':
+        embedder.dims = 3
+    else:
+        setattr(embedder, change, getattr(embedder, change) + '-changed')
+    embedder.embed_query.return_value = np.eye(1, embedder.dims, k=1, dtype=np.float32)[0]
+    second_path = _capability_vector_cache_path(cap, embedder)
+    second = _get_trigger_embedding(cap, embedder)
+    assert first_path != second_path
+    assert first_path.is_file() and second_path.is_file()
+    assert embedder.embed_query.call_count == 2
+    assert not np.array_equal(first, second)
+
+
+def test_cache_returns_private_vector_copies(harrier_cache):
+    cap, embedder = CAPABILITIES['research'], harrier_cache()
+    original = _get_trigger_embedding(cap, embedder)
+    original[:] = 0
+    cached = _get_trigger_embedding(cap, embedder)
+    assert cached[0] == 1
+    cached[:] = 0
+    assert _get_trigger_embedding(cap, embedder)[0] == 1
+    assert embedder.embed_query.call_count == 1
+
+
+@pytest.mark.parametrize('bad', [np.array([np.nan, 0.]), np.array([1., 0., 0.]),
+    np.array([[1., 0.]]), np.zeros(2), np.array([np.inf, 1.])])
+def test_bad_disk_vectors_are_rebuilt(harrier_cache, bad):
+    from agentic.capability import _capability_vector_cache_path
+    cap, embedder = CAPABILITIES['research'], harrier_cache()
+    path = _capability_vector_cache_path(cap, embedder)
+    path.parent.mkdir()
+    np.savez(path, vector=bad)
+    actual = _get_trigger_embedding(cap, embedder)
+    assert np.array_equal(actual, [1., 0.])
+    assert embedder.embed_query.call_count == 1
+    with np.load(path, allow_pickle=False) as data:
+        assert np.array_equal(data['vector'], actual)
+
+
+def test_disk_cache_survives_memory_clear_for_same_geometry(harrier_cache):
+    cap, first = CAPABILITIES['research'], harrier_cache()
+    expected = _get_trigger_embedding(cap, first)
+    _trigger_embed_cache.clear()
+    second = harrier_cache()
+    second.embed_query.side_effect = AssertionError('cache should avoid embedding transport')
+    assert np.array_equal(_get_trigger_embedding(cap, second), expected)
+    second.embed_query.assert_not_called()
+
+
+def test_failed_atomic_cache_write_does_not_break_routing_or_replace_valid_file(harrier_cache, monkeypatch):
+    from agentic import capability
+    cap, embedder = CAPABILITIES['research'], harrier_cache()
+    expected = _get_trigger_embedding(cap, embedder)
+    path = capability._capability_vector_cache_path(cap, embedder)
+    old_bytes = path.read_bytes()
+    _trigger_embed_cache.clear()
+    # Force regeneration without making the existing destination unreadable.
+    monkeypatch.setattr(capability.np, 'load', MagicMock(side_effect=OSError('transient read failure')))
+    monkeypatch.setattr(capability.np, 'savez', MagicMock(side_effect=OSError('disk full')))
+    assert np.array_equal(_get_trigger_embedding(cap, embedder), expected)
+    assert path.read_bytes() == old_bytes
+    assert sorted(p.name for p in path.parent.iterdir()) == [path.name]
+
+
+def test_concurrent_cache_writers_leave_complete_archive(harrier_cache):
+    from concurrent.futures import ThreadPoolExecutor
+    from agentic.capability import _capability_vector_cache_path
+    cap, embedder = CAPABILITIES['research'], harrier_cache()
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        outputs = list(pool.map(lambda _: _get_trigger_embedding(cap, embedder), range(24)))
+    assert all(np.array_equal(v, [1., 0.]) for v in outputs)
+    path = _capability_vector_cache_path(cap, embedder)
+    with np.load(path, allow_pickle=False) as data:
+        assert np.array_equal(data['vector'], outputs[0])
+    assert list(path.parent.iterdir()) == [path]

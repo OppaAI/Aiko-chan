@@ -36,7 +36,7 @@ def _exists(path: str | None) -> bool:
     if not path:
         return False
     try:
-        return os.path.exists(path)
+        return os.path.isfile(path)
     except OSError:
         return False
 
@@ -56,7 +56,6 @@ def resolve_ca_bundle(exclude: tuple[str, ...] | list[str] = ()) -> str | None:
         value = os.getenv(var, "").strip()
         if value:
             candidates.append(value)
-            break
     try:
         import certifi
 

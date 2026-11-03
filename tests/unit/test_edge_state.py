@@ -1,10 +1,18 @@
 import importlib
 import json
 import sqlite3
+import pytest
 
 from cognition import attention
 from cognition import attention_train
 from cognition.attention import EdgeCognitiveState
+
+
+@pytest.fixture(autouse=True)
+def neutral_intent_model(monkeypatch):
+    # These tests cover the deterministic attention rules. A locally trained
+    # optional classifier must not change their trigger or expected reason.
+    monkeypatch.setattr(attention._intent_classifier, "predict", lambda _: (0.0, 0.5))
 
 
 def test_attention_module_is_singleton():

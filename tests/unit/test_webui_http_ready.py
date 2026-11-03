@@ -1,5 +1,5 @@
 """P2 regression: AikoWeb._run_http() must signal _loop_ready only after
-uvicorn's server.started fires (socket bound) — not before serve() starts —
+uvicorn's server.started becomes true (socket bound) — not before serve() starts —
 and must close the event loop on shutdown."""
 
 from __future__ import annotations
@@ -19,9 +19,8 @@ def _install_fake_uvicorn(monkeypatch):
     class FakeServer:
         def __init__(self, config):
             self.config = config
-            # asyncio.Event() binds lazily on first await (3.10+) — safe to
-            # construct here, outside the loop thread.
-            self.started = asyncio.Event()
+            # Uvicorn exposes a boolean, not an asyncio.Event.
+            self.started = False
             self._done = asyncio.Event()
             created.append(self)
 
@@ -53,7 +52,7 @@ def test_run_http_signals_ready_only_after_start(monkeypatch):
             time.sleep(0.05)
         server = created[0]
 
-        inst._loop.call_soon_threadsafe(server.started.set)
+        inst._loop.call_soon_threadsafe(setattr, server, "started", True)
         assert inst._loop_ready.wait(timeout=5), "_loop_ready never fired after started"
 
         inst._loop.call_soon_threadsafe(server._done.set)
@@ -77,7 +76,7 @@ def test_run_http_bind_failure_sets_ready_and_clears_loop(monkeypatch):
 
     class DyingServer:
         def __init__(self, config):
-            self.started = asyncio.Event()
+            self.started = False
             created.append(self)
 
         async def serve(self):

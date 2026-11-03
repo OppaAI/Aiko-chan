@@ -22,12 +22,13 @@ existing turn.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections import OrderedDict
 from pathlib import Path
 from typing import Protocol
-import hashlib
 import json
-import os
 import re
+import tempfile
+import threading
 
 import numpy as np
 
@@ -245,29 +246,34 @@ def _term_matches(text: str, term: str) -> bool:
 def _capability_text_matches(text: str, terms: tuple[str, ...]) -> bool:
     return any(_term_matches(text, term) for term in terms)
 
-_trigger_embed_cache: dict[str, np.ndarray] = {}
+_trigger_embed_cache: OrderedDict[tuple, tuple[object | None, np.ndarray]] = OrderedDict()
+_trigger_embed_cache_lock = threading.Lock()
 _TRIGGER_EMBED_CACHE_MAX = 256
-
-# On-disk tier, mirroring cognition.think._semantic_example_vectors' route
-# vector cache. Same env flag so both caches turn on/off together; give it
-# its own var (CAP_VECTOR_CACHE_ENABLED) instead if you want to toggle them
-# independently.
-_CAP_VECTOR_CACHE_DIR = Path(
-    os.environ.get("CAP_VECTOR_CACHE_DIR", "cache/capability_vectors")
-)
 
 _CAP_VECTOR_CACHE_DIR_DEFAULT = "capability_vectors"
 
 
+def _embedding_geometry(embedder: Embedder) -> tuple | None:
+    """Only the known HTTP embedder has a reproducible cross-process identity."""
+    from cognition.memory.vecstore import HarrierEmbedder, _flyal_mode
+
+    if not isinstance(embedder, HarrierEmbedder):
+        return None
+    return (type(embedder).__module__, type(embedder).__qualname__,
+            embedder.base_url, embedder.model, embedder.dims, _flyal_mode())
+
+
 def _capability_vector_cache_path(cap: Capability, embedder: Embedder) -> Path | None:
+    geometry = _embedding_geometry(embedder)
+    if geometry is None:
+        # A foreign embedder may hide model/preprocessing settings. Persisting
+        # by its class name would reuse unrelated vectors after a restart.
+        return None
     payload = {
+        "version": 2,
         "triggers": list(cap.triggers),
         "cap_id": cap.id,
-        "embedder": {
-            "class": type(embedder).__name__,
-            "model": getattr(embedder, "model", None) or getattr(embedder, "model_name", None) or getattr(embedder, "name", None),
-            "dims": os.getenv("EMBED_DIMS", ""),
-        },
+        "embedder": geometry,
     }
     return reason.cache_vector_path(
         payload,
@@ -277,38 +283,71 @@ def _capability_vector_cache_path(cap: Capability, embedder: Embedder) -> Path |
     )
 
 
+def _validated_trigger_vector(raw, embedder: Embedder) -> np.ndarray:
+    vec = np.asarray(raw, dtype=np.float32)
+    geometry = _embedding_geometry(embedder)
+    if vec.ndim != 1 or not vec.size or not np.isfinite(vec).all():
+        raise ValueError("invalid capability embedding")
+    if geometry is not None and vec.shape != (embedder.dims,):
+        raise ValueError("capability embedding dimension mismatch")
+    norm = float(np.linalg.norm(vec))
+    if not np.isfinite(norm) or norm <= 1e-12:
+        raise ValueError("invalid capability embedding norm")
+    return vec / norm
+
+
+def _remember_trigger_vector(key: tuple, embedder: Embedder, vec: np.ndarray) -> None:
+    with _trigger_embed_cache_lock:
+        # Keep foreign instances alive while their entries exist: otherwise
+        # Python may recycle an id and make an unrelated instance hit the cache.
+        owner = embedder if _embedding_geometry(embedder) is None else None
+        _trigger_embed_cache[key] = (owner, vec.copy())
+        _trigger_embed_cache.move_to_end(key)
+        while len(_trigger_embed_cache) > _TRIGGER_EMBED_CACHE_MAX:
+            _trigger_embed_cache.popitem(last=False)
+
+
 def _get_trigger_embedding(cap: Capability, embedder: Embedder) -> np.ndarray:
-    cached = _trigger_embed_cache.get(cap.id)
-    if cached is not None:
-        return cached
+    geometry = _embedding_geometry(embedder)
+    key = (cap.id, cap.triggers, geometry if geometry is not None else (id(embedder),))
+    with _trigger_embed_cache_lock:
+        cached = _trigger_embed_cache.get(key)
+        if cached is not None:
+            _trigger_embed_cache.move_to_end(key)
+            return cached[1].copy()
 
     disk_path = _capability_vector_cache_path(cap, embedder)
     if disk_path is not None and disk_path.exists():
         try:
             with disk_path.open("rb") as f:
-                data = np.load(f, allow_pickle=False)
-                vec = data["vector"]
-            if len(_trigger_embed_cache) >= _TRIGGER_EMBED_CACHE_MAX:
-                _trigger_embed_cache.pop(next(iter(_trigger_embed_cache)))
-            _trigger_embed_cache[cap.id] = vec
+                with np.load(f, allow_pickle=False) as data:
+                    vec = _validated_trigger_vector(data["vector"], embedder)
+            _remember_trigger_vector(key, embedder, vec)
             return vec
         except Exception:
             log.warning("capability: failed to load cached trigger embedding")
 
     text = " | ".join(cap.triggers)
-    vec = reason.normalize_vec(np.asarray(embedder.embed_query(text), dtype=np.float32))
+    vec = _validated_trigger_vector(embedder.embed_query(text), embedder)
 
     if disk_path is not None:
+        temporary = None
         try:
             disk_path.parent.mkdir(parents=True, exist_ok=True)
-            with disk_path.open("wb") as f:
+            with tempfile.NamedTemporaryFile(dir=disk_path.parent, suffix=".npz", delete=False) as f:
+                temporary = Path(f.name)
                 np.savez(f, vector=vec)
+            temporary.replace(disk_path)
         except Exception:
             log.warning("capability: failed to write trigger embedding cache")
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    log.warning("capability: failed to remove temporary embedding cache")
 
-    if len(_trigger_embed_cache) >= _TRIGGER_EMBED_CACHE_MAX:
-        _trigger_embed_cache.pop(next(iter(_trigger_embed_cache)))
-    _trigger_embed_cache[cap.id] = vec
+    _remember_trigger_vector(key, embedder, vec)
     return vec
 
 

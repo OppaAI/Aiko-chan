@@ -29,6 +29,20 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 - Capability embedding cache isolation, shadow CX bus leakage, zero-valued
   attention inputs, atomic coding-tool writes, and TLS CA fallback.
 
+## Area 1 progress
+
+- Memory readiness is published after the startup result is available.
+- Thinking and the returned boot result use the same memory startup decision.
+- Memory that finishes after its startup timeout is closed after cleanup.
+- Fatal cognition startup skips the optional Fly catalog warmup.
+- Shutdown continues remaining cleanup when an individual subsystem fails.
+- Proactive check-in failures clear the active-session marker.
+- Session shutdown requests scheduler stop before draining memory writes and
+  detaches the stopped scheduler from the notification registry. In-flight jobs
+  are not forcibly cancelled.
+- Version remains 0.2.0. Jetson Orin Nano 8 GB performance measurements and the
+  remaining lifecycle and duplication review are still pending.
+
 The latest full run completed with 2,095 unit tests and 30 integration tests
 passing. These results are a baseline for the systematic review, not a claim
 that the repository has no remaining bugs.

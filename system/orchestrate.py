@@ -1364,6 +1364,8 @@ def run_session(ui, args) -> None:
                 log.exception("Failed to stop %s", label)
 
         cleanup("proactive runner", proactive.stop)
+        from system.schedule import stop_scheduler
+        cleanup("scheduler", stop_scheduler)
         for adapter in background_adapters:
             try:
                 adapter.stop()

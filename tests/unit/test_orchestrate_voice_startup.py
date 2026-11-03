@@ -7,9 +7,11 @@ from unittest.mock import MagicMock
 import pytest
 
 
-def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flush=None):
+def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flush=None, scheduler_stop=None):
     import system.orchestrate as orchestrate
     import system.wakeup as wakeup
+    import system.schedule as schedule
+    monkeypatch.setattr(schedule, "stop_scheduler", scheduler_stop or (lambda: None))
 
     messages = []
     backends = []
@@ -48,6 +50,14 @@ def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flus
 
     orchestrate.run_session(ui, SimpleNamespace(text=True, no_asr=True, debug=False, cli=True))
     return ui, messages, backends
+
+
+def test_shutdown_requests_scheduler_stop_before_memory_flush(monkeypatch):
+    events = []
+    _run_commands(monkeypatch, ["/quit"],
+                  scheduler_stop=lambda: events.append("scheduler"),
+                  memory_flush=lambda: events.append("memory"))
+    assert events == ["scheduler", "memory"]
 
 
 def test_shutdown_flushes_memory_even_if_listen_stop_fails(monkeypatch):

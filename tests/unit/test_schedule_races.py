@@ -5,6 +5,18 @@ from types import ModuleType
 import sys
 
 
+def test_stop_scheduler_detaches_stopped_runner(monkeypatch):
+    from types import SimpleNamespace
+    import system.schedule as schedule
+    stopped = []
+    runner = SimpleNamespace(stop=lambda: stopped.append(True))
+    monkeypatch.setattr(schedule, "_scheduler_instance", runner)
+    schedule.stop_scheduler()
+    schedule.stop_scheduler()
+    assert stopped == [True]
+    assert schedule._scheduler_instance is None
+
+
 class _Memorize:
     def __init__(self) -> None:
         self.user_id = "github_alice"

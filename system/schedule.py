@@ -1780,6 +1780,19 @@ def register_scheduler(scheduler: ScheduleRunner) -> None:
     _scheduler_instance = scheduler
 
 
+def stop_scheduler() -> None:
+    """Request that the registered scheduler stop, then detach it.
+
+    This stops future polling; it does not forcibly cancel an in-flight job.
+    """
+    global _scheduler_instance
+    scheduler = _scheduler_instance
+    if scheduler is not None:
+        scheduler.stop()
+        if _scheduler_instance is scheduler:
+            _scheduler_instance = None
+
+
 
 def notify_scheduler_new_job() -> None:
     """Notify the scheduler that a new job was added, so it wakes early to pick it up."""

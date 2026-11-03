@@ -53,6 +53,8 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
   workers through start().
 - Owner assignment is atomic, and owner resolution cannot launch catch-up
   workers after shutdown, including when shutdown arrives during its scan.
+- Daily catch-up checks shutdown after acquiring the turn gate and retains
+  pending dates when stopped or when switching memory users fails.
 - The RSS fallback no longer opens an unused proc file, and regression coverage
   checks conversion with a 64 KB system page size.
 - Version remains 0.2.0. Jetson Orin Nano 8 GB performance measurements and the

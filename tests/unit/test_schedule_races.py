@@ -5,6 +5,39 @@ from types import ModuleType
 import sys
 
 
+def test_catchup_preserves_dates_when_stopped_waiting_for_gate(monkeypatch):
+    import system.schedule as schedule
+    monkeypatch.setattr(schedule.ScheduleRunner, "_missing_reflection_dates", lambda self: [])
+    monkeypatch.setattr(schedule.ScheduleRunner, "_monthly_catchup_needed", lambda self: False)
+    runner = schedule.ScheduleRunner(user_id="github_alice")
+    dates = [datetime.now(timezone.utc)]
+    runner._catchup_dates = dates.copy()
+    releases = []
+    def acquire(**kwargs):
+        runner.stop()
+        return True
+    monkeypatch.setattr(schedule, "acquire_busy", acquire)
+    monkeypatch.setattr(schedule, "release_busy", lambda: releases.append(True))
+    runner._run_catchup_backfill()
+    assert runner._catchup_dates == dates
+    assert releases == [True]
+
+
+def test_catchup_preserves_date_after_memory_switch_failure(monkeypatch):
+    from types import SimpleNamespace
+    import system.schedule as schedule
+    monkeypatch.setattr(schedule.ScheduleRunner, "_missing_reflection_dates", lambda self: [])
+    monkeypatch.setattr(schedule.ScheduleRunner, "_monthly_catchup_needed", lambda self: False)
+    runner = schedule.ScheduleRunner(user_id="github_alice")
+    runner._memorize = SimpleNamespace(switch_user=lambda uid: False)
+    dates = [datetime.now(timezone.utc)]
+    runner._catchup_dates = dates.copy()
+    monkeypatch.setattr(schedule, "acquire_busy", lambda **kw: True)
+    monkeypatch.setattr(schedule, "release_busy", lambda: None)
+    runner._run_catchup_backfill()
+    assert runner._catchup_dates == dates
+
+
 def test_owner_resolution_cannot_start_workers_after_stop(monkeypatch):
     import system.schedule as schedule
     runner = schedule.ScheduleRunner(user_id="guest", memorize=object(),

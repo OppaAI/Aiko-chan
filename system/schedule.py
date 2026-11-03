@@ -2410,30 +2410,26 @@ class ScheduleRunner:
         """Sequentially backfill every date found missing by
         _missing_reflection_dates(), oldest first.
 
-        Can potentially run concurrently on two threads — the startup
-        catch-up thread from start(), and a late one from
-        _promote_owner() if the owner resolves mid-backfill. Guard against
-        a duplicate post for the same date two ways: pop dates off the
-        shared self._catchup_dates list one at a time (so a date claimed
-        by one thread isn't also picked up by the other), and re-check
-        _reflection_post_exists() immediately before firing (the
-        underlying operation is idempotent by design, so this is a
-        belt-and-suspenders check against any window between the pop and
-        the fire).
+        Startup and owner resolution can both launch a worker. The catch-up
+        lock admits only one; the reflection runner also rechecks post
+        existence. Consume a date only after the turn gate and owner memory
+        are ready, preserving pending dates on shutdown or a failed switch.
         """
         if not self._catchup_lock.acquire(blocking=False):
             log.info("Scheduler: daily catch-up already running — skipping duplicate worker.")
             return
         try:
-            while self._catchup_dates:
+            while self._catchup_dates and not self._stop.is_set():
                 if not acquire_busy(owner="scheduler:daily-catchup"):
                     log.error(
                         "Scheduler: skipping daily catch-up — %s",
                         holder_desc())
                     return
                 try:
+                    if self._stop.is_set():
+                        return
                     try:
-                        date = self._catchup_dates.pop(0)
+                        date = self._catchup_dates[0]
                     except IndexError:
                         break
                     uid = self._resolve_owner()
@@ -2446,6 +2442,7 @@ class ScheduleRunner:
                             if not self._memorize.switch_user(uid):
                                 log.warning("schedule: daily reflect skipped — memory switch failed.")
                                 return
+                        self._catchup_dates.pop(0)
                         self._run_daily_reflect_and_dream(for_date=date)
                     finally:
                         reset_current_user_id(token)

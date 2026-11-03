@@ -5,6 +5,26 @@ from types import ModuleType
 import sys
 
 
+def test_guest_boot_defers_catchup_checks_until_owner_resolution(monkeypatch):
+    import system.schedule as schedule
+    checks = []
+    def missing(runner):
+        checks.append(("daily", runner._owner_user_id))
+        return []
+    def monthly(runner):
+        checks.append(("monthly", runner._owner_user_id))
+        return False
+    monkeypatch.setattr(schedule.ScheduleRunner, "_missing_reflection_dates", missing)
+    monkeypatch.setattr(schedule.ScheduleRunner, "_monthly_catchup_needed", monthly)
+    runner = schedule.ScheduleRunner(user_id="guest")
+    assert checks == []
+    assert runner._catchup_dates == []
+    assert runner._monthly_catchup_needed_flag is False
+    runner.set_owner("github_alice")
+    runner.set_owner("github_bob")
+    assert checks == [("daily", "github_alice"), ("monthly", "github_alice")]
+
+
 def test_stop_scheduler_detaches_stopped_runner(monkeypatch):
     from types import SimpleNamespace
     import system.schedule as schedule

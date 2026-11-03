@@ -44,6 +44,8 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 - Session shutdown requests scheduler stop before draining memory writes and
   detaches the stopped scheduler from the notification registry. In-flight jobs
   are not forcibly cancelled.
+- Guest scheduler startup defers reflection and consolidation catch-up checks
+  until a real owner is resolved, avoiding redundant checks against guest state.
 - Version remains 0.2.0. Jetson Orin Nano 8 GB performance measurements and the
   remaining lifecycle and duplication review are still pending.
 

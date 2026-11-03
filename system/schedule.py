@@ -2046,14 +2046,11 @@ class ScheduleRunner:
         self._next_monthly_verify = _next_monthly_verify()
         self._next_fly_replay = _next_fly_replay()
 
-        # catch-up state — checked on start(). NOTE: if _owner_user_id is
-        # still "guest" at this point (pre-auth boot), the monthly check
-        # below reads guest's (nonexistent/irrelevant) state file. That's
-        # fine — _promote_owner() recomputes both flags and re-fires
-        # catch-up as soon as a real owner is known, so nothing is lost,
-        # just deferred. See _promote_owner().
-        self._catchup_dates = self._missing_reflection_dates()
-        self._monthly_catchup_needed_flag = self._monthly_catchup_needed()
+        # Guest boot has no owner to backfill for. Avoid network reflection
+        # scans and guest consolidation state reads; owner promotion performs
+        # both checks once a real identity is available.
+        self._catchup_dates = self._missing_reflection_dates() if self._owner_promoted.is_set() else []
+        self._monthly_catchup_needed_flag = self._monthly_catchup_needed() if self._owner_promoted.is_set() else False
 
     # ── daily catch-up ────────────────────────────────────────────────────────
 

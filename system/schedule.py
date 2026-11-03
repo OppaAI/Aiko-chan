@@ -2053,6 +2053,8 @@ class ScheduleRunner:
         # both checks once a real identity is available.
         self._catchup_dates = self._missing_reflection_dates() if self._owner_promoted.is_set() else []
         self._monthly_catchup_needed_flag = self._monthly_catchup_needed() if self._owner_promoted.is_set() else False
+        self._catchup_ready = self._owner_promoted.is_set()
+        self._catchup_started = False
 
     # ── daily catch-up ────────────────────────────────────────────────────────
 
@@ -2172,24 +2174,8 @@ class ScheduleRunner:
         with self._lifecycle_lock:
             if self._stop.is_set():
                 return
-            if self._owner_promoted.is_set() and self._catchup_dates and self._memorize and self._generate_and_post_fn:
-                log.info(
-                    "Scheduler: running %d missed daily reflect+dream job(s) after owner resolution.",
-                    len(self._catchup_dates),
-                )
-                threading.Thread(
-                    target=self._run_catchup_backfill,
-                    name="aiko-schedule-catchup-late",
-                    daemon=True,
-                ).start()
-
-            if self._monthly_catchup_needed_flag and self._memorize and self._consolidate_fn:
-                log.info("Scheduler: running missed monthly_consolidate after owner resolution.")
-                threading.Thread(
-                    target=self._run_monthly_consolidate,
-                    name="aiko-schedule-monthly-catchup-late",
-                    daemon=True,
-                ).start()
+            self._catchup_ready = True
+            self._launch_catchup_locked()
 
             self.notify_new_job()
 
@@ -2212,26 +2198,19 @@ class ScheduleRunner:
                 DAILY_JOB_HOUR, DAILY_JOB_MINUTE,
                 MONTHLY_JOB_HOUR, MONTHLY_JOB_MINUTE,
             )
-            if self._catchup_dates and self._memorize and self._generate_and_post_fn:
-                log.info(
-                    "Scheduler: running %d missed daily reflect+dream job(s) on startup.",
-                    len(self._catchup_dates),
-                )
-                catchup_thread = threading.Thread(
-                    target=self._run_catchup_backfill,
-                    name="aiko-schedule-catchup",
-                    daemon=True,
-                )
-                catchup_thread.start()
+            self._launch_catchup_locked()
 
-            if self._monthly_catchup_needed_flag and self._memorize and self._consolidate_fn:
-                log.info("Scheduler: running missed monthly_consolidate on startup.")
-                monthly_catchup_thread = threading.Thread(
-                    target=self._run_monthly_consolidate,
-                    name="aiko-schedule-monthly-catchup",
-                    daemon=True,
-                )
-                monthly_catchup_thread.start()
+    def _launch_catchup_locked(self) -> None:
+        """Launch startup catch-up once; caller holds the lifecycle lock."""
+        if self._stop.is_set() or not self._catchup_ready or self._catchup_started:
+            return
+        self._catchup_started = True
+        if self._catchup_dates and self._memorize and self._generate_and_post_fn:
+            threading.Thread(target=self._run_catchup_backfill,
+                             name="aiko-schedule-catchup", daemon=True).start()
+        if self._monthly_catchup_needed_flag and self._memorize and self._consolidate_fn:
+            threading.Thread(target=self._run_monthly_consolidate,
+                             name="aiko-schedule-monthly-catchup", daemon=True).start()
 
     def stop(self) -> None:
         """Request shutdown; a stopped runner must be replaced, not restarted."""

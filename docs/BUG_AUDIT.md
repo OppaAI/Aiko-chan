@@ -53,6 +53,8 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
   workers through start().
 - Owner assignment is atomic, and owner resolution cannot launch catch-up
   workers after shutdown, including when shutdown arrives during its scan.
+- Startup and owner resolution share one guarded catch-up launch path,
+  preventing duplicate workers regardless of which happens first.
 - Daily catch-up checks shutdown after acquiring the turn gate and retains
   pending dates when stopped or when switching memory users fails.
 - Monthly catch-up acquires the shared turn gate, binds the owner's memory

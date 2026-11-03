@@ -6,6 +6,28 @@ import sys
 import pytest
 
 
+@pytest.mark.parametrize("start_before_owner", [False, True])
+def test_startup_and_owner_resolution_launch_catchup_once(monkeypatch, start_before_owner):
+    from types import SimpleNamespace
+    import system.schedule as schedule
+    runner = schedule.ScheduleRunner(user_id="guest", memorize=object(),
+                                     generate_and_post_fn=lambda: None, consolidate_fn=lambda: None)
+    monkeypatch.setattr(schedule.ScheduleRunner, "_missing_reflection_dates", lambda self: [datetime.now(timezone.utc)])
+    monkeypatch.setattr(schedule.ScheduleRunner, "_monthly_catchup_needed", lambda self: True)
+    launched = []
+    def thread(**kwargs):
+        return SimpleNamespace(start=lambda: launched.append(kwargs["name"]), is_alive=lambda: True)
+    monkeypatch.setattr(schedule.threading, "Thread", thread)
+    if start_before_owner:
+        runner.start()
+    runner.set_owner("github_alice")
+    runner.start()
+    runner.start()
+    assert launched.count("aiko-schedule") == 1
+    assert launched.count("aiko-schedule-catchup") == 1
+    assert launched.count("aiko-schedule-monthly-catchup") == 1
+
+
 @pytest.mark.parametrize("kind", ["system", "user"])
 def test_dispatch_does_not_start_jobs_after_shutdown_during_gate_wait(monkeypatch, kind):
     import system.schedule as schedule

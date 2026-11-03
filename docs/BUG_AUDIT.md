@@ -37,6 +37,9 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 - Fatal cognition startup skips the optional Fly catalog warmup.
 - Fatal cognition startup also bypasses the optional MCP bridge wait, avoiding
   up to 120 seconds of delay before reporting the failure to the supervisor.
+- Scheduler startup occurs after speech/listening configuration, so overdue
+  jobs cannot use partially wired backends and wiring failures do not leave
+  a newly started scheduler running.
 - Transition from startup to chat uses a bounded spinner join so a stalled
   UI spinner cannot prevent the input loop from starting.
 - Shutdown continues remaining cleanup when an individual subsystem fails.

@@ -368,6 +368,28 @@ class TestCallbackContract:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestFailurePaths:
+    def test_scheduler_starts_after_backend_configuration(self, monkeypatch):
+        _patch_common(monkeypatch)
+        events = []
+        def scheduler(**kwargs):
+            assert kwargs["think"]._speak is None
+            events.append("scheduler")
+        monkeypatch.setattr(wakeup_module, "start_scheduler", scheduler)
+        AikoWakeup().boot(_noop, lambda key: events.append(key), _noop,
+                          enable_tts=False, enable_asr=False)
+        assert events.index("listen_skip") < events.index("scheduler")
+
+    def test_speech_wiring_failure_does_not_start_scheduler(self, monkeypatch):
+        class BrokenWiring(FakeThink):
+            def set_speak(self, speak):
+                raise RuntimeError("speech wiring failed")
+        _patch_common(monkeypatch, think_cls=BrokenWiring)
+        starts = []
+        monkeypatch.setattr(wakeup_module, "start_scheduler", lambda **kw: starts.append(True))
+        with pytest.raises(RuntimeError, match="speech wiring failed"):
+            AikoWakeup().boot(_noop, _noop, _noop, enable_tts=False, enable_asr=False)
+        assert starts == []
+
     def test_fatal_cognition_failure_does_not_wait_for_optional_mcp(self, monkeypatch):
         import agentic.mcp_client.bridge as bridge
         started = threading.Event()

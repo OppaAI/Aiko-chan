@@ -41,20 +41,17 @@ Flow:
     └───────────┬──────────────┘             │
                 └───────────┬────────────────┘
                             ▼
-                  join both threads
+                  collect thinking result (bounded wait)
                   (raise if think failed; memorize None is OK)
                             │
                             ▼
                   construct speak (not yet wired to think)
                             │
                             ▼
-                  hand off scheduler startup to system.schedule
-                            │
-                            ▼
                   voice pipeline (TTS warmup → think.set_speak(speak) → construct AikoListen)
                             │
                             ▼
-                  return BootResult
+                  start scheduler, then return BootResult
                   (semantic route/capability cache prewarming deferred to post-auth)
 
 - Parallel phase — init_think and init_memorize run on separate threads at the same time.
@@ -65,11 +62,11 @@ Flow:
   learner (no-ops if memory is None) before returning.
 - The memory worker signals mem_ready_evt after publishing its result, including
   failures, so the thinking thread can consume it without an unbounded wait.
-- Join point — main thread waits for both think_future/mem_future to finish.
+- Join point — main thread collects thinking and its selected memory backend.
 - speak is constructed right after the join, but not wired into think until the voice
   stack is ready.
-- Wakeup then hands the live refs to `system.schedule.start_scheduler()`, which owns
-  the scheduler thread and all seeded jobs.
+- After voice configuration, wakeup hands the live refs to
+  `system.schedule.start_scheduler()`, which owns the scheduler thread and seeded jobs.
 - Voice pipeline (sequential) — TTS warmup, then think_ref.set_speak(speak) (or None),
   then AikoListen() is constructed (non-fatal). ASR/VAD models load lazily on first
   mic arm via AikoListen.ensure_ready() — not part of boot. Under --text /
@@ -471,14 +468,6 @@ class AikoWakeup:
                 log.exception("[wakeup] AikoSpeak construction failed — Aiko will run without voice output.")  # log failure
                 speak = None                                                                      # set to None to indicate failure
 
-        # Wakeup now only bootstraps the live subsystems and hands them to
-        # system.schedule's scheduler startup helper.
-        start_scheduler(
-            on_due=think_ref.handle_scheduled_job,
-            memorize=memorize,
-            think=think_ref,
-        )
-
         # ── voice subsystems ──────────────────────────────────────────────────
 
         # TTS — non-fatal: Aiko can run text-only if this fails. Gated on speak
@@ -509,6 +498,13 @@ class AikoWakeup:
         else:
             _boot_step('listen_skip')                                                            # report the --text/--no-asr skip in boot progress
             log.info("[wakeup] ASR skipped at boot (--text/--no-asr); /listen starts it on demand.")
+
+        # Start jobs only after the live subsystems have been configured.
+        start_scheduler(
+            on_due=think_ref.handle_scheduled_job,
+            memorize=memorize,
+            think=think_ref,
+        )
 
         return BootResult(                                                                        # all four subsystem references
             think    = think_ref,                                                                 # cognitive core (always live; fatal if None)

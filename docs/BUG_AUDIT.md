@@ -40,6 +40,8 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 - Transition from startup to chat uses a bounded spinner join so a stalled
   UI spinner cannot prevent the input loop from starting.
 - Shutdown continues remaining cleanup when an individual subsystem fails.
+- A shared setup guard stops the startup spinner even when frontend wiring
+  raises before the session input loop begins.
 - A single session-loop cleanup guard covers normal returns, input failures,
   command failures, and turn exceptions, while preserving error propagation.
 - Proactive check-in failures clear the active-session marker.

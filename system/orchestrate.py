@@ -1069,29 +1069,29 @@ def run_session(ui, args) -> None:
 
     # Wire the brain tracer to the UI sink so per-step traces stream into
     # the WebUI / CLI as sys lines. Cheap when TRACE_BRAIN is off.
-    _brain_trace.set_ui_sink(ui)
-    _brain_trace.begin_turn("boot")  # banner
-    _brain_trace.record_step(
-        "session.boot",
-        layer="preflight",
-        inputs={"args": {"debug": args.debug, "text": args.text, "cli": args.cli}},
-        outputs={"ui": type(ui).__name__},
-        factors=["boot via main.py", "ui constructed", "subsystems to be booted next"],
-    )
-    _brain_trace.end_turn()
+    try:
+        _brain_trace.set_ui_sink(ui)
+        _brain_trace.begin_turn("boot")  # banner
+        _brain_trace.record_step(
+            "session.boot",
+            layer="preflight",
+            inputs={"args": {"debug": args.debug, "text": args.text, "cli": args.cli}},
+            outputs={"ui": type(ui).__name__},
+            factors=["boot via main.py", "ui constructed", "subsystems to be booted next"],
+        )
+        _brain_trace.end_turn()
 
-    # ── boot all subsystems via wakeup ────────────────────────────────────────
-    # The spinner is daemon, but stop it on boot failure too — otherwise it
-    # loops to process exit churning the UI while the traceback prints.
-    #
-    # The WebUI front end already booted before its servers started (so
-    # browsers never see a half-booted Aiko) — reuse that BootResult instead
-    # of booting a second time. The old double boot also left a zombie
-    # scheduler thread behind (each boot's ScheduleRunner kept ticking).
-    result = getattr(ui, "_boot_result", None)
-    fresh_boot = result is None
-    if result is None:
-        try:
+        # ── boot all subsystems via wakeup ────────────────────────────────────────
+        # The spinner is daemon, but stop it on boot failure too — otherwise it
+        # loops to process exit churning the UI while the traceback prints.
+        #
+        # The WebUI front end already booted before its servers started (so
+        # browsers never see a half-booted Aiko) — reuse that BootResult instead
+        # of booting a second time. The old double boot also left a zombie
+        # scheduler thread behind (each boot's ScheduleRunner kept ticking).
+        result = getattr(ui, "_boot_result", None)
+        fresh_boot = result is None
+        if result is None:
             result = AikoWakeup().boot(
                 on_loading = ui.step_loading,
                 on_done    = ui.step_done,
@@ -1099,87 +1099,85 @@ def run_session(ui, args) -> None:
                 enable_tts = not getattr(args, "text", False),
                 enable_asr = not getattr(args, "no_asr", False),
             )
-        except BaseException:
-            spin_stop.set()
-            spin_t.join(timeout=2.0)
-            raise
-    else:
-        log.info("[run_session] reusing front-end boot result — skipping second boot")
+        else:
+            log.info("[run_session] reusing front-end boot result — skipping second boot")
 
-    think    = result.think
-    memorize = result.memorize
-    speak    = result.speak
-    listen   = result.listen
+        think    = result.think
+        memorize = result.memorize
+        speak    = result.speak
+        listen   = result.listen
 
-    # CLI boots straight into a real uid (no post-login hook like the
-    # WebUI), so without this the first turn pays the cold-cache embed
-    # cost. Fire-and-forget daemon thread — never blocks the loop.
-    if fresh_boot and think is not None and memorize is not None:
+        # CLI boots straight into a real uid (no post-login hook like the
+        # WebUI), so without this the first turn pays the cold-cache embed
+        # cost. Fire-and-forget daemon thread — never blocks the loop.
+        if fresh_boot and think is not None and memorize is not None:
+            try:
+                from system.userspace import current_user_id
+                if current_user_id() != "guest":
+                    def _cli_prewarm() -> None:
+                        try:
+                            think.prewarm_caches()
+                        except Exception:
+                            log.debug("CLI cache prewarm failed", exc_info=True)
+                    threading.Thread(target=_cli_prewarm, name="cli-prewarm", daemon=True).start()
+            except Exception:
+                log.debug("CLI cache prewarm scheduling failed", exc_info=True)
+
+        if hasattr(ui, "set_voice_backends"):
+            ui.set_voice_backends(speak, listen)
+
+        if hasattr(ui, "set_think"):
+            ui.set_think(think)
+
+        if memorize is not None and hasattr(ui, "set_memorize"):
+            ui.set_memorize(memorize)
+
+        # Social reply daemons started pre-boot with no memory handle — inject
+        # the live one now so their replies gain long-term recall + saving.
         try:
-            from system.userspace import current_user_id
-            if current_user_id() != "guest":
-                def _cli_prewarm() -> None:
-                    try:
-                        think.prewarm_caches()
-                    except Exception:
-                        log.debug("CLI cache prewarm failed", exc_info=True)
-                threading.Thread(target=_cli_prewarm, name="cli-prewarm", daemon=True).start()
+            from interface.mcp_server.social.monitor_daemon import set_shared_memorize
+            set_shared_memorize(memorize)
         except Exception:
-            log.debug("CLI cache prewarm scheduling failed", exc_info=True)
+            log.debug("Social monitor daemon memory injection skipped", exc_info=True)
 
-    if hasattr(ui, "set_voice_backends"):
-        ui.set_voice_backends(speak, listen)
+        # If a browser already authenticated while boot was running, its connect-
+        # time seeding deferred itself (subsystem refs weren't ready yet) — run
+        # the post-login hook now that think/memorize/scheduler are all live.
+        if hasattr(ui, "_on_user_active"):
+            authed_uid = getattr(ui, "_authenticated_uid", None)
+            if authed_uid:
+                ui._on_user_active(authed_uid)
 
-    if hasattr(ui, "set_think"):
-        ui.set_think(think)
+        if memorize is None:
+            ui.add_message('sys', '⚠️ Memory backend failed to load — check logs. Running without persistent memory this session.')
 
-    if memorize is not None and hasattr(ui, "set_memorize"):
-        ui.set_memorize(memorize)
+        background_adapters = []
+        if think is not None:
+            try:
+                from interface.adapter import start_background_adapters
+                background_adapters = start_background_adapters(think, memorize)
+            except Exception:
+                log.exception("Failed to start background messenger adapters.")
 
-    # Social reply daemons started pre-boot with no memory handle — inject
-    # the live one now so their replies gain long-term recall + saving.
-    try:
-        from interface.mcp_server.social.monitor_daemon import set_shared_memorize
-        set_shared_memorize(memorize)
-    except Exception:
-        log.debug("Social monitor daemon memory injection skipped", exc_info=True)
+        def _wire_speak_sink(s) -> None:
+            """Attach the WebUI remote-audio sink to a (possibly lazily started) speak backend."""
+            if s and hasattr(ui, "broadcast_audio_bytes"):
+                s.set_audio_sink(ui.broadcast_audio_bytes)
+                if hasattr(ui, "set_viseme"):
+                    s.set_viseme_sink(ui.set_viseme)
+                if os.getenv("WEBUI_LOCAL_PLAYBACK", "1").lower() in {"0", "false", "no", "off"}:
+                    s.local_playback = False
 
-    # If a browser already authenticated while boot was running, its connect-
-    # time seeding deferred itself (subsystem refs weren't ready yet) — run
-    # the post-login hook now that think/memorize/scheduler are all live.
-    if hasattr(ui, "_on_user_active"):
-        authed_uid = getattr(ui, "_authenticated_uid", None)
-        if authed_uid:
-            ui._on_user_active(authed_uid)
+        _wire_speak_sink(speak)
 
-    if memorize is None:
-        ui.add_message('sys', '⚠️ Memory backend failed to load — check logs. Running without persistent memory this session.')
-
-    background_adapters = []
-    if think is not None:
-        try:
-            from interface.adapter import start_background_adapters
-            background_adapters = start_background_adapters(think, memorize)
-        except Exception:
-            log.exception("Failed to start background messenger adapters.")
-
-    def _wire_speak_sink(s) -> None:
-        """Attach the WebUI remote-audio sink to a (possibly lazily started) speak backend."""
-        if s and hasattr(ui, "broadcast_audio_bytes"):
-            s.set_audio_sink(ui.broadcast_audio_bytes)
-            if hasattr(ui, "set_viseme"):
-                s.set_viseme_sink(ui.set_viseme)
-            if os.getenv("WEBUI_LOCAL_PLAYBACK", "1").lower() in {"0", "false", "no", "off"}:
-                s.local_playback = False
-
-    _wire_speak_sink(speak)
+    finally:
+        spin_stop.set()
+        spin_t.join(timeout=2.0)
+        if spin_t.is_alive():
+            log.warning("Startup spinner did not stop within 2s; continuing without waiting for it.")
 
     # ── transition to chat ────────────────────────────────────────────────────
 
-    spin_stop.set()
-    spin_t.join(timeout=2.0)
-    if spin_t.is_alive():
-        log.warning("Startup spinner did not stop within 2s; continuing without waiting for it.")
     ui.status_finish()
     ui._draw()
 

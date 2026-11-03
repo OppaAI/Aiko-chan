@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 
-def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flush=None, scheduler_stop=None, memory=None, reset_context=None, spin_loop=None):
+def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flush=None, scheduler_stop=None, memory=None, reset_context=None, spin_loop=None, wire_backends=None):
     import system.orchestrate as orchestrate
     import system.wakeup as wakeup
     import system.schedule as schedule
@@ -32,7 +32,7 @@ def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flus
         _spin_loop=spin_loop or (lambda stop: stop.wait()),
         _stats={},
         add_message=lambda role, text: messages.append(text),
-        set_voice_backends=lambda output, input_backend: backends.append((output, input_backend)),
+        set_voice_backends=wire_backends or (lambda output, input_backend: backends.append((output, input_backend))),
         status_finish=lambda: None,
         _draw=lambda **kwargs: None,
         get_input=get_input,
@@ -56,6 +56,19 @@ def _run_commands(monkeypatch, commands, *, speak=None, listen=None, memory_flus
 
     orchestrate.run_session(ui, SimpleNamespace(text=True, no_asr=True, debug=False, cli=True))
     return ui, messages, backends
+
+
+def test_setup_failure_stops_startup_spinner(monkeypatch):
+    import threading
+    finished = threading.Event()
+    def spin(stop):
+        if stop.wait(3):
+            finished.set()
+    def fail_wiring(*args):
+        raise RuntimeError("frontend wiring failed")
+    with pytest.raises(RuntimeError, match="frontend wiring failed"):
+        _run_commands(monkeypatch, [], spin_loop=spin, wire_backends=fail_wiring)
+    assert finished.is_set()
 
 
 def test_stalled_startup_spinner_does_not_prevent_chat(monkeypatch):

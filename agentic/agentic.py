@@ -1,0 +1,2838 @@
+"""
+agentic/agentic.py
+
+Aiko's task-mode loop: tool schemas, ReAct-style dispatch, and final response
+handling. Pure tool implementations stay in agentic/toolkit/; chat facade, TTS,
+history, and memory queue ownership stay in cognition/think.py.
+
+Context fetch shape:
+  Memory + knowledge-base (KB) are intent-agnostic — cognition.think.route()
+  fetches both before dispatching to agentic (or run_agentic_chat fetches
+  them directly when called standalone, e.g. a scheduled job with no prior
+  route() call). The task-start future is bounded by AGENT_MEMKB_TIMEOUT.
+
+  Wiki, skill, policy, and experience blocks are NEVER injected upfront.
+  Discovery follows a ladder: (1) a matching validated DAG via
+  run_schema_agent, (2) a similar successful experience via
+  _similar_successful_experience, (3) otherwise plain ReAct. The loop pulls
+  wiki/skills/experience explicitly with the retrieve_context and load_skill
+  tools when it needs them.
+"""
+
+from __future__ import annotations
+
+import concurrent.futures
+import contextvars
+import inspect
+from collections import OrderedDict
+import json
+import math
+import os
+import re
+import threading
+import time
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import numpy as np
+
+from system.log import get_logger
+from system import bioclock
+from system.userspace import current_user_id, user_state_dir, user_workspace_root
+from cognition import reason
+from cognition import CONTEXT_POOL
+from agentic.skills import search_skillsets_json
+from agentic.capability import match_capabilities, filtered_tool_schemas, resolve_handoff
+from agentic.guardrails import DEFAULT_POST_ANSWER_GUARDRAILS, default_pre_tool_guardrails
+from cognition.knowledge import knowledge_context_for, ingest_text as ingest_knowledge_text, ingest_file as ingest_knowledge_file
+from agentic import experience, skill_learning
+from agentic import graph_engine as schema
+from agentic.needle import NeedleClient, NeedleError, NeedleLowConfidence
+from agentic.needle_orchestrator import NeedleOrchestrator, load_needle_workers
+from agentic.tools import (
+    adaptive_search,
+    deep_research,
+    deep_read,
+    make_plan,
+    create_checklist,
+    save_note,
+    read_workspace_file,
+    summarize_task_state,
+    schedule_job,
+    list_schedule,
+    cancel_schedule,
+    schedule_reminder,
+    list_reminders,
+    cancel_reminder,
+    scan_photo_workspace,
+    propose_photo_ingestion,
+    write_photo_ingestion_report,
+    repo_file_tree,
+    repo_read_file,
+    repo_search_text,
+    write_report,
+    search_jobs,
+    draft_job_post_social,
+    post_job_post_social,
+    draft_photo_social,
+    post_photo_social,
+    draft_video_social,
+    post_video_social,
+)
+
+log = get_logger(__name__)
+
+MAX_AGENT_ITER = int(os.getenv("MAX_AGENT_ITER", 8))
+AGENT_MAX_TOKENS = int(os.getenv("AGENT_MAX_TOKENS", os.getenv("LLM_MAX_TOKENS", 512)))
+LLM_CTX_SIZE = int(os.getenv("LLM_CTX_SIZE", 10240))
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", 120))
+AGENT_CONTEXT_BUDGET_RATIO = float(os.getenv("AGENT_CONTEXT_BUDGET_RATIO", 0.65))
+# Share of the context window the *assembled request* may occupy, leaving room
+# for the completion and the server's own chat-template overhead. The system-prompt
+# budget above governs one block group; this governs the whole payload actually
+# sent, which is what actually 400s when the ReAct loop grows.
+AGENT_REQUEST_BUDGET_RATIO = float(os.getenv("AGENT_REQUEST_BUDGET_RATIO", 0.80))
+# AGENT_MEMORY_DRAIN_TIMEOUT and AGENT_MEMORY_RECALL_LIMIT removed:
+#   - Draining removed: the async write's own idle-grace window
+#     (MEMORY_WRITE_IDLE_GRACE in memorize.py) plus real agentic turn
+#     latency (multi-iteration tool loop) meant a queued write was either
+#     not started yet or already finished by the time the next turn's
+#     search() ran — a short drain wait never caught anything real.
+#   - Recall limit removed: memory (and KB) fetch now happens once,
+#     centrally, in cognition.think._fetch_memory_and_knowledge, shared by all
+#     three chat paths (see MEMORY_RECALL_LIMIT / KNOWLEDGE_RECALL_LIMIT in
+#     cognition.think). Agentic no longer owns a separate limit knob for the
+#     same data.
+AGENT_NOTE_MAX_CHARS = int(os.getenv("AGENT_NOTE_MAX_CHARS", 5000))
+AGENT_TOOL_RESULT_MAX_CHARS = int(os.getenv("AGENT_TOOL_RESULT_MAX_CHARS", 8000))
+# Scheduled ticks (self-coding loops and friends) resume from on-disk
+# checkpoints, so their conversation state does not need to survive in the
+# prompt. A tighter per-tool-result cap keeps a 6-iteration ReAct loop inside a
+# 10k window without touching n_ctx.
+AGENT_TICK_TOOL_RESULT_MAX_CHARS = int(os.getenv("AGENT_TICK_TOOL_RESULT_MAX_CHARS", "3000"))
+# Token estimator divisor: chars-per-token used by every agentic context
+# guard. The old default (4) is accurate for prose but optimistic for code,
+# test logs, and tracebacks (typically 3-3.5), which let requests sail past
+# the guards and 400 at the server. 3 is conservative for code-heavy ticks;
+# interactive chat may trim slightly more aggressively as a result.
+AGENT_TOKEN_ESTIMATE_DIVISOR = int(os.getenv("AGENT_TOKEN_ESTIMATE_DIVISOR", "3"))
+# Lean worker profile for autonomous coding ticks (10k/16k windows).
+# A coding worker carries no persona, memory, or RAG — just the task and
+# coding tools. Fixed overhead drops from ~4-6k tokens to ~1k, leaving the
+# window for actual think-act-observe cycles instead of overhead.
+WORKER_TOOLS = frozenset({
+    "repo_read_file",
+    "repo_search_text",
+    "codebase_search",
+    "code_apply_patch",
+    "repo_write_file",
+    "sandbox_run",
+    "final_answer",
+})
+WORKER_SYSTEM_PROMPT = (
+    "You are a coding worker. Complete the task below using the provided tools.\n"
+    "RULES: Use tools to act — never describe or simulate tool results. "
+    "Read only the files you need; keep tool calls small. "
+    "Build and test ONLY inside the work directory given in the task. "
+    "Use repo_write_file to create files, code_apply_patch to edit, and "
+    "sandbox_run to run Python scripts/tests through Playground's runner. "
+    "Write small files/patches (about 1200 characters per call); page reads. "
+    "When done or blocked, write CHECKPOINT.md describing the state, "
+    "then call final_answer with a short summary."
+)
+# Active per-run tool-result cap. A contextvar (not a module global) so
+# concurrent turns can't clobber each other's limit; set once by
+# run_agentic_chat and read by ToolResult.observation().
+_tool_result_max_chars: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "aiko_agent_tool_result_max_chars", default=None,
+)
+AGENT_VERIFY_FINAL = os.getenv("AGENT_VERIFY_FINAL", "1").lower() in {"1", "true", "yes", "on"}
+AGENT_VERIFY_LLM = os.getenv("AGENT_VERIFY_LLM", "1").lower() in {"1", "true", "yes", "on"}
+AGENT_VERIFY_LLM_MODE = os.getenv("AGENT_VERIFY_LLM_MODE", "auto")  # "always" | "auto" | "off"
+AGENT_MAX_FINAL_REPAIRS = int(os.getenv("AGENT_MAX_FINAL_REPAIRS", 2))
+AGENT_VERIFY_MIN_SCORE = float(os.getenv("AGENT_VERIFY_MIN_SCORE", "0.70"))
+AGENT_TOOL_RETRY_BACKOFF = float(os.getenv("AGENT_TOOL_RETRY_BACKOFF", 0.4))
+# Bound on the task-start memory+KB future: route() may hand us a future
+# that is still fetching (slow embedder/DB). The turn must never hang on it
+# — on timeout we continue with empty memory/KB blocks and log it.
+AGENT_MEMKB_TIMEOUT = float(os.getenv("AGENT_MEMKB_TIMEOUT", "20"))
+AGENT_EXECUTOR_MODE = os.getenv("AGENT_EXECUTOR_MODE", "hybrid").strip().lower()  # react | graph | hybrid
+# Tool-RAG upfront floor (cosine block relevance, same scale as
+# batch_block_relevance_scores): knowledge/experience blocks scoring below
+# this are omitted upfront — the loop pulls specifics via retrieve_context
+# instead of paying prompt tokens for near-orthogonal blocks. Memory stays
+# in the fixed budget (never gated); wiki/skill/policy keep budget-only
+# behavior so task setup never loses its scaffolding.
+AGENT_UPFRONT_MIN_SCORE = float(os.getenv("AGENT_UPFRONT_MIN_SCORE", "0.10"))
+# ``needle`` uses the local Needle 3 playground /complete contract for the novel ReAct
+# path. Graph playbooks remain deterministic; low-confidence Needle outputs
+# intentionally fall back to the configured conversational LLM.
+AGENT_REACT_BACKEND = os.getenv("AGENT_REACT_BACKEND", "openai").strip().lower()
+NEEDLE_BASE_URL = os.getenv("NEEDLE_BASE_URL", "http://127.0.0.1:8082")
+NEEDLE_TIMEOUT = float(os.getenv("NEEDLE_TIMEOUT", "15"))
+NEEDLE_CONFIDENCE_THRESHOLD = float(os.getenv("NEEDLE_CONFIDENCE_THRESHOLD", "0.85"))
+NEEDLE_WORKERS = os.getenv("NEEDLE_WORKERS", "")
+# Empty/whitespace env values are a config smell, not a valid int: int("")
+# raised ValueError on every ReAct turn and escalated straight past Needle.
+NEEDLE_MAX_WORKERS = (os.getenv("NEEDLE_MAX_WORKERS", "").strip() or "4")
+
+# Needle circuit breaker. A hung/unreachable Needle burns its full timeout on
+# every turn (x4 workers), which is pure latency when the server is known-dead.
+# After NEEDLE_CIRCUIT_FAILURES consecutive transport failures, skip Needle
+# entirely for NEEDLE_CIRCUIT_COOLDOWN seconds instead of re-paying the timeout.
+NEEDLE_CIRCUIT_FAILURES = int(os.getenv("NEEDLE_CIRCUIT_FAILURES", "3"))
+NEEDLE_CIRCUIT_COOLDOWN = float(os.getenv("NEEDLE_CIRCUIT_COOLDOWN", "300"))
+_needle_state = {"failures": 0, "open_until": 0.0}
+
+
+def _needle_circuit_open() -> bool:
+    """True while the Needle breaker is open (server presumed dead)."""
+    return time.monotonic() < _needle_state["open_until"]
+
+
+def _needle_circuit_record(ok: bool) -> None:
+    """Track consecutive Needle transport outcomes and trip/reset the breaker."""
+    if ok:
+        _needle_state["failures"] = 0
+        _needle_state["open_until"] = 0.0
+        return
+    _needle_state["failures"] += 1
+    if _needle_state["failures"] >= NEEDLE_CIRCUIT_FAILURES:
+        _needle_state["open_until"] = time.monotonic() + NEEDLE_CIRCUIT_COOLDOWN
+        log.warning(
+            "[agentic] Needle breaker open for %.0fs after %d consecutive failures — "
+            "skipping Needle and escalating directly.",
+            NEEDLE_CIRCUIT_COOLDOWN, _needle_state["failures"],
+        )
+
+
+def _needle_circuit_reset() -> None:
+    """Clear breaker state — used by tests and manual recovery."""
+    _needle_state["failures"] = 0
+    _needle_state["open_until"] = 0.0
+
+# Rolling STM window shared across all three chat paths. Mirrors
+# CONTEXT_WINDOW_TURNS in cognition.think (kept as a distinct name here rather
+# than importing cognition.think, which already imports agentic.agentic — that
+# would create a circular import).
+AGENT_HISTORY_TURNS = int(os.getenv("CONTEXT_WINDOW_TURNS", 8))
+
+# Max number of times adaptive_search/deep_research together can be invoked in
+# ONE agentic workflow. The two tools share one budget so a single agentic
+# workflow cannot keep spending web/research calls after enough evidence was gathered.
+AGENT_RESEARCH_MAX_CALLS = int(os.getenv("AGENT_RESEARCH_MAX_CALLS", 1))
+
+# TASK MODE instruction split into a small always-kept CORE (operationally
+# essential rules) and a larger GUIDANCE portion that is droppable under
+# context-budget pressure. Previously the whole ~950-char block was baked
+# into every agentic turn and could never be shed, starving task-specific
+# data (memory/wiki/skill) once the budget was exceeded.
+TASK_MODE_CORE = (
+    "[TASK MODE] You MUST use tools to complete tasks. Call tools first, "
+    "speak after. Never describe or simulate tool results — always call the "
+    "actual tool. Do not call final_answer until all needed tool calls are "
+    "complete. Keep reasoning private; never write tool names or JSON in "
+    "your spoken answer."
+)
+TASK_MODE_GUIDANCE = (
+    "[TASK MODE OVERRIDE] The speech style limits in the persona do NOT apply "
+    "in task mode. Do not summarize in 1-2 sentences. Output length is "
+    "irrelevant until final_answer is reached.\n\n"
+    "Treat agentic work as a sequence of steps, not one category: plan/decide "
+    "when useful, use adaptive_search for discovery/support "
+    "inside a workflow, or deep_research for fetched source reading, synthesis, "
+    "and self-learning, inspect repository files for coding or architecture "
+    "work, schedule with schedule_job or schedule_reminder when requested, and "
+    "write or save the result when the user asks for an artifact. Research "
+    "tasks should normally end in a written summary/report, even if the user "
+    "only asked you to look something up, unless they explicitly ask you not "
+    "to write it down. If the user asks you to save, write, schedule, or "
+    "search: call the tool first, then confirm with final_answer. "
+    "Tool observations are structured JSON. If ok=false, do not pretend the "
+    "action succeeded: retry with corrected arguments, choose another tool or "
+    "query, or clearly disclose the limitation in the final answer. "
+    f"adaptive_search/deep_research together may be used at most {AGENT_RESEARCH_MAX_CALLS} "
+    "time(s) per agentic workflow. After research returns, read its evidence "
+    "and continue with the next productive step (plan, summarize, save, or "
+    "answer) instead of searching again. In task mode, do not use "
+    "web_search/web_fetch directly; adaptive_search is the general-purpose "
+    "research tool and deep_research is for thorough fetched evidence. "
+    "When writing notes after research: "
+    "cross-check any hardware specs, commands, or version numbers against "
+    "fetched page content only — never state technical facts from memory "
+    "alone. If a fact cannot be confirmed from fetched content, omit it or "
+    "flag it as unverified. If a research tool result explicitly says no "
+    "relevant content was found, disclose that gap plainly in the final answer "
+    "instead of guessing or filling it in from memory. "
+    "Social posting tools (post_photo_social, post_video_social)"
+    "will refuse to run on anything not already approved "
+    "by a person outside this conversation, and refuse a second post of the "
+    "same draft. Only call a post_* social tool when the user explicitly "
+    "asks to publish/post right now — never as an automatic follow-up to "
+    "drafting, and never assume a draft is approved just because it was "
+    "created. If a post_* call comes back ok=false, disclose that plainly; "
+    "do not tell the user something was posted unless the tool result says so. "
+    "For the daily job post: when the user asks to post the job post, call "
+    "post_job_post_social with NO draft_dir argument — it auto-posts the most "
+    "recent human-approved draft. Do NOT run the job-search/draft graph "
+    "(gen_job_post) or re-draft when the user wants to post an already-"
+    "approved draft."
+    "Wiki operating cards, skill workflows, and past task experience are NOT "
+    "injected into your context automatically. For repeatable workflows, call "
+    "retrieve_context with stores=wiki,skill,experience to check for a matching "
+    "card, skill, or successful past run before inventing a new process; call "
+    "load_skill(name) to read a skill's full instructions when its summary "
+    "matches. When a recalled <past_task> "
+    "has outcome=\"failed\" or outcome=\"partial\", or a low verifier_score, "
+    "treat its steps as a cautionary trace of what went wrong, not a template "
+    "to follow — do not repeat the same tool/argument choices that led to "
+    "that failure. Only reuse the tool sequence from a <past_task> with "
+    "outcome=\"ok\" as a positive template. If no matching skill exists, "
+    "continue with generic tools. CRITICAL: When asked to save a file, call "
+    "save_note BEFORE writing any content in chat. Do not describe what you "
+    "will save — just save it. Never say 'I'll now open a file' or 'I'll "
+    "generate' — call the tool immediately."
+)
+
+# Placeholder bodies returned by the per-source fetchers when they have no
+# real content. Injecting these XML wrappers every agentic turn wastes
+# tokens for zero information — the model already receives the real blocks
+# (memory / KB / TASK MODE) and the empty wrappers add no signal. We blank
+# any block whose body is one of these "no match" placeholders; genuine
+# "Lookup failed." placeholders (a real error worth surfacing) are kept.
+_EMPTY_CONTEXT_MARKERS = (
+    "No similar past task found.",
+    "No matching task policy found for this request.",
+    "No operational wiki pages found.",
+    "No matching predefined skills found.",
+    "No matching local knowledge found.",
+    "No matching learned knowledge found.",
+    "No relevant memories found.",
+    "Lookup failed.",
+)
+
+
+def _blank_empty_context(block: str) -> str:
+    """Return '' if `block` is an empty "No ... found." placeholder."""
+    if not block:
+        return ""
+    for _marker in _EMPTY_CONTEXT_MARKERS:
+        if _marker in block:
+            return ""
+    return block
+
+
+_ERROR_PREFIX_RE = re.compile(r"^\[(?P<label>[^:\]]+)(?::\s*(?P<detail>.*))?\]$", re.DOTALL)
+# Tools that can genuinely post to a real public account. When one of these
+# ran and succeeded this turn, an answer describing a real "posted" action
+# is not a hallucinated external action — see _verify_final_answer.
+_SOCIAL_POST_TOOLS = {"post_job_post_social", "post_photo_social", "post_video_social", "post_to_social"}
+# Any tool message over this length gets compacted to a preview once a
+# later assistant message has arrived — generalized from a research-only
+# rule to cover every bulky tool (repo_read_file, search_jobs, etc.), since
+# any of them can accumulate across MAX_AGENT_ITER iterations otherwise.
+_COMPACTABLE_MIN_CHARS = 800
+_RESEARCH_TOOLS = {"adaptive_search", "deep_research", "deep_read"}
+_PRE_TOOL_GUARDRAILS = default_pre_tool_guardrails(AGENT_RESEARCH_MAX_CALLS)
+_POST_ANSWER_GUARDRAILS = DEFAULT_POST_ANSWER_GUARDRAILS
+
+# Capability -> turn policy (tool_domains, system_overlay, max_iter,
+# research_budget) is now resolved exclusively via
+# agentic.capability.resolve_handoff(), which reads the single
+# CAPABILITIES table in capability.py. Do not reintroduce a second,
+# hand-maintained profile table here — that was the source of the
+# job_hunt/reports domain mismatch bug.
+
+
+_TOOLS: dict[str, tuple[dict, object]] = {}
+
+
+def _owner_embedder(owner):
+    """Reuse the already-warm HarrierEmbedder — same instance think.py uses
+    for memory search and intent routing — so every relevance-scoring call
+    (web evidence, KB, skills, agentic policy) gets semantic scoring with
+    zero extra model load. Returns None if unavailable; every scoring path
+    then falls back to keyword overlap instead of failing."""
+    return getattr(getattr(getattr(owner, "_memorize", None), "_mem", None), "_embedder", None)
+
+
+# How the agentic loop gets its bearings (the discovery ladder):
+#   1. Validated DAG — run_schema_agent tries a matching playbook first.
+#   2. Similar successful experience — _similar_successful_experience below
+#      searches the experience store for a past task like this one and, on a
+#      strong match, injects its tool order as guidance into the ReAct prompt.
+#   3. Otherwise plain ReAct.
+# DAGs and experiences stay separate record types (playbooks in graph_engine,
+# experiences in the experience store); only the discovery order is shared.
+# Wiki, skill, and policy blocks are NEVER injected upfront — the loop pulls
+# them explicitly via retrieve_context / load_skill when it needs them.
+_DISCOVERY_MIN_EXPERIENCE_SCORE = float(os.getenv("DISCOVERY_MIN_EXPERIENCE_SCORE", "0.65"))
+
+
+def _similar_successful_experience(user_input: str, embedder) -> str:
+    """Search the experience store for a similar *successful* past task.
+
+    Returns a compact guidance block for the ReAct system prompt, or "" when
+    nothing strong enough matches. Only outcome="ok" records with a verifier
+    score >= 0.7 are eligible — failed/partial traces are cautionary data,
+    not templates.
+    """
+    try:
+        from agentic.experience import search_experience
+    except Exception as exc:
+        log.debug("[discovery] experience search unavailable: %s", exc)
+        return ""
+    try:
+        hits = search_experience(user_input, limit=3, embedder=embedder) or []
+    except Exception as exc:
+        log.warning("[discovery] experience search failed: %s", exc)
+        return ""
+    eligible = [
+        h for h in hits
+        if (h.get("outcome") or "") == "ok"
+        and float(h.get("score", 0.0) or 0.0) >= 0.7
+        and float(h.get("recall_score", 0.0) or 0.0) >= _DISCOVERY_MIN_EXPERIENCE_SCORE
+    ]
+    if not eligible:
+        return ""
+    best = eligible[0]
+    steps = best.get("record_text", "") or ""
+    return (
+        "<similar_experience>\n"
+        f"A past task like this one succeeded (score {float(best.get('score', 0.0)):.2f}).\n"
+        f"Goal: {(best.get('goal') or '')[:200]}\n"
+        f"{steps[:1200]}\n"
+        "You may reuse its tool order as a starting template, adapting arguments "
+        "to this task. If it does not fit, ignore it and work from first principles.\n"
+        "</similar_experience>"
+    )
+
+
+AGENT_HISTORY_CANDIDATE_MULTIPLIER = int(os.getenv("AGENT_HISTORY_CANDIDATE_MULTIPLIER", 3))
+AGENT_HISTORY_RECENCY_HALFLIFE = float(os.getenv("AGENT_HISTORY_RECENCY_HALFLIFE", 4))  # turns
+AGENT_HISTORY_ALWAYS_KEEP_RECENT = int(os.getenv("AGENT_HISTORY_ALWAYS_KEEP_RECENT", 2))
+
+# Per-message history embedding cache: each unique historical user message is
+# embedded once and reused across turns. The conversation history is
+# append-only, so an old message's embedding never changes — yet
+# _recent_history_messages scores the full candidate window (24 pairs) every
+# turn just to keep 8, re-paying the embed cost for ~16 already-dropped
+# pairs on EVERY single turn. Keyed by truncated content; capped to bound
+# memory across a long session (overflow just forces a one-time re-embed).
+_history_embed_cache: "OrderedDict[str, np.ndarray]" = OrderedDict()
+_HISTORY_EMBED_CACHE_MAX = 512
+
+def _history_relevance_scores(embedder, user_input: str, history_texts: list[str], query_vector: np.ndarray | None) -> list[float]:
+    truncated = [t[:1500] for t in history_texts]
+    to_embed = [t for t in truncated if t not in _history_embed_cache]
+    if to_embed:
+        new_vecs = reason.embed_batch_or_none(embedder, to_embed)
+        if new_vecs is not None and new_vecs.shape[0] == len(to_embed):
+            for t, v in zip(to_embed, new_vecs):
+                _history_embed_cache[t] = np.asarray(v, dtype=np.float32)
+                _history_embed_cache.move_to_end(t)
+            while len(_history_embed_cache) > _HISTORY_EMBED_CACHE_MAX:
+                _history_embed_cache.popitem(last=False)  # evict oldest, not everything
+        else:
+            return reason.batch_block_relevance_scores(embedder, user_input, history_texts, query_vector=query_vector)
+    # Mark cache hits as recently used too, so eviction stays LRU rather than
+    # pure insertion-order FIFO.
+    for t in truncated:
+        if t in _history_embed_cache:
+            _history_embed_cache.move_to_end(t)
+    b_vecs = np.asarray([_history_embed_cache[t] for t in truncated], dtype=np.float32)
+    if query_vector is not None:
+        q_vec = np.asarray(query_vector, dtype=np.float32)
+    else:
+        try:
+            q_vec = reason.cached_embed_query(embedder, user_input)
+        except Exception:
+            return [0.0] * len(history_texts)
+    scores = reason.batch_cosine_scores(q_vec, b_vecs)
+    return [float(s) for s in scores]
+
+
+def _recent_history_messages(owner, user_input: str = "", max_turns: int = AGENT_HISTORY_TURNS, query_vector: np.ndarray | None = None) -> list[dict]:
+    with owner._history_lock:
+        snapshot = list(owner._history)
+    if not snapshot:
+        return []
+    sanitized = owner._sanitize_history(snapshot)
+
+    pairs, i = [], 0
+    while i < len(sanitized) - 1:
+        if sanitized[i]["role"] == "user" and sanitized[i + 1]["role"] == "assistant":
+            pairs.append((sanitized[i], sanitized[i + 1]))
+            i += 2
+        else:
+            i += 1
+    if not pairs or not user_input:
+        return sanitized[-(max_turns * 2):]
+
+    candidates = pairs[-(max_turns * AGENT_HISTORY_CANDIDATE_MULTIPLIER):]
+    n = len(candidates)
+    embedder = _owner_embedder(owner)
+
+    history_texts = [u_msg["content"] for u_msg, _ in candidates]
+    relevance_scores = _history_relevance_scores(embedder, user_input, history_texts, query_vector)
+    scored = []
+    for idx, (u_msg, a_msg) in enumerate(candidates):
+        turns_ago = n - 1 - idx
+        recency_weight = 0.5 ** (turns_ago / AGENT_HISTORY_RECENCY_HALFLIFE)
+        relevance = relevance_scores[idx]
+        scored.append((0.5 * recency_weight + 0.5 * relevance, idx))
+
+    keep_idx = set(range(max(0, n - AGENT_HISTORY_ALWAYS_KEEP_RECENT), n))  # continuity floor
+    for score, idx in sorted(scored, reverse=True):
+        if len(keep_idx) >= max_turns:
+            break
+        keep_idx.add(idx)
+
+    messages = []
+    for idx in sorted(keep_idx):
+        messages.extend(candidates[idx])
+    return messages
+
+
+
+
+@dataclass(frozen=True)
+class AgentContext:
+    """Minimal execution context passed to tools instead of the whole owner."""
+
+    client: Any = None
+    llm_model: str | None = None
+    embedder: Any = None
+    user_id: str | None = None
+    workspace: Path | None = None
+    run_id: str | None = None
+    approval_bypass: frozenset[str] = frozenset()
+    conscience_bypass: frozenset[str] = frozenset()
+    worker_root: Path | None = None
+
+
+def _agent_context(owner=None, *, run_id: str | None = None) -> AgentContext:
+    uid = getattr(owner, "user_id", None) or getattr(owner, "_user_id", None) or current_user_id()
+    return AgentContext(
+        client=getattr(owner, "_client", None),
+        llm_model=getattr(owner, "_llm_model", None),
+        embedder=_owner_embedder(owner),
+        user_id=uid,
+        workspace=user_workspace_root(uid),
+        run_id=run_id,
+    )
+
+
+def _context_attr(owner_or_ctx, name: str, default=None):
+    if isinstance(owner_or_ctx, AgentContext):
+        return getattr(owner_or_ctx, name, default)
+    legacy = {"client": "_client", "llm_model": "_llm_model"}.get(name, name)
+    return getattr(owner_or_ctx, legacy, default)
+
+
+def _context_embedder(owner_or_ctx):
+    if isinstance(owner_or_ctx, AgentContext):
+        return owner_or_ctx.embedder
+    return _owner_embedder(owner_or_ctx)
+
+
+AGENT_TRACE_MAX_BYTES = int(os.getenv("AGENT_TRACE_MAX_BYTES", "1048576"))
+AGENT_TRACE_MAX_FILES = int(os.getenv("AGENT_TRACE_MAX_FILES", "50"))
+
+import threading
+import time
+
+# Buffer for batched agentic trace writes
+_trace_buffer: list[dict] = []
+_trace_buffer_lock = threading.RLock()  # Use RLock to allow reentrant flush from same thread
+_TRACE_FLUSH_INTERVAL = 5.0  # flush every 5 seconds
+_trace_last_flush = time.time()
+
+
+def _trim_trace_dir(trace_dir: Path) -> None:
+    for old in files[AGENT_TRACE_MAX_FILES:]:
+        try:
+            old.unlink()
+        except OSError:
+            log.debug("agentic: failed to unlink old trace file")
+
+
+def _flush_trace_buffer() -> None:
+    """Flush the trace buffer to disk."""
+    global _trace_last_flush
+    with _trace_buffer_lock:
+        if not _trace_buffer:
+            return
+        # Group by (user_id, run_id) to write to correct files
+        by_path: dict[Path, list[dict]] = {}
+        for rec in _trace_buffer:
+            uid = rec.get("user_id")
+            run_id = rec.get("run_id", "default")
+            trace_dir = user_state_dir(uid) / "agentic" / "traces"
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            path = trace_dir / f"{run_id}.jsonl"
+            by_path.setdefault(path, []).append(rec)
+
+        for path, records in by_path.items():
+            try:
+                if path.exists() and path.stat().st_size >= AGENT_TRACE_MAX_BYTES:
+                    path.rename(path.parent / f"{path.stem}.{int(time.time())}.jsonl")
+                with path.open("a", encoding="utf-8") as f:
+                    for rec in records:
+                        f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+            except Exception as exc:
+                log.debug("failed to flush agentic trace batch: %s", exc)
+
+        _trace_buffer.clear()
+        _trace_last_flush = time.time()
+
+
+def _append_step_trace(ctx: AgentContext | None, event: str, payload: dict[str, Any]) -> None:
+    try:
+        record = {"ts": time.time(), "event": event, "run_id": ctx.run_id if ctx and ctx.run_id else "default", **payload}
+        if ctx and ctx.user_id:
+            record["user_id"] = ctx.user_id
+        flush_immediately = event in ("approval", "approval_resume", "approval_wait", "checkpoint")
+        with _trace_buffer_lock:
+            _trace_buffer.append(record)
+            # Flush if interval exceeded or for critical events (approval, checkpoint)
+            if flush_immediately or time.time() - _trace_last_flush >= _TRACE_FLUSH_INTERVAL:
+                _flush_trace_buffer()
+    except Exception as exc:  # pragma: no cover - tracing must never break tools
+        log.debug("failed to append agentic trace: %s", exc)
+
+
+def _pending_approval_path(ctx: AgentContext) -> Path:
+    root = user_state_dir(ctx.user_id) / "agentic" / "pending_approvals"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / f"{ctx.run_id}.json"
+
+
+def _persist_pending_approval(ctx: AgentContext, tool: str, args: dict[str, Any], state: "TaskState") -> None:
+    payload = {"run_id": ctx.run_id, "tool": tool, "args": args, "checkpoint": json.loads(state.summary()), "created_at": time.time()}
+    _pending_approval_path(ctx).write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+
+_CCC_APPROVAL_LOCK = threading.Lock()
+
+
+def _ccc_pending_approval_path(user_id: str | None, escalation_id: str, *, create_parent: bool = False) -> Path:
+    root = user_state_dir(user_id) / "agentic" / "pending_ccc_approvals"
+    if create_parent:
+        root.mkdir(parents=True, exist_ok=True)
+    return root / f"{escalation_id}.json"
+
+
+def _persist_ccc_approval(
+    ctx: AgentContext,
+    escalation_id: str,
+    tool: str,
+    args: dict[str, Any],
+    state: "TaskState",
+) -> None:
+    """Persist everything needed to execute one CCC-approved call later."""
+    payload = {
+        "escalation_id": escalation_id,
+        "tool": tool,
+        "args": args,
+        "checkpoint": json.loads(state.summary()),
+        "context": {
+            "user_id": ctx.user_id,
+            "workspace": str(ctx.workspace) if ctx.workspace is not None else None,
+            "run_id": ctx.run_id,
+            "llm_model": ctx.llm_model,
+            "approval_bypass": sorted(ctx.approval_bypass),
+        },
+        "created_at": time.time(),
+    }
+    path = _ccc_pending_approval_path(ctx.user_id, escalation_id, create_parent=True)
+    temp_path = path.with_suffix(".tmp")
+    with _CCC_APPROVAL_LOCK:
+        temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        temp_path.replace(path)
+
+
+def _discard_ccc_approval(user_id: str | None, escalation_id: str) -> None:
+    """Remove a denied CCC tool invocation, if this escalation owns one."""
+    path = _ccc_pending_approval_path(user_id, escalation_id)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _resume_ccc_approval(owner, escalation_id: str) -> str | None:
+    """Consume and execute a CCC-approved tool invocation at most once."""
+    base_ctx = _agent_context(owner)
+    path = _ccc_pending_approval_path(base_ctx.user_id, escalation_id)
+    with _CCC_APPROVAL_LOCK:
+        try:
+            serialized = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        # Consume before dispatch.  A duplicate approval cannot execute the
+        # same external action twice, even if the tool reports an error.
+        path.unlink()
+    data = json.loads(serialized)
+
+    tool_name = str(data.get("tool") or "")
+    args = dict(data.get("args") or {})
+    saved_context = dict(data.get("context") or {})
+    checkpoint = dict(data.get("checkpoint") or {})
+    saved_user_id = saved_context.get("user_id") or base_ctx.user_id
+    if saved_user_id != base_ctx.user_id:
+        log.warning("agentic: refused CCC resume for a different user")
+        return None
+    saved_workspace = saved_context.get("workspace")
+    resume_ctx = AgentContext(
+        client=base_ctx.client,
+        llm_model=saved_context.get("llm_model") or base_ctx.llm_model,
+        embedder=base_ctx.embedder,
+        user_id=saved_user_id,
+        workspace=Path(saved_workspace) if saved_workspace else base_ctx.workspace,
+        run_id=saved_context.get("run_id") or base_ctx.run_id,
+        approval_bypass=frozenset(saved_context.get("approval_bypass") or ()),
+        conscience_bypass=frozenset({tool_name}),
+    )
+    state = TaskState(goal=str(checkpoint.get("goal") or f"resume CCC approval {escalation_id}"))
+    _append_step_trace(resume_ctx, "conscience_approval_resume", {"tool": tool_name, "escalation_id": escalation_id})
+    return execute_tool_with_policy(tool_name, args, state, ctx=resume_ctx).observation()
+
+
+_APPROVAL_REJECT_RE = re.compile(
+    r"\b(?:no|nope|nah|deny|decline|reject|cancel|stop|not\s+now|later|wait|hold\s+off)\b",
+    re.I,
+)
+_APPROVAL_ACCEPT_RE = re.compile(
+    r"\b(?:y|yes|yeah|yep|sure|ok(?:ay)?|confirm|approve|approved|resume|continue|go\s+ahead|do\s+it|proceed)\b",
+    re.I,
+)
+
+
+def _looks_like_approval_reply(user_input: str) -> bool:
+    """Conservative approval parser for pending-tool resumes.
+
+    This runs before normal routing, so it must accept common short approvals
+    ("yeah", "sure") while refusing mixed or delayed replies such as
+    "yes, but not now" instead of trying to infer user intent semantically.
+    """
+    text = (user_input or "").strip()
+    if not text or _APPROVAL_REJECT_RE.search(text):
+        return False
+    if not _APPROVAL_ACCEPT_RE.search(text):
+        return False
+    # Avoid hijacking ordinary chat that happens to contain an approval word.
+    return bool(
+        re.fullmatch(
+            r"[\s.!?,;:-]*(?:y|yes|yeah|yep|sure|ok(?:ay)?|confirm|approve|approved|resume|continue|go\s+ahead|do\s+it|proceed)"
+            r"(?:\s+(?:please|pls|now))?[\s.!?,;:-]*(?:\b(?:run-[0-9]+|r\d[0-9A-Za-z_-]*)\b)?[\s.!?,;:-]*",
+            text,
+            re.I,
+        )
+        or bool(
+            re.fullmatch(
+                r"[\s.!?,;:-]*(?:(?:y|yes|yeah|yep|sure|ok(?:ay)?|confirm|approve|approved|resume|continue|go\s+ahead|do\s+it|proceed)[\s.!?,;:-]+)?"
+                r"(?:approve|confirm|resume|continue)\s+(?:run-[0-9]+|r\d[0-9A-Za-z_-]*)[\s.!?,;:-]*",
+                text,
+                re.I,
+            )
+        )
+    )
+
+
+def _maybe_resume_approval(owner, user_input: str, token_callback=None) -> str | None:
+    if not _looks_like_approval_reply(user_input):
+        return None
+    base_ctx = _agent_context(owner)
+    match = re.search(r"\b(run-[0-9]+|r\d[0-9A-Za-z_-]*)\b", user_input or "")
+    if match:
+        run_id = match.group(1)
+    else:
+        pending_root = user_state_dir(base_ctx.user_id) / "agentic" / "pending_approvals"
+        pending = sorted(pending_root.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True) if pending_root.exists() else []
+        if len(pending) != 1:
+            return None
+        run_id = pending[0].stem
+    ctx = _agent_context(owner, run_id=run_id)
+    path = _pending_approval_path(ctx)
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text(encoding="utf-8"))
+    tool_name = str(data.get("tool") or "")
+    state = TaskState(goal=f"resume approval {ctx.run_id}")
+    resume_ctx = AgentContext(
+        client=ctx.client, llm_model=ctx.llm_model, embedder=ctx.embedder,
+        user_id=ctx.user_id, workspace=ctx.workspace, run_id=ctx.run_id,
+        approval_bypass=frozenset({tool_name}),
+    )
+    _append_step_trace(resume_ctx, "approval_resume", {"tool": tool_name})
+    result = execute_tool_with_policy(tool_name, dict(data.get("args") or {}), state, ctx=resume_ctx)
+    if result.ok:
+        try:
+            path.unlink()
+        except OSError:
+            log.debug("agentic: failed to unlink approval pause file")
+    final = result.observation()
+    if token_callback:
+        token_callback(final)
+    return final
+
+@dataclass
+class ToolResult:
+    """Structured outcome for one tool call attempt."""
+
+    ok: bool
+    tool: str
+    args: dict
+    content: str
+    error_type: str | None = None
+    retryable: bool = False
+    attempts: int = 1
+    metadata: dict = field(default_factory=dict)
+
+    def observation(self) -> str:
+        """Render a compact machine-readable observation for the next LLM step.
+
+        Honors the active per-run cap (``_tool_result_max_chars``) so a
+        scheduled tick can bound its tool output far tighter than interactive
+        chat without every call site having to thread a limit through.
+        """
+        content = self.content or ""
+        limit = _tool_result_max_chars.get() or AGENT_TOOL_RESULT_MAX_CHARS
+        if len(content) > limit:
+            content = (
+                content[:limit]
+                + f"\n[... truncated: {len(content) - limit} more chars; "
+                + "re-run with narrower scope if you need the rest]"
+            )
+        payload = {
+            "ok": self.ok,
+            "tool": self.tool,
+            "attempts": self.attempts,
+            "retryable": self.retryable,
+            "error_type": self.error_type,
+            "args": self.args,
+            "content": content,
+        }
+        if self.metadata:
+            payload["metadata"] = self.metadata
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+@dataclass
+class TaskState:
+    """Runtime ledger of actions, evidence, and unresolved failures."""
+
+    goal: str
+    steps: list[dict] = field(default_factory=list)
+    evidence: list[str] = field(default_factory=list)
+    failures: list[ToolResult] = field(default_factory=list)
+
+    def record(self, result: ToolResult) -> None:
+        """Record a tool execution result and update agent state."""
+        try:
+            from cognition.attention import for_identity
+            from system.userspace import current_user_id
+            state = for_identity(current_user_id())
+            state.record_tool_outcome(
+                result.tool,
+                ok=result.ok,
+                detail=result.content,
+                error_type=result.error_type or "",
+            )
+            state.persist()
+        except Exception:
+            pass
+        self.steps.append({
+            "tool": result.tool,
+            "ok": result.ok,
+            "attempts": result.attempts,
+            "error_type": result.error_type,
+            "args": result.args,
+            "content": result.content if result.ok else None,
+            "observation": result.content if result.ok else None,
+        })
+        if result.ok:
+            self.evidence.append(f"{result.tool}: {result.content[:500]}")
+        else:
+            self.failures.append(result)
+
+    def summary(self) -> str:
+        """Generate a JSON summary of the agentic plan execution."""
+        payload = {
+            "goal": self.goal,
+            "completed_tools": [s for s in self.steps if s["ok"]],
+            "failed_tools": [s for s in self.steps if not s["ok"]],
+            "evidence_count": len(self.evidence),
+            "unresolved_failures": [
+                {
+                    "tool": f.tool,
+                    "error_type": f.error_type,
+                    "content": f.content[:300],
+                    "args": f.args,
+                }
+                for f in self.failures
+            ],
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+@dataclass
+class VerificationResult:
+    """Final-answer verification verdict."""
+
+    ok: bool
+    feedback: str
+    score: float = 1.0
+
+
+def tool_schemas() -> list[dict]:
+    """Return OpenAI-compatible tool schemas for autonomous task mode.
+
+    Read live from the registry rather than the import-time ``_TOOLS``
+    snapshot so tools registered after import (e.g. MCP bridge tools
+    bootstrapped at wakeup, like the ProtonMail email tools) are visible
+    to the LLM too. Order is deterministic (registry insertion order).
+    """
+    return [spec.to_openai_schema() for spec in registry.all_specs() if spec.react]
+
+
+from agentic.registry import TOOLS, ValidationError, registry, register_tool_schema, tool
+try:
+    from agentic.tool_models import LearnKnowledgeArgs
+except Exception:  # pragma: no cover - pydantic may be unavailable in minimal envs
+    LearnKnowledgeArgs = None
+
+
+def _bootstrap_tool_registry() -> None:
+    """Import toolkit modules so @tool decorators populate the registry."""
+    import agentic.tools  # noqa: F401
+    from agentic.toolkit import synthesize  # noqa: F401
+
+
+@tool(TOOLS["final_answer"])
+def final_answer(answer: str) -> str:
+    """Return the final answer from the agentic workflow."""
+    return answer
+
+
+def _register_agentic_local_tools() -> None:
+    register_tool_schema(
+        "learn_knowledge",
+        "Store durable learned knowledge in Aiko's vector RAG store (encrypted when SQLite encryption is enabled). Use only when the user asks Aiko to remember/add/store knowledge, ingest pasted document text, or after explicit self-learning/research should be retained. Do not use for private personal preferences; those belong in memory. Do not use for merely saving a human-readable note; use save_note for that.",
+        props={
+            "title": {"type": "string", "description": "Short title for the learned document or fact set."},
+            "text": {"type": "string", "description": "Knowledge text to chunk, embed, and retrieve later. Use this for pasted/extracted text."},
+            "relative_path": {"type": "string", "description": "Optional workspace-relative document path to ingest instead of text."},
+            "source": {"type": "string", "description": "Optional source URL/path/context for pasted text."},
+            "kind": {"type": "string", "enum": ["ingested", "self_learned", "study_note"], "description": "Where this knowledge came from."},
+        },
+        required=["title"],
+        domain="kb",
+        args_model=LearnKnowledgeArgs,
+    )
+
+
+def _init_tool_tables() -> tuple[dict[str, tuple[dict, object]], list[tuple[dict, object]]]:
+    _bootstrap_tool_registry()
+    _register_agentic_local_tools()
+    tool_defs = registry.get_react_defs()
+    tools = {schema["function"]["name"]: (schema, handler) for schema, handler in tool_defs}
+    return tools, tool_defs
+
+
+_TOOLS, _TOOL_DEFS = _init_tool_tables()
+
+
+def invoke_registered_tool(name: str, arguments: dict | None = None):
+    """Invoke a registered agentic tool for a data-driven scheduled job.
+
+    A schedule can select only an existing tool; it cannot import or execute
+    arbitrary Python. Tool-specific safety gates still apply.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("scheduled tool call requires a tool name")
+    if arguments is None:
+        arguments = {}
+    if not isinstance(arguments, dict):
+        raise ValueError("scheduled tool arguments must be an object")
+    entry = _TOOLS.get(name)
+    if entry is None or entry[1] is None:
+        raise ValueError(f"unknown or non-invocable scheduled tool: {name}")
+    from cognition.fly_behavior.gf_global import should_cancel_tools
+    if should_cancel_tools(current_user_id()):
+        return {"skipped": True, "reason": "gf_interrupt"}
+    return entry[1](arguments)
+    
+
+def _required_args_for(name: str) -> list[str]:
+    entry = _TOOLS.get(name)
+    if not entry:
+        return []
+    return list(entry[0].get("function", {}).get("parameters", {}).get("required", []))
+
+
+def _json_safe(value):
+    """Recursively coerce a value to JSON-serializable primitives."""
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, Exception):
+        return str(value)
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return value
+
+
+def _validate_args(name: str, args: object) -> ToolResult | None:
+    """Return a validation error result, or None when args are safe to dispatch."""
+    if name == "final_answer":
+        return None
+    if not isinstance(args, dict):
+        return ToolResult(
+            ok=False, tool=name, args={},
+            content="Tool arguments must be a JSON object. Reissue the call with valid JSON.",
+            error_type="invalid_args", retryable=True,
+        )
+    spec = registry.get(name)
+    if spec and spec.args_model is not None:
+        try:
+            coerced = spec.validate_args(args)
+        except Exception as exc:
+            if ValidationError is not None and isinstance(exc, ValidationError):
+                detail = _json_safe(exc.errors(include_url=False))
+            else:
+                detail = str(exc)
+            return ToolResult(
+                ok=False, tool=name, args=args,
+                content=json.dumps({
+                    "message": "Tool arguments failed schema validation. Reissue the call with corrected arguments.",
+                    "errors": detail,
+                }, ensure_ascii=False),
+                error_type="schema_validation_failed", retryable=True,
+            )
+        args.clear()
+        args.update(coerced)
+    missing = [
+        key for key in _required_args_for(name)
+        if args.get(key) is None or str(args.get(key)).strip() == ""
+    ]
+    if missing:
+        return ToolResult(
+            ok=False, tool=name, args=args,
+            content=f"Missing required argument(s): {', '.join(missing)}. Reissue the tool call with complete arguments.",
+            error_type="missing_args", retryable=True,
+        )
+
+    if name == "deep_research" and not (args.get("query") or "").strip():
+        return ToolResult(
+            ok=False, tool=name, args=args,
+            content="Missing required argument: query must be a non-empty string. Reissue with a research question.",
+            error_type="missing_args", retryable=True,
+        )
+    if name == "learn_knowledge" and not (
+        (args.get("text") or "").strip() or (args.get("relative_path") or "").strip()
+        ):
+        return ToolResult(
+            ok=False, tool=name, args=args,
+            content="Missing required argument: provide text or relative_path with knowledge to store.",
+            error_type="missing_args", retryable=True,
+        )
+    return None
+
+
+def _classify_result(name: str, args: dict, content: str, attempts: int = 1) -> ToolResult:
+    """Convert legacy string tool output into a structured result."""
+    text = content or ""
+    stripped = text.strip()
+    if stripped.startswith("[") and stripped.endswith("]"):
+        match = _ERROR_PREFIX_RE.match(stripped)
+        label = (match.group("label") if match else "tool failed").lower()
+        detail = match.group("detail") if match else stripped.strip("[]")
+        retryable = any(marker in label for marker in ("search failed", "fetch failed"))
+        retryable = retryable or any(marker in (detail or "").lower() for marker in ("timeout", "connection", "empty response"))
+        return ToolResult(
+            ok=False, tool=name, args=args, content=stripped,
+            error_type=label.replace(" ", "_"),
+            retryable=retryable,
+            attempts=attempts,
+            metadata={"detail": detail or label},
+        )
+    return ToolResult(ok=True, tool=name, args=args, content=text, attempts=attempts)
+
+
+def _dispatch_tool_impl(name: str, args: dict, owner=None) -> str:
+    """Run one named tool with already-decoded JSON args.
+
+    ``owner`` is the AikoThink instance driving this agentic turn.
+    adaptive_search and deep_research both need it for the shared embedder;
+    deep_research additionally needs the already-loaded local LLM
+    client/model for its adaptive continue/refine and synthesis steps.
+    Every other tool is a pure function of its args and ignores it.
+    """
+    # agentic/agentic.py — dispatch_tool()
+    if name == "adaptive_search":
+        return adaptive_search(
+            args.get("query", ""),
+            client=_context_attr(owner, "client"),
+            model=_context_attr(owner, "llm_model"),
+            embedder=_context_embedder(owner),
+        )
+    if name == "deep_research":
+        return deep_research(
+            args.get("query", ""),
+            client=_context_attr(owner, "client"),
+            model=_context_attr(owner, "llm_model"),
+            embedder=_context_embedder(owner),
+        )
+    if name == "deep_read":
+        return deep_read(
+            args.get("url", ""),
+            query=args.get("query", ""),
+            embedder=_context_embedder(owner),
+        )
+    if name == "run_playbook":
+        return schema.run_playbook_json(
+            args.get("task", ""),
+            cap_ids=args.get("cap_ids") if isinstance(args.get("cap_ids"), list) else None,
+            embedder=_context_embedder(owner),
+            llm_client=_context_attr(owner, "client"),
+            llm_model=_context_attr(owner, "llm_model"),
+        )
+    if name == "learn_knowledge":
+        if (args.get("relative_path") or "").strip():
+            doc_id = ingest_knowledge_file(
+                args.get("relative_path", ""),
+                title=args.get("title") or None,
+                kind=args.get("kind", "ingested"),
+                embedder=_context_embedder(owner),
+            )
+        else:
+            doc_id = ingest_knowledge_text(
+                args.get("title", "Learned knowledge"),
+                args.get("text", ""),
+                source=args.get("source", ""),
+                kind=args.get("kind", "ingested"),
+                embedder=_context_embedder(owner),
+            )
+        return json.dumps({"ok": bool(doc_id), "doc_id": doc_id}, ensure_ascii=False)
+    if name == "search_skillsets":
+        return search_skillsets_json(
+            args.get("query", ""),
+            int(args.get("limit", 3) or 3),
+            embedder=_context_embedder(owner),
+        )
+    if name == "write_report":
+        return write_report(
+            args.get("title", "Aiko report"), args.get("content", ""),
+            args.get("report_dir", "reports"), bool(args.get("arxiv_style", False)),
+            args.get("section", ""), bool(args.get("append", False)),
+        )
+    spec = registry.get(name)
+    if not spec or spec.handler is None:
+        return f"[unknown tool: {name}]"
+    if name == "save_note":
+        args["content"] = args.get("content", "")[:AGENT_NOTE_MAX_CHARS]
+        args["title"] = args.get("title", "aiko-note")
+    # Inject agent context (LLM client/model/embedder) into any registered
+    # handler whose signature accepts them. Without this, generic tools like
+    # draft_job_post_social receive client=None and silently skip their LLM
+    # steps (enrichment, page fetching, verification). Mirrors the injection
+    # graph_engine._run_node does for graph nodes.
+    call_args = dict(args)
+    handler = spec.handler
+    try:
+        _params = set(inspect.signature(handler).parameters)
+    except (TypeError, ValueError):
+        _params = set()
+    if "client" in _params and "client" not in call_args:
+        call_args["client"] = _context_attr(owner, "client")
+    if "model" in _params and "model" not in call_args:
+        call_args["model"] = _context_attr(owner, "llm_model")
+    if "embedder" in _params and "embedder" not in call_args:
+        call_args["embedder"] = _context_embedder(owner)
+    try:
+        return handler(**call_args)
+    except TypeError:
+        return handler(args)
+
+
+def dispatch_tool(name: str, args: dict, owner=None) -> str:
+    """Dispatch a tool and record its bounded outcome in cognitive state."""
+    try:
+        result = _dispatch_tool_impl(name, args, owner=owner)
+        parsed = result if isinstance(result, dict) else None
+        if parsed is None and isinstance(result, str) and result.lstrip().startswith("{"):
+            try:
+                parsed = json.loads(result)
+            except Exception:
+                parsed = None
+        ok = not (isinstance(result, str) and result.startswith("[unknown tool:"))
+        if isinstance(parsed, dict) and parsed.get("ok") is False:
+            ok = False
+        detail = str(result)[:240]
+        error_type = "tool_error" if not ok else ""
+    except Exception as exc:
+        result = f"[tool error: {exc}]"
+        ok = False
+        detail = str(exc)[:240]
+        error_type = type(exc).__name__
+    try:
+        from cognition.attention import for_identity
+        from system.userspace import current_user_id
+        for_identity(current_user_id()).record_tool_outcome(name, ok=ok, detail=detail, error_type=error_type)
+    except Exception:
+        pass
+    return result
+
+def _gate_tool_call(name: str, args: dict, owner=None) -> dict | None:
+    """Return a blocking CCC payload, including explicit integration failures."""
+    try:
+        from cognition.conscience.hooks import gate_tool
+        return gate_tool(
+            name=name,
+            args=args,
+            llm_client=_context_attr(owner, "client"),
+            embedder=_context_embedder(owner),
+            social_post_tools=_SOCIAL_POST_TOOLS,
+        )
+    except Exception as exc:
+        log.warning("[agentic] conscience tool integration failed closed: %s", exc)
+        return {
+            "status": "conscience_unavailable",
+            "tool": name,
+            "decision": "error",
+            "gate": "error",
+            "reasons": ["complete tool argument evaluation was unavailable"],
+            "as_trace": {"decision": "error", "gate": "error", "fail_mode": type(exc).__name__},
+        }
+
+
+def _tool_gate_result(name: str, args: dict, blocked: dict) -> ToolResult:
+    decision = blocked.get("decision")
+    trace = blocked.get("as_trace")
+    return ToolResult(
+        ok=False,
+        tool=name,
+        args=args,
+        content=json.dumps({key: value for key, value in blocked.items() if key != "as_trace"}, ensure_ascii=False),
+        error_type=(
+            "conscience_skip"
+            if blocked.get("status") == "conscience_skip"
+            else "conscience_refuse"
+            if decision == "refuse"
+            else "needs_approval"
+            if decision == "escalate"
+            else "conscience_caution"
+            if decision == "caution"
+            else "conscience_unavailable"
+        ),
+        retryable=False,
+        metadata={"ccc": trace or {}},
+    )
+
+
+def dispatch_tool_checked(name: str, args: dict, owner=None, *, conscience_checked: bool = False) -> ToolResult:
+    """Run a gated tool and return a structured result.
+
+    Direct callers must obtain a successful complete-argument CCC evaluation;
+    execute_tool_with_policy can pass ``conscience_checked`` after doing the
+    same gate itself so it can persist an escalation before returning.
+    """
+    if not conscience_checked:
+        blocked = _gate_tool_call(name, args, owner=owner)
+        if blocked is not None:
+            return _tool_gate_result(name, args, blocked)
+    try:
+        content = dispatch_tool(name, args, owner=owner)
+    except Exception as e:
+        log.exception("Tool %s raised unexpectedly", name)
+        return ToolResult(
+            ok=False, tool=name, args=args,
+            content=f"[tool exception: {e}]",
+            error_type="tool_exception",
+            retryable=False,
+        )
+    try:
+        from cognition.fly_behavior.action_select import record_completed_tool_call
+        from system.userspace import current_user_id
+
+        record_completed_tool_call(
+            tool=name,
+            args_text=json.dumps(args, ensure_ascii=False, default=str),
+            user_id=getattr(owner, "user_id", None) or getattr(owner, "_user_id", None) or current_user_id(),
+        )
+    except Exception as exc:
+        log.debug("[agentic] tool feedback target skipped: %s", exc)
+    return _classify_result(name, args, str(content))
+
+
+def _max_attempts_for(name: str) -> int:
+    if name == "deep_research":
+        return max(1, int(os.getenv("AGENT_DEEP_RESEARCH_ATTEMPTS", 1)))
+    if name in {"save_note", "schedule_job", "schedule_reminder"}:
+        return max(1, int(os.getenv("AGENT_LOCAL_TOOL_ATTEMPTS", 1)))
+    if name in _SOCIAL_POST_TOOLS:
+        # Posting tools are never worth auto-retrying: a false-negative
+        # retry after a real post would risk a duplicate, and the human-
+        # approval / already-posted checks are deterministic, not
+        # transient failures that retrying would fix.
+        return 1
+    return 1
+
+
+_PREFERENCE_READ_ONLY_TOOLS = frozenset({
+    "adaptive_search", "deep_read", "deep_research", "read_workspace_file",
+    "repo_file_tree", "repo_read_file", "repo_search_text", "search_jobs",
+    "list_schedule", "list_reminders", "scan_photo_workspace", "summarize_task_state",
+})
+
+def _preference_requires_approval(name: str) -> bool:
+    try:
+        from cognition.attention import for_identity
+        preferences = for_identity(current_user_id()).snapshot().get("preferences", {})
+        return preferences.get("action_confirmation") == "ask_before_acting" and name not in _PREFERENCE_READ_ONLY_TOOLS
+    except Exception:
+        return False
+
+def execute_tool_with_policy(name: str, args: dict, state: TaskState, owner=None, ctx: AgentContext | None = None, guards=None) -> ToolResult:
+    """Validate, guard, run, retry, and ledger one tool call."""
+    ctx = ctx or (owner if isinstance(owner, AgentContext) else _agent_context(owner))
+    _append_step_trace(ctx, "tool_call", {"tool": name, "args": args})
+    worker_authorized = False
+    if ctx.worker_root is not None:
+        try:
+            from system.playground import playground_work_path
+            if name not in WORKER_TOOLS:
+                raise ValueError("tool is not available to the coding worker")
+            if (ctx.worker_root / "loop" / "disabled").exists():
+                raise ValueError("Playground worker is disabled")
+            if name in {"repo_write_file", "code_apply_patch", "sandbox_run"}:
+                path = playground_work_path(args.get("relative_path", ""), ctx.worker_root)
+                args = {**args, "relative_path": str(path)}
+                worker_authorized = True
+        except (ValueError, TypeError) as exc:
+            result = ToolResult(ok=False, tool=name, args=args, content=str(exc), error_type="worker_scope", retryable=False)
+            state.record(result)
+            return result
+    spec = registry.get(name)
+    for guard in (guards or _PRE_TOOL_GUARDRAILS):
+        verdict = guard(name, args, state)
+        if verdict is not None:
+            result = ToolResult(
+                ok=False, tool=name, args=args, content=verdict.content,
+                error_type=verdict.error_type, retryable=verdict.retryable,
+                metadata=verdict.metadata,
+            )
+            state.record(result)
+            return result
+
+    validation = _validate_args(name, args)
+    if validation is not None:
+        state.record(validation)
+        return validation
+
+    preference_gate = _preference_requires_approval(name)
+    if (preference_gate or (spec and spec.needs_approval and not worker_authorized)) and name not in ctx.approval_bypass:
+        _persist_pending_approval(ctx, name, args, state)
+        draft_dir = args.get("draft_dir") if isinstance(args, dict) else None
+        wait_payload = {"status": "waiting_for_approval", "run_id": ctx.run_id, "instruction": f"Reply with approve {ctx.run_id} to run {name}."}
+        if preference_gate and not (spec and spec.needs_approval):
+            wait_payload["reason"] = "Your saved preference requires confirmation before consequential actions."
+        if draft_dir:
+            wait_payload["draft_dir"] = draft_dir
+            wait_payload["instruction"] = (
+                f"Review the draft at {draft_dir} and approve it outside this "
+                f"conversation, then reply with approve {ctx.run_id} to run {name}."
+            )
+        result = ToolResult(ok=False, tool=name, args=args, content=json.dumps(wait_payload, ensure_ascii=False), error_type="needs_approval", retryable=False, metadata={"run_id": ctx.run_id, "checkpoint": state.summary()})
+        state.record(result)
+        _append_step_trace(ctx, "approval_wait", {"tool": name, "args": args})
+        _append_step_trace(ctx, "tool_result", {"tool": name, "ok": False, "error_type": "needs_approval"})
+        return result
+
+    if name not in ctx.conscience_bypass:
+        blocked = _gate_tool_call(name, args, owner=owner or ctx)
+        if blocked is not None:
+            escalation_id = blocked.get("escalation_id")
+            # conscience_skip (social band-ask) must never enter the
+            # approval-resume path: the owner approving later would
+            # resurrect a post this branch deliberately skipped.
+            if (blocked.get("decision") == "escalate" and escalation_id
+                    and blocked.get("status") != "conscience_skip"):
+                try:
+                    _persist_ccc_approval(ctx, str(escalation_id), name, args, state)
+                except Exception as exc:
+                    log.warning("[agentic] failed to persist CCC approval: %s", exc)
+                    try:
+                        from cognition.conscience import conscience_for
+
+                        conscience_for(ctx.user_id).resolve_escalation(
+                            str(escalation_id),
+                            False,
+                            note="tool approval persistence failed closed",
+                        )
+                    except Exception as resolve_exc:
+                        log.warning(
+                            "[agentic] failed to deny unpersisted CCC escalation: %s",
+                            resolve_exc,
+                        )
+                    blocked = {
+                        "status": "conscience_unavailable",
+                        "tool": name,
+                        "decision": "error",
+                        "gate": "error",
+                        "reasons": ["CCC approval persistence was unavailable"],
+                        "as_trace": {
+                            "decision": "error",
+                            "gate": "error",
+                            "fail_mode": type(exc).__name__,
+                        },
+                    }
+            result = _tool_gate_result(name, args, blocked)
+            state.record(result)
+            _append_step_trace(ctx, "conscience_gate", blocked)
+            _append_step_trace(
+                ctx, "tool_result", {"tool": name, "ok": False, "error_type": result.error_type}
+            )
+            return result
+
+    last = ToolResult(ok=False, tool=name, args=args, content="[tool did not run]", error_type="not_run")
+    for attempt in range(1, _max_attempts_for(name) + 1):
+        last = dispatch_tool_checked(name, dict(args), owner=ctx, conscience_checked=True)
+        last.attempts = attempt
+        if last.ok or not last.retryable:
+            break
+        if attempt < _max_attempts_for(name):
+            time.sleep(AGENT_TOOL_RETRY_BACKOFF * attempt)
+
+    state.record(last)
+    _append_step_trace(ctx, "tool_result", {"tool": name, "ok": last.ok, "error_type": last.error_type, "attempts": last.attempts})
+    return last
+
+
+def _research_call_count(state: TaskState) -> int:
+    """How many times adaptive_search/deep_research have already SUCCEEDED in
+    this workflow. The two tools share one counted budget so one task cannot
+    keep spending web/research calls indefinitely."""
+    return sum(1 for step in state.steps if step["tool"] in _RESEARCH_TOOLS and step["ok"])
+
+
+def _compact_processed_tool_context(messages: list[dict], preview_chars: int = 1500) -> None:
+    """Shrink already-consumed tool observations once a later assistant
+    message has arrived, instead of letting every tool call in the loop
+    accumulate uncompacted for all MAX_AGENT_ITER iterations.
+
+    Generalized from a research-tool-only rule: any tool's output can
+    accumulate across iterations (repo_read_file, search_jobs, etc.), not
+    just adaptive_search/deep_research, so this now applies uniformly
+    to any tool-role message over _COMPACTABLE_MIN_CHARS.
+    """
+    completed = {m.get("tool_call_id") for m in messages if m.get("role") == "tool"}
+    for message in messages[:-1]:
+        if message.get("role") != "assistant":
+            continue
+        for call in message.get("tool_calls") or []:
+            function = call.get("function", {})
+            arguments = function.get("arguments", "")
+            if call.get("id") not in completed or len(arguments) < _COMPACTABLE_MIN_CHARS:
+                continue
+            # Generated source is already on disk. Keeping it again in every
+            # historical tool call crowds an 8K worker out of its own context.
+            try:
+                parsed = json.loads(arguments)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            function["arguments"] = json.dumps({
+                "_context_compacted": True,
+                "relative_path": parsed.get("relative_path", ""),
+                "note": "Earlier arguments omitted; read the file for current source.",
+            })
+    for message in messages:
+        if message.get("role") != "tool":
+            continue
+        content = str(message.get("content") or "")
+        if '"context_compacted"' in content:
+            continue
+        if len(content) < _COMPACTABLE_MIN_CHARS:
+            continue
+        try:
+            parsed = json.loads(content)
+            original_content = str(parsed.get("content", content))
+        except (json.JSONDecodeError, AttributeError):
+            original_content = content
+        message["content"] = json.dumps(
+            {
+                "ok": True,
+                "tool": message.get("name"),
+                "context_compacted": True,
+                "evidence_preview": original_content[:preview_chars],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
+
+def _sanitize_user_facing_tool_detail(detail: str, max_chars: int = 300) -> str:
+    """Redact sensitive/internal-looking details before surfacing blockers."""
+    text = (detail or "").strip()
+    if not text:
+        return "unknown tool failure"
+    text = re.sub(
+        r"(?i)(api[_-]?key|token|secret|password)(\s*[:=]\s*)([^\s,;]+)",
+        r"\1\2[redacted]",
+        text,
+    )
+    text = re.sub(r"(?i)(authorization\s*:\s*bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[redacted]", text)
+    text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[redacted]", text)
+    text = re.sub(r"(?i)(https?://)(localhost|127\.0\.0\.1|0\.0\.0\.0|[^\s/]+\.local)([^\s)]*)", r"\1[internal-url-redacted]", text)
+    text = re.sub(r"(?m)^\s*File \"[^\n]+", "File [internal path redacted]", text)
+    text = re.sub(r"(?m)^\s*(Traceback \(most recent call last\):|During handling of the above exception.*)$", "[stack trace redacted]", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:max_chars] or "unknown tool failure"
+
+def _build_incomplete_task_answer(state: TaskState, last_content: str = "") -> str:
+    """Create a useful final response when the model never emits final_answer."""
+    lines: list[str] = []
+    if state.evidence:
+        lines.append("I completed these step(s):")
+        for item in state.evidence[-5:]:
+            lines.append(f"- {item[:600]}")
+    if state.failures:
+        lines.append("I could not fully complete the task because of these blocker(s):")
+        for failure in state.failures[-3:]:
+            detail = _sanitize_user_facing_tool_detail(failure.content or failure.error_type or "")
+            lines.append(f"- {failure.tool}: {detail}")
+    if last_content.strip():
+        lines.append("Most recent model draft:")
+        lines.append(last_content.strip())
+    if not lines:
+        lines.append(
+            "I could not complete the task before the agent loop reached its step limit, "
+            "and no tool results were recorded."
+        )
+    return "\n".join(lines)
+
+def _coerce_verifier_bool(value) -> bool:
+    """Parse verifier booleans without treating non-empty strings as True."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "yes", "1", "pass", "passed"}
+    return bool(value)
+
+
+def _verify_final_answer(owner, user_input: str, answer: str, state: TaskState) -> VerificationResult:
+    """Check answer completeness and evidence support before Aiko speaks it."""
+    stripped = (answer or "").strip()
+    issues = [
+        verdict.content
+        for guard in _POST_ANSWER_GUARDRAILS
+        if (verdict := guard(stripped, state, user_input)) is not None
+    ]
+
+    if not issues and AGENT_VERIFY_LLM_MODE in ("off", "auto"):
+        return VerificationResult(ok=True, feedback="Deterministic checks passed; LLM verify skipped.", score=1.0)
+    if issues and AGENT_VERIFY_LLM_MODE == "off":
+        return VerificationResult(ok=False, feedback="\n".join(issues), score=0.0)
+
+
+    deterministic_note = f"\n\nDeterministic checks flagged (weigh, don't auto-fail): {'; '.join(issues)}" if issues else ""
+
+    prompt = (
+        "You are Aiko's final-answer verifier. This is NOT just a JSON schema check. "
+        "Judge whether the candidate answer is accurate, complete, and supported by "
+        "the task ledger/tool evidence. Do not use outside knowledge to bless facts that "
+        "are missing from the ledger. Fail answers that invent unsupported details, hide "
+        "tool failures, imply external actions that were not performed, omit required paths "
+        "or confirmations, or do not answer the user's request. Return ONLY compact JSON "
+        "with keys: pass (boolean), score (0-1), feedback (string). Do not add markdown.\n\n"
+        f"User request:\n{user_input}\n\n"
+        f"Task ledger/tool evidence:\n{state.summary()}\n\n"
+        f"Candidate answer:\n{stripped}"
+    )
+    try:
+        # The verdict is fully determined by the prompt; a thinking model
+        # would burn the 160-token budget before emitting the JSON.
+        from cognition.think import THINK_OFF_EXTRA_BODY
+        think_off = THINK_OFF_EXTRA_BODY
+    except Exception:
+        think_off = None
+    try:
+        create_kwargs = dict(
+            model=owner._llm_model,
+            messages=[{"role": "user", "content": prompt}],
+            stream=False,
+            max_tokens=1024,
+            temperature=0.2,
+            # Verification verdicts need real judgment (Agent A1).
+            extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "verification",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "pass": {"type": "boolean"},
+                            "score": {"type": "number"},
+                            "feedback": {"type": "string"},
+                        },
+                        "required": ["pass", "score", "feedback"],
+                    },
+                },
+            },
+        )
+        if think_off is not None:
+            create_kwargs["extra_body"] = think_off
+        resp = owner._client.chat.completions.create(**create_kwargs)
+        raw = (resp.choices[0].message.content or "").strip()
+        data = json.loads(raw)
+        ok = _coerce_verifier_bool(data.get("pass"))
+        raw_score = data.get("score", 1.0 if ok else 0.0)
+        feedback = str(data.get("feedback") or ("Verifier passed." if ok else "Verifier failed."))
+        try:
+            score = float(raw_score)
+        except (TypeError, ValueError):
+            score = 0.0
+            ok = False
+            feedback = "Verifier returned an invalid score."
+        if not math.isfinite(score) or score < 0.0 or score > 1.0:
+            ok = False
+            feedback = f"Verifier returned an out-of-range score: {raw_score!r}."
+            score = 0.0
+        if score < AGENT_VERIFY_MIN_SCORE:
+            ok = False
+            if feedback == "Verifier passed.":
+                feedback = f"Verifier score {score:.2f} below threshold {AGENT_VERIFY_MIN_SCORE:.2f}."
+        return VerificationResult(ok=ok, feedback=feedback, score=score)
+    except Exception as e:
+        log.warning("Agent verifier failed; falling back to deterministic pass: %s", e)
+        return VerificationResult(ok=True, feedback="Verifier unavailable; deterministic checks passed.", score=0.75)
+
+
+def _rewrite_failed_answer(owner, user_input: str, answer: str, verdict: VerificationResult, state: TaskState) -> str | None:
+    """One targeted rewrite attempt after the verifier rejects an answer.
+
+    Uses the verifier's specific feedback (not generic heuristics) to guide
+    the rewrite. Returns the rewritten answer, or None if the rewrite fails.
+    The caller re-verifies; only one attempt is made (no loop).
+    """
+    try:
+        prompt = (
+            "You are Aiko's answer repair editor. The verifier rejected the candidate answer below. "
+            "Rewrite it to address ONLY the specific issues in the verifier feedback. "
+            "Preserve everything that was correct; do not invent facts not in the task ledger. "
+            "Return only the corrected answer, no preamble.\n\n"
+            f"User request:\n{user_input}\n\n"
+            f"Task ledger/tool evidence:\n{state.summary()}\n\n"
+            f"Candidate answer:\n{answer}\n\n"
+            f"Verifier feedback (fix these issues):\n{verdict.feedback}\n"
+        )
+        from cognition.think import THINK_OFF_EXTRA_BODY
+        think_off = THINK_OFF_EXTRA_BODY
+    except Exception:
+        think_off = None
+    try:
+        create_kwargs = dict(
+            model=owner._llm_model,
+            messages=[{"role": "user", "content": prompt}],
+            stream=False,
+            max_tokens=1024,
+            temperature=0.2,
+            extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+        )
+        if think_off is not None:
+            create_kwargs["extra_body"] = think_off
+        resp = owner._client.chat.completions.create(**create_kwargs)
+        rewritten = (resp.choices[0].message.content or "").strip()
+        if not rewritten:
+            return None
+        return rewritten
+    except Exception as e:
+        log.warning("Agent answer rewrite failed: %s", e)
+        return None
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate — good enough for a budget guard, not
+    for billing/accounting. Divisor is AGENT_TOKEN_ESTIMATE_DIVISOR
+    (default 3): conservative for code-heavy agentic content."""
+    return max(1, len(text) // AGENT_TOKEN_ESTIMATE_DIVISOR)
+
+
+def _enforce_agentic_context_budget(
+    persona, memory_context, user_input,
+    knowledge_context, experience_guidance,
+    task_mode_context: str = "",
+    tool_schemas: list | None = None,
+    scores: dict[str, float] | None = None,
+    lean: bool = False,
+) -> tuple[str, str, str, str]:
+    """Shed droppable blocks when the agentic system prompt exceeds budget.
+
+    Three blocks are always droppable: learned knowledge, the similar-experience
+    guidance, and the verbose task-mode guidance. Memory is fixed budget for
+    interactive chat — a conversational turn that loses its recalled memories
+    answers as a different person.
+
+    ``lean=True`` (scheduled self-coding ticks, which resume from on-disk
+    checkpoints rather than chat memory) promotes ``memory`` to droppable and
+    ranks it last. Nothing in a coding tick's prompt depends on Aiko's personal
+    recollection, and on a 10k window that memory block was the difference
+    between a session that ran and one that 400'd on every iteration.
+
+    Returns ``(memory, knowledge, experience, task_mode)``.
+    """
+    budget = int(LLM_CTX_SIZE * AGENT_CONTEXT_BUDGET_RATIO)
+    # Estimate from the ACTUAL filtered tool schemas sent to the LLM this
+    # turn (10-12 after capability match), not the full 25-tool corpus —
+    # over-reserving for every schema starves task-specific context blocks.
+    tool_tokens = _estimate_tokens(json.dumps(tool_schemas or []))
+    fixed = persona + user_input
+    fixed_tokens = _estimate_tokens(fixed) + tool_tokens
+
+    blocks = {
+        "knowledge": knowledge_context,
+        "experience": experience_guidance,
+        "task_mode": task_mode_context,
+    }
+    if lean:
+        blocks["memory"] = memory_context
+
+    scores = scores or {}
+    # task_mode guidance has no task-specific relevance score; treat it as
+    # neutral so it sheds after clearly-irrelevant blocks (low score) but
+    # before valuable task-specific data (high score).
+    scores.setdefault("task_mode", 0.0)
+    if lean:
+        # Shed memory first and only under real pressure: it is still the
+        # second-most useful block for a coding task after knowledge.
+        scores.setdefault("memory", 0.5)
+    # fallback tie-break preserves the original weakest-first order when
+    # scores are missing or tied
+    fallback_rank = {"experience": 0, "knowledge": 1, "task_mode": 2, "memory": 3}
+    remaining = set(blocks)
+
+    while remaining:
+        total_tokens = fixed_tokens + sum(_estimate_tokens(v) for v in blocks.values())
+        if total_tokens <= budget:
+            break
+        victim = min(remaining, key=lambda k: (scores.get(k, -1.0), fallback_rank[k]))
+        log.warning(
+            "[agentic] context budget exceeded (%s > %s est. tokens); dropping %s (score=%.3f)",
+            total_tokens, budget, victim, scores.get(victim, -1.0),
+        )
+        blocks[victim] = f"<{victim}_context>\nOmitted this turn — context budget exceeded.\n</{victim}_context>"
+        remaining.discard(victim)
+
+    return (
+        blocks.get("memory", memory_context),
+        blocks["knowledge"],
+        blocks["experience"],
+        blocks["task_mode"],
+    )
+
+
+def _estimate_messages_tokens(messages: list[dict], tool_schemas: list | None = None) -> int:
+    """Estimate the token cost of a fully assembled request.
+
+    Counts every message plus the per-message role/tool-call framing overhead
+    and the tool schemas. The system-prompt budget guard cannot see any of this:
+    it runs once, before the ReAct loop appends assistant tool-call messages and
+    tool observations. That blind spot is what let a 6-iteration loop ship an
+    11.5k-token request at a 10.2k server and kill every session.
+    """
+    total = _estimate_tokens(json.dumps(tool_schemas or []))
+    for message in messages:
+        total += _estimate_tokens(str(message.get("content") or ""))
+        if message.get("role") == "tool":
+            # name + tool_call_id + framing
+            total += 12
+        for call in message.get("tool_calls") or []:
+            function = call.get("function", {}) if isinstance(call, dict) else {}
+            total += 8 + _estimate_tokens(str(function.get("name") or ""))
+            total += _estimate_tokens(str(function.get("arguments") or ""))
+    return total
+
+
+def _fit_messages_to_context(
+    messages: list[dict],
+    tool_schemas: list | None = None,
+    reserve: int | None = None,
+) -> tuple[list[dict], bool]:
+    """Shrink an assembled request until it fits the server context window.
+
+    Escalating order, cheapest information loss first:
+
+    1. Halve every oversized tool observation.
+    2. Stub the OLDEST tool observations one at a time, newest kept whole —
+       the most recent result is what the next step reasons about.
+    3. Drop the oldest non-system turns (chat history).
+
+    Steps 2 and 3 stop as soon as the payload fits, so a mildly-over request
+    sheds nothing and a badly-over one still returns a usable session.
+
+    The system message and the final user task are never dropped — without them
+    the model has no goal. Returns ``(messages, trimmed)``; the input list is
+    not mutated.
+    """
+    budget = int(LLM_CTX_SIZE * AGENT_REQUEST_BUDGET_RATIO) if reserve is None else reserve
+    budget -= _effective_max_tokens_safe()
+    working = [dict(m) for m in messages]
+
+    if _estimate_messages_tokens(working, tool_schemas) <= budget:
+        return working, False
+
+    log.warning(
+        "[agentic] request over budget (%d > %d est. tokens) — trimming assembled payload",
+        _estimate_messages_tokens(working, tool_schemas), budget,
+    )
+
+    # 1. Halve every oversized tool observation.
+    limit = _tool_result_max_chars.get() or AGENT_TOOL_RESULT_MAX_CHARS
+    for message in working:
+        if message.get("role") != "tool":
+            continue
+        content = str(message.get("content") or "")
+        if len(content) > limit // 2:
+            message["content"] = (
+                content[: limit // 2]
+                + f"\n[... trimmed to fit context: {len(content) - limit // 2} more chars]"
+            )
+
+    # 2. Stub the oldest tool observations, one at a time, until it fits.
+    for message in working:
+        if _estimate_messages_tokens(working, tool_schemas) <= budget:
+            break
+        if message.get("role") != "tool":
+            continue
+        content = str(message.get("content") or "")
+        if len(content) > 400:
+            message["content"] = f"[older tool output omitted to fit context: {len(content)} chars]"
+
+    # 3. Drop old turns together with their linked tool results. Never
+    # orphan a tool result or discard the task just because a tool is last.
+    task_index = next((i for i in range(len(working) - 1, -1, -1)
+                       if working[i].get("role") == "user"), None)
+    task_message = working[task_index] if task_index is not None else None
+    while _estimate_messages_tokens(working, tool_schemas) > budget:
+        candidates = [
+            i for i, m in enumerate(working)
+            if m.get("role") != "system" and m is not task_message and i < len(working) - 1
+        ]
+        if not candidates:
+            break
+        victim = working[candidates[0]]
+        call_ids = {call.get("id") for call in victim.get("tool_calls") or []}
+        if victim.get("role") == "tool":
+            # Results may only be removed with the assistant call that owns
+            # them, including any siblings in a parallel tool batch.
+            parent = next((m for m in working if any(
+                c.get("id") == victim.get("tool_call_id") for c in m.get("tool_calls") or []
+            )), None)
+            if parent is not None:
+                victim = parent
+                call_ids = {call.get("id") for call in parent.get("tool_calls") or []}
+        working = [m for m in working if m is not victim and not (
+            m.get("role") == "tool" and m.get("tool_call_id") in call_ids
+        )]
+
+    return working, True
+
+
+def _effective_max_tokens_safe() -> int:
+    """AGENT_MAX_TOKENS, or 0 when the thinking-aware helper is unavailable."""
+    try:
+        from cognition.think import _effective_max_tokens
+    except Exception:
+        return int(AGENT_MAX_TOKENS)
+    try:
+        return int(_effective_max_tokens(AGENT_MAX_TOKENS))
+    except Exception:
+        return int(AGENT_MAX_TOKENS)
+
+
+def _is_context_size_error(exc: Exception) -> bool:
+    """True for llama-server's ``exceed_context_size_error`` 400."""
+    text = str(exc).lower()
+    return (
+        "exceed_context_size" in text
+        or "exceeds the available context size" in text
+        or "context size" in text and "n_ctx" in text
+        or "maximum context length" in text
+    )
+
+
+def _needle_prompt(messages: list[dict]) -> str:
+    """Keep the Needle worker inside its small, tool-oriented context window."""
+    task = next((str(m.get("content") or "") for m in reversed(messages) if m.get("role") == "user"), "")
+    observations = [str(m.get("content") or "") for m in messages if m.get("role") == "tool"][-2:]
+    if not observations:
+        return task
+    compact = "\n".join(observations)
+    return f"Task: {task}\nLatest tool observations:\n{compact[-1800:]}"
+
+
+def _needle_agent_message(messages, tools, token_callback):
+    """Ask Needle for constrained calls; escalate low-confidence turns to OpenAI."""
+    client = NeedleClient(
+        NEEDLE_BASE_URL, timeout=NEEDLE_TIMEOUT,
+        confidence_threshold=NEEDLE_CONFIDENCE_THRESHOLD,
+    )
+    response = client.complete(_needle_prompt(messages), tools)
+    calls = [
+        SimpleNamespace(
+            id=f"needle-{index}",
+            function=SimpleNamespace(name=call.name, arguments=json.dumps(call.arguments, ensure_ascii=False)),
+        )
+        for index, call in enumerate(response.calls)
+    ]
+    content = response.content or None
+    if content and token_callback:
+        token_callback(content)
+
+    def _dump(exclude_none=True):
+        data = {"role": "assistant", "content": content}
+        if calls:
+            data["tool_calls"] = [
+                {"id": call.id, "type": "function", "function": {"name": call.function.name, "arguments": call.function.arguments}}
+                for call in calls
+            ]
+        return data
+
+    msg = SimpleNamespace(content=content, tool_calls=calls or None)
+    msg.model_dump = _dump
+    usage = SimpleNamespace(prompt_tokens=None, completion_tokens=None, total_tokens=None)
+    return msg, usage
+
+
+def _needle_multi_agent_message(messages, tools, token_callback):
+    """Fan a novel ReAct turn out to isolated, least-privilege Needle workers."""
+    try:
+        max_workers = int(NEEDLE_MAX_WORKERS)
+    except ValueError as exc:
+        raise NeedleError("NEEDLE_MAX_WORKERS must be an integer") from exc
+    workers = load_needle_workers(
+        NEEDLE_WORKERS,
+        default_timeout=NEEDLE_TIMEOUT,
+        default_confidence_threshold=NEEDLE_CONFIDENCE_THRESHOLD,
+        max_workers=max_workers,
+    )
+    results = NeedleOrchestrator(workers).complete(_needle_prompt(messages), tools)
+    calls = []
+    seen: set[tuple[str, str]] = set()
+    for result in results:
+        if result.response is None:
+            log.info("[agentic] Needle worker %s unavailable: %s", result.worker_id, result.error)
+            continue
+        for index, call in enumerate(result.response.calls):
+            arguments = json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)
+            key = (call.name, arguments)
+            if key in seen:
+                continue
+            seen.add(key)
+            calls.append(SimpleNamespace(
+                id=f"needle-{result.worker_id}-{index}",
+                function=SimpleNamespace(name=call.name, arguments=arguments),
+            ))
+    content = next((result.response.content for result in results if result.response and result.response.content), None)
+    if not calls and not content:
+        raise NeedleError("Needle workers returned no calls or response content")
+    if content and token_callback:
+        token_callback(content)
+
+    def _dump(exclude_none=True):
+        data = {"role": "assistant", "content": content}
+        if calls:
+            data["tool_calls"] = [
+                {"id": call.id, "type": "function", "function": {"name": call.function.name, "arguments": call.function.arguments}}
+                for call in calls
+            ]
+        return data
+
+    msg = SimpleNamespace(content=content, tool_calls=calls or None)
+    msg.model_dump = _dump
+    usage = SimpleNamespace(prompt_tokens=None, completion_tokens=None, total_tokens=None)
+    return msg, usage
+
+
+def _agent_messages_sendable(owner, messages: list[dict]) -> list[dict]:
+    """Apply the shared no-system latch to one agentic request.
+
+    Some llama-server templates reject the `system` role (500). The chat path
+    latches that rejection process-wide; the agentic loop honors the same
+    latch here so task turns don't pay a doomed first attempt either.
+    Duck-typed (getattr) so lightweight test owners keep working.
+    """
+    avoid = getattr(owner, "_should_avoid_system_role", None)
+    merge = getattr(owner, "_messages_without_system", None)
+    try:
+        if (callable(avoid) and avoid() and callable(merge)
+                and any(isinstance(m, dict) and m.get("role") == "system" for m in messages)):
+            return merge(list(messages))
+    except Exception:
+        log.debug("agentic: no-system merge skipped", exc_info=True)
+    return messages
+
+
+def _is_agent_system_role_error(owner, exc: Exception) -> bool:
+    check = getattr(owner, "_is_system_role_error", None)
+    if not callable(check):
+        return False
+    try:
+        return bool(check(exc))
+    except Exception:
+        return False
+
+
+def _create_agent_stream(owner, send_messages, tools, agent_max_tokens):
+    """Single streaming completion attempt against the agentic backend."""
+    return owner._client.chat.completions.create(
+        model=owner._llm_model, messages=send_messages, tools=tools,
+        tool_choice="auto", stream=True, max_tokens=agent_max_tokens,
+        temperature=0.3,
+        # ReAct steps stay no-think (Agent A1): thinking would starve
+        # tool-calls within AGENT_MAX_TOKENS and stall the loop.
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+
+
+def _stream_agent_message(owner, messages, tools, token_callback):
+    """Stream an agentic LLM call, feeding text tokens to token_callback.
+    Returns (SimpleNamespace, usage) matching the non-streaming shape.
+    """
+    # Tool planning is where a thinking model earns its keep — give it
+    # headroom instead of disabling thinking. Lazy import: cognition.think
+    # imports this module, so a top-level import would be circular.
+    agent_max_tokens = _effective_max_tokens_safe()
+    send_messages = _agent_messages_sendable(owner, messages)
+    if AGENT_REACT_BACKEND in {"needle", "needle_multi"}:
+        if _needle_circuit_open():
+            log.info(
+                "[agentic] Needle breaker open — skipping Needle for this turn "
+                "(%.0fs cooldown remaining).",
+                max(0.0, _needle_state["open_until"] - time.monotonic()),
+            )
+        else:
+            try:
+                needle_call = (
+                    _needle_multi_agent_message if AGENT_REACT_BACKEND == "needle_multi"
+                    else _needle_agent_message
+                )
+                result = needle_call(messages, tools, token_callback)
+                _needle_circuit_record(True)
+                return result
+            except NeedleLowConfidence as exc:
+                # A working-but-unsure server is not a dead server: it must not
+                # count against the breaker.
+                _needle_circuit_record(True)
+                log.info("[agentic] Needle escalation to OpenAI: %s", exc)
+            except NeedleError as exc:
+                _needle_circuit_record(False)
+                # Needle is a bounded action worker. Unavailable or uncertain calls
+                # must not execute; the larger conversational model handles them.
+                log.info("[agentic] Needle escalation to OpenAI: %s", exc)
+    elif AGENT_REACT_BACKEND != "openai":
+        log.warning("[agentic] unknown AGENT_REACT_BACKEND=%r; using openai", AGENT_REACT_BACKEND)
+
+    # Pre-flight: fit the assembled request to the server window before
+    # spending a round trip on a guaranteed 400.
+    send_messages, _trimmed = _fit_messages_to_context(send_messages, tools)
+
+    try:
+        stream = _create_agent_stream(owner, send_messages, tools, agent_max_tokens)
+    except Exception as exc:
+        # Context overflow despite the pre-flight estimate: shed history and
+        # tool output hard, then retry once. Losing the session outright on a
+        # recoverable size error is what killed every scheduled tick.
+        if _is_context_size_error(exc):
+            aggressive, _ = _fit_messages_to_context(send_messages, tools, reserve=int(LLM_CTX_SIZE * 0.55))
+            log.warning(
+                "[agentic] context overflow (%s) — retrying once with a hard-trimmed payload.",
+                str(exc)[:200],
+            )
+            return _stream_after_retry(owner, aggressive, tools, token_callback, agent_max_tokens)
+        # Same template rejection the chat path handles: retry once with the
+        # system block merged into user turns, and latch it process-wide.
+        merge = getattr(owner, "_messages_without_system", None)
+        note = getattr(owner, "_note_system_role_rejected", None)
+        if (callable(merge) and callable(note) and _is_agent_system_role_error(owner, exc)
+                and any(isinstance(m, dict) and m.get("role") == "system" for m in send_messages)):
+            note()
+            log.warning("agentic: system role rejected; retrying step without system messages")
+            send_messages = merge(list(send_messages))
+            stream = _create_agent_stream(owner, send_messages, tools, agent_max_tokens)
+        else:
+            raise
+    return _consume_agent_stream(stream, token_callback)
+
+
+def _stream_after_retry(owner, send_messages, tools, token_callback, agent_max_tokens):
+    """Second attempt after a context-size 400, with one system-role fallback."""
+    try:
+        stream = _create_agent_stream(owner, send_messages, tools, agent_max_tokens)
+    except Exception as exc:
+        merge = getattr(owner, "_messages_without_system", None)
+        note = getattr(owner, "_note_system_role_rejected", None)
+        if (callable(merge) and callable(note) and _is_agent_system_role_error(owner, exc)
+                and any(isinstance(m, dict) and m.get("role") == "system" for m in send_messages)):
+            note()
+            log.warning("agentic: system role rejected on retry; dropping system messages")
+            stream = _create_agent_stream(owner, merge(list(send_messages)), tools, agent_max_tokens)
+        else:
+            raise
+    return _consume_agent_stream(stream, token_callback)
+
+
+def _consume_agent_stream(stream, token_callback):
+    """Drain an agentic SSE stream into the (message, usage) shape callers expect."""
+    content_parts = []
+    tc_deltas = {}
+    usage = None
+
+    for chunk in stream:
+        if chunk.usage:
+            usage = chunk.usage
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        if delta.content:
+            content_parts.append(delta.content)
+            if token_callback:
+                token_callback(delta.content)
+        if delta.tool_calls:
+            for tcd in delta.tool_calls:
+                idx = tcd.index
+                if idx not in tc_deltas:
+                    tc_deltas[idx] = SimpleNamespace(
+                        id=tcd.id or "", name="", args=[],
+                    )
+                if tcd.id:
+                    tc_deltas[idx].id = tcd.id
+                if tcd.function:
+                    if tcd.function.name:
+                        tc_deltas[idx].name = tcd.function.name
+                    if tcd.function.arguments:
+                        tc_deltas[idx].args.append(tcd.function.arguments)
+
+    content = "".join(content_parts) if content_parts else None
+    tool_calls = None
+    if tc_deltas:
+        tool_calls = [
+            SimpleNamespace(
+                id=d.id,
+                function=SimpleNamespace(name=d.name, arguments="".join(d.args)),
+            )
+            for d in (tc_deltas[i] for i in sorted(tc_deltas))
+        ]
+
+    def _dump(exclude_none=True):
+        d = {"role": "assistant", "content": content}
+        if tool_calls:
+            d["tool_calls"] = [
+                {"id": tc.id, "type": "function",
+                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in tool_calls
+            ]
+        return d
+
+    msg = SimpleNamespace(content=content, tool_calls=tool_calls)
+    msg.model_dump = _dump
+    return msg, usage
+
+
+
+def _collect_file_artifacts(state: "TaskState") -> list[dict]:
+    """Harvest workspace file paths from tool args/content for UI file chips."""
+    files: list[dict] = []
+    seen: set[str] = set()
+    path_keys = ("relative_path", "path", "output_path", "file_path", "filepath", "dest", "destination")
+    for step in getattr(state, "steps", []) or []:
+        args = step.get("args") or {}
+        if not isinstance(args, dict):
+            args = {}
+        for key in path_keys:
+            val = args.get(key)
+            if isinstance(val, str) and val.strip():
+                p = val.strip()
+                if p not in seen:
+                    seen.add(p)
+                    files.append({"label": p.rsplit("/", 1)[-1], "path": p})
+        content = step.get("content") or step.get("observation") or ""
+        if isinstance(content, str):
+            import re as _re
+            for m in _re.finditer(r"(?:saved|wrote|written to|output)\s*[:=]?\s*([\w./\\-]+\.[A-Za-z0-9]{1,8})", content, _re.I):
+                p = m.group(1).strip()
+                if p not in seen:
+                    seen.add(p)
+                    files.append({"label": p.rsplit("/", 1)[-1], "path": p})
+    return files
+
+
+def _emit_file_artifacts(token_callback, state: "TaskState") -> None:
+    if not token_callback:
+        return
+    files = _collect_file_artifacts(state)
+    if not files:
+        return
+    import json as _json
+    token_callback("__FILES__:" + _json.dumps(files, ensure_ascii=False) + "\n")
+
+
+def _finalize_agentic_answer(owner, user_input: str, draft: str, token_callback=None) -> str:
+    """Audit and, when needed, repair the final answer before delivery."""
+    finalize = getattr(owner, "_finalize_response", None)
+    if callable(finalize):
+        return finalize(user_input, draft, token_callback)
+    owner._emit(draft, token_callback=token_callback)
+    return draft
+
+def run_agentic_chat(
+    owner, user_input: str, token_callback=None, mem_kb_future=None,
+    query_vec: np.ndarray | None = None, cap_vec: np.ndarray | None = None,
+    output_model: Any | None = None, include_history: bool = True,
+    lean_context: bool = False, worker_mode: bool = False,
+) -> str:
+    """Run task mode using the owning AikoThink instance for model/memory/output.
+
+    mem_kb_future: a concurrent.futures.Future from
+    owner._fetch_memory_and_knowledge(user_input), submitted by
+    cognition.think.route() BEFORE intent was resolved to "agentic" (memory+KB
+    are intent-agnostic, so route() doesn't wait for routing to finish
+    before starting them). If this is None (e.g. a scheduled job calling
+    agentic_chat() directly, with no prior route() call), the fetch runs
+    here instead.
+
+    query_vec — pre-computed _QUERY_INSTRUCT embedding of user_input.
+    cap_vec  — pre-computed _CAPABILITY_INSTRUCT embedding of user_input.
+    Both avoid redundant HTTP calls when provided.
+
+    include_history — scheduled ticks run False: every past tick appends its
+    giant skill prompt + failure transcript to owner._history, and relevance
+    selection keeps pulling those back in until each session's first call
+    exceeds the llama-server ctx on its own (observed 10.5k/10.2k death
+    spiral). Ticks resume from CHECKPOINT.md, never from chat history.
+
+    lean_context — scheduled self-coding ticks run True: memory becomes
+    droppable and tool observations get a tighter cap. Those sessions carry
+    their state in on-disk checkpoints, so Aiko's personal recollection buys
+    nothing and costs the difference between running and 400ing every
+    iteration on a 10k window. Interactive chat never sets it.
+
+    worker_mode — coding ticks run True: the loop becomes a lean worker
+    (minimal system prompt, coding tools only, no memory/KB/persona fetch).
+    """
+    # Bound this run's tool observations for the whole ReAct loop.
+    _tool_token = _tool_result_max_chars.set(
+        AGENT_TICK_TOOL_RESULT_MAX_CHARS if lean_context else None
+    )
+    try:
+        return _run_agentic_chat_inner(
+            owner, user_input, token_callback=token_callback,
+            mem_kb_future=mem_kb_future, query_vec=query_vec, cap_vec=cap_vec,
+            output_model=output_model, include_history=include_history,
+            lean_context=lean_context, worker_mode=worker_mode,
+        )
+    finally:
+        _tool_result_max_chars.reset(_tool_token)
+
+
+def _run_agentic_chat_inner(
+    owner, user_input: str, token_callback=None, mem_kb_future=None,
+    query_vec: np.ndarray | None = None, cap_vec: np.ndarray | None = None,
+    output_model: Any | None = None, include_history: bool = True,
+    lean_context: bool = False, worker_mode: bool = False,
+) -> str:
+    # Reuse the same HarrierEmbedder instance already warm for memory search
+    # and intent routing for every RAG-selection call below (agentic policy,
+    # wiki, skill, experience, and now capability matching). Falls back to
+    # keyword scoring automatically if unavailable.
+    resumed = _maybe_resume_approval(owner, user_input, token_callback=token_callback)
+    if resumed is not None:
+        return resumed
+
+    _embedder = _owner_embedder(owner)
+
+    _query_vec = query_vec
+    _cap_vec = cap_vec
+
+    if worker_mode:
+        # Lean worker: fixed coding toolset, no capability matching, no
+        # embedder calls. The worker's fixed overhead is ~1k tokens
+        # (minimal prompt + 7 terse schemas) instead of ~4-6k.
+        _matched_caps: list[str] = []
+        tools = [s for s in tool_schemas() if s["function"]["name"] in WORKER_TOOLS]
+    else:
+        # Narrow the tool list actually sent to the LLM this turn. Previously
+        # every _TOOL_SCHEMAS entry (~20 tools) was sent on every turn regardless
+        # of relevance — a real cost for a 3B model's tool-selection accuracy.
+        # No match -> filtered_tool_schemas returns everything unchanged, so this
+        # can only shrink the list, never regress a turn.
+        _matched_caps = match_capabilities(user_input, embedder=_embedder, query_vector=_cap_vec)
+    handoff_profile = resolve_handoff(
+        _matched_caps,
+        default_max_iter=MAX_AGENT_ITER,
+        default_research_budget=AGENT_RESEARCH_MAX_CALLS,
+    )
+    trace_ctx = _agent_context(owner, run_id=f"run-{int(time.time() * 1000)}")
+    if worker_mode:
+        from system.playground import playground_dir
+        trace_ctx = replace(trace_ctx, worker_root=playground_dir().resolve())
+    _append_step_trace(trace_ctx, "llm_step", {
+        "step": 0,
+        "matched_capabilities": _matched_caps,
+        "handoff_profile": {
+            "tool_domains": sorted(handoff_profile.tool_domains),
+            "system_overlay": handoff_profile.system_overlay,
+            "max_iter": handoff_profile.max_iter,
+            "research_budget": handoff_profile.research_budget,
+            "capability_ids": list(handoff_profile.capability_ids),
+        },
+    })
+    if not worker_mode:
+        # filtered_tool_schemas is the ONLY domain filter pass now — it derives
+        # its domain set from the same CAPABILITIES table resolve_handoff just
+        # used, so there is nothing left to reconcile with a second pass.
+        tools = filtered_tool_schemas(tool_schemas(), list(handoff_profile.capability_ids))
+
+    # Graph-first executor: known playbook workflows can run without an LLM
+    # planning loop. Novel/ambiguous tasks return None and fall back to the
+    # ReAct loop once; the normal experience recorder below then captures the
+    # successful sequence for later promotion into the graph playbook.
+    # Worker mode skips it: coding tasks are novel by definition, and the
+    # worker's job is the ReAct loop itself.
+    if not worker_mode and AGENT_EXECUTOR_MODE in {"graph", "hybrid"}:
+        graph_result = schema.run_schema_agent(
+            user_input, cap_ids=_matched_caps, embedder=_embedder,
+            llm_client=owner._client, llm_model=owner._llm_model,
+        )
+        if graph_result is not None:
+            for _node in graph_result.results:
+                _append_step_trace(trace_ctx, "graph_node", {"node_id": getattr(_node, "node_id", ""), "tool": getattr(_node, "tool", ""), "ok": getattr(_node, "ok", False), "error_type": getattr(_node, "error_type", None)})
+            _graph_ok = not any(not r.ok for r in graph_result.results)
+
+            # DEBUG: Log each node result
+            for r in graph_result.results:
+                status = "OK" if r.ok else "FAILED"
+                content_preview = str(r.content)[:500] if r.content else "None"
+                log.info(f"GRAPH NODE {status}: tool={r.tool} node_id={r.node_id if hasattr(r, 'node_id') else '?'} error_type={r.error_type} content={content_preview}")
+
+            # Build a TaskState from the graph's node results so the SAME
+            # final-answer verifier used by ReAct also scrutinizes graph-
+            # executed answers. Previously the graph path never called
+            # _verify_final_answer at all, so a node-level failure or an
+            # answer that quietly omitted a required disclosure could reach
+            # the user with zero scrutiny, unlike every ReAct answer.
+            graph_state = TaskState(goal=user_input)
+            for r in graph_result.results:
+                graph_state.record(ToolResult(
+                    ok=r.ok, tool=r.tool, args=r.args, content=r.content,
+                    error_type=r.error_type, retryable=False, attempts=1,
+                ))
+
+            graph_verdict: VerificationResult | None = None
+            if AGENT_VERIFY_FINAL:
+                log.info(f"VERIFY: calling _verify_final_answer, final_answer_len={len(str(graph_result.final_answer)) if graph_result.final_answer else 0}")
+                graph_verdict = _verify_final_answer(owner, user_input, graph_result.final_answer, graph_state)
+                log.info(f"VERIFY: result ok={graph_verdict.ok} score={graph_verdict.score} feedback_len={len(graph_verdict.feedback) if graph_verdict.feedback else 0}")
+                _append_step_trace(trace_ctx, "verify", {"ok": graph_verdict.ok, "score": graph_verdict.score, "feedback": graph_verdict.feedback[:500], "mode": "graph"})
+                # One targeted rewrite on verifier failure: the verifier's
+                # specific feedback guides the fix (unlike generic heuristics).
+                # Re-verify; if it still fails, fall through to the existing
+                # failure handling below.
+                if graph_verdict is not None and not graph_verdict.ok:
+                    log.info("VERIFY: attempting one targeted rewrite of rejected answer")
+                    rewritten = _rewrite_failed_answer(
+                        owner, user_input, graph_result.final_answer, graph_verdict, graph_state
+                    )
+                    if rewritten:
+                        _append_step_trace(trace_ctx, "verify_rewrite", {"rewritten_chars": len(rewritten)})
+                        rewrite_verdict = _verify_final_answer(owner, user_input, rewritten, graph_state)
+                        log.info(f"VERIFY (rewrite): ok={rewrite_verdict.ok} score={rewrite_verdict.score}")
+                        _append_step_trace(trace_ctx, "verify", {"ok": rewrite_verdict.ok, "score": rewrite_verdict.score, "feedback": rewrite_verdict.feedback[:500], "mode": "graph_rewrite"})
+                        if rewrite_verdict.ok:
+                            graph_verdict = rewrite_verdict
+                            graph_result.final_answer = rewritten
+            else:
+                log.info("VERIFY: skipped (AGENT_VERIFY_FINAL=0)")
+
+            graph_trustworthy = _graph_ok and (graph_verdict is None or graph_verdict.ok)
+            log.info(f"GRAPH TRUSTWORTHY: _graph_ok={_graph_ok} verdict_ok={graph_verdict.ok if graph_verdict else None} -> {graph_trustworthy}")
+
+            if graph_trustworthy:
+                def _safe_dict(obj):
+                    if is_dataclass(obj):
+                        return asdict(obj)
+                    if hasattr(obj, "__dict__"):
+                        return obj.__dict__
+                    if hasattr(obj, "__slots__"):
+                        return {s: getattr(obj, s) for s in obj.__slots__}
+                    return vars(obj)  # will raise clearly if truly unsupported
+
+                CONTEXT_POOL.submit(
+                    experience.record_experience,
+                    owner, user_input, graph_result.steps, graph_result.final_answer,
+                    verified_ok=True, score=graph_verdict.score if graph_verdict else 1.0, embedder=_embedder,
+                )
+                CONTEXT_POOL.submit(
+                    skill_learning.propose_skill_from_run,
+                    user_input, graph_result.steps, graph_result.final_answer,
+                    verified_ok=True, score=graph_verdict.score if graph_verdict else 1.0, user_id=trace_ctx.user_id,
+                )
+                graph_payload = {
+                    "id": graph_result.graph.id,
+                    "name": graph_result.graph.name,
+                    "goal": graph_result.graph.goal,
+                    "source": graph_result.graph.source,
+                    "nodes": [_safe_dict(n) for n in graph_result.graph.nodes],
+                }
+                node_payload = [_safe_dict(r) for r in graph_result.results]
+                owner.last_prompt_debug = {
+                    "mode": "agentic_graph",
+                    "matched_capabilities": _matched_caps,
+                    "graph": graph_payload,
+                    "node_results": node_payload,
+                }
+                owner.last_usage = {
+                    "prompt_messages": [{"role": "user", "content": user_input}],
+                    "completion_text": graph_result.final_answer,
+                    "prompt_tokens": None,
+                    "completion_tokens": None,
+                    "total_tokens": None,
+                }
+                _emit_file_artifacts(token_callback, graph_state)
+                final_text = _finalize_agentic_answer(owner, user_input, graph_result.final_answer, token_callback=token_callback)
+                with owner._history_lock:
+                    owner._history.append({"role": "user", "content": user_input})
+                    owner._history.append({"role": "assistant", "content": final_text})
+                    if len(owner._history) > AGENT_HISTORY_TURNS * 10:
+                        owner._history = owner._history[-(AGENT_HISTORY_TURNS * 10):]
+                owner._store_async(user_input, final_text)
+                return final_text
+
+            # Graph produced an untrustworthy result (a node failed, and/or
+            # the verifier rejected it). Record it as a failed/partial
+            # experience regardless of what happens next, so this graph
+            # template stops getting reinforced by a result nobody actually
+            # trusted.
+            log.warning(
+                "[agentic] graph result untrustworthy (nodes_ok=%s, verified=%s); "
+                "executor_mode=%s",
+                _graph_ok, graph_verdict.ok if graph_verdict else None, AGENT_EXECUTOR_MODE,
+            )
+            CONTEXT_POOL.submit(
+                experience.record_experience,
+                owner, user_input, graph_result.steps, graph_result.final_answer,
+                verified_ok=False, score=graph_verdict.score if graph_verdict else 0.0, embedder=_embedder,
+            )
+            CONTEXT_POOL.submit(
+                skill_learning.propose_skill_from_run,
+                user_input, graph_result.steps, graph_result.final_answer,
+                verified_ok=False, score=graph_verdict.score if graph_verdict else 0.0, user_id=trace_ctx.user_id,
+            )
+
+            if AGENT_EXECUTOR_MODE == "graph":
+                # No ReAct fallback allowed in pure graph mode; surface the
+                # graph's own (already failure-disclosing) text as before.
+                final_text = graph_result.final_answer
+                owner.last_usage = {
+                    "prompt_messages": [{"role": "user", "content": user_input}],
+                    "completion_text": final_text,
+                    "prompt_tokens": None,
+                    "completion_tokens": None,
+                    "total_tokens": None,
+                }
+                _emit_file_artifacts(token_callback, graph_state)
+                final_text = _finalize_agentic_answer(owner, user_input, final_text, token_callback=token_callback)
+                with owner._history_lock:
+                    owner._history.append({"role": "user", "content": user_input})
+                    owner._history.append({"role": "assistant", "content": final_text})
+                    if len(owner._history) > AGENT_HISTORY_TURNS * 10:
+                        owner._history = owner._history[-(AGENT_HISTORY_TURNS * 10):]
+                owner._store_async(user_input, final_text)
+                return final_text
+            # else: AGENT_EXECUTOR_MODE == "hybrid" — fall through to the
+            # ReAct loop below instead of trusting a graph result that
+            # failed a node or failed verification. This is the actual
+            # "hybrid" fallback the docstring/synthesized text promised but
+            # the old code never performed.
+
+        if graph_result is None and AGENT_EXECUTOR_MODE == "graph":
+            final_text = (
+                "I could not match this task to a saved playbook workflow, "
+                "and AGENT_EXECUTOR_MODE=graph disables the ReAct fallback. "
+                "Run practice.py or switch to AGENT_EXECUTOR_MODE=hybrid to learn it once."
+            )
+            final_text = _finalize_agentic_answer(owner, user_input, final_text, token_callback=token_callback)
+            owner.last_usage = {
+                "prompt_messages": [{"role": "user", "content": user_input}],
+                "completion_text": final_text,
+                "prompt_tokens": None,
+                "completion_tokens": None,
+                "total_tokens": None,
+            }
+            with owner._history_lock:
+                owner._history.append({"role": "user", "content": user_input})
+                owner._history.append({"role": "assistant", "content": final_text})
+                if len(owner._history) > AGENT_HISTORY_TURNS * 10:
+                    owner._history = owner._history[-(AGENT_HISTORY_TURNS * 10):]
+            owner._store_async(user_input, final_text)
+            return final_text
+
+    if worker_mode:
+        # Lean worker: no memory/KB/experience/persona fetch at all — not
+        # just droppable, never fetched. A coding worker's state lives in
+        # the work dir and CHECKPOINT.md, not in Aiko's recollection.
+        # Fixed overhead: ~150-token prompt + 7 terse tool schemas.
+        memory_context = ""
+        knowledge_context = ""
+        experience_guidance = ""
+        task_mode_guidance = ""
+        agent_system = WORKER_SYSTEM_PROMPT
+        scores = {}
+    else:
+        if mem_kb_future is not None:
+            try:
+                memories, knowledge_block = mem_kb_future.result(timeout=AGENT_MEMKB_TIMEOUT)
+            except concurrent.futures.TimeoutError:
+                log.warning("[agentic] memory/KB future timed out after %.1fs — continuing without it",
+                            AGENT_MEMKB_TIMEOUT)
+                memories, knowledge_block = [], "<knowledge_context>\nLookup timed out.\n</knowledge_context>"
+            except Exception as e:
+                log.error("Memory/KB fetch failed: %s", e)
+                memories, knowledge_block = [], "<knowledge_context>\nLookup failed.\n</knowledge_context>"
+        else:
+            memories, knowledge_block = owner._fetch_memory_and_knowledge(user_input, query_vector=_query_vec)
+
+        memory_block = owner._get_memorize().format_for_context(
+            memories, query=user_input, query_vector=_query_vec
+        )
+        memory_context = memory_block or "<memory_context>\nNo relevant memories found.\n</memory_context>"
+        memory_context = _blank_empty_context(memory_context)
+
+        # Discovery ladder step 2: no validated DAG matched (graph returned None
+        # above), so look for a similar *successful* past task to guide ReAct.
+        # Wiki / skill / policy blocks are never injected upfront — the loop
+        # pulls them explicitly via retrieve_context / load_skill when needed.
+        experience_guidance = _similar_successful_experience(user_input, _embedder)
+        knowledge_block = _blank_empty_context(knowledge_block)
+        knowledge_context = knowledge_block
+        scores = {}
+        scores["knowledge"] = reason.batch_block_relevance_scores(_embedder, user_input, [knowledge_context], query_vector=_query_vec)[0]
+
+        # Tool-RAG: omit low-relevance knowledge upfront; the loop retrieves
+        # specifics with retrieve_context instead of reading noise.
+        # Memory is fixed-budget (never gated here).
+        if AGENT_UPFRONT_MIN_SCORE > 0:
+            if knowledge_context and scores.get("knowledge", 0.0) < AGENT_UPFRONT_MIN_SCORE:
+                log.info("[agentic] knowledge upfront score %.3f < %.2f — omitted, retrieve_context on demand",
+                         scores.get("knowledge", 0.0), AGENT_UPFRONT_MIN_SCORE)
+                knowledge_context = ("<knowledge_context>\nOmitted this turn (low relevance) — "
+                                     "use the retrieve_context tool to pull specifics on demand.\n</knowledge_context>")
+
+        memory_context, knowledge_context, experience_guidance, task_mode_guidance = _enforce_agentic_context_budget(
+            owner._persona, memory_context, user_input,
+            knowledge_context, experience_guidance,
+            task_mode_context=TASK_MODE_GUIDANCE,
+            tool_schemas=tools,
+            scores=scores,
+            lean=lean_context,
+        )
+
+        # Core task-mode rules are always kept (small, operationally essential);
+        # the verbose guidance is droppable under context-budget pressure.
+        # Task mode uses the stable persona core (SOUL.md + user profile) WITHOUT
+        # the volatile chat-cognition tail (mood/energy/reflection/preferences/
+        # lessons/priming/reasoning-guide): that tail costs thousands of tokens
+        # and the ReAct loop + verification provide task grounding instead.
+        # Full prompt was exceeding the llama-server ctx (11k > 10k) even after
+        # every droppable block shed — the fixed cost itself was the overflow.
+        agent_system = (
+            f"{owner._current_system_prompt()}\n\n"
+            f"{bioclock.current_datetime_block()}\n\n"
+            f"{TASK_MODE_CORE}\n\n"
+            f"{handoff_profile.system_overlay}\n\n"
+            f"{memory_context}\n\n"
+            f"{knowledge_context}\n\n"
+            f"{experience_guidance}\n\n"
+            f"{task_mode_guidance}\n\n"
+        )
+    messages = [
+        {"role": "system", "content": agent_system},
+        *(_recent_history_messages(owner, user_input, query_vector=_query_vec) if include_history and not worker_mode else []),
+        {"role": "user", "content": user_input},
+    ]
+    owner.last_prompt_debug = {
+        "mode": "agentic_worker" if worker_mode else "agentic",
+        "system_prompt": WORKER_SYSTEM_PROMPT if worker_mode else owner._persona_core(),
+        "memory_prompt": memory_context,
+        "web_prompt": "",
+        "agentic_prompts": [
+            {"label": "knowledge_context", "content": knowledge_context},
+            {"label": "similar_experience", "content": experience_guidance},
+            {"label": "task_mode_core", "content": TASK_MODE_CORE},
+            {"label": "task_mode_guidance", "content": task_mode_guidance},
+        ],
+        "matched_capabilities": _matched_caps,
+        "previous_chat_messages": [dict(m) for m in messages[1:-1]],
+    }
+    owner.last_usage = {
+        "prompt_messages": list(messages),
+        "completion_text": "",
+        "prompt_tokens": None,
+        "completion_tokens": None,
+        "total_tokens": None,
+    }
+
+    final_text = ""
+    last_content = ""
+    seen_calls: set[tuple[str, str]] = set()
+    state = TaskState(goal=user_input)
+    final_repairs = 0
+    last_verdict: VerificationResult | None = None
+    used_incomplete_fallback = False
+    interrupted = False
+
+    turn_guards = default_pre_tool_guardrails(handoff_profile.research_budget)
+
+    for step in range(handoff_profile.max_iter):
+        # Stage 2 GF: abort agent loop when live interrupt/urgency is set.
+        try:
+            from cognition.fly_behavior import should_abort_plan
+            _uid = None
+            try:
+                _uid = current_user_id() or None
+            except Exception:
+                _uid = None
+            if should_abort_plan(_uid):
+                log.info("flygf interrupt → abort agentic loop step=%s user=%s", step, _uid or "default")
+                final_text = "Stopped — interrupt received."
+                interrupted = True
+                break
+        except Exception:
+            pass
+        if token_callback:
+            token_callback("__THINKING__\n")
+
+        try:
+            msg, usage = _stream_agent_message(owner, messages, tools, token_callback)
+            last_content = msg.content or ""
+            owner.last_usage = {
+                "prompt_messages": list(messages),
+                "completion_text": last_content,
+                "prompt_tokens": getattr(usage, "prompt_tokens", None),
+                "completion_tokens": getattr(usage, "completion_tokens", None),
+                "total_tokens": getattr(usage, "total_tokens", None),
+            }
+            messages.append(msg.model_dump(exclude_none=True))
+            _compact_processed_tool_context(messages)
+        except Exception as e:
+            log.error("Agent LLM call failed: %s", e)
+            state.record(ToolResult(
+                ok=False, tool="llm_call", args={},
+                content=f"[llm_call_failed: {e}]",
+                error_type="llm_call_failed",
+                retryable=False,
+            ))
+            break
+
+        if not msg.tool_calls:
+            candidate = msg.content or ""
+            # Worker mode skips the LLM final-verifier: for code, the test
+            # run is the verifier, and the extra LLM call costs context.
+            if AGENT_VERIFY_FINAL and not worker_mode:
+                verdict = _verify_final_answer(owner, user_input, candidate, state)
+                last_verdict = verdict
+                _append_step_trace(trace_ctx, "verify", {"ok": verdict.ok, "score": verdict.score, "feedback": verdict.feedback[:500]})
+                if not verdict.ok and final_repairs < AGENT_MAX_FINAL_REPAIRS:
+                    final_repairs += 1
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Verifier rejected the candidate final answer. "
+                            "Repair the task or answer before finalizing.\n"
+                            f"Verifier score: {verdict.score}\n"
+                            f"Feedback:\n{verdict.feedback}\n\n"
+                            f"Task ledger:\n{state.summary()}"
+                        ),
+                    })
+                    continue
+            final_text = candidate
+            break
+
+        # Phase 1 — pre-process all tool calls (fast, sequential checks)
+        batch_calls: list[tuple[str, str, dict]] = []   # (call_id, name, args)
+        final_answer_data: tuple[str, dict] | None = None  # (call_id, args)
+        trailing_dropped = 0
+
+        for call_idx, call in enumerate(msg.tool_calls):
+            name = call.function.name
+            try:
+                args = json.loads(call.function.arguments)
+            except json.JSONDecodeError as e:
+                result = ToolResult(
+                    ok=False, tool=name, args={},
+                    content=f"Invalid JSON arguments: {e}. Reissue this tool call with valid JSON.",
+                    error_type="invalid_json", retryable=True,
+                )
+                state.record(result)
+                messages.append({
+                    "role": "tool", "tool_call_id": call.id,
+                    "name": name, "content": result.observation(),
+                })
+                continue
+
+            log.info("[agent] step %s → %s(%s)", step, name, args)
+
+            call_key = (name, json.dumps(args, sort_keys=True))
+            if name != "final_answer" and call_key in seen_calls:
+                result = ToolResult(
+                    ok=False, tool=name, args=args,
+                    content=(
+                        f"Repeated tool call skipped for {name}. Choose a different "
+                        "query/argument/tool, or finalize with a disclosed limitation."
+                    ),
+                    error_type="repeated_tool_call", retryable=True,
+                )
+                state.record(result)
+                messages.append({
+                    "role": "tool", "tool_call_id": call.id,
+                    "name": name, "content": result.observation(),
+                })
+                continue
+
+            if name != "final_answer":
+                seen_calls.add(call_key)
+            if token_callback:
+                token_callback(f"__STATUS__:tool:{name}\n")
+
+            if name == "final_answer":
+                final_answer_data = (call.id, args)
+                trailing_dropped = len(msg.tool_calls) - call_idx - 1
+                break
+
+            batch_calls.append((call.id, name, args))
+
+        # Phase 2 — execute batch tools in parallel, collect in original order
+        if batch_calls:
+            submitted = [
+                (call_id, name, CONTEXT_POOL.submit(
+                    execute_tool_with_policy, name, args, state, owner=owner, ctx=trace_ctx, guards=turn_guards
+                ))
+                for call_id, name, args in batch_calls
+            ]
+            for call_id, name, future in submitted:
+                try:
+                    result = future.result()
+                except Exception as e:
+                    result = ToolResult(
+                        ok=False, tool=name, args={},
+                        content=f"[tool execution error: {e}]",
+                        error_type="execution_error", retryable=False,
+                    )
+                    state.record(result)
+                messages.append({
+                    "role": "tool", "tool_call_id": call_id,
+                    "name": name, "content": result.observation(),
+                })
+
+        # Phase 3 — handle final_answer on main thread
+        if final_answer_data:
+            call_id, args = final_answer_data
+            candidate = args.get("answer", "")
+            if AGENT_VERIFY_FINAL and not worker_mode:
+                verdict = _verify_final_answer(owner, user_input, candidate, state)
+                last_verdict = verdict
+                _append_step_trace(trace_ctx, "verify", {"ok": verdict.ok, "score": verdict.score, "feedback": verdict.feedback[:500]})
+                if not verdict.ok and final_repairs < AGENT_MAX_FINAL_REPAIRS:
+                    final_repairs += 1
+                    messages.append({
+                        "role": "tool", "tool_call_id": call_id,
+                        "name": "final_answer",
+                        "content": json.dumps({
+                            "ok": False, "error_type": "verification_failed",
+                            "score": verdict.score, "feedback": verdict.feedback,
+                            "task_ledger": json.loads(state.summary()),
+                            "instruction": "Repair the missing/unsupported parts, then call final_answer again.",
+                        }, ensure_ascii=False, indent=2),
+                    })
+                    continue
+            if output_model is not None:
+                try:
+                    structured = output_model.model_validate_json(candidate) if isinstance(candidate, str) else output_model.model_validate(candidate)
+                    candidate = json.dumps(structured.model_dump(mode="json"), ensure_ascii=False)
+                except Exception as exc:
+                    if final_repairs < AGENT_MAX_FINAL_REPAIRS:
+                        final_repairs += 1
+                        detail = exc.errors(include_url=False) if ValidationError is not None and isinstance(exc, ValidationError) else str(exc)
+                        messages.append({
+                            "role": "tool", "tool_call_id": call_id,
+                            "name": "final_answer",
+                            "content": json.dumps({
+                                "ok": False, "error_type": "structured_output_validation_failed",
+                                "errors": detail,
+                                "instruction": "Return final_answer as valid JSON matching the requested structured output model.",
+                            }, ensure_ascii=False, indent=2),
+                        })
+                        continue
+                    final_text = json.dumps({"ok": False, "error_type": "structured_output_validation_failed", "errors": detail}, ensure_ascii=False)
+                    break
+            final_text = candidate
+            messages.append({
+                "role": "tool", "tool_call_id": call_id,
+                "name": "final_answer", "content": "Answer submitted.",
+            })
+            if trailing_dropped:
+                log.warning("[agentic] final_answer arrived mid-batch; dropping %d remaining tool call(s)", trailing_dropped)
+
+        if final_text:
+            break
+
+    if not final_text:
+        log.warning(
+            "Agent loop ended without a final answer after %s iterations; tools=%s failures=%s",
+            MAX_AGENT_ITER, len(state.steps), len(state.failures),
+        )
+        final_text = _build_incomplete_task_answer(state, last_content)
+        used_incomplete_fallback = True
+
+    if used_incomplete_fallback:
+        exp_verified_ok, exp_score = False, 0.0
+    elif last_verdict is not None:
+        exp_verified_ok, exp_score = last_verdict.ok, last_verdict.score
+    else:
+        exp_verified_ok, exp_score = True, 1.0
+
+    if not interrupted:
+        CONTEXT_POOL.submit(
+            experience.record_experience,
+            owner, user_input, state.steps, final_text,
+            verified_ok=exp_verified_ok, score=exp_score, embedder=_embedder,
+        )
+        CONTEXT_POOL.submit(
+            skill_learning.propose_skill_from_run,
+            user_input, state.steps, final_text,
+            verified_ok=exp_verified_ok, score=exp_score, user_id=trace_ctx.user_id,
+        )
+    _emit_file_artifacts(token_callback, state)
+    final_text = _finalize_agentic_answer(owner, user_input, final_text, token_callback=token_callback)
+
+    with owner._history_lock:
+        owner._history.append({"role": "user", "content": user_input})
+        owner._history.append({"role": "assistant", "content": final_text})
+        if len(owner._history) > AGENT_HISTORY_TURNS * 10:
+            owner._history = owner._history[-(AGENT_HISTORY_TURNS * 10):]
+
+    owner._store_async(user_input, final_text)
+    _flush_trace_buffer()
+    from cognition.attention import flush_all_persist
+    flush_all_persist()
+    return final_text

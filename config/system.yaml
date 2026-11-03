@@ -14,7 +14,7 @@ AI_NAME: "Aiko"
 # AGE_KEY and ENV_AGE_PATH below are resolved relative to this root too,
 # since they're plain filenames, not absolute paths.
 #
-USER_STATE_ROOT: "~/.aiko"
+USER_SPACE_ROOT: "/home/oppa-ai/.aiko"
 
 # -- Secrets Key --
 # These are SERVICE-level secrets (one shared LLM/OAuth config for all
@@ -45,13 +45,14 @@ TIMEZONE: "America/Vancouver"  # IANA timezone name used everywhere Aiko resolve
 
 # -- Paths --
 WORKSPACE_ROOT: ""  # Optional override; blank uses per-user ~/.aiko/<user_id>/workspace.
-SCHEDULE_PATH: ""  # Optional override; blank uses per-user ~/.aiko/<user_id>/workspace/tasks/schedule.json.
+SCHEDULE_PATH: ""  # Optional override; blank uses per-user ~/.aiko/<user_id>/tasks/schedule.json.
 
 # -- System job timing --
 DAILY_JOB_HOUR: "0"  # Local hour for daily reflection/dream job; integer 0-23.
 DAILY_JOB_MINUTE: "0"  # Local minute for daily reflection/dream job; integer 0-59.
 MONTHLY_JOB_HOUR: "0"  # Local hour for monthly consolidation job on the 1st; integer 0-23.
 MONTHLY_JOB_MINUTE: "5"  # Local minute for monthly consolidation job; integer 0-59.
+CATCHUP_MAX_LOOKBACK_DAYS: "7"  # Maximum days back the scheduler scans for missed nightly reflection runs on startup.
 
 # Log config
 #
@@ -60,6 +61,7 @@ MONTHLY_JOB_MINUTE: "5"  # Local minute for monthly consolidation job; integer 0
 
 # -- Logging --
 LOG_LEVEL: "INFO"  # Python log level; options: DEBUG, INFO, WARNING, ERROR, CRITICAL.
+LOG_ROTATE_MODE: "size"  # "size" rotates at LOG_MAX_BYTES (default); "time" rotates daily via LOG_ROTATE_WHEN/LOG_ROTATE_INTERVAL. Size fits Aiko's constrained Jetson storage better than calendar-based rotation.
 LOG_MAX_BYTES: "5242880"  # Maximum size of logs/aiko.log before rotation.
 LOG_BACKUP_COUNT: "3"  # Number of rotated log files to keep.
 DB_SIZE_TTL: "1.0"  # Seconds to cache memory DB size in health/vitals display.

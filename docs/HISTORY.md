@@ -140,8 +140,8 @@ Major additions:
 - OpenAI-compatible local LLM client path for llama.cpp-style servers
 - agentic toolkit focused tool modules
 - agentic tools compatibility facade
-- agentic skill workflow documents under `skills/skillsets/*.md`
-- agentic skill discovery and retrieval in `skills/skills.py`
+- agentic skill workflow documents under `agentic/skillsets/*.md`
+- agentic skill discovery and retrieval in `agentic/skills.py`
 - agentic task-mode skill context injection
 - initial `wildlife_photo`, `aiko_architect`, `coding_tutor`, `japanese_tutor`, and `aurora_forecast_watch` skill projects
 - local scheduling/reminder infrastructure using per-user `schedule.json`
@@ -158,18 +158,18 @@ Architecture changes in Phase 2.5:
 | Routing | Keyword-only (`/web`, `/think`, task keywords) | **Dual-path: fast semantic exemplar routing by default, optional LLM router/fallback for context-heavy cases** |
 | Embeddings | BGE v1.5 (fastembed, 1024d, MEAN pooling) | **Harrier OSS v1 270M (custom ONNX, 640d, last-token pooling, query instructions)** |
 | Embedder | `fastembed` library | **Custom `cognition/reason.py` ONNX Harrier embedder** (fastembed only exposed MEAN/CLS pooling) |
-| Tools | Scattered functions | **Focused `toolkit/` modules: web, planning, scheduling, photo, architecture** |
-| Skills | N/A | **`skills/skillsets/*.md` workflow registry loaded by `skills/skills.py`** |
-| Agentic facade | Direct calls | **`toolkit/tools.py` compatibility facade + `skills/agentic.py` ReAct loop** |
+| Tools | Scattered functions | **Focused `agentic/toolkit/` modules: web, planning, scheduling, photo, architecture** |
+| Skills | N/A | **`agentic/skillsets/*.md` workflow registry loaded by `agentic/skills.py`** |
+| Agentic facade | Direct calls | **`agentic/toolkit/tools.py` compatibility facade + `agentic/agentic.py` ReAct loop** |
 
 Lessons learned:
 
 - Tools are executable abilities; skills are repeatable workflows.
 - Markdown skill files are for humans and prompts; Python toolkit modules are for actions.
-- `toolkit/tools.py` remains useful as a stable public facade even when implementations move into `toolkit/`.
+- `agentic/toolkit/tools.py` remains useful as a stable public facade even when implementations move into `agentic/toolkit/`.
 - The browser WebUI can share the TUI contract, but remote voice-device UX still needs polishing.
 - Environment-variable migrations need docs: `LLM_*` and `ROUTE_*` are now the current names for chat runtime/routing.
-- Aiko now has a graph-first master-plan executor for known workflows and a ReAct fallback for novel workflows. It still does not have a long-running autonomous sub-agent worker runtime with queues/leases/cancellation; graph nodes are lightweight tool tasks inside one orchestrated turn.
+- Aiko now has a graph-first playbook executor for known workflows and a ReAct fallback for novel workflows. It still does not have a long-running autonomous sub-agent worker runtime with queues/leases/cancellation; graph nodes are lightweight tool tasks inside one orchestrated turn.
 
 ---
 
@@ -192,8 +192,8 @@ The core philosophy remains unchanged:
 
 ## Graph-first agentic executor update
 
-- Added a deterministic graph/master-plan executor for known workflows.
+- Added a deterministic graph/playbook executor for known workflows.
 - Added `AGENT_EXECUTOR_MODE=react|graph|hybrid`; hybrid tries graph first and falls back to ReAct once.
 - Experience is no longer prompt context by default; it is primarily a post-run trace for offline workflow promotion.
-- Added `practice.py` for seeding practiced workflows and promoting them into per-user master plans.
+- Added `practice.py` for seeding practiced workflows and promoting them into per-user playbooks.
 - Added an on-disk semantic route-vector cache for static intent-routing examples.

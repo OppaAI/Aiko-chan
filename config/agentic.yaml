@@ -1,0 +1,196 @@
+# Wiki config
+#
+# Settings for agentic/wiki.py (wiki/persona/config/docs indexing).
+# Two-stage RAG pattern: semantic-rank WHICH items are candidates, then
+# chunk-rank WHICH PART of each selected item gets injected.
+
+# -- item-level semantic ranking (which wiki/persona/config/docs items are candidates at all) --
+WIKI_SEMANTIC_THRESHOLD: "0.35"  # Min cosine similarity for a wiki item to be considered a candidate match.
+
+# -- chunk-level RAG selection (which part of a selected item gets injected) --
+WIKI_CHUNK_CHARS: "600"  # Chunk size (chars) a matched wiki item's body is split into before relevance scoring. Shared by wiki_context_for.
+WIKI_CHUNKS_PER_ITEM: "3"  # Max relevant chunks kept per matched wiki item.
+WIKI_CHUNK_MIN_SCORE: "0.30"  # Min relevance score to keep a chunk; below this the item falls back to its first chunk.
+
+# Skills config
+#
+# Settings for agentic/skills.py (skills/<id>/SKILL.md workflow docs).
+# Two-stage RAG pattern: semantic-rank WHICH skills are candidates, then
+# chunk-rank WHICH PART of each matched SKILL.md gets injected.
+
+# -- whole-doc semantic ranking (which skills are candidates at all) --
+SKILL_SEMANTIC_THRESHOLD: "0.35"  # Min cosine similarity for a skill to be considered a candidate match. Lower = more skills surface per query, at the cost of precision.
+
+# -- chunk-level RAG selection (which part of a matched SKILL.md gets injected) --
+SKILL_CHUNK_CHARS: "600"  # Chunk size (chars) a matched SKILL.md is split into before relevance scoring.
+SKILL_CHUNKS_PER_MATCH: "4"  # Max relevant chunks kept per matched skill doc.
+SKILL_CHUNK_MIN_SCORE: "0.30"  # Min relevance score to keep a chunk; below this the skill falls back to its first chunk.
+
+# -- user skillsets --
+USER_SKILLSETS_PATH: ""  # Override path for per-user skillsets. Defaults to <USER_SPACE_ROOT>/<user_id>/skillsets/.
+
+# -- job hunt config path --
+JOB_HUNT_CONFIG_PATH: ""  # Path to job_hunt.json config file. Can be absolute or relative to workspace. Defaults to <USER_SPACE_ROOT>/<user_id>/skillsets/job_hunt.json if exists, otherwise <workspace>/agentic/skillsets/job_hunt.json.
+
+# -- Lane D job-hunt behavior --
+JOB_HUNT_DEDUP_DAYS: "3"  # Cross-run dedup retention window (days). Seen/rejected jobs are kept deduped for this many days (default 3 = same-day + 1 day buffer), then may reappear. Published jobs are removed from the ledger immediately on post success.
+JOB_HUNT_MAX_RSS_POSTS: "10"  # Max job posts drafted from RSS feeds per run.
+JOB_HUNT_MAX_EMAIL_POSTS: "10"  # Max job posts drafted from email alerts per run (LinkedIn/Glassdoor/Indeed).
+# Email job alerts are read via the already-registered Proton Mail MCP tools
+# (read_protonmail / search_protonmail) from interface/mcp_server/social/services/protonmail.py.
+# Mailbox credentials are configured separately for that MCP server.
+
+# Agentic config
+#
+# Settings for agentic/agentic.py plus chat-vs-agent routing used by cognition/think.py.
+# Use this to tune when Aiko enters tool/task mode and how much work one task may do.
+
+# -- Agent executor mode --
+AGENT_EXECUTOR_MODE: "hybrid"  # react = old ReAct loop only; graph = playbook DAG only; hybrid = graph first, ReAct fallback once for novel workflows.
+GRAPH_AGENT_ENABLED: "1"  # Enable deterministic graph/playbook executor for known workflows.
+GRAPH_AGENT_PLAYBOOK: "agentic/playbook.json"  # Per-user JSON file for practiced/promoted graph workflows.
+GRAPH_MAX_WORKERS: "2"  # Max parallel tool nodes for graph execution. 2 on Jetson Orin Nano 8GB (4+ risks LLM/RAM contention).
+AGENT_INCLUDE_EXPERIENCE_CONTEXT: "0"  # Experience is now used for offline playbook promotion, not prompt context, by default.
+
+# -- Optional Needle 3 ReAct backend --
+# openai = main chat LLM picks tools (default).
+# needle = one local Needle 3 playground server proposes tools for novel ReAct turns.
+# needle_multi = fan-out to isolated Needle workers in NEEDLE_WORKERS.
+# Graph/playbook workflows stay deterministic. Low-confidence or unavailable
+# Needle responses fall back to the configured main LLM. Needle never executes
+# tools; Aiko still validates, approves, and runs every call.
+AGENT_REACT_BACKEND: "needle_multi"  # openai | needle | needle_multi. Flip to needle after the local Needle server is up.
+NEEDLE_BASE_URL: "http://127.0.0.1:8082"  # Single-worker Needle 3 playground POST /complete server.
+NEEDLE_CONFIDENCE_THRESHOLD: "0.85"  # Below this, escalate the ReAct turn to the main LLM. Range 0.0-1.0.
+NEEDLE_TIMEOUT: "15"  # Seconds before a Needle /complete request is treated as unavailable.
+NEEDLE_MAX_WORKERS: "4"  # Cap on NEEDLE_WORKERS length for needle_multi. On Jetson 8GB keep <=2 workers.
+# Each worker needs id, role, base_url, and a non-empty allowed_tools list.
+# Example: [{"id":"research","role":"researcher","base_url":"http://127.0.0.1:8082","allowed_tools":["adaptive_search","deep_read"]}]
+# Jetson example (2 workers max): [{"id":"research","role":"researcher","base_url":"http://127.0.0.1:8082","allowed_tools":["adaptive_search","deep_read"]},
+#  {"id":"coder","role":"code reviewer","base_url":"http://127.0.0.1:8083","allowed_tools":["codebase_search","repo_read_file","repo_search_text"]}]
+
+# JSON array of NeedleWorkerSpec objects. Empty disables multi-worker.
+NEEDLE_WORKERS: '[{"id":"research","role":"researcher","base_url":"http://127.0.0.1:8082","allowed_tools":["adaptive_search","deep_read"]},{"id":"coder","role":"code reviewer","base_url":"http://127.0.0.1:8083","allowed_tools":["codebase_search","repo_search_text"]},{"id":"planner","role":"planner","base_url":"http://127.0.0.1:8084","allowed_tools":["create_checklist","save_note"]},{"id":"reader","role":"reader","base_url":"http://127.0.0.1:8085","allowed_tools":["fetch_from_url","repo_read_file"]}]'
+
+# -- Coding-agent + IT/DAG studio budgets (Jetson Orin Nano 8GB) --
+# Ministral-3-3B CAN self-improve on small scoped tasks (single file, <200
+# lines, clear goal) via code_plan -> code_diff_preview -> code_apply_patch
+# (approval) -> code_lint -> code_run_tests. It canNOT do large multi-file
+# refactors in one shot — keep patches <50k chars and verify each step.
+# New IT/everyday/coding/needle tools live in agentic/toolkit/it_ops.py,
+# agentic/toolkit/coding.py, agentic/toolkit/needle_team.py and are all
+# graph+react enabled so the DAG studio palette picks them up.
+
+# -- Agent loop limits --
+MAX_AGENT_ITER: "10"  # Maximum tool/planning iterations per task; raise for complex tasks, lower for safety.
+AGENT_MAX_TOKENS: "512"  # Max model output tokens per agent step.
+LLM_TIMEOUT: "30"  # Per-request timeout (seconds) for agentic chat.completions calls (job-hunt enrich, synthesize_report, polish_text, ask_llm_json, etc.). Bounds stalled local/cloud backends so a single hang cannot block a graph node for the OpenAI SDK default (~600s).
+LLM_CTX_SIZE: "8192"  # Local llama-server context ceiling; used directly by agentic.py's context-budget guard now. Keep in sync with the actual llama-server --ctx-size.
+AGENT_CONTEXT_BUDGET_RATIO: "0.65"  # Fraction of LLM_CTX_SIZE the agent prompt (persona+memory+policy+wiki+skill+learned knowledge+experience+tool schemas) is allowed to occupy before blocks start getting dropped.
+AGENT_NOTE_MAX_CHARS: "5000"  # Max characters from notes/files injected into an agent step.
+AGENT_TOOL_RESULT_MAX_CHARS: "8000"  # Max characters retained from one tool result. Raised so research synthesis output isn't truncated.
+
+# -- Agentic policy RAG (skills.md/schedule.md excerpt selection) --
+AGENTIC_POLICY_CHUNK_CHARS: "600"  # Chunk size (chars) skills.md/schedule.md are split into before relevance scoring.
+AGENTIC_POLICY_CHUNKS_PER_FILE: "4"  # Max relevant chunks kept per policy file.
+AGENTIC_POLICY_CHUNK_MIN_SCORE: "0.25"  # Minimum relevance score to keep a policy chunk; below this the file falls back to its first chunk.
+AGENTIC_POLICY_MAX_CHARS: "3000"  # Hard cap on total policy excerpt chars injected into the agent system prompt, across both files.
+
+# -- Verification and retries --
+AGENT_VERIFY_FINAL: "1"  # Final-answer verifier toggle; options: 1/0, true/false, yes/no, on/off.
+AGENT_VERIFY_LLM: "1"  # Use an LLM call for final verification; options: 1/0, true/false, yes/no, on/off.
+AGENT_VERIFY_LLM_MODE: "auto" # Skip LLM when deterministic checks are clean, escalate when they flag something; options "always", "auto", "off"
+AGENT_MAX_FINAL_REPAIRS: "1"  # Max attempts to repair a final answer that fails verification.
+AGENT_VERIFY_MIN_SCORE: "0.70"  # Minimum verifier score when LLM verification is enabled; range 0.0-1.0.
+AGENT_UPFRONT_MIN_SCORE: "0.10"  # Cosine floor for upfront knowledge/experience blocks; below this they're omitted and pulled via retrieve_context instead.
+AGENT_TOOL_RETRY_BACKOFF: "0.2"  # Seconds to wait before retrying a failed tool call.
+
+# -- Agent tool retry policy --
+AGENT_WEB_TOOL_ATTEMPTS: "2"  # Retry attempts for task-mode web search on transient search failure. web_search/web_fetch are chat-only and not agentic tools.
+AGENT_LOCAL_TOOL_ATTEMPTS: "1"  # Retry attempts for save_note/schedule_job/schedule_reminder.
+AGENT_DEEP_RESEARCH_ATTEMPTS: "1"  # Retry attempts for deep_research specifically. Keep at 1 unless you can afford doubling a multi-round research call's cost (search+fetch×rounds + decision/synthesis LLM calls) on a retry.
+
+# -- Agentic history recall (recency + relevance weighted STM) --
+AGENT_HISTORY_CANDIDATE_MULTIPLIER: "3"  # How many past turns (x AGENT_HISTORY_TURNS/CONTEXT_WINDOW_TURNS) are considered as scoring candidates before selecting the final window.
+AGENT_HISTORY_RECENCY_HALFLIFE: "4"  # Turns until a candidate's recency weight halves in the blended recency+relevance score.
+AGENT_HISTORY_ALWAYS_KEEP_RECENT: "2"  # Number of most-recent turns always kept regardless of score, as a continuity floor.
+
+# -- Research call budget --
+AGENT_RESEARCH_MAX_CALLS: "1"  # Max deep_research calls per agentic workflow. (Internal _deep_search_impl is not a separate tool call, so it doesn't count against this budget.)
+
+# -- Workspace tool limits --
+MAX_WRITE_CHARS: "50000"  # Max characters allowed when agent saves a note/draft.
+MAX_READ_CHARS: "12000"  # Max characters returned when agent reads a workspace file.
+
+# -- Workspace tool limits --
+WORKSPACE_KNOWLEDGE_SCAN_INTERVAL_SECONDS: "60"  # How often (seconds) the scheduler scans workspace/knowledge for new RAG documents.
+
+# Web config
+#
+# Settings for agentic/toolkit/research.py and semantic web-search triggering.
+# Controls local SearXNG endpoint and how many search results the agent consumes.
+
+# -- SearXNG --
+SEARXNG_URL: "http://localhost:8888"  # Base URL for self-hosted SearXNG instance.
+SEARCH_SEMANTIC_THRESHOLD: "0.70"  # Semantic score to trigger web search from chat; higher means fewer searches.
+SEARXNG_MAX_RESULTS: "3"  # Max results per SearXNG call. Shared by web_search (snippet-only) and _deep_search_impl/deep_research underlying search calls.
+SEARXNG_TIMEOUT_SECONDS: "8"  # Seconds before SearXNG search calls time out.
+SEARXNG_MAX_RETRIES: "3"  # Max retry attempts for transient search failures.
+SEARXNG_RETRY_BASE_DELAY: "1.0"  # Base delay in seconds for search retry backoff (1s, 2s, 3s...).
+SEARXNG_RATE_LIMIT_DELAY: "2.0"  # Base delay in seconds for HTTP 429 rate-limit retries (2s, 4s, 6s...).
+TAVILY_TIMEOUT_SECONDS: "20"  # Seconds before Tavily Extract fallback calls time out.
+TAVILY_MIN_CHARS: "200"  # Trafilatura output shorter than this triggers the Tavily Extract fallback (longer source wins).
+
+# -- deep_research (multi-round adaptive research, accuracy-first) --
+ADAPTIVE_SEARCH_MAX_ROUNDS: "2"  # Unrolled subgraph rounds for adaptive_search. Each round = judge → (search → fetch on escalation). Default 2 — cheap enough for ReAct; quick_study overrides this via QUICK_STUDY_MAX_ROUNDS.
+DEEP_RESEARCH_NUM_SEARCHES: "5"  # SearXNG pages pulled per deep_research round.
+DEEP_RESEARCH_NUM_FETCHES: "3"  # Pages fetched per deep_research round. Bumped from 2 — more corroborating sources per round means the agreement bonus below has more to work with.
+DEEP_RESEARCH_MAX_CHARS_PER_PAGE: "3500"  # Per-page fetched text cap for deep_research's fetches specifically. Crawl4AI's markdown output tends to run longer than trafilatura's plain extraction, so this has its own higher budget.
+DEEP_RESEARCH_MAX_WORKERS: "4"  # Max concurrent threads for multi-page search and multi-URL fetch within ONE deep_research round. Shared with adaptive_search's fetch_and_condense_ranked. Lower on Jetson (limited cores) vs PC if contention shows up.
+DEEP_RESEARCH_MAX_ROUNDS: "2"  # Hard ceiling on search+fetch rounds. Lower this on Jetson vs PC if latency matters more than thoroughness. Each round now also does a Crawl4AI batch fetch + sitemap check, so a full 5-round dig is meaningfully heavier than before — watch this against AGENT_RESEARCH_MAX_CALLS in agentic.py, which still caps deep_research to 1 call per agentic workflow regardless of this setting.
+DEEP_RESEARCH_EVIDENCE_CHARS_FOR_DECISION: "8000"  # How much CONDENSED (not raw) accumulated evidence the continue/refine decision call sees. Bumped from 6000 alongside the wider per-round fetch count.
+DEEP_RESEARCH_EVIDENCE_CHARS_FOR_SYNTHESIS: "12000"  # How much condensed accumulated evidence the final synthesis call sees. Bumped from 8000 for the same reason.
+DEEP_RESEARCH_DECISION_MAX_TOKENS: "200"  # Token budget for the continue/refine decision call.
+DEEP_RESEARCH_SYNTHESIS_MAX_TOKENS: "1500"  # Token budget for the final synthesis call. Raised from 700 so the LLM can produce a real synthesized article rather than a dump of URL snippets.
+
+# -- in-memory evidence condensation (embedding-based relevance filtering) --
+CONDENSE_CHUNK_CHARS: "500"  # Chunk size (chars) fetched pages are split into before relevance scoring. Shared by _deep_search_impl and deep_research.
+CONDENSE_TOP_K: "8"  # Max relevant chunks kept in _deep_search_impl's condensed bundle.
+CONDENSE_MIN_SCORE: "0.15"  # Minimum relevance score to keep a chunk in _deep_search_impl's condensed bundle. Below this, content is dropped, not truncated-and-kept.
+CONDENSE_MAX_CHUNKS_TO_SCORE: "30"  # Caps embedding latency for _deep_search_impl regardless of total fetched volume. Lower on Jetson if embedding calls stack up (~200ms each per your harrier embedder benchmarks — 30 chunks ≈ 6s worst case).
+
+# -- deep_research condensation (wider net, corroboration-aware) --
+RESEARCH_CONDENSE_TOP_K: "12"  # Max relevant chunks kept in deep_research's condensed bundle per round — higher than _deep_search_impl's 8 since a trusted-KB answer benefits from more corroborating excerpts surviving into synthesis.
+RESEARCH_CONDENSE_MIN_SCORE: "0.12"  # Lower bar than _deep_search_impl's 0.15 — borderline chunks get a chance to clear the bar via the corroboration bonus below instead of being dropped outright.
+RESEARCH_CONDENSE_MAX_CHUNKS_TO_SCORE: "30"  # Same embedding-latency cap as CONDENSE_MAX_CHUNKS_TO_SCORE but sized for deep_research's wider per-round fetch count. On Jetson, 30 chunks at ~200ms/chunk is ~6s worst case per round.
+
+# -- cross-source corroboration ("sources agreement" scoring, deep_research only) --
+RESEARCH_AGREEMENT_BONUS: "0.12"  # Score added per additional independent corroborating domain (capped at 1.0 total).
+RESEARCH_AGREEMENT_SIMILARITY: "0.5"  # Word-shingle Jaccard similarity threshold above which two chunks from different domains count as corroborating each other. Raise toward 0.7-0.8 if unrelated chunks are getting falsely flagged as agreeing; lower toward 0.3-0.4 if genuinely-corroborating chunks with different phrasing aren't being caught.
+RESEARCH_AGREEMENT_SHINGLE_SIZE: "5"  # Word-shingle length used for the similarity check above.
+
+# -- Crawl4AI (deep_research only, richer page extraction) --
+RESEARCH_USE_CRAWL4AI: "1"  # 1 to use Crawl4AI's Playwright browser for JS rendering. Set 0 if RAM is constrained (Chromium/Playwright uses substantial RAM per page).
+CRAWL4AI_TIMEOUT_MS: "20000"  # Per-page timeout for Crawl4AI's Playwright load. Consider raising on Jetson for cold-start latency on first run.
+CRAWL4AI_MAX_CONCURRENT: "2"  # Max concurrent Playwright pages within one Crawl4AI batch session. Headless Chromium is not light — drop this to 2 on Jetson if it's competing with llama-server for RAM during a research round.
+CRAWL4AI_WORD_COUNT_THRESHOLD: "40"  # Minimum word count for Crawl4AI to consider a page block worth keeping, filtering out nav/boilerplate fragments.
+
+# -- robots.txt compliance ("source agreement" to be crawled) + sitemap discovery --
+RESEARCH_RESPECT_ROBOTS: "1"  # 1 to only fetch URLs the source's own robots.txt permits for our user-agent (fails open if robots.txt is unreachable/unparseable, matching standard crawler convention). 0 to disable the check entirely.
+ROBOTS_CACHE_TTL_SECONDS: "3600"  # How long a fetched robots.txt is cached in-process before being re-fetched.
+RESEARCH_SITEMAP_ENABLED: "1"  # 1 to let deep_research widen candidate URLs via sitemap.xml discovery for the top 1-2 domains in each round's search results (useful when one authoritative docs site is worth exploring beyond just the search snippet). 0 to disable.
+RESEARCH_SITEMAP_MAX_URLS: "6"  # Max sitemap-discovered URLs added per round, on top of the normal DEEP_RESEARCH_NUM_FETCHES search-derived URLs.
+RESEARCH_SITEMAP_TIMEOUT_SECONDS: "6"  # Per-request timeout for fetching robots.txt/sitemap.xml during discovery.
+
+# -- deep_study_window (scheduled autonomous study) --
+DEEP_STUDY_TOPIC: "Machine Learning"  # Optional topic for autonomous deep-study windows. Leave empty to skip or set dynamically via memorize.pending_deep_study_topic. Example: "quantum computing fundamentals".
+DEEP_STUDY_WINDOW_TIMEZONE: ""  # Timezone for the daily study window (e.g., "America/New_York"). Empty uses local system timezone.
+
+# -- web_fetch download guard & caching --
+WEB_FETCH_MAX_DOWNLOAD_BYTES: "5_000_000"  # Hard byte cap per fetch; download aborted mid-stream before extraction/truncation, bounding worst-case memory for one fetch.
+WEB_FETCH_TIMEOUT_SECONDS: "8"  # Per-request timeout for web_fetch's underlying HTTP call.
+WEB_FETCH_MAX_CHARS: "4000"  # Default max characters returned by web_fetch().
+FETCH_FROM_URL_MAX_CHARS: "4000"  # Default max characters returned by fetch_from_url().
+FETCH_URL_USER_AGENT: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"  # User-Agent header for URL fetch requests.
+TOOLS_CACHE_TTL_SECONDS: "900"  # In-process cache lifetime (seconds) for both search results and fetched pages. 15 min default.
+TOOLS_CACHE_MAX_ENTRIES: "256"  # Max entries per cache (search cache and fetch cache each get their own instance of this limit) before oldest entries are evicted.

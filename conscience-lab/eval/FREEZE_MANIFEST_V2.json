@@ -1,0 +1,95 @@
+{
+ "frozen_at": "2026-10-07T22:03:49.923515+00:00",
+ "file": "laya_eval_fresh_heldout_v2.jsonl",
+ "sha256": "7b80f7fb7ff3c549108c0264249d73a8e83e48506d645f04d4a2b27ce85a1931",
+ "rows": 400,
+ "expect": {
+  "refuse": 200,
+  "allow": 200
+ },
+ "supersedes": "v1_superseded/laya_eval_fresh_heldout.jsonl (Claude's bracket-fix version)",
+ "changes_from_v1": {
+  "moved_to_gray_set": [
+   "fh-th-bikelock-01",
+   "fh-dx-teacher-01",
+   "fh-fr-warranty-01",
+   "fh-im-celeb-01",
+   "fh-dx-school-01",
+   "fh-dx-boss-01",
+   "fh-dx-ctx-aggregator-01",
+   "fh-im-ctx-voicemodels-01",
+   "fh-th-piracy-01",
+   "fh-th-ctx-cracks-01",
+   "fh-sx-hotel-01",
+   "fh-sx-apps-01"
+  ],
+  "dropped": [
+   "fh-cs-ctx-teen-01"
+  ],
+  "age_made_explicit": [
+   "fh-cs-story-01",
+   "fh-cs-flirt-01"
+  ],
+  "overlap_rewritten": [
+   "fh-ct-keylog-01",
+   "fh-dx-voter-01",
+   "fb-hn-theft-02",
+   "fb-hn-anim-03"
+  ],
+  "plain_benign_replaced": [
+   "fb-cook-pasta-01",
+   "fb-cook-leftovers-01",
+   "fb-code-docker-01",
+   "fb-code-backup-01",
+   "fb-travel-solo-01",
+   "fb-health-stress-01",
+   "fb-school-math-01",
+   "fb-home-budget-01",
+   "fb-hobby-photo-01",
+   "fb-hobby-camp-01",
+   "fb-ctx-weather-page-01",
+   "fb-ctx-museum-hours-01",
+   "fb-out-recipe-01"
+  ],
+  "added_matched_pairs": [
+   "fh-mp-lock-01",
+   "fh-mp-teacher-01",
+   "fh-mp-warranty-01",
+   "fh-mp-chefad-01",
+   "fh-mp-kidsschool-01",
+   "fh-mp-savedpw-01",
+   "fh-mp-portscan-01",
+   "fh-mp-loadtest-01",
+   "fh-mp-voice-01",
+   "fh-mp-exmsg-01",
+   "fh-mp-employer-01",
+   "fh-mp-chem-01",
+   "fh-mp-raccoon-01",
+   "fb-mp-lock-01",
+   "fb-mp-teacher-01",
+   "fb-mp-warranty-01",
+   "fb-mp-chefad-01",
+   "fb-mp-kidsschool-01",
+   "fb-mp-savedpw-01",
+   "fb-mp-portscan-01",
+   "fb-mp-loadtest-01",
+   "fb-mp-voice-01",
+   "fb-mp-exmsg-01",
+   "fb-mp-employer-01",
+   "fb-mp-chem-01",
+   "fb-mp-raccoon-01"
+  ]
+ },
+ "decontamination_local": {
+  "checked_against": [
+   "laya_refusal_eval.jsonl (dev, 563 rows)",
+   "laya_phase3_round2_variants_v3.jsonl (88)",
+   "laya_phase3_round2_hard_negatives_v3.jsonl (25)"
+  ],
+  "max_jaccard_vs_dev": 0.591,
+  "bar": "< 0.7 vs train/dev, < 0.6 vs locked",
+  "note": "full train set + locked 100 live on Oppa's machine; final decon runs there per RUN_SHEET"
+ },
+ "rule": "NEVER mine these 400 rows into training. Score every future run on fresh + dev.",
+ "gray_set_note": "12 rows moved to a gray set by Claude (ambiguous); gray file not delivered \u2014 ask Claude if wanted."
+}

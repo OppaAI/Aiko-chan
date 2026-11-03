@@ -1,0 +1,214 @@
+"""SQLite-backed checkpointing for graph runs (agentic/graph_engine.py).
+
+A run_id identifies one invocation of execute_graph. If interrupted,
+calling execute_graph again with the same run_id resumes from the last
+completed node instead of restarting the whole graph.
+"""
+import json
+import shutil
+import sqlite3
+import threading
+from pathlib import Path
+
+from system.log import get_logger
+from system.userspace import current_user_id, user_state_dir
+
+log = get_logger(__name__)
+
+_lock = threading.Lock()
+
+
+def _db_path() -> Path:
+    return user_state_dir(current_user_id()) / "agentic" / "checkpoints.db"
+
+
+def _open_db(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=10.0)
+    try:
+        conn.execute("PRAGMA busy_timeout = 5000")
+    except Exception:
+        pass
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except Exception:
+        pass
+    return conn
+
+
+def _get_conn() -> sqlite3.Connection:
+    path = _db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_migrated()
+    _add_state_column_if_missing()
+    conn = _open_db(path)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS node_checkpoints (
+            run_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            tool TEXT NOT NULL,
+            ok INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            args TEXT NOT NULL,
+            error_type TEXT,
+            seq INTEGER NOT NULL,
+            state_json TEXT DEFAULT '{}',
+            PRIMARY KEY (run_id, node_id)
+        )
+    """)
+    return conn
+
+
+def _ensure_migrated() -> None:
+    """Ensure checkpoint DB is in user-space location, migrating if needed."""
+    old_path = Path(__file__).parent / "checkpoint.db"
+    new_path = _db_path()
+
+    if not old_path.exists():
+        return
+
+    if new_path.exists():
+        return
+
+    try:
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(old_path, new_path)
+        log.info("[checkpoint] Migrated checkpoint DB from %s to %s", old_path, new_path)
+
+        old_path.unlink()
+        log.info("[checkpoint] Removed old checkpoint DB at %s", old_path)
+    except Exception as e:
+        log.error("[checkpoint] Failed to migrate checkpoint DB: %s", e)
+
+
+def _add_state_column_if_missing() -> None:
+    """Idempotent migration for existing DBs that lack state_json."""
+    path = _db_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    try:
+        conn = _open_db(path)
+    except Exception as exc:
+        log.warning("state_json migration skipped (open failed): %s", exc)
+        return
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(node_checkpoints)").fetchall()]
+        if "state_json" not in cols:
+            conn.execute("ALTER TABLE node_checkpoints ADD COLUMN state_json TEXT DEFAULT '{}'")
+            conn.commit()
+    except Exception as exc:
+        log.warning("state_json migration skipped: %s", exc)
+    finally:
+        conn.close()
+
+
+def save_node_result(run_id: str, seq: int, result, state_json: str = "{}") -> None:
+    """Persist one NodeResult and an optional state snapshot."""
+    _add_state_column_if_missing()
+    safe_args = {
+        k: v for k, v in result.args.items()
+        if k not in {"embedder", "client", "model"}
+    }
+    with _lock:
+        conn = _get_conn()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO node_checkpoints "
+                "(run_id, node_id, tool, ok, content, args, error_type, seq, state_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (run_id, result.node_id, result.tool, int(result.ok),
+                 result.content, json.dumps(safe_args), result.error_type, seq, state_json),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def load_checkpoint(run_id: str, node_result_cls) -> list:
+    """Returns completed NodeResults for run_id, in original order. Empty if none."""
+    _add_state_column_if_missing()
+    with _lock:
+        conn = _get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT node_id, tool, ok, content, args, error_type, state_json "
+                "FROM node_checkpoints WHERE run_id = ? ORDER BY seq", (run_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+    out = []
+    for r in rows:
+        node_id, tool, ok, content, args_json, error_type, state_json = r
+        nr = node_result_cls(node_id=node_id, tool=tool, ok=bool(ok), content=content,
+                              args=json.loads(args_json), error_type=error_type, checkpoint_state=state_json)
+        out.append(nr)
+    return out
+
+
+def save_graph_state(run_id: str, state: dict) -> None:
+    """Persist a standalone state snapshot keyed by run_id.
+
+    Non-serializable values (threading.Lock, live handles) are coerced to
+    their repr so a tool that stashes one in state can never kill the graph
+    run with a ``TypeError: ... is not JSON serializable`` at snapshot time.
+    """
+    state = state or {}
+    _add_state_column_if_missing()
+    with _lock:
+        conn = _get_conn()
+        try:
+            try:
+                state_json = json.dumps(state)
+            except TypeError:
+                state_json = json.dumps(state, default=str)
+            conn.execute(
+                "INSERT OR REPLACE INTO node_checkpoints "
+                "(run_id, node_id, tool, ok, content, args, error_type, seq, state_json) "
+                "VALUES (?, '__graph_state__', '', 1, '', '{}', NULL, 0, ?)",
+                (run_id, state_json),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def load_graph_state(run_id: str) -> dict:
+    _add_state_column_if_missing()
+    with _lock:
+        conn = _get_conn()
+        try:
+            row = conn.execute(
+                "SELECT state_json FROM node_checkpoints "
+                "WHERE run_id = ? AND node_id = '__graph_state__'", (run_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+    if row:
+        return json.loads(row[0])
+    return {}
+
+
+def delete_node_checkpoint(run_id: str, node_id: str) -> None:
+    """Remove one stale checkpoint entry during loop-back reset."""
+    with _lock:
+        conn = _get_conn()
+        try:
+            conn.execute(
+                "DELETE FROM node_checkpoints WHERE run_id = ? AND node_id = ?",
+                (run_id, node_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def clear_checkpoint(run_id: str) -> None:
+    """Call after a run completes successfully."""
+    with _lock:
+        conn = _get_conn()
+        try:
+            conn.execute("DELETE FROM node_checkpoints WHERE run_id = ?", (run_id,))
+            conn.commit()
+        finally:
+            conn.close()

@@ -1,0 +1,99 @@
+{
+  "task": "phase3-refusal",
+  "model": "/home/oppa-ai/.cache/huggingface/hub/models--convaiinnovations--laya-multilingual/snapshots/1720e3e3357cfe1e281542e223f8273b0890ca34",
+  "ctx": 1024,
+  "config": {
+    "cases_per_combo": null,
+    "epochs": 8,
+    "tokens_per_batch": 4096,
+    "grad_accum": 8,
+    "freeze_layers": 0,
+    "gpu_limit_gb": null,
+    "profile": "full"
+  },
+  "data": "data/phase3_train_v2.jsonl",
+  "teacher_answers": 0,
+  "cases": {
+    "train": 422,
+    "calibration": 52,
+    "validation": 54
+  },
+  "best_validation_ce": 1.104385499601011,
+  "max_vram_gb": 6.02,
+  "base": {
+    "validation": {
+      "questions": {
+        "triage": {
+          "correct": 33,
+          "total": 54,
+          "ece": 0.275
+        },
+        "category": {
+          "correct": 21,
+          "total": 54,
+          "ece": 0.261
+        }
+      },
+      "all_correct": 16,
+      "total": 54,
+      "p50_latency_ms": 28.4,
+      "p95_latency_ms": 28.8
+    },
+    "test": {
+      "questions": {
+        "triage": {
+          "correct": 4,
+          "total": 8,
+          "ece": 0.363
+        },
+        "category": {
+          "correct": 4,
+          "total": 8,
+          "ece": 0.232
+        }
+      },
+      "all_correct": 2,
+      "total": 8,
+      "p50_latency_ms": 28.4,
+      "p95_latency_ms": 28.7
+    }
+  },
+  "tuned": {
+    "validation": {
+      "questions": {
+        "triage": {
+          "correct": 37,
+          "total": 54,
+          "ece": 0.131
+        },
+        "category": {
+          "correct": 33,
+          "total": 54,
+          "ece": 0.095
+        }
+      },
+      "all_correct": 26,
+      "total": 54,
+      "p50_latency_ms": 28.8,
+      "p95_latency_ms": 29.8
+    },
+    "test": {
+      "questions": {
+        "triage": {
+          "correct": 5,
+          "total": 8,
+          "ece": 0.276
+        },
+        "category": {
+          "correct": 6,
+          "total": 8,
+          "ece": 0.404
+        }
+      },
+      "all_correct": 4,
+      "total": 8,
+      "p50_latency_ms": 28.6,
+      "p95_latency_ms": 28.7
+    }
+  }
+}

@@ -1,0 +1,254 @@
+"""Deterministic, bounded orchestration for independent Needle 3 workers.
+
+Workers are configured explicitly and must point at separate Needle servers (or
+at server sessions that the Needle deployment documents as isolated).  This
+module only aggregates constrained tool proposals; Aiko's normal ReAct loop
+continues to validate, approve, and execute every proposed call.
+"""
+from __future__ import annotations
+
+import json
+import math
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from typing import Any
+
+from agentic.needle import NeedleClient, NeedleError, NeedleResponse
+
+try:
+    from system.log import get_logger as _get_logger
+    log = _get_logger(__name__)
+except Exception:
+    import logging as _logging
+    log = _logging.getLogger("aiko.needle_orchestrator")
+
+try:
+    from system.config import env_str as _env_str
+except Exception:
+    _env_str = None
+
+
+def _flycx_mode() -> str:
+    try:
+        if _env_str is None:
+            return "off"
+        return _env_str("MEMORY_FLYCX_MODE", "off").strip().lower()
+    except Exception:
+        return "off"
+
+
+def _flycx_cadence(task: str, user_id: str | None = None) -> str:
+    """parallel|sequential crew cadence from compass sleep pressure.
+
+    Shares the identity-scoped compass with cognition.attention via
+    fly_registry. Drowsy crews run sequentially (same coverage, calmer
+    cadence). Shadow only logs the would-be choice.
+    """
+    mode = _flycx_mode()
+    if mode not in ("shadow", "live"):
+        return "parallel"
+    try:
+        from cognition.fly_registry import get_flycx, get_flycx_lock
+        from cognition.flymemory import text_features
+        if user_id is None:
+            try:
+                from system.userspace import current_user_id
+                user_id = current_user_id() or None
+            except Exception:
+                user_id = None
+        cx = get_flycx(user_id)
+        if cx is None:
+            return "parallel"
+        with get_flycx_lock(user_id):
+            out = cx.step(text_features(task or ""), fatigue=0.0)
+    except Exception as exc:
+        log.debug("flycx cadence failed: %s", exc)
+        return "parallel"
+    choice = "sequential" if out["sleep_pressure"] > 0.5 else "parallel"
+    log.debug("flycx cadence mode=%s sleep=%.2f -> %s", mode, out["sleep_pressure"], choice)
+    return choice if mode == "live" else "parallel"
+
+
+@dataclass(frozen=True)
+class NeedleWorkerSpec:
+    """One explicitly configured Needle worker with a least-privilege tool set."""
+
+    id: str
+    role: str
+    base_url: str
+    allowed_tools: tuple[str, ...]
+    confidence_threshold: float = 0.85
+    timeout: float = 15.0
+
+
+@dataclass(frozen=True)
+class NeedleWorkerResult:
+    """A worker response or a safe, serializable failure record."""
+
+    worker_id: str
+    role: str
+    response: NeedleResponse | None = None
+    error: str = ""
+
+
+def load_needle_workers(
+    raw: str,
+    *,
+    default_timeout: float,
+    default_confidence_threshold: float,
+    max_workers: int = 4,
+) -> tuple[NeedleWorkerSpec, ...]:
+    """Parse ``NEEDLE_WORKERS`` JSON into validated, deterministic worker specs.
+
+    Empty configuration deliberately means no workers.  Each worker must name
+    its permitted tools, so a configuration typo cannot silently create an
+    unrestricted action worker.
+    """
+    if not raw.strip():
+        return ()
+    if max_workers < 1:
+        raise NeedleError("NEEDLE_MAX_WORKERS must be at least 1")
+    try:
+        items = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise NeedleError(f"NEEDLE_WORKERS must be a JSON array: {exc}") from exc
+    if not isinstance(items, list):
+        raise NeedleError("NEEDLE_WORKERS must be a JSON array")
+    if len(items) > max_workers:
+        raise NeedleError(f"NEEDLE_WORKERS exceeds configured worker limit ({max_workers})")
+
+    workers: list[NeedleWorkerSpec] = []
+    seen_ids: set[str] = set()
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise NeedleError(f"NEEDLE_WORKERS[{index}] must be an object")
+        worker_id = str(item.get("id") or "").strip()
+        role = str(item.get("role") or worker_id).strip()
+        base_url = str(item.get("base_url") or "").strip()
+        allowed_raw = item.get("allowed_tools")
+        if not worker_id or not role or not base_url:
+            raise NeedleError(f"NEEDLE_WORKERS[{index}] requires id, role, and base_url")
+        if worker_id in seen_ids:
+            raise NeedleError(f"NEEDLE_WORKERS contains duplicate worker id: {worker_id}")
+        if not isinstance(allowed_raw, list) or not allowed_raw or not all(isinstance(name, str) and name for name in allowed_raw):
+            raise NeedleError(f"NEEDLE_WORKERS[{index}].allowed_tools must be a non-empty string array")
+        try:
+            confidence_threshold = float(item.get("confidence_threshold", default_confidence_threshold))
+            timeout = float(item.get("timeout", default_timeout))
+        except (TypeError, ValueError) as exc:
+            raise NeedleError(f"NEEDLE_WORKERS[{index}] has an invalid timeout or confidence_threshold") from exc
+        if not math.isfinite(confidence_threshold) or not 0.0 <= confidence_threshold <= 1.0:
+            raise NeedleError(f"NEEDLE_WORKERS[{index}].confidence_threshold must be between 0 and 1")
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise NeedleError(f"NEEDLE_WORKERS[{index}].timeout must be a positive finite number")
+        seen_ids.add(worker_id)
+        workers.append(NeedleWorkerSpec(
+            id=worker_id,
+            role=role,
+            base_url=base_url,
+            allowed_tools=tuple(dict.fromkeys(allowed_raw)),
+            confidence_threshold=confidence_threshold,
+            timeout=timeout,
+        ))
+    return tuple(workers)
+
+
+class NeedleOrchestrator:
+    """Fan out one task to configured Needle workers and merge valid calls.
+
+    The caller supplies the already capability-filtered schemas for the current
+    Aiko turn.  A worker gets the intersection of that set and its static
+    allow-list; the response is checked against that exact intersection again
+    by :class:`NeedleClient`.
+    """
+
+    def __init__(
+        self,
+        workers: tuple[NeedleWorkerSpec, ...],
+        *,
+        client_factory: Callable[..., NeedleClient] = NeedleClient,
+    ) -> None:
+        if not workers:
+            raise NeedleError("Needle multi-worker backend requires at least one configured worker")
+        self.workers = workers
+        self._client_factory = client_factory
+
+    @staticmethod
+    def _tools_for_worker(worker: NeedleWorkerSpec, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        allowed = set(worker.allowed_tools)
+        return [tool for tool in tools if str(tool.get("function", {}).get("name") or "") in allowed]
+
+    @staticmethod
+    def _worker_prompt(worker: NeedleWorkerSpec, task: str) -> str:
+        return f"Role: {worker.role}.\nTask: {task}"
+
+    def _run_one(self, worker: NeedleWorkerSpec, task: str, tools: list[dict[str, Any]]) -> NeedleWorkerResult:
+        worker_tools = self._tools_for_worker(worker, tools)
+        if not worker_tools:
+            return NeedleWorkerResult(worker.id, worker.role, error="no allowed tools are available for this turn")
+        try:
+            client = self._client_factory(
+                worker.base_url,
+                timeout=worker.timeout,
+                confidence_threshold=worker.confidence_threshold,
+            )
+            return NeedleWorkerResult(
+                worker.id,
+                worker.role,
+                response=client.complete(self._worker_prompt(worker, task), worker_tools),
+            )
+        except NeedleError as exc:
+            return NeedleWorkerResult(worker.id, worker.role, error=str(exc))
+
+    def complete(self, task: str, tools: list[dict[str, Any]]) -> tuple[NeedleWorkerResult, ...]:
+        """Run workers concurrently (or sequentially when drowsy), preserving configured order."""
+        # Stage 1 GF: abort whole needle crew when live interrupt is set.
+        try:
+            from cognition.fly_behavior import should_abort_plan
+            uid = None
+            try:
+                from system.userspace import current_user_id
+                uid = current_user_id() or None
+            except Exception:
+                uid = None
+            if should_abort_plan(uid):
+                log.info("flygf interrupt → abort needle crew user=%s", uid or "default")
+                raise NeedleError("fly giant-fiber interrupt: aborting needle crew")
+        except NeedleError:
+            raise
+        except Exception:
+            pass
+        cadence = _flycx_cadence(task)
+        max_workers = 1 if cadence == "sequential" else len(self.workers)
+        try:
+            from cognition.fly_behavior import maintenance_level
+            uid = None
+            try:
+                from system.userspace import current_user_id
+                uid = current_user_id() or None
+            except Exception:
+                uid = None
+            level = maintenance_level(uid)
+            if level == "maintenance":
+                max_workers = 1
+                log.debug("flysleep maintenance → sequential needle user=%s", uid or "default")
+            elif level == "reduced":
+                max_workers = min(max_workers, max(1, (len(self.workers) + 1) // 2))
+                log.debug("flysleep reduced → max_workers=%d user=%s", max_workers, uid or "default")
+        except Exception:
+            pass
+        results: dict[str, NeedleWorkerResult] = {}
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="needle-worker") as pool:
+            futures = {pool.submit(self._run_one, worker, task, tools): worker for worker in self.workers}
+            for future in as_completed(futures):
+                worker = futures[future]
+                try:
+                    results[worker.id] = future.result()
+                except Exception as exc:
+                    results[worker.id] = NeedleWorkerResult(worker.id, worker.role, error=str(exc))
+        ordered = tuple(results[worker.id] for worker in self.workers)
+        if not any(result.response is not None for result in ordered):
+            details = "; ".join(f"{result.worker_id}: {result.error}" for result in ordered)
+            raise NeedleError(f"all Needle workers failed or were ineligible: {details}")
+        return ordered

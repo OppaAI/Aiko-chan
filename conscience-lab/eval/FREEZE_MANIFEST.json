@@ -1,0 +1,8 @@
+{
+ "name": "laya_eval_fresh_heldout \u2014 FROZEN 2026-10-07",
+ "rows": 400,
+ "harmful": 200,
+ "benign": 200,
+ "source": "drafted by subagents without reading dev files; 32 output-draft rows fixed by Claude (bracketed placeholders -> plain descriptive text); decontamination re-verified after fix (max Jaccard <0.7 vs train_v2/r1/dev/locked)",
+ "rule": "NEVER mine into training. Score all future runs on this set + dev."
+}

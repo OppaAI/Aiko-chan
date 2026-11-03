@@ -1,0 +1,59 @@
+{
+  "provenance": {
+    "dataset": "male-cns:v1.0 (minconf-0.5, weight>=5)",
+    "paper": "Berg et al. 2025",
+    "license": "CC-BY",
+    "portal": "https://male-cns.janelia.org/download/",
+    "note": "Slice: EPG/PEN/PEG/PF/RING bodies + top-40 EPG input types. No dFB-annotated sleep neurons in v1.0 types; ER5/R5 used as sleep-drive proxy (Liu et al. 2016). Full weights sliced locally."
+  },
+  "nodes": {
+    "EPG": 50,
+    "PEN": 42,
+    "PEG": 18,
+    "PF": 506,
+    "RING": 308,
+    "INPUT": 358
+  },
+  "mats": {
+    "ER_RING->EPG": {
+      "edges": 9748,
+      "synapses": 140569,
+      "mean_w": 14.420291341813705
+    },
+    "PEN->EPG": {
+      "edges": 621,
+      "synapses": 23930,
+      "mean_w": 38.53462157809984
+    },
+    "PEG->EPG": {
+      "edges": 73,
+      "synapses": 594,
+      "mean_w": 8.136986301369863
+    },
+    "EPG->EPG": {
+      "edges": 419,
+      "synapses": 10953,
+      "mean_w": 26.140811455847256
+    },
+    "EPG->PF": {
+      "edges": 512,
+      "synapses": 6810,
+      "mean_w": 13.30078125
+    },
+    "PF->PF": {
+      "edges": 4788,
+      "synapses": 49067,
+      "mean_w": 10.247911445279867
+    },
+    "INPUT->EPG": {
+      "edges": 762,
+      "synapses": 16061,
+      "mean_w": 21.07742782152231
+    },
+    "RING->RING": {
+      "edges": 12302,
+      "synapses": 328353,
+      "mean_w": 26.69102584945537
+    }
+  }
+}

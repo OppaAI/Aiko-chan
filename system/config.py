@@ -1,31 +1,74 @@
-"""Configuration bootstrap for Aiko.
+"""
+system/config.py
+
+Configuration bootstrap for Aiko.
+
+Usage:
+    from system.config import load_config, load_yaml
+    load_config()  # once at startup
+    data = load_yaml("memory.yaml")
+
 Loads non-secret defaults from category YAML files and local values from an
 age-encrypted .env.age. Real process environment variables win over both, and
 YAML wins over stale .env constants while .env still fills in secrets or
 deployment-specific gaps.
-"""
-from __future__ import annotations
 
-import io
-import json
-import os
-import subprocess
-from pathlib import Path
-from typing import Any
+Precedence is:
+    1. Real process environment variables, unless override=True.
+    2. Non-secret YAML constants from config/*.yaml.
+    3. Values from .env.age that YAML did not already define.
+
+This module only resolves YAML/.env.age at load_config() call (not at import
+time), so main.py can call it once near startup before any subsystem init
+— see main.py's module docstring for why import-time resolution would be
+too late.
+
+Flow:
+
+                                      load_config()
+                                           │
+              ┌────────────────┼────────────────┼─────────────────┐
+              ▼                ▼                ▼                 ▼
+         config/*.yaml    .env.age (age)    .env (fallback)   os.environ
+              │                │                │                 │
+              ▼                ▼                ▼                 ▼
+         _flatten+_stringify → os.environ (if not in original_env / override)
+                                           │
+                                           ▼
+                                      _LOADED = True  (guarded by _load_lock)
+"""
+from __future__ import annotations            # evaluates type annotations later
+
+# Public libraries
+import io                                     # for in-memory age decrypt buffer
+import json                                   # for list stringify + JSON YAML fallback
+import os                                     # for os.environ precedence
+import subprocess                             # for age decrypt subprocess
+import threading                              # for thread-safe one-time load
+from pathlib import Path                      # for config/state path resolution
+from typing import Any                        # for YAML value types
 
 try:
-    import yaml
+    import yaml                               # for YAML parsing (preferred)
 except ImportError:  # pragma: no cover - lightweight fallback for minimal tooling envs
     yaml = None
 
 
 try:
-    from dotenv import dotenv_values
+    from dotenv import dotenv_values          # for .env parsing
 except ImportError:  # pragma: no cover - optional dependency fallback
-    def dotenv_values(*_args, **_kwargs):
+    def dotenv_values(*_args: Any, **_kwargs: Any) -> dict[str, str | None]:  # type: ignore[no-redef, misc]
         return {}
 
 _LOADED = False
+_load_lock = threading.Lock()
+
+__all__ = ["load_config", "load_yaml", "env_flag", "env_bool", "env_int", "env_float", "env_str"]
+
+# Timeout for the `age` decrypt subprocess. If the binary hangs (bad
+# identity file, unexpected passphrase prompt, etc.) this turns a silent
+# boot-time hang into a fast, diagnosable failure.
+_AGE_TIMEOUT_SECONDS = 10
 
 
 def _strip_comment(line: str) -> str:
@@ -44,9 +87,10 @@ def _strip_comment(line: str) -> str:
 def _simple_yaml_load(text: str) -> dict[str, Any]:
     """Tiny fallback parser for Aiko's simple config/*.yaml files.
 
-    It supports top-level KEY: VALUE pairs and the config/index.yaml list used
-    during bootstrap. Full YAML support is still provided by PyYAML when
-    installed, which is the normal runtime path.
+    Flat mappings + top-level lists only. Nested mappings need real
+    PyYAML — raising loudly here beats silently exporting the wrong
+    keys (an indented `b:` would otherwise surface as a top-level `B`,
+    misconfiguring the whole process with no error).
     """
     data: dict[str, Any] = {}
     current_key: str | None = None
@@ -57,22 +101,30 @@ def _simple_yaml_load(text: str) -> dict[str, Any]:
             continue
         stripped = line.strip()
         if stripped.startswith("-") and current_key:
+            existing = data.get(current_key)
             if current_key in pending_empty:
-                # First list item seen: this key was a list all along.
                 data[current_key] = []
                 pending_empty.discard(current_key)
-            data.setdefault(current_key, []).append(stripped[1:].strip().strip('"\''))
+            elif not isinstance(existing, list):
+                # Malformed/mixed YAML (scalar followed by a "- item" line
+                # under the same key) — don't crash the whole config load
+                # over a hand-edited typo; start a fresh list instead.
+                data[current_key] = []
+            data[current_key].append(stripped[1:].strip().strip('"\''))
             continue
         if ":" not in line:
             continue
+        if line != line.lstrip():
+            raise RuntimeError(
+                "nested YAML mapping found but PyYAML is not installed — "
+                "install pyyaml (a declared dependency) instead of relying "
+                "on the flat fallback parser"
+            )
         key, value = line.split(":", 1)
         key = key.strip()
         value = value.strip()
         current_key = key
         if value == "":
-            # Ambiguous: could be an unset scalar or the start of a list.
-            # Default to "unset" (empty string) and only promote to a list
-            # if `-` items actually follow.
             data[key] = ""
             pending_empty.add(key)
         else:
@@ -83,8 +135,28 @@ def _simple_yaml_load(text: str) -> dict[str, Any]:
 
 def _load_yaml_mapping(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8")
-    data = yaml.safe_load(text) if yaml is not None else _simple_yaml_load(text)
+    if yaml is not None:
+        data = yaml.safe_load(text)
+    else:
+        lines = text.splitlines()
+        start = 0
+        for index, line in enumerate(lines):
+            stripped_line = line.lstrip()
+            if stripped_line and not stripped_line.startswith("#"):
+                start = index
+                break
+        body = "\n".join(lines[start:])
+        stripped = body.lstrip()
+        data = json.loads(body) if stripped.startswith(("{", "[")) else _simple_yaml_load(text)  # merge startswith tuple (py312)
     return data or {}
+
+
+def load_yaml(path: str | Path) -> dict[str, Any]:
+    """Load a YAML file from the given path."""
+    path = Path(path)
+    if not path.is_absolute():
+        path = Path(__file__).parent.parent / "config" / path
+    return _load_yaml_mapping(path)
 
 
 def _stringify(value: Any) -> str:
@@ -117,26 +189,32 @@ def _decrypt_env(enc_path: Path, identity_path: Path) -> dict[str, str]:
     if not enc_path.exists():
         return {}
     if not identity_path.exists():
-        raise FileNotFoundError(
-            f"age identity file not found: {identity_path}. "
-            "Set AGE_KEY to point at it, or place .env.age's key there."
-        )
+        msg = f"age identity file not found: {identity_path}. Set AGE_KEY to point at it, or place .env.age's key there."  # for FileNotFoundError
+        raise FileNotFoundError(msg)
     try:
         result = subprocess.run(
             ["age", "-d", "-i", str(identity_path), str(enc_path)],
             capture_output=True,
             check=True,
+            timeout=_AGE_TIMEOUT_SECONDS,
         )
     except FileNotFoundError as exc:
         raise RuntimeError(
             "the 'age' binary was not found on PATH; install it "
             "(e.g. `sudo apt install age`)"
         ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"decrypting {enc_path} timed out after {_AGE_TIMEOUT_SECONDS}s "
+            "(age may be waiting on an unexpected prompt, or the identity "
+            "file/binary is misbehaving)"
+        ) from exc
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(
             f"failed to decrypt {enc_path}: {exc.stderr.decode(errors='replace')}"
         ) from exc
-    return dict(dotenv_values(stream=io.StringIO(result.stdout.decode())))
+    vals = dotenv_values(stream=io.StringIO(result.stdout.decode(errors="replace")))
+    return {k: v for k, v in vals.items() if v is not None}
 
 
 def load_config(*, override: bool = False) -> None:
@@ -151,70 +229,119 @@ def load_config(*, override: bool = False) -> None:
     while preserving .env.age as the local place for tokens, keys, URLs,
     DSNs, and other deployment-specific values whose names may not follow a
     strict pattern.
+
+    Thread-safe: guarded by _load_lock so concurrent callers can't both
+    pass the _LOADED check and run the full load twice. Currently called
+    once, synchronously, near the top of main() before any other thread
+    exists — this guard is here so that stays true if that ever changes.
     """
     global _LOADED
     if _LOADED and not override:
         return
 
-    root = Path(__file__).resolve().parent.parent
-    original_env = set(os.environ)
+    with _load_lock:
+        if _LOADED and not override:  # re-check inside the lock
+            return
 
-    config_dir = root / "config"
-    if config_dir.exists():
-        index_path = config_dir / "index.yaml"
-        if index_path.exists():
-            index_data = _load_yaml_mapping(index_path)
-            config_names = index_data.get("configs", [])
-            if not isinstance(config_names, list):
-                raise ValueError(f"{index_path} configs must be a list")
-            paths = [config_dir / str(name) for name in config_names]
-        else:
-            paths = sorted(
-                path for path in config_dir.glob("*.y*ml")
-                if path.name != "index.yaml"
-            )
-        for path in paths:
-            if not path.exists():
-                raise FileNotFoundError(f"Configured YAML file not found: {path}")
-            data = _load_yaml_mapping(path)
-            if not isinstance(data, dict):
-                raise ValueError(f"{path} must contain a YAML mapping")
-            for key, value in _flatten(data).items():
-                # Empty YAML values mean "unset": allow code defaults or
-                # .env.age/deployment secrets to provide the value instead of
-                # exporting an empty string.
-                if value is None or (isinstance(value, str) and value == ""):
-                    continue
-                if override or key not in original_env:
-                    os.environ[key] = _stringify(value)
+        root = Path(__file__).resolve().parent.parent
+        original_env = set(os.environ)
 
-    # --- Secrets: encrypted .env.age (preferred) with plaintext .env fallback ---
-    # AGE_KEY / ENV_AGE_PATH may be bare filenames (e.g. from identity.yaml);
-    # resolve them under USER_STATE_ROOT unless they're already absolute,
-    # so an explicit absolute override (env var or YAML) still wins outright.
-    state_root = Path(os.environ.get("USER_STATE_ROOT", "~/.aiko")).expanduser()
+        config_dir = root / "config"
+        if config_dir.exists():
+            index_path = config_dir / "index.yaml"
+            if index_path.exists():
+                index_data = _load_yaml_mapping(index_path)
+                config_names = index_data.get("configs", [])
+                if not isinstance(config_names, list):
+                    raise ValueError(f"{index_path} configs must be a list")
+                paths = [config_dir / str(name) for name in config_names]
+            else:
+                paths = sorted(
+                    path for path in config_dir.glob("*.y*ml")
+                    if path.name != "index.yaml"
+                )
+            for path in paths:
+                if not path.exists():
+                    raise FileNotFoundError(f"Configured YAML file not found: {path}")
+                data = _load_yaml_mapping(path)
+                if not isinstance(data, dict):
+                    raise ValueError(f"{path} must contain a YAML mapping")
+                for key, value in _flatten(data).items():
+                    # Empty YAML values mean "unset": allow code defaults or
+                    # .env.age/deployment secrets to provide the value instead of
+                    # exporting an empty string.
+                    if value is None or (isinstance(value, str) and value == ""):
+                        continue
+                    if override or key not in original_env:
+                        os.environ[key] = _stringify(value)
 
-    def _resolve_under(base: Path, value: str) -> Path:
-        candidate = Path(value).expanduser()
-        return candidate if candidate.is_absolute() else base / candidate
+        # --- Secrets: encrypted .env.age (preferred) with plaintext .env fallback ---
+        # AGE_KEY / ENV_AGE_PATH may be bare filenames (e.g. from identity.yaml);
+        # resolve them under USER_SPACE_ROOT unless they're already absolute,
+        # so an explicit absolute override (env var or YAML) still wins outright.
+        state_root = Path(os.environ.get("USER_SPACE_ROOT", str(Path.home() / ".aiko"))).expanduser()
 
-    identity_path = _resolve_under(state_root, os.environ.get("AGE_KEY", "age-key.txt"))
-    enc_path = _resolve_under(state_root, os.environ.get("ENV_AGE_PATH", ".env.age"))
+        def _resolve_under(base: Path, value: str) -> Path:
+            candidate = Path(value).expanduser()
+            return candidate if candidate.is_absolute() else base / candidate
 
-    if enc_path.exists():
-        for key, value in _decrypt_env(enc_path, identity_path).items():
-            if not key or value is None:
-                continue
-            if override or key not in os.environ:
-                os.environ[key] = value
-    else:
-        # Dev-machine fallback only — should not exist on the Jetson deployment.
-        env_path = root / ".env"
-        if env_path.exists():
-            for key, value in dotenv_values(env_path).items():
+        identity_path = _resolve_under(state_root, os.environ.get("AGE_KEY", "age-key.txt"))
+        enc_path = _resolve_under(state_root, os.environ.get("ENV_AGE_PATH", ".env.age"))
+
+        if enc_path.exists():
+            for key, value in _decrypt_env(enc_path, identity_path).items():
                 if not key or value is None:
                     continue
                 if override or key not in os.environ:
                     os.environ[key] = value
+        else:
+            # Dev-machine fallback only — should not exist on the Jetson deployment.
+            env_path = root / ".env"
+            if env_path.exists():
+                for key, value in dotenv_values(env_path).items():
+                    if not key or value is None:
+                        continue
+                    if override or key not in os.environ:
+                        os.environ[key] = value
 
-    _LOADED = True
+        _LOADED = True
+
+
+# ── env-var parsing helpers ──────────────────────────────────────────────────
+# Lightweight, dependency-free typed accessors for tunables defined in
+# config/*.yaml. Two flavors of bool parsing are kept because the codebase
+# historically disagreed and refactoring every callsite's semantics would be
+# a behavior change:
+#   * env_flag  — off only when 0/false/no/off/empty (the "grasp" convention)
+#   * env_bool  — on only for 1/true/yes/on (the "schema" / strict convention)
+
+
+def env_flag(name: str, default: str = "1") -> bool:
+    """Conservative flag: off only when the var is 0/false/no/off/empty."""
+    return str(os.getenv(name, default)).strip().lower() not in (
+        "0", "false", "no", "off", "",
+    )
+
+
+def env_bool(name: str, default: str = "1") -> bool:
+    """Whitelist flag: True only for 1/true/yes/on."""
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def env_str(name: str, default: str) -> str:
+    v = os.getenv(name)
+    return default if v is None or str(v).strip() == "" else str(v).strip()

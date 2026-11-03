@@ -1,0 +1,35 @@
+:root { color-scheme: light; font-family: "Instrument Sans", system-ui, sans-serif; background: #f4f0e6; color: #4a3728; }
+body { margin: 0; }
+header, main { max-width: 1500px; margin: auto; padding: 18px 28px; }
+header { display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid rgba(58,74,46,0.16); }
+h1 { margin:0; font-size:1.35rem; font-family: "Fraunces", Georgia, serif; font-weight:300; color:#3a4a2e; }
+p { color:#7a8f68; }
+button, input, select { background:#faf8f1; color:#4a3728; border:1px solid rgba(58,74,46,0.16); border-radius:4px; padding:7px; font-family:"DM Mono", ui-monospace, monospace; font-size:11px; }
+button { cursor:pointer; text-transform:uppercase; letter-spacing:.08em; }
+button:hover { border-color:#3a4a2e; background:#e8e2d4; }
+form { display:flex; flex-wrap:wrap; gap:12px; align-items:end; }
+label { display:grid; gap:5px; color:#7a8f68; font-size:.82rem; font-family:"DM Mono", ui-monospace, monospace; text-transform:uppercase; letter-spacing:.08em; }
+select { min-width:150px; min-height:70px; }
+#entries { display:grid; gap:8px; }
+article { display:grid; grid-template-columns:195px 80px minmax(160px, 280px) 1fr; gap:12px; padding:11px; border:1px solid rgba(58,74,46,0.16); border-left:4px solid #5b7a4e; background:#faf8f1; border-radius:2px; }
+.level-error, .level-critical { border-left-color:#a0522d; }
+.level-warning { border-left-color:#c8813a; }
+time, .component { color:#7a8f68; font-size:.83rem; font-family:"DM Mono", ui-monospace, monospace; }
+.level { font-weight:700; font-family:"DM Mono", ui-monospace, monospace; font-size:.78rem; text-transform:uppercase; letter-spacing:.06em; }
+pre { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; font: .83rem/1.45 "DM Mono", ui-monospace, monospace; color:#4a3728; }
+@media (max-width:800px) { header, main { padding:14px; } article { grid-template-columns:1fr; gap:5px; } }
+
+
+/* ── dark variant: follows the main WebUI theme flag (localStorage 'aiko-theme') ── */
+html[data-theme="dark"] { color-scheme: dark; background: #0d0718; color: #ded3f7; }
+html[data-theme="dark"] header { border-bottom-color: rgba(196, 181, 253, 0.18); }
+html[data-theme="dark"] h1 { color: #c4b5fd; }
+html[data-theme="dark"] p { color: #9a82c4; }
+html[data-theme="dark"] button, html[data-theme="dark"] input, html[data-theme="dark"] select { background: #211738; color: #ded3f7; border-color: rgba(196, 181, 253, 0.18); }
+html[data-theme="dark"] button:hover { border-color: #c4b5fd; background: rgba(196, 181, 253, 0.14); }
+html[data-theme="dark"] label { color: #9a82c4; }
+html[data-theme="dark"] article { border-color: rgba(196, 181, 253, 0.18); border-left-color: #8b6fd8; background: rgba(33, 23, 56, 0.9); }
+html[data-theme="dark"] .level-error, html[data-theme="dark"] .level-critical { border-left-color: #d96a5e; }
+html[data-theme="dark"] .level-warning { border-left-color: #d9a05b; }
+html[data-theme="dark"] time, html[data-theme="dark"] .component { color: #9a82c4; }
+html[data-theme="dark"] pre { color: #ded3f7; }

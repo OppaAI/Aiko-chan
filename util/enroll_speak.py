@@ -4,7 +4,7 @@ enroll_speaker.py
 One-time enrollment for Aiko's speaker verification (listen.py).
 Records a few seconds of your voice via parec, computes a speaker
 embedding with the same sherpa-onnx model listen.py uses at runtime,
-and saves it to SPEAKER_ENROLL_PATH (default: <USER_STATE_ROOT>/<user_id>/profile/speaker_enrollment.json).
+and saves it to SPEAKER_ENROLL_PATH (default: <USER_SPACE_ROOT>/<user_id>/profile/speaker_enrollment.json).
 
 Usage:
     python enroll_speaker.py
@@ -16,7 +16,7 @@ pointing at a sherpa-onnx speaker embedding .onnx file:
     https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models
 e.g. 3dspeaker_speech_eres2net_base_sv_en_voxceleb_16k.onnx (~28MB)
 
-Saves to <USER_STATE_ROOT>/<user_id>/profile/speaker_enrollment.json (matches listen.py's lookup) —
+Saves to <USER_SPACE_ROOT>/<user_id>/profile/speaker_enrollment.json (matches listen.py's lookup) —
 no separate env var needed, just set USER_ID like the rest of Aiko's config.
 
 Re-running this script overwrites any existing enrollment.
@@ -25,6 +25,7 @@ Re-running this script overwrites any existing enrollment.
 import argparse
 import json
 import os
+import select
 import subprocess
 import sys
 import time
@@ -38,7 +39,7 @@ try:
     from system.config import load_config
     load_config()
 except ImportError:
-    pass
+    print("[enroll_speak] config load skipped (optional dep)")
 
 SAMPLE_RATE = 16000
 _PAREC_CMD = [
@@ -55,7 +56,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default=os.getenv("SPEAKER_MODEL_PATH", ""),
         help="Path to sherpa-onnx speaker embedding .onnx model")
     parser.add_argument("--out", default=str(user_state_path("profile/speaker_enrollment.json")),
-        help="Where to save the enrollment JSON (default: <USER_STATE_ROOT>/<user_id>/profile/speaker_enrollment.json)")
+        help="Where to save the enrollment JSON (default: <USER_SPACE_ROOT>/<user_id>/profile/speaker_enrollment.json)")
     parser.add_argument("--seconds", type=float, default=6.0,
         help="How long to record (seconds). 5-8s of normal speech works well.")
     parser.add_argument("--name", default=os.getenv("USER_ID", "owner"),
@@ -75,15 +76,35 @@ def _record_seconds(seconds: float) -> np.ndarray:
     print("  recording now!          ")
 
     proc = subprocess.Popen(_PAREC_CMD, stdout=subprocess.PIPE)
+    # Bound the whole capture: the old read-until-n_bytes loop blocked
+    # forever if parec stalled with the pipe open (no data, no EOF).
+    deadline = time.monotonic() + seconds + 30.0
     try:
         raw = b""
         while len(raw) < n_bytes:
-            chunk = proc.stdout.read(n_bytes - len(raw))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                print("  (stopped: mic produced no audio in time)")
+                break
+            rlist, _, _ = select.select([proc.stdout], [], [], min(1.0, remaining))
+            if not rlist:
+                continue
+            # os.read (not the BufferedReader's read): select() only sees the
+            # OS fd, so a buffered read() could block for bytes already
+            # sitting in Python's buffer or stall waiting for more.
+            chunk = os.read(proc.stdout.fileno(), min(65536, n_bytes - len(raw)))
             if not chunk:
                 break
             raw += chunk
     finally:
+        # Reap the child: terminate() alone leaves a zombie if parec
+        # ignores SIGTERM.
         proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
 
     print("Done recording.")
     return np.frombuffer(raw, dtype=np.float32).copy()

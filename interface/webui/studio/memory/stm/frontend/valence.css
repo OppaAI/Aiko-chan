@@ -1,0 +1,51 @@
+/* Valence (parity with Neural LTM studio)
+ * Border + rim hue follow valence; the numeric score stays the original pink.
+ */
+.mem.valence-pos { border-color: rgba(200, 129, 58, 0.55); }
+.mem.valence-neg { border-color: rgba(91, 122, 78, 0.55); }
+.mem.valence-neutral { border-color: rgba(122, 143, 104, 0.35); }
+
+.mem.valence-pos svg circle.ring { stroke: #c8813a; }
+.mem.valence-neg svg circle.ring { stroke: #5b7a4e; }
+.mem.valence-neutral svg circle.ring { stroke: #7a8f68; }
+
+/* Score number: always original purple→pink, never yellow/cyan */
+.mem.valence-pos .mem-score,
+.mem.valence-neg .mem-score,
+.mem.valence-neutral .mem-score,
+.mem .mem-score {
+  background: linear-gradient(180deg, #3a4a2e, #c8813a) !important;
+  -webkit-background-clip: text !important;
+  background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+}
+
+.mem-valence {
+  font-size: 8px; font-weight: 700; letter-spacing: .08em;
+  margin-top: 1px; opacity: 0.85;
+}
+.mem.valence-pos .mem-valence { color: #c8813a; }
+.mem.valence-neg .mem-valence { color: #5b7a4e; }
+.mem.valence-neutral .mem-valence { color: #7a8f68; }
+
+.valence-legend {
+  display: flex; gap: 10px; align-items: center;
+  font-size: 10px; color: var(--dim-text); margin: 6px 12px 0;
+  flex-wrap: wrap;
+}
+.valence-legend span { display: inline-flex; align-items: center; gap: 4px; }
+.valence-legend i {
+  width: 8px; height: 8px; border-radius: 50%; display: inline-block;
+}
+.valence-legend .pos i { background: #c8813a; box-shadow: 0 0 6px #c8813a; }
+.valence-legend .neg i { background: #5b7a4e; box-shadow: 0 0 6px #5b7a4e; }
+.valence-legend .neu i { background: #7a8f68; }
+
+
+/* ── dark variant: score gradient readable on the dark background ── */
+html[data-theme="dark"] .mem.valence-pos .mem-score,
+html[data-theme="dark"] .mem.valence-neg .mem-score,
+html[data-theme="dark"] .mem.valence-neutral .mem-score,
+html[data-theme="dark"] .mem .mem-score {
+  background: linear-gradient(180deg, #c4b5fd, #d9a05b) !important;
+}

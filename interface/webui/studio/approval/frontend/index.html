@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aiko Approval Studio</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>try{var __t=localStorage.getItem('aiko-theme')||'light';document.documentElement.dataset.theme=(__t==='dark'?'dark':'light');window.addEventListener('storage',function(e){if(e&&e.key==='aiko-theme'){document.documentElement.dataset.theme=(e.newValue==='dark'?'dark':'light');}});}catch(__e){document.documentElement.dataset.theme='light';}</script>
+<link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+    <header class="studio-header">
+        <div style="display: flex; align-items: center; gap: 14px;">
+            <h1>Aiko Approval Studio</h1>
+        </div>
+        <div class="header-actions">
+            <span class="header-status" id="header-status">Loading drafts…</span>
+            <button id="refresh-btn" class="btn">Refresh</button>
+        </div>
+    </header>
+
+    <div class="studio-body">
+        <aside class="sidebar">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <h2>Job Post Drafts</h2>
+                <span id="draft-count" style="font-size: 12px; color: var(--dim);">0</span>
+            </div>
+            <div class="filter-tabs" id="filter-tabs">
+                <button class="filter-tab" data-filter="all">All</button>
+                <button class="filter-tab active" data-filter="pending">Pending</button>
+                <button class="filter-tab" data-filter="approved">Approved</button>
+                <button class="filter-tab" data-filter="posted">Posted</button>
+                <button class="filter-tab" data-filter="rejected">Rejected</button>
+            </div>
+            <div id="drafts-list"></div>
+        </aside>
+
+        <div class="content-area">
+            <div class="info-panel" id="info-panel">
+                <div class="empty-state" id="info-empty">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                        <polyline points="14 2 14 8 20 8"></polyline>
+                        <line x1="16" y1="13" x2="8" y2="13"></line>
+                        <line x1="16" y1="17" x2="8" y2="17"></line>
+                        <polyline points="10 9 9 9 8 9"></polyline>
+                    </svg>
+                    <p>Select a draft from the sidebar to review</p>
+                </div>
+                <div id="info-content" style="display: none;">
+                    <h3>Draft Information</h3>
+                    <div class="info-grid" id="info-grid"></div>
+                    <div class="action-buttons" id="action-buttons" style="display: flex; gap: 8px; margin-top: 14px;"></div>
+                </div>
+            </div>
+            <div class="content-panel url-panel" id="content-panel">
+                <div class="empty-state" id="content-empty">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                        <polyline points="14 2 14 8 20 8"></polyline>
+                        <line x1="16" y1="13" x2="8" y2="13"></line>
+                        <line x1="16" y1="17" x2="8" y2="17"></line>
+                        <polyline points="10 9 9 9 8 9"></polyline>
+                    </svg>
+                    <p>Draft content will appear here</p>
+                </div>
+                <textarea id="content-text" class="job-post-textarea" style="display: none;" spellcheck="false"></textarea>
+                <div id="content-edit-actions" class="content-edit-actions" style="display: none;">
+                    <button id="save-content-btn" class="btn btn-success">Save</button>
+                    <button id="cancel-content-btn" class="btn">Cancel</button>
+                    <span id="edit-status" class="edit-status"></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Source panel: renders the source webpage as Markdown via MarkItDown -->
+        <div class="content-panel right-panel" id="url-panel" style="border-left: 1px solid var(--border); padding: 16px; display: flex; flex-direction: column; overflow: hidden; background: var(--bg2);">
+            <div style="display: flex; align-items: center; justify-content: flex-start; gap: 10px; margin-bottom: 12px;">
+                <h3 style="font-size: 12px; letter-spacing: 0.15em; color: var(--orange); text-transform: uppercase; margin-bottom: 0; display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1;">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="flex: 0 0 auto;"><circle cx="12" cy="12" r="10"></circle><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
+                    <span id="source-title" class="source-panel-link" style="text-transform: uppercase; letter-spacing: 0.15em; color: var(--orange);">Source Webpage</span>
+                </h3>
+            </div>
+            <div class="empty-state" id="url-empty" style="padding: 20px; display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1;">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width: 32px; height: 32px; margin-bottom: 8px; opacity: 0.5;">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+                </svg>
+                <p>No source URL available for this draft</p>
+            </div>
+
+            <!-- Fetched web content, converted to Markdown by MarkItDown and rendered -->
+            <div id="url-content" style="display: none; flex-direction: column; flex: 1; overflow-y: auto; margin-top: 4px; min-height: 0;">
+                <div id="url-markdown" class="content-text markdown-body" style="max-height: 100%; overflow-y: auto;"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
+    <script src="shared/graph-bootstrap.js"></script>
+    <script src="static/script.js"></script>
+</body>
+</html>

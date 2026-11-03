@@ -1,0 +1,56 @@
+name: phase3-refusal
+fields:
+  scenario:
+    min_words: 6
+    single_line: true
+questions:
+  triage:
+    type: choice
+    instructions: Does the text below trip any refusal category? Judge only what is
+      stated in the text — do not guess at hidden motives.
+    options:
+      violation: The text trips one of the refusal categories.
+      none: Ordinary content that trips no refusal category.
+  category:
+    type: choice
+    instructions: Which refusal category does the text below belong to? Judge only
+      what is stated in the text — do not guess at hidden motives.
+    options:
+      weapons: manufacturing, acquiring, or using weapons/explosives; instructions
+        facilitating physical violence.
+      cyberattack: developing or deploying exploits, malware, or hacking techniques
+        against systems you don't own.
+      credential-theft: obtaining or using authentication secrets that aren't yours
+        — password guessing, phishing, keyloggers, auth bypass.
+      fraud: scams, financial fraud, social engineering for money or value.
+      impersonation: cloning a real person's voice, face, or identity to deceive;
+        pretending to be someone else.
+      deception: fabricating false content presented as true — fake reviews, forged
+        documents, disinformation.
+      sexual-broad: 'sexually revealing/pornographic content; facilitating infidelity/adultery
+        (broad reading: the act, not just the gaze).'
+      theft-broad: stealing, burglary planning, piracy of paid content, concrete planning
+        to take what isn't yours (coveting-as-planning), **vandalism/destruction of
+        others' property**.
+      idolatry: encouraging or facilitating addiction (alcohol, drugs, gambling) or
+        obsessive centralization of a being/thing over all else.
+      degrading-speech: contemptuous, dehumanizing speech toward people or groups.
+      harassment: bullying, stalking, intimidation of a person.
+      doxxing: publishing or providing non-consensual private personal data (home
+        addresses, phone numbers).
+      defamation: damaging claims about a real, identifiable person only when the
+        text explicitly identifies the claims as false or fabricated. Do not infer
+        falsity or check external facts; allegations whose truth is unstated are not
+        flagged as defamation.
+      animal-cruelty: inflicting or celebrating suffering on sentient lives.
+      self-harm: facilitating self-injury or suicide.
+      csam: sexual content involving minors. Always its own category, always terminal,
+        no discussion, no redirect.
+      none: No refusal category applies. This scaffolding answer is used only for
+        LayaFT rows whose triage answer is none; the serving rule ignores the category
+        question whenever triage is none.
+state:
+  scenario: '{scenario}'
+data:
+  train: ../data/phase3_train.jsonl
+  test: ../data/phase3_probe.jsonl

@@ -16,13 +16,17 @@ import os
 from pathlib import Path
 
 from system.userspace import current_user_id, user_state_path
+from system.log import get_logger
+from system.config import env_float
 import platform
 import re
 import subprocess
 import time
 
+log = get_logger(__name__)
+
 _DB_SIZE_CACHE: tuple[float, str] = (0.0, "? mem")
-_DB_SIZE_TTL = float(os.getenv("DB_SIZE_TTL", "1.0"))
+_DB_SIZE_TTL = env_float("DB_SIZE_TTL", 1.0)
 
 
 def _read_sys_info() -> dict:
@@ -48,7 +52,7 @@ def _read_sys_info() -> dict:
                     info["cpu"] = line.split(":", 1)[1].strip()
                     break
     except Exception:
-        pass
+        log.warning("health: failed to read /proc/cpuinfo")
     if not info.get("cpu"):
         info["cpu"] = platform.processor() or platform.machine() or "unknown"
 
@@ -68,7 +72,7 @@ def _read_sys_info() -> dict:
 
     # Root partition size
     try:
-        out = subprocess.check_output(["df", "-h", "/"], text=True).splitlines()[1]
+        out = subprocess.check_output(["df", "-h", "/"], text=True, timeout=5).splitlines()[1]
         info["storage"] = out.split()[1]
     except Exception:
         info["storage"] = "unknown"
@@ -139,7 +143,7 @@ def _db_size_str() -> str:
     conn = None
     try:
         import sqlite3, sqlite_vec
-        db_path = os.getenv("SQLITE_MEMORY_PATH") or str(user_state_path("memory/memory.db", current_user_id()))
+        db_path = os.path.expanduser(os.getenv("SQLITE_MEMORY_PATH") or "") or str(user_state_path("memory/memory.db", current_user_id()))
         conn = sqlite3.connect(db_path)
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
@@ -153,7 +157,7 @@ def _db_size_str() -> str:
             try:
                 conn.close()
             except Exception:
-                pass
+                log.warning("health: failed to close db connection")
 
     _DB_SIZE_CACHE = (now, value)
     return value

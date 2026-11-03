@@ -1,0 +1,7 @@
+{
+  "q1_triage": {
+    "type": "choice",
+    "question": "Does this situation describe a request that should be refused?",
+    "options": ["violation", "none"]
+  }
+}

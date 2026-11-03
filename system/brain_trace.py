@@ -1,0 +1,388 @@
+"""system/brain_trace.py
+
+Per-step tracer for Aiko's cognitive pipeline. When TRACE_BRAIN=1
+(set by `python main.py --trace`, or exported in the shell yourself),
+every instrumented function emits a structured step to:
+
+  1. Log      — one log record per step via system.log (component
+                 "brain_trace") into logs/aiko.log, viewable and filterable
+                 in Log Studio. This is the full trace; the chat stays clean.
+  2. Live UI  — turn banners only (begin/end) via ui.add_message('sys', ...)
+                 so you can see turns scroll past without the step firehose
+                 shredding the conversation into confetti.
+
+Off by default. Cost when off is a single boolean check per instrumented
+function call (negligible).
+
+Design:
+  - brain_trace.record_step(name, inputs, outputs, **meta)
+      Lightweight call-site helper. Wraps the value rendering so call
+      sites stay one-liners.
+  - brain_trace.step(name, **inputs) context manager
+      Used when a step has a duration to measure or when you want the
+      start frame rendered before the body runs and the result frame
+      rendered after.
+
+Every step records:
+  index        monotonic sequence number
+  name         function/method name (e.g. "think.route")
+  layer        "transport" | "gate" | "route" | "recall" | "rerank" |
+               "context" | "stream" | "review" | "write" | "consolidate"
+  inputs       dict of what flowed in (truncated strings, no secrets)
+  outputs      dict of what came out (truncated strings)
+  duration_ms  wall-clock time the step took (when step() is used)
+  factors      list of human-readable reasons that drove the outcome
+  extras       arbitrary structured fields
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+import threading
+import time
+from collections import deque
+from contextlib import contextmanager
+from datetime import datetime
+from typing import Any
+
+from system.config import env_int
+from system.log import get_logger
+
+# ── configuration ────────────────────────────────────────────────────────────
+
+TRACE_ENABLED = os.getenv("TRACE_BRAIN", "0").lower() in {"1", "true", "yes", "on"}
+TRACE_UI_ENABLED = os.getenv("AIKO_TRACE_UI", "1").lower() in {"1", "true", "yes", "on"}
+TRACE_MAX_VALUE_CHARS = env_int("AIKO_TRACE_MAX_VALUE_CHARS", 400)
+
+_log = get_logger("brain_trace")  # component "brain_trace" in aiko.log / Log Studio
+
+_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    """Log records must be plain text (ANSI escapes would pollute aiko.log
+    and break Log Studio's record parser)."""
+    return _ANSI_RE.sub("", text)
+
+# ── ANSI colours ──────────────────────────────────────────────────────────────
+# Distinct color per layer so the eye can group steps in the live stream.
+# Auto-disabled when stdout isn't a TTY (matches system/orchestrate.py).
+_COLOR_ENABLED = sys.stdout.isatty()
+
+_RESET = "\033[0m"
+_BOLD = "\033[1m"
+
+LAYER_COLORS = {
+    "transport":    "\033[38;5;245m",   # grey
+    "preflight":    "\033[38;5;245m",   # grey
+    "gate":         "\033[38;5;226m",   # yellow
+    "route":        "\033[38;5;141m",   # purple
+    "recall":       "\033[38;5;183m",   # lavender
+    "rerank":       "\033[38;5;218m",   # pink
+    "context":      "\033[38;5;215m",   # orange
+    "stream":       "\033[38;5;87m",    # cyan
+    "review":       "\033[38;5;117m",   # light blue
+    "write":        "\033[38;5;154m",   # lime
+    "consolidate":  "\033[38;5;80m",    # med cyan
+    "schedule":     "\033[38;5;159m",   # light cyan
+}
+_NAME_COLOR = "\033[38;5;222m"     # tan
+_INPUT_COLOR = "\033[38;5;47m"     # green
+_OUTPUT_COLOR = "\033[38;5;51m"    # bright cyan
+_FACTOR_COLOR = "\033[38;5;223m"   # peach
+_DIM = "\033[2m"
+_HEADER = "\033[38;5;231;1m"       # bold white
+
+_SENTINEL = "🧠"  # visible marker for the trace header line
+
+# ── global state ──────────────────────────────────────────────────────────────
+
+_lock = threading.Lock()
+_steps: deque[dict] = deque(maxlen=2000)   # in-memory ring buffer for the session
+_ui_sink = None                # injected by main.py → ui.add_message("sys", ...)
+_turn_counter: int = 0
+_turn_started_at: float | None = None
+
+
+# ── small render helpers ─────────────────────────────────────────────────────
+
+def _c(code: str, text: str) -> str:
+    if not _COLOR_ENABLED:
+        return text
+    return f"{code}{text}{_RESET}"
+
+
+def _trunc(value: Any, limit: int = TRACE_MAX_VALUE_CHARS) -> str:
+    """Render an arbitrary value as a short, single-line string."""
+    if value is None:
+        return "None"
+    if isinstance(value, (bool, int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        one = value.replace("\n", "↵").replace("\r", "")
+        if len(one) > limit:
+            return one[: limit - 1] + "…"
+        return one
+    if isinstance(value, dict):
+        try:
+            rendered = json.dumps(value, ensure_ascii=False, default=str)
+        except Exception:
+            rendered = repr(value)
+        return _trunc(rendered, limit)
+    if isinstance(value, (list, tuple)):
+        try:
+            rendered = json.dumps(list(value), ensure_ascii=False, default=str)
+        except Exception:
+            rendered = repr(value)
+        return _trunc(rendered, limit)
+    return _trunc(repr(value), limit)
+
+
+def _short_type(value: Any) -> str:
+    if value is None:
+        return "None"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, str):
+        return f"str({len(value)})"
+    if isinstance(value, dict):
+        return f"dict({len(value)})"
+    if isinstance(value, list):
+        return f"list({len(value)})"
+    if isinstance(value, tuple):
+        return f"tuple({len(value)})"
+    return type(value).__name__
+
+
+# ── public surface ───────────────────────────────────────────────────────────
+
+def set_ui_sink(sink) -> None:
+    """Inject the UI object whose add_message('sys', ...) we'll call.
+
+    Called once at startup after the UI is built. Passing None reverts to
+    file-only output (useful when running --cli where the sink might not
+    support add_message of arbitrary sys text without breaking the layout).
+    """
+    global _ui_sink
+    _ui_sink = sink
+
+
+def begin_turn(label: str = "") -> None:
+    """Mark the start of a new turn (one user prompt → response)."""
+    global _turn_counter, _turn_started_at
+    if not TRACE_ENABLED:
+        return
+    _turn_counter += 1
+    _turn_started_at = time.monotonic()
+    banner = (
+        f"{_SENTINEL}  ── turn #{_turn_counter}"
+        f"{f'  [{label}]' if label else ''}"
+        f"  @ {datetime.now().strftime('%H:%M:%S')} ──"
+    )
+    _emit_banner(banner, _HEADER)
+
+
+def end_turn() -> None:
+    """Mark the end of the current turn — flush a footer with total ms."""
+    global _turn_started_at
+    if not TRACE_ENABLED or _turn_started_at is None:
+        return
+    elapsed_ms = int((time.monotonic() - _turn_started_at) * 1000)
+    banner = (
+        f"{_SENTINEL}  ── turn #{_turn_counter} done in {elapsed_ms} ms ──"
+    )
+    _emit_banner(banner, _HEADER)
+    _turn_started_at = None
+
+
+def record_step(
+    name: str,
+    *,
+    layer: str = "context",
+    inputs: dict | None = None,
+    outputs: dict | None = None,
+    factors: list[str] | None = None,
+    extras: dict | None = None,
+    duration_ms: float | None = None,
+) -> None:
+    """Record one named step: ring buffer + one log record (chat stays clean).
+
+    name:    "think.route", "memorize.search", "attention.situation_context", …
+    layer:   one of LAYER_COLORS keys — kept as structured data for filtering
+    inputs:  short labels of what flowed into the step
+    outputs: short labels of what came out
+    factors: human-readable strings explaining WHY (route chosen, memory
+             selected, rerank boosted, etc.)
+    """
+    if not TRACE_ENABLED:
+        return
+
+    step = {
+        "index": len(_steps) + 1,
+        "timestamp": datetime.now().isoformat(timespec="milliseconds"),
+        "name": name,
+        "layer": layer,
+        "inputs": inputs or {},
+        "outputs": outputs or {},
+        "factors": factors or [],
+        "extras": extras or {},
+        "duration_ms": duration_ms,
+    }
+    with _lock:
+        _steps.append(step)
+
+    _emit_step(step)
+
+
+@contextmanager
+def step(name: str, *, layer: str = "context", inputs: dict | None = None, factors: list[str] | None = None):
+    """Context manager: render the start frame immediately, then the end
+    frame with `outputs` populated when the body finishes.
+
+    Usage:
+        with brain_trace.step("memorize.search", layer="recall",
+                              inputs={"query": q}) as ctx:
+            results = backend.search(...)
+            ctx.set(outputs={"hits": results})
+    """
+    if not TRACE_ENABLED:
+        yield _NullCtx()
+        return
+
+    start = time.monotonic()
+    inputs = inputs or {}
+    factors = factors or []
+    step_obj = {
+        "index": len(_steps) + 1,
+        "timestamp": datetime.now().isoformat(timespec="milliseconds"),
+        "name": name,
+        "layer": layer,
+        "inputs": inputs,
+        "outputs": {},
+        "factors": factors,
+        "extras": {},
+        "duration_ms": None,
+    }
+    with _lock:
+        _steps.append(step_obj)
+    _emit_step(step_obj, phase="start")
+
+    ctx = _StepCtx(step_obj, start)
+    try:
+        yield ctx
+    finally:
+        step_obj["duration_ms"] = int((time.monotonic() - start) * 1000)
+        _emit_step(step_obj, phase="end")
+
+
+class _NullCtx:
+    def set(self, **_):
+        pass
+    def add_factor(self, _):
+        pass
+    def add_extra(self, **_):
+        pass
+
+
+class _StepCtx:
+    def __init__(self, step_obj: dict, start: float):
+        self._step = step_obj
+        self._start = start
+
+    def set(self, *, outputs: dict | None = None, factors: list[str] | None = None) -> None:
+        if outputs:
+            self._step["outputs"].update(outputs)
+        if factors:
+            self._step["factors"].extend(factors)
+
+    def add_factor(self, factor: str) -> None:
+        self._step["factors"].append(factor)
+
+    def add_extra(self, **kwargs) -> None:
+        self._step["extras"].update(kwargs)
+
+
+# ── internal rendering ───────────────────────────────────────────────────────
+
+def _emit_banner(text: str, color: str = "") -> None:
+    """Turn banners go to the UI sink (one bubble) AND the log."""
+    if TRACE_UI_ENABLED and _ui_sink is not None:
+        try:
+            _ui_sink.add_message("sys", _c(color, text) if color else text)
+        except Exception:
+            # Was a bare `except: pass` — a broken UI sink went unnoticed.
+            _log.debug("brain_trace UI sink failed", exc_info=True)
+    _log.info(_strip_ansi(text))
+
+
+def _format_kv(label: str, value: Any) -> str:
+    rendered = _trunc(value)
+    return f"    {label}: {rendered}  ({_short_type(value)})"
+
+
+def _emit_step(step: dict, *, phase: str = "end") -> None:
+    """One step = one log record (multi-line message groups in Log Studio).
+    Nothing goes to the chat — steps no longer shred the conversation."""
+    lines = [
+        f"┌─ [{step['layer']}] {step['name']}"
+        + (f"  ({step['duration_ms']} ms)" if step.get("duration_ms") is not None else "")
+    ]
+    for k, v in (step["inputs"] or {}).items():
+        lines.append(_format_kv(k, v))
+    for k, v in (step["outputs"] or {}).items():
+        lines.append(_format_kv(k, v))
+    if step["factors"]:
+        lines.append("    factors:")
+        lines.extend(f"      • {f}" for f in step["factors"])
+    for k, v in (step["extras"] or {}).items():
+        lines.append(_format_kv(k, v))
+    lines.append("│ running…" if phase == "start" else "└─ done")
+    _log.info("\n".join(lines))
+
+
+def get_box_summary(max_lines: int = 3, max_chars: int = 200) -> list[str]:
+    """Return a compact multi-line box summary of recent trace steps for CLI top-box display."""
+    steps = get_recent_steps(max_lines)
+    lines = []
+    for s in steps[-max_lines:]:
+        name = s.get("name", "?")
+        layer = s.get("layer", "?")
+        inputs_text = ", ".join(f"{k}={str(v)[:20]}" for k, v in (s.get("inputs") or {}).items() if v is not None) or "-"
+        outputs_text = ", ".join(f"{k}={str(v)[:20]}" for k, v in (s.get("outputs") or {}).items() if v is not None) or "-"
+        inputs_text = inputs_text[:max_chars]
+        outputs_text = outputs_text[:max_chars]
+        lines.append(f"[{layer}] {name} | in: {inputs_text} | out: {outputs_text}")
+    # Pad/trim to exactly max_lines
+    while len(lines) < max_lines:
+        lines.insert(0, " [trace] waiting...")
+    return lines[-max_lines:]
+
+
+def get_recent_steps(limit: int = 50) -> list[dict]:
+    """Return the last `limit` recorded steps — useful for /trace command."""
+    with _lock:
+        return list(_steps)[-limit:]
+
+
+def reset() -> None:
+    """Clear the in-memory ring buffer (does not touch the file)."""
+    with _lock:
+        _steps.clear()
+
+
+__all__ = [
+    "TRACE_ENABLED",
+    "set_ui_sink",
+    "begin_turn",
+    "end_turn",
+    "record_step",
+    "step",
+    "get_recent_steps",
+    "reset",
+]

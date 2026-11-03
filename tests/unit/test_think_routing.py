@@ -1,0 +1,533 @@
+"""Unit tests for cognition.think intent routing shortcuts."""
+from __future__ import annotations
+
+import threading
+from types import SimpleNamespace
+
+import numpy as np
+
+from cognition import think as think_module
+from cognition.think import AikoThink, _load_route_examples
+
+
+class FakeEmbedder:
+    def __init__(self):
+        self.calls: list[tuple[str, str]] = []
+
+    def embed_query(self, text: str, instruct: str = ""):
+        self.calls.append((text, instruct))
+        return np.array([1.0, 0.0], dtype=np.float32)
+
+
+class FakeMemoryInner:
+    def __init__(self, embedder):
+        self._embedder = embedder
+
+
+class FakeMemorize:
+    def __init__(self, embedder):
+        self._mem = FakeMemoryInner(embedder)
+
+
+def _bare_think(embedder: FakeEmbedder | None = None) -> AikoThink:
+    think = object.__new__(AikoThink)
+    think._memorize = FakeMemorize(embedder or FakeEmbedder())
+    think._memorize_lock = threading.Lock()
+    think._active_user_ids = set()
+    think._active_users_lock = threading.Lock()
+    think._last_chat_time = 0.0
+    think._proactive_lock = threading.Lock()
+    think._proactive_resting = False
+    return think
+
+
+def test_route_examples_include_greeting_label():
+    examples = _load_route_examples()
+
+    assert "greeting" in examples
+    assert any("hello" in example.lower() for example in examples["greeting"])
+
+
+def test_ternary_route_examples_exclude_greeting_label():
+    examples = _load_route_examples(include_greeting=False)
+
+    assert set(examples) == {"agentic", "webchat", "localchat"}
+
+
+def test_route_intent_falls_back_to_llm_when_embedder_raises(monkeypatch):
+    """A RAISING embedder (HTTP 500/timeout/circuit-open) must degrade
+    exactly like a MISSING one — never kill the turn. Previously this
+    bubbled out of _route_intent and killed every Playground idle build
+    during embedding outages."""
+
+    class RaisingEmbedder:
+        def embed_query(self, text: str, instruct: str = ""):
+            raise RuntimeError("500 Server Error for url: /embedding")
+
+    think = _bare_think(RaisingEmbedder())
+    monkeypatch.setattr(
+        think, "_classify_quaternary_intent_llm",
+        lambda user_input, allow_agentic=True: "localchat",
+    )
+    intent, query_vec = think._route_intent("research the history of this project")
+    assert intent == "localchat"
+    assert query_vec is None
+
+
+def test_route_intent_can_return_greeting_from_semantic_scores(monkeypatch):
+    embedder = FakeEmbedder()
+    think = _bare_think(embedder)
+    monkeypatch.setattr(think, "_semantic_example_vectors", lambda examples, instruct: (["greeting"], np.array([[1.0, 0.0]], dtype=np.float32)))
+    monkeypatch.setattr(think_module.reason, "label_scores_topk", lambda *a, **kw: {"greeting": 0.95, "localchat": 0.10})
+
+    intent, query_vec = think._route_intent("hello there")
+    assert intent == "greeting"
+    assert query_vec is not None
+    assert embedder.calls == [("hello there", think_module._ROUTE_INSTRUCT_QUATERNARY)]
+
+
+def test_greeting_route_skips_memory_recall_and_writeback(monkeypatch):
+    from cognition.conscience import ledger
+
+    think = _bare_think()
+    calls = {}
+    monkeypatch.setattr(ledger, "ledger_for", lambda *_args: SimpleNamespace(flush=lambda: calls.setdefault("flushed", True)))
+
+    monkeypatch.setattr(think, "_route_intent", lambda user_input: ("greeting", None))
+    monkeypatch.setattr(think, "_fetch_memory_and_knowledge", lambda *a, **kw: calls.setdefault("fetch", True))
+
+    def fake_chat(user_input, **kwargs):
+        assert calls["flushed"] is True
+        calls["chat_kwargs"] = kwargs
+        return "hi!"
+
+    monkeypatch.setattr(think, "chat", fake_chat)
+
+    assert think.route("hi") == "hi!"
+    assert "fetch" not in calls
+    assert calls["chat_kwargs"]["skip_memory"] is True
+    assert calls["chat_kwargs"]["store_turn"] is False
+
+
+def test_refusal_route_flushes_before_reply(monkeypatch):
+    from cognition.conscience import hooks, ledger
+
+    think = _bare_think()
+    think._history_lock = threading.Lock()
+    think._history = []
+    events = []
+    monkeypatch.setattr(hooks, "gate_respond", lambda **_kwargs: ("refuse", "No thanks", ""))
+    monkeypatch.setattr(ledger, "ledger_for", lambda *_args: SimpleNamespace(flush=lambda: events.append("flush")))
+    monkeypatch.setattr(think, "_emit", lambda *_args, **_kwargs: events.append("emit"))
+    # Gate and intent overlap: intent always runs now (its result is only
+    # unused on refusal). The invariant under test is flush-before-reply.
+    monkeypatch.setattr(think, "_route_intent", lambda *_args: events.append("route") or ("localchat", None))
+
+    assert think.route("Please do the wrong thing") == "No thanks"
+    assert events == ["route", "flush", "emit"]
+
+
+def test_non_greeting_route_starts_memory_after_intent(monkeypatch):
+    # Chained recall: localchat runs recall sequentially inside chat(), so
+    # route() must NOT start the shared memory+KB future for it.
+    think = _bare_think()
+    events: list[str] = []
+
+    monkeypatch.setattr(think, "_route_intent", lambda user_input: events.append("intent") or ("localchat", None))
+    # Pin the attention gate open: global energy state leaks between tests
+    # (a depleted-energy run defers before intent, which is what this test
+    # measures — not what it intends to test).
+    from cognition.attention import EdgeCognitiveState
+    monkeypatch.setattr(EdgeCognitiveState, "should_attempt",
+                        lambda self, user_input, **kw: (True, "test", "proceed"))
+
+    class ImmediatePool:
+        def submit(self, fn, *args):
+            events.append("submit_mem_kb")
+
+            class Future:
+                def result(self_inner):
+                    return fn(*args)
+
+            return Future()
+
+    monkeypatch.setattr(think_module, "CONTEXT_POOL", ImmediatePool())
+    monkeypatch.setattr(think, "chat", lambda *a, **kw: events.append("chat") or "ok")
+
+    assert think.route("tell me about routers") == "ok"
+    assert events == ["intent", "chat"]
+    assert "submit_mem_kb" not in events
+
+
+def test_agentic_route_starts_shared_mem_kb_future(monkeypatch):
+    # Agentic keeps the shared future until piece 2 reworks it.
+    think = _bare_think()
+    events: list[str] = []
+
+    monkeypatch.setattr(think, "_route_intent", lambda user_input: events.append("intent") or ("agentic", None))
+
+    class ImmediatePool:
+        def submit(self, fn, *args):
+            events.append("submit_mem_kb")
+
+            class Future:
+                def result(self_inner):
+                    return ([], "<knowledge_context />")
+
+            return Future()
+
+    monkeypatch.setattr(think_module, "CONTEXT_POOL", ImmediatePool())
+    monkeypatch.setattr(think, "_fetch_memory_and_knowledge", lambda *a, **kw: ([], "<knowledge_context />"))
+
+    def fake_agentic(user_input, **kwargs):
+        assert kwargs.get("mem_kb_future") is not None
+        return "agentic ok"
+
+    monkeypatch.setattr(think, "agentic_chat", fake_agentic)
+
+    assert think.route("research quantum error correction for me") == "agentic ok"
+    assert events == ["intent", "submit_mem_kb"]
+
+
+def test_ccc_approval_route_clears_active_user(monkeypatch):
+    from cognition.conscience import hooks
+
+    think = _bare_think()
+    emitted = []
+    monkeypatch.setattr(think_module, "current_user_id", lambda: "user-1")
+    monkeypatch.setattr(think, "_note_user_activity", lambda: None)
+    monkeypatch.setattr(think, "_emit", lambda text, token_callback=None: emitted.append(text))
+    monkeypatch.setattr(hooks, "resolve_ccc_approval", lambda *args, **kwargs: "approved")
+
+    assert think.route("approve ccc-abcdef") == "approved"
+    assert emitted == ["approved"]
+    assert "user-1" not in think._active_user_ids
+
+
+def test_degrade_chat_is_recorded_without_promoting_agency(monkeypatch):
+    from cognition import attention
+
+    think = _bare_think()
+    state = attention.EdgeCognitiveState()
+    monkeypatch.setattr(attention, "for_identity", lambda _identity: state)
+    monkeypatch.setattr(think, "chat", lambda *_args, **_kwargs: "soft reply")
+
+    assert think._soft_gate_reply("draft this", "degrade_chat", "low confidence") == "soft reply"
+
+    assert state.snapshot()["self_decisions"][0]["kinds"] == ["degrade_chat"]
+    assert not state.snapshot()["self_preference_evidence"]
+
+
+class FakeCompletions:
+    def __init__(self, label: str):
+        self.label = label
+        self.last_messages = None
+
+    def create(self, **kwargs):
+        self.last_messages = kwargs["messages"]
+        message = SimpleNamespace(content=self.label)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
+class FakeClient:
+    def __init__(self, label: str):
+        self.chat = SimpleNamespace(completions=FakeCompletions(label))
+
+
+def test_ternary_llm_classifier_preserves_three_way_labels():
+    think = _bare_think()
+    think._client = FakeClient("greeting")
+    think._router_model = "router"
+
+    assert think._classify_ternary_intent_llm("hello") == "localchat"
+    prompt = think._client.chat.completions.last_messages[0]["content"]
+    assert "Labels: [agentic, webchat, chat]" in prompt
+    assert "Label: greeting" not in prompt
+
+
+def test_quaternary_llm_classifier_allows_greeting_label():
+    think = _bare_think()
+    think._client = FakeClient("greeting")
+    think._router_model = "router"
+
+    assert think._classify_quaternary_intent_llm("hello") == "greeting"
+    prompt = think._client.chat.completions.last_messages[0]["content"]
+    assert "Labels: [greeting, agentic, webchat, chat]" in prompt
+    assert "Label: greeting" in prompt
+
+
+def test_ambiguous_semantic_scores_default_to_localchat_no_llm(monkeypatch):
+    """Ambiguous gap defaults to localchat without spending an LLM tiebreak
+    call (~1-3s TTFT). The fly tiebreak runs first (free); if it can't
+    decide, localchat is the safe default. Explicit opt-in via ROUTE_MODE=llm.
+    """
+    think = _bare_think(FakeEmbedder())
+    monkeypatch.setenv("ROUTE_WEBCHAT_THRESHOLD", "0.60")
+    monkeypatch.setattr(think_module, "_SEMANTIC_ROUTE_MIN_GAP", 0.05)
+    monkeypatch.setattr(
+        think, "_semantic_example_vectors",
+        lambda examples, instruct: (["webchat", "agentic"], np.zeros((2, 2), dtype=np.float32)),
+    )
+    monkeypatch.setattr(
+        think_module.reason, "label_scores_topk",
+        lambda *a, **kw: {"webchat": 0.65, "agentic": 0.63, "localchat": 0.10},
+    )
+    # Fly tiebreak abstains (not decisive).
+    monkeypatch.setattr(think, "_fly_route_tiebreak", lambda *a, **kw: None)
+    tiebreak_calls = []
+    monkeypatch.setattr(
+        think, "_classify_quaternary_intent_llm",
+        lambda text, allow_agentic=True: tiebreak_calls.append(text) or "webchat",
+    )
+
+    intent, _ = think._route_intent("what does PNE stand for")
+    # No LLM tiebreak spent; safe default.
+    assert tiebreak_calls == []
+    assert intent == "localchat"
+
+
+def test_ambiguous_semantic_scores_llm_mode_still_tiebreaks(monkeypatch):
+    """ROUTE_MODE=llm explicitly opts back into the LLM tiebreak for
+    ambiguous gaps."""
+    think = _bare_think(FakeEmbedder())
+    monkeypatch.setenv("ROUTE_WEBCHAT_THRESHOLD", "0.60")
+    monkeypatch.setattr(think_module, "_SEMANTIC_ROUTE_MIN_GAP", 0.05)
+    monkeypatch.setattr(think_module, "_ROUTE_MODE", "llm")
+    monkeypatch.setattr(
+        think, "_semantic_example_vectors",
+        lambda examples, instruct: (["webchat", "agentic"], np.zeros((2, 2), dtype=np.float32)),
+    )
+    monkeypatch.setattr(
+        think_module.reason, "label_scores_topk",
+        lambda *a, **kw: {"webchat": 0.65, "agentic": 0.63, "localchat": 0.10},
+    )
+    monkeypatch.setattr(think, "_fly_route_tiebreak", lambda *a, **kw: None)
+    tiebreak_calls = []
+    monkeypatch.setattr(
+        think, "_classify_quaternary_intent_llm",
+        lambda text, allow_agentic=True: tiebreak_calls.append(text) or "webchat",
+    )
+
+    intent, _ = think._route_intent("what does PNE stand for")
+    assert tiebreak_calls == ["what does PNE stand for"]
+    assert intent == "webchat"
+
+
+def test_ambiguous_semantic_scores_pass_current_user_to_fly(monkeypatch):
+    think = _bare_think(FakeEmbedder())
+    monkeypatch.setenv("ROUTE_WEBCHAT_THRESHOLD", "0.60")
+    monkeypatch.setattr(think_module, "_SEMANTIC_ROUTE_MIN_GAP", 0.05)
+    monkeypatch.setattr(think_module, "current_user_id", lambda: "route-user")
+    monkeypatch.setattr(think, "_semantic_example_vectors", lambda *_args: (["webchat", "agentic"], np.zeros((2, 2), dtype=np.float32)))
+    monkeypatch.setattr(think_module.reason, "label_scores_topk", lambda *args, **kwargs: {"webchat": 0.65, "agentic": 0.63})
+    seen = []
+    monkeypatch.setattr(think, "_fly_route_tiebreak", lambda _text, _scores, uid, _ctx, _vec: seen.append(uid) or "webchat")
+
+    intent, _ = think._route_intent("what does PNE stand for")
+
+    assert intent == "webchat"
+    assert seen == ["route-user"]
+
+
+def test_recall_query_resolves_pronouns_from_recent_history():
+    think = _bare_think()
+    think._history_lock = threading.Lock()
+    think._history = [
+        {"role": "user", "content": "Do you know what PNE is?"},
+        {"role": "assistant", "content": "PNE? You mean Playland?"},
+    ]
+    q = think._recall_query("We went there yesterday together. Did you enjoy?")
+    assert "We went there yesterday" in q
+    assert "Playland" in q  # antecedent context folded in
+
+
+def test_recall_query_is_plain_input_with_empty_history():
+    think = _bare_think()
+    assert think._recall_query("hello there") == "hello there"
+
+
+def test_fetch_memory_uses_enriched_query(monkeypatch):
+    think = _bare_think()
+    think._history_lock = threading.Lock()
+    think._history = [
+        {"role": "user", "content": "Do you know what PNE is?"},
+        {"role": "assistant", "content": "PNE? Playland."},
+    ]
+    captured = {}
+
+    class FakeMemorizeWrapper:
+        _mem = SimpleNamespace(_embedder=None)
+
+        def search(self, query, limit=3, query_vector=None, **kw):
+            captured["query"] = query
+            return []
+
+    think._memorize = FakeMemorizeWrapper()
+    monkeypatch.setattr(think_module, "knowledge_context_for", lambda *a, **kw: "")
+
+    memories, kb = think._fetch_memory_and_knowledge("We went there yesterday. Did you enjoy?")
+    assert (memories, kb) == ([], "")
+    assert "PNE? Playland." in captured["query"]
+
+
+class CountingCompletions:
+    """Fake completions endpoint that counts create() calls and can fail once."""
+
+    def __init__(self, label: str = "webchat", fail_first: bool = False, labels: list | None = None):
+        self.label = label
+        self.fail_first = fail_first
+        self.labels = list(labels) if labels else []
+        self.calls = 0
+
+    def create(self, **kwargs):
+        self.calls += 1
+        if self.fail_first:
+            self.fail_first = False
+            raise RuntimeError("transient LLM outage")
+        label = self.labels.pop(0) if self.labels else self.label
+        message = SimpleNamespace(content=label)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
+class CountingClient:
+    def __init__(self, label: str = "webchat", fail_first: bool = False, labels: list | None = None):
+        self.chat = SimpleNamespace(completions=CountingCompletions(label, fail_first, labels))
+
+    @property
+    def calls(self) -> int:
+        return self.chat.completions.calls
+
+
+def _clear_intent_cache() -> None:
+    think_module._intent_llm_cache.clear()
+
+
+def test_intent_llm_cache_skips_repeat_call():
+    _clear_intent_cache()
+    try:
+        think = _bare_think()
+        think._client = CountingClient("webchat")
+        think._router_model = "router"
+
+        assert think._classify_quaternary_intent_llm("will it rain on tuesday") == "webchat"
+        assert think._classify_quaternary_intent_llm("will it rain on tuesday") == "webchat"
+        assert think._client.calls == 1
+    finally:
+        _clear_intent_cache()
+
+
+def test_intent_llm_cache_separates_flags_and_models():
+    _clear_intent_cache()
+    try:
+        think = _bare_think()
+        think._client = CountingClient("webchat")
+        think._router_model = "router"
+
+        # Same input, different classifier flags -> distinct cache entries.
+        assert think._classify_quaternary_intent_llm("cache probe alpha") == "webchat"
+        assert think._classify_ternary_intent_llm("cache probe alpha") == "webchat"
+        assert think._client.calls == 2
+        # Repeats hit both entries.
+        assert think._classify_quaternary_intent_llm("cache probe alpha") == "webchat"
+        assert think._classify_ternary_intent_llm("cache probe alpha") == "webchat"
+        assert think._client.calls == 2
+        # Same input, different router model -> cache miss.
+        think._router_model = "router2"
+        assert think._classify_quaternary_intent_llm("cache probe alpha") == "webchat"
+        assert think._client.calls == 3
+    finally:
+        _clear_intent_cache()
+
+
+def test_intent_llm_cache_never_stores_failures():
+    _clear_intent_cache()
+    try:
+        think = _bare_think()
+        think._client = CountingClient("webchat", fail_first=True)
+        think._router_model = "router"
+
+        # Exception fallback must not be cached: the retry goes to the LLM.
+        assert think._classify_quaternary_intent_llm("cache probe beta") == "localchat"
+        assert think._client.calls == 1
+        assert think._classify_quaternary_intent_llm("cache probe beta") == "webchat"
+        assert think._client.calls == 2
+        # The successful classification is cached from here on.
+        assert think._classify_quaternary_intent_llm("cache probe beta") == "webchat"
+        assert think._client.calls == 2
+    finally:
+        _clear_intent_cache()
+
+
+def test_intent_llm_cache_retries_after_empty_response():
+    _clear_intent_cache()
+    try:
+        think = _bare_think()
+        think._client = CountingClient(labels=["", "webchat"])
+        think._router_model = "router"
+
+        # Empty LLM content -> localchat, but NOT cached.
+        assert think._classify_quaternary_intent_llm("cache probe gamma") == "localchat"
+        assert think._client.calls == 1
+        # The retry re-asks the LLM instead of replaying the cached fallback.
+        assert think._classify_quaternary_intent_llm("cache probe gamma") == "webchat"
+        assert think._client.calls == 2
+        # The valid label is cached from here on.
+        assert think._classify_quaternary_intent_llm("cache probe gamma") == "webchat"
+        assert think._client.calls == 2
+    finally:
+        _clear_intent_cache()
+
+
+def test_intent_llm_cache_retries_after_invalid_label():
+    _clear_intent_cache()
+    try:
+        think = _bare_think()
+        think._client = CountingClient(labels=["???", "webchat"])
+        think._router_model = "router"
+
+        # Unparseable label -> localchat, but NOT cached.
+        assert think._classify_quaternary_intent_llm("cache probe delta") == "localchat"
+        assert think._client.calls == 1
+        # The retry re-asks the LLM instead of replaying the cached fallback.
+        assert think._classify_quaternary_intent_llm("cache probe delta") == "webchat"
+        assert think._client.calls == 2
+        # The valid label is cached from here on.
+        assert think._classify_quaternary_intent_llm("cache probe delta") == "webchat"
+        assert think._client.calls == 2
+    finally:
+        _clear_intent_cache()
+
+
+def test_intent_llm_cache_key_is_stable_and_scoped():
+    key1 = think_module._intent_llm_cache_key(
+        "hello", model="router", allow_agentic=True, include_greeting=True
+    )
+    key2 = think_module._intent_llm_cache_key(
+        "hello", model="router", allow_agentic=True, include_greeting=True
+    )
+    assert key1 == key2
+    assert len(key1) == 64  # sha256 hex
+    other_flag = think_module._intent_llm_cache_key(
+        "hello", model="router", allow_agentic=True, include_greeting=False
+    )
+    other_model = think_module._intent_llm_cache_key(
+        "hello", model="other", allow_agentic=True, include_greeting=True
+    )
+    other_input = think_module._intent_llm_cache_key(
+        "hello!", model="router", allow_agentic=True, include_greeting=True
+    )
+    assert len({key1, other_flag, other_model, other_input}) == 4
+
+
+def test_worker_entry_skips_memory_and_capability_embedding(monkeypatch):
+    from unittest.mock import Mock
+    think = _bare_think()
+    monkeypatch.setattr(think, '_get_memorize', Mock(side_effect=AssertionError('worker fetched memory')))
+    runner = Mock(return_value='checkpoint saved')
+    monkeypatch.setattr(think_module, 'run_agentic_chat', runner)
+    out = think.agentic_chat('Build one small Playground step', worker_mode=True,
+                            gate_result=(True, 'authorized idle job', 'proceed'))
+    assert out == 'checkpoint saved'
+    think._get_memorize.assert_not_called()
+    assert runner.call_args.kwargs['worker_mode'] is True
+    assert runner.call_args.kwargs['cap_vec'] is None

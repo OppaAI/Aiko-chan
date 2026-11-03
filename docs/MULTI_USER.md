@@ -1,18 +1,18 @@
 # Multi-user testing plan
 
 There may be simple `$5 Patreon tester` isolation model for Aiko just to cover the cost of the front-end/back-end servers.
-OAuth is the source of identity; `persona/identity.md` remains Aiko's identity only and is no longer a user identity source.
+OAuth is the source of identity; `persona/SOUL.md` remains Aiko's identity only and is no longer a user identity source.
 
 ## Current implementation
 
 - OAuth sessions store a provider-scoped runtime id, such as `github_123456` or `patreon_987654321`, to avoid collisions between providers.
 - User-private state defaults to `<USER_SPACE_ROOT>/<user_id>/`:
-  - `user.md` for the user's editable bio/profile.
+  - `USER.md` for the user's editable bio/profile.
   - `memory.db` for that user's sqlite-vec memory store.
   - `monthly_consolidation_state.jsonl` for that user's monthly consolidation state.
   - `schedule.json` for that user's scheduled jobs/reminders (agentic scheduling).
   - `workspace/` for that user's notes and tool artifacts; this can later be redirected to a mounted/synced Google Drive workspace via `WORKSPACE_ROOT`.
-  - `skills/` for that user's skill workflow state (future per-user skill customization).
+  - `agentic/` for that user's skill workflow state (future per-user skill customization).
 - Existing env overrides still work for local/owner operation; leave YAML path overrides blank for per-user defaults:
   - `USER_ID` or `AIKO_USER_ID`
   - `SQLITE_MEMORY_PATH`
@@ -20,7 +20,7 @@ OAuth is the source of identity; `persona/identity.md` remains Aiko's identity o
   - `MONTHLY_CONSOLIDATION_STATE_PATH`
   - `SCHEDULE_PATH`
   - `WORKSPACE_ROOT`
-  - `USER_STATE_ROOT` (canonical), plus compatibility aliases `AIKO_USER_STATE_ROOT` and `USER_SPACE_ROOT`
+  - `USER_SPACE_ROOT` (canonical), plus compatibility aliases `USER_STATE_ROOT` and `AIKO_USER_STATE_ROOT`
 
 ## sqlite-vec per user
 
@@ -40,7 +40,7 @@ Do **not** derive an encryption key from only the OAuth user id. User ids are no
 
 For a simple online tester tier, prefer encrypting the storage layer instead of encrypting individual files in application code:
 
-1. Put `USER_STATE_ROOT` on an encrypted persistent volume.
+1. Put `USER_SPACE_ROOT` on an encrypted persistent volume.
 2. Restrict permissions to the service account.
 3. Keep each user in a separate directory.
 4. Avoid writing secrets into workspace files.

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Aiko Companion",
+  "version": "0.1.0",
+  "identifier": "com.oppaai.aiko.companion",
+  "build": {
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "devUrl": "https://aiko.ide-chroma.ts.net/",
+    "frontendDist": "../webui/static"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "companion",
+        "title": "Aiko",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 320,
+        "minHeight": 420,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "resizable": true
+      }
+    ],
+    "security": { "csp": null }
+  },
+  "bundle": { "active": true, "targets": "all" }
+}

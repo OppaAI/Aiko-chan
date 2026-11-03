@@ -1,78 +1,164 @@
 """
-webui/webui.py
-Aiko-chan's browser-based UI backend — drop-in replacement for AikoTUI.
+webui/webui.py — Aiko-chan's browser-based UI backend.
 
-Responsibilities:
-    - Serve aiko.html + assets from webui/static/ over HTTP(S) (localhost:PORT)
-    - Host a bidirectional WebSocket server (localhost:WS_PORT)
-    - Expose the same public API as AikoTUI so main.py needs minimal changes:
-        add_message / stream_token / stream_commit / turn_start
-        step_loading / step_done / step_skip / step_error / status_finish
-        get_input / get_voice_input / spin_loop
-    - Block get_input() until the browser sends {"type":"user_input","text":"..."}
-    - Auto-open the browser on first connection
+Serves the WebUI over HTTP(S) + WebSocket so any device on the LAN (PC,
+phone, tablet) can connect — drop-in replacement for AikoTUI when running
+headless (e.g. on Jetson).
 
-Environment variables (all optional):
-    HTTP_PORT   — HTTP port for serving the UI (default 8787)
-    WS_PORT     — WebSocket port                (default 8765)
-    NO_BROWSER  — set to "1" to suppress auto-open
-    WEBUI_HTTPS — set to "1" to serve HTTPS/WSS for remote browser microphones
-    WEBUI_BROWSER_VAD_GATE — set to "0" to stream raw WebUI PCM for VAD diagnostics
-    SSL_CERT    — optional TLS certificate path
-    SSL_KEY     — optional TLS private key path
+Sections:
+    Config          — env-driven ports, HTTPS, VAD-gate toggles (module level)
+    TLS setup       — self-signed cert generation for LAN HTTPS/mic access
+    AikoWeb         — server lifecycle, per-connection auth, chat/voice I/O
+        .connection   — WebSocket auth handshake, per-user context binding
+        .broadcast    — fan-out of chat tokens, tool status, vitals, poses
+        .boot-report  — step_loading/step_done/... boot progress events
+        .voice I/O    — mic audio queue, barge-in, VAD status relay
+    run_webui()     — entry point called from main.py after boot
 
-Boot ordering note (login-gated wakeup):
-    AikoWakeup().boot() — which constructs AikoMemorize, seeds schedule.json
-    jobs, and starts the global ScheduleRunner — must never run before a real
-    user is authenticated, since every one of those subsystems resolves paths
-    via system.userspace.current_user_id(). This class exposes
-    wait_for_first_login() so main.py's _run_session() can block until the
-    first authenticated WebSocket session connects (see _ws_handler below)
-    before calling AikoWakeup().boot(). The HTTP server (login page, OAuth
-    flow, static assets) is already serving at this point — only the heavy
-    model/subsystem boot is deferred.
+Notes:
+    - barge_in WebSocket messages are ignored when BARGE_IN_ENABLED is off.
+    - mic start payload includes echo_guard_ms for browser barge echo guard.
+    - No local browser auto-launch: this runs headless (e.g. Jetson) and is
+      always accessed remotely, so webbrowser/xdg-open is intentionally not used.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import os
+from pathlib import Path
 import queue
 import ssl
 import subprocess
 import threading
 import time
-import webbrowser
-from pathlib import Path
-
-import websockets
+from typing import ClassVar, TYPE_CHECKING
+if TYPE_CHECKING:
+    from system.wakeup import BootResult
 
 from system.config import load_config
-from system.userspace import reset_current_user_id, set_current_user_id, set_current_display_name
+from system.userspace import current_user_id, reset_current_display_name, reset_current_user_id, set_current_user_id, set_current_display_name
+from cognition.fly_runtime import observe as observe_fly_runtime, visual_observation
+from cognition.flysense.pathways import image_dimensions_within_limit
 load_config()
-from websockets.server import serve as ws_serve
 
 from system import bioclock
 
 log = logging.getLogger(__name__)
 
-# ── config ────────────────────────────────────────────────────────────────────
+_REACTIVE_GESTURE_DURATIONS = {
+    "leanIn": 2.8,
+    "curiousTilt": 2.8,
+    "handsClasp": 3.2,
+    "emphasizePoint": 2.6,
+    "wave": 2.6,
+    "giggle": 2.4,
+    "bow": 2.6,
+    "clap": 2.8,
+    "dance": 4.2,
+}
 
 HTTP_PORT  = int(os.getenv("HTTP_PORT", "8787"))
-WS_PORT    = int(os.getenv("WS_PORT",   "8765"))
 STATIC_DIR = Path(__file__).parent / "static"
 NO_BROWSER = os.getenv("NO_BROWSER", "0") == "1"
 WEBUI_HTTPS = os.getenv("WEBUI_HTTPS", "0").lower() in {"1", "true", "yes", "on"}
 SSL_CERT = os.getenv("SSL_CERT", "")
 SSL_KEY = os.getenv("SSL_KEY", "")
 WEBUI_BROWSER_VAD_GATE = os.getenv("WEBUI_BROWSER_VAD_GATE", "1").lower() in {"1", "true", "yes", "on"}
+WEBUI_VISION_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+WEBUI_VISION_MAX_IN_FLIGHT = 1
+_VISUAL_DECODE_SLOT = threading.BoundedSemaphore(1)
 
+
+def _validate_image_data_uri(value: object) -> str | None:
+    """Return a safe, bounded image data URI, or ``None`` for invalid input.
+
+    Camera frames stay in memory and are sent only to the configured vision
+    endpoint.  Keeping this validation at the WebSocket boundary prevents a
+    client from using the inference request as an oversized data transport.
+    """
+    if not isinstance(value, str) or not value.startswith("data:image/"):
+        return None
+    try:
+        header, encoded = value.split(",", 1)
+        mime = header[5:].split(";", 1)[0].lower()
+        if mime not in {"image/jpeg", "image/png", "image/webp"} or ";base64" not in header:
+            return None
+        # Reject before decoding so a malicious client cannot force a large
+        # temporary allocation merely to fail the post-decode size check.
+        if len(encoded) > (WEBUI_VISION_MAX_IMAGE_BYTES * 4 // 3) + 4:
+            return None
+        raw = base64.b64decode(encoded, validate=True)
+    except (ValueError, UnicodeEncodeError, binascii.Error):
+        return None
+    if not raw or len(raw) > WEBUI_VISION_MAX_IMAGE_BYTES:
+        return None
+    signatures_match = {
+        "image/jpeg": raw.startswith(b"\xff\xd8\xff"),
+        "image/png": raw.startswith(b"\x89PNG\r\n\x1a\n"),
+        "image/webp": len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP",
+    }
+    if not signatures_match[mime] or not image_dimensions_within_limit(raw):
+        return None
+    return value
+
+
+def _note_visual_frame_bounded(uid: str, image: str, source: str) -> None:
+    """Limit transient frame decoding across every WebSocket connection."""
+    if not _VISUAL_DECODE_SLOT.acquire(blocking=False):
+        return
+    try:
+        from cognition.flysense.pathways import note_visual_frame
+        note_visual_frame(uid, image, source)
+    finally:
+        _VISUAL_DECODE_SLOT.release()
+
+
+def _vision_base_url() -> str:
+    return (
+        os.getenv("WEBUI_VISION_BASE_URL", "").strip()
+        or os.getenv("VISION_BASE_URL", "").strip()
+        or os.getenv("LLM_BASE_URL", "").strip()
+        or "http://localhost:8080/v1"
+    )
+
+
+def _barge_in_enabled() -> bool:
+    # sensory.listen_native was removed — barge-in is native to sensory.listen
+    # now (see that module's docstring). The bare env-parsing fallback below
+    # only remains as a last resort if sensory.listen itself is unavailable
+    # for some reason (e.g. import-order edge case at boot).
+    try:
+        from sensory.listen import barge_in_enabled
+        return barge_in_enabled()
+    except Exception:
+        return os.getenv("BARGE_IN_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _echo_guard_ms() -> int:
+    try:
+        return max(0, int(os.getenv("BARGE_IN_ECHO_GUARD_MS", "450")))
+    except ValueError:
+        return 450
+
+
+def _load_stored_display_name(uid: str) -> str:
+    # Shared with the CLI's "What's your name?" answer (system.userspace);
+    # checks the display_name.txt locations plus legacy cli_name.txt, so
+    # the WebUI addresses Oppa as the user instead of as a third person.
+    try:
+        from system.userspace import read_stored_display_name
+        return read_stored_display_name(uid)
+    except Exception:
+        log.warning("webui: failed to read display name")
+    return ""
 
 
 def _make_ssl_context(hostname: str, host_ip: str) -> ssl.SSLContext | None:
-    """Return a server TLS context when WEBUI_HTTPS is enabled."""
     if not WEBUI_HTTPS:
         return None
 
@@ -110,83 +196,61 @@ def _make_ssl_context(hostname: str, host_ip: str) -> ssl.SSLContext | None:
     ctx.set_alpn_protocols(["http/1.1"])
     return ctx
 
-# ── message types (server → browser) ─────────────────────────────────────────
-#
-# chat      {"type":"chat",    "sender":"you"|"aiko"|"sys", "text":"..."}
-# token     {"type":"token",   "text":"..."}
-# commit    {"type":"commit"}
-# step      {"type":"step",    "key":"...", "state":"loading"|"done"|"skip"|"error", "detail":"..."}
-# phase     {"type":"phase",   "value":"init"|"chat"}
-# vitals    {"type":"vitals",  "tokens":0, "tok_s":0.0, "ram":"...", "uptime":"...", "asr":true, "tts":true}
-# voice     {"type":"voice",   "status":"waiting"|"listening"|"transcribing"|"idle"}
-# mic       {"type":"mic",     "action":"start"|"stop", "bytes_per_chunk":2048}
-# tool      {"type":"tool",    "status":"..."|null}
-# expression{"type":"expression","name":"...","intensity":0.8}
-# viseme    {"type":"viseme",  "viseme":"A","weight":0.6}
-# pose      {"type":"pose",    "name":"thinking", "active":true}
-#
-# browser → server:
-# user_input{"type":"user_input","text":"..."}
-# vad       {"type":"vad",     "event":"start"|"end"}   ← browser VAD sentinels
-
 
 class AikoWeb:
-    """
-    Browser-based drop-in for AikoTUI.
+    """Browser-based WebUI backend for Aiko-chan."""
+    def __init__(self, no_voice: bool = False, debug: bool = False, boot_result: BootResult | None = None, defer_servers: bool = False):
+        self._no_voice     = no_voice
+        self._debug        = debug
+        self._boot_result  = boot_result
+        self._ts           = time.time()
+        self._lock         = threading.Lock()
 
-    All drawing methods become JSON WebSocket broadcasts.
-    get_input() blocks on a threading.Queue until the browser submits a message.
-
-    Browser VAD gates WebUI microphone audio by default so silence/private
-    background audio is not streamed to the server. For diagnostics, set
-    WEBUI_BROWSER_VAD_GATE=0 to stream raw PCM and let server-side VAD segment it.
-    """
-
-    # ------------------------------------------------------------------
-    # construction
-    # ------------------------------------------------------------------
-
-    def __init__(self, no_voice: bool = False, debug: bool = False):
-        self._no_voice = no_voice
-        self._debug    = debug
-        self._ts       = time.time()
-        self._lock     = threading.Lock()
-
-        # current authenticated user — set by _ws_handler, consumed by get_input()
-        self._current_user_id: str = "guest"
-        self._current_display_name: str = "Guest"
-
-        # login gate — set the first time a real authenticated WS session
-        # connects, so main.py can defer AikoWakeup().boot() until a real
-        # (non-guest) user_id is known. See wait_for_first_login() below.
+        self._fully_ready = False                                # set to True by set_boot_result(); sent to clients on connect
+        
+        # ⚠️ Legacy globals from pre-contextvar era (before per-connection user binding):
+        # Set once by first client to connect; never reset on disconnect. Verify that
+        # nothing outside this class still reads _authenticated_uid or _login_event.
+        # The contextvars-based flow (_bind_user_context, reset on ws.close) is the
+        # preferred approach — these should be removed if no code depends on them.
         self._login_event = threading.Event()
         self._authenticated_uid: str | None = None
         self._authenticated_display_name: str | None = None
+        self._user_space_ready: set[str] = set()   # users whose deferred user-space seeding has run
 
-        # input queue — browser posts here, get_input() reads here
-        self._input_q: queue.Queue[str] = queue.Queue()
+        self._input_q: queue.Queue[tuple[str, str, str]] = queue.Queue()
+        try:
+            _register_webui(self)
+        except Exception:
+            pass
 
-        # binary mic-audio frames from the browser, consumed by get_voice_input()
-        # an empty-bytes sentinel (b"") signals end-of-utterance from browser VAD
-        # maxsize=10000 (~20 seconds at 512 frames/s) prevents unbounded growth
-        # since the mic stays open continuously for instant barge-in
-        self._audio_q: queue.Queue[bytes] = queue.Queue(maxsize=10000)
+        # 4096 frames × 512 samples ≈ 8MB ceiling ≈ 13s of 16kHz mono f32 —
+        # ample headroom for VAD-gated speech bursts; raw-mic mode drops
+        # frames when full instead of ballooning RAM (was 10000 / ~20MB).
+        self._audio_q: queue.Queue[bytes | tuple[bytes, str, str]] = queue.Queue(maxsize=4096)
         self._mic_active = threading.Event()
-        self._mic_started: bool = False
         self._did_barge_in: bool = False
 
-        # connected browser websocket clients
         self._clients: set = set()
+        self._client_users: dict[object, str] = {}
         self._clients_lock = threading.Lock()
 
-        # memory backend (injected after boot by _run_session)
-        self._memorize = None
+        # Whichever user's turn (or background scheduled job — see
+        # system/turngate.py) currently holds AIKO_BUSY_LOCK. Used only to
+        # tell OTHER users why nothing is happening yet; the actual
+        # serialization is the shared lock + single-threaded main loop, not
+        # this flag — this is display state, not a gate.
+        self._active_uid: str | None = None
 
-        # streaming state
+        self._memorize = None
+        self._think = None
+        self._speak = None
+        self._listen = None
+
         self._streaming   = ""
         self._tool_status = None
+        self._gesture_active_until = 0.0
 
-        # session stats
         self._stats: dict = {
             "tokens":     0,
             "turn_tok":   0,
@@ -196,78 +260,118 @@ class AikoWeb:
             "tts_on":     not no_voice,
         }
 
-        # asyncio event loop running in a background thread
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_ready = threading.Event()
         self._ssl_context: ssl.SSLContext | None = None
 
-        # Register instance for WebSocket routing
         import interface.webui.auth
         interface.webui.auth.aiko_web_instance = self
 
+        self._servers_started = False                 # start_servers() idempotence guard
+        if not defer_servers:                         # default: server up immediately (old behaviour);
+            self.start_servers()                      # run_webui now passes defer_servers=True so boot
+                                                      # finishes BEFORE the first socket opens.
+
+    def start_servers(self) -> None:
+        """Open the HTTP/WS listener. Idempotent; called by __init__ unless
+        constructed with defer_servers=True (then run_webui calls it after
+        wakeup.boot() completes — browsers never see a half-booted Aiko)."""
+        with self._lock:
+            if self._servers_started:
+                return
+            self._servers_started = True
         self._start_servers()
 
+    def set_boot_result(self, result: BootResult):
+        """Called by main.py AFTER wakeup.boot() finishes (now before login).
+        
+        Unpacks the BootResult into instance variables and marks the system ready.
+        The "ready" broadcast is deferred to _ws_handler() so new clients receive
+        it on connect — broadcasts here fire before servers start.
+        """
+        self._boot_result = result
+        if result:
+            # Unpack subsystem refs for later injection into run_post_auth()
+            self._memorize = result.memorize
+            self._think    = result.think
+            self._speak    = result.speak
+            self._listen   = result.listen
+            self._fully_ready = True
+            self.status_finish()   # broadcasts the "phase: chat" event
+
     def set_voice_backends(self, speak, listen) -> None:
-        """Inject speak/listen (called from _run_session after boot) so
-        _ws_handler can act on a browser-reported barge_in message."""
+        """Deprecated — kept for compatibility. Use set_boot_result() instead."""
         self._speak = speak
         self._listen = listen
-    
+
     def set_memorize(self, memorize) -> None:
-        """Inject the memory backend (called from _run_session after boot)."""
+        """Deprecated — kept for compatibility. Use set_boot_result() instead."""
         self._memorize = memorize
 
-    def wait_for_first_login(self, timeout: float | None = None) -> str | None:
-        """Block the calling thread until the first authenticated WebSocket
-        session connects, then return that session's real user_id.
+    def set_think(self, think) -> None:
+        """Deprecated — kept for compatibility. Use set_boot_result() instead."""
+        self._think = think
 
-        Used by main.py's _run_session() to defer AikoWakeup().boot() (and
-        therefore AikoMemorize construction, schedule.json seeding, and the
-        ScheduleRunner) until a genuine logged-in user_id is known — never
-        the "guest" default. The HTTP server (login page, OAuth flow, static
-        assets) is already reachable while this blocks; only the heavy
-        subsystem boot is gated.
+    async def _bind_user_context(self, uid: str, session: dict) -> tuple:
+        """Resolve display name and bind uid/display-name to this WebSocket task.
 
-        Returns None if `timeout` is given and no login arrives in time.
+        WebUI can serve multiple browsers concurrently, so per-connection
+        identity must stay local to the handler task. Do not mirror it into
+        process-wide environment variables or a shared AikoMemorize instance;
+        downstream turn code receives the uid/display name explicitly via the
+        input queue and contextvars.
         """
-        self._login_event.wait(timeout)
-        return self._authenticated_uid
+        stored_name = _load_stored_display_name(uid)
+        session_name = session.get("username") or ""
+        display_name = stored_name or session_name or uid
+        user_token = set_current_user_id(uid)
+        display_token = set_current_display_name(display_name)
+        return user_token, display_token, display_name
 
-    # ------------------------------------------------------------------
-    # server lifecycle
-    # ------------------------------------------------------------------
+    def _on_user_active(self, uid: str) -> None:
+        """Post-login hook: run one-time user-space initialization that boot
+        skipped because it ran pre-auth as guest.
+
+        The actual work lives in system/prepare.run_post_auth() so CLI and
+        messenger adapters can reuse the same sequence. This wrapper only
+        enforces the once-per-uid guard; it runs off the event loop (see
+        _ws_handler's asyncio.to_thread call), so login never blocks on it.
+        """
+        if uid == "guest":
+            return
+        with self._lock:
+            if uid in self._user_space_ready:
+                return
+            self._user_space_ready.add(uid)
+            log.info("[aiko-web] first authenticated user (%s) — running deferred user-space seeding", uid)
+            try:
+                from system.prepare import run_post_auth
+                run_post_auth(uid, memorize=self._memorize, think=self._think)
+            except Exception:
+                log.exception("[aiko-web] post-auth initialization failed")
 
     def _start_servers(self) -> None:
-        """Spin up the HTTP / WebSocket server using FastAPI & uvicorn."""
         import socket
         hostname = socket.gethostname()
         host_ip = socket.gethostbyname(hostname)
         self._ssl_context = _make_ssl_context(hostname, host_ip)
-        scheme = "https" if self._ssl_context else "http"
 
-        # Mount static files to auth app dynamically
         from interface.webui.auth import app as auth_app
-        from fastapi.staticfiles import StaticFiles
+        from starlette.staticfiles import StaticFiles
 
-        has_static = False
-        for route in auth_app.routes:
-            if hasattr(route, "name") and route.name == "static":
-                has_static = True
-                break
+        has_static = any(getattr(route, "name", None) == "static" for route in auth_app.routes)
         if not has_static:
             auth_app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
 
         http_t = threading.Thread(target=self._run_http, daemon=True, name="aiko-http")
         http_t.start()
 
+        # _loop_ready now fires only after uvicorn's server.started event (socket
+        # bound) or serve() dying outright (bind failure) — start_servers()
+        # no longer returns while nothing is listening.
         self._loop_ready.wait(timeout=5)
 
-        if not NO_BROWSER:
-            threading.Timer(0.6, lambda: webbrowser.open(f"{scheme}://{host_ip}:{HTTP_PORT}/")).start()
-
     def _run_http(self) -> None:
-        """Serve the FastAPI app over HTTP or HTTPS via uvicorn."""
-        import asyncio
         import uvicorn
         from interface.webui.auth import app as auth_app
 
@@ -287,15 +391,43 @@ class AikoWeb:
             loop="asyncio"
         )
         server = uvicorn.Server(config)
-        self._loop_ready.set()
-        self._loop.run_until_complete(server.serve())
+
+        async def _serve_and_signal() -> None:
+            serve_task = asyncio.ensure_future(server.serve())
+            # Signal _loop_ready only once the socket is actually bound (or
+            # serve() has died trying) — it previously fired before serve()
+            # even started, so start_servers() could return while nothing was
+            # listening yet.
+            # NOTE: uvicorn>=0.30 made Server.started a plain bool (was an
+            # asyncio.Event). Poll it — pyproject floors uvicorn at 0.50.2,
+            # so the old Event API can't come back via a downgrade.
+            while not server.started and not serve_task.done():
+                await asyncio.sleep(0.05)
+            self._loop_ready.set()
+            # Re-raises serve() failures (e.g. port already in use) instead
+            # of swallowing them; on the happy path runs until shutdown.
+            await serve_task
+
+        try:
+            self._loop.run_until_complete(_serve_and_signal())
+        except (SystemExit, Exception):
+            # Uvicorn raises SystemExit (not Exception) on bind failure; it
+            # escapes run_until_complete before _serve_and_signal() resumes,
+            # so without this the 5s _loop_ready wait would always time out.
+            log.exception("[aiko-web] HTTP server exited")
+            raise
+        finally:
+            # Backstop: waiters must never hang the full 5s on a dead server.
+            self._loop_ready.set()
+            # Clear before closing so later _broadcast() calls hit the None
+            # guard instead of submitting to a closed loop.
+            loop, self._loop = self._loop, None
+            loop.close()
 
     async def _ws_handler(self, ws) -> None:
-        """Handle one browser WebSocket connection via FastAPI WebSocket."""
-        # 1. Enforce session authentication (Auth is mandatory)
         from interface.webui.auth import sessions, signer, SESSION_MAX_AGE_SECONDS
         from itsdangerous import BadSignature, SignatureExpired
-        from datetime import datetime, timedelta
+        from datetime import timedelta
 
         cookie_value = ws.cookies.get("session_id")
         if not cookie_value:
@@ -316,35 +448,52 @@ class AikoWeb:
             return
 
         session = sessions[session_id]
-        if bioclock.local_now() - session["created_at"] > timedelta(days=30):
+        # Use SESSION_MAX_AGE_SECONDS (not hardcoded timedelta) to stay in sync with auth config
+        session_max_age = timedelta(seconds=SESSION_MAX_AGE_SECONDS)
+        if bioclock.local_now() - session["created_at"] > session_max_age:
             log.warning("[aiko-web] expired WebSocket session")
             await ws.close(code=1008)
             return
 
         uid = str(session["user_id"])
-
-        # Login gate — record the first real authenticated uid so main.py's
-        # wait_for_first_login() can unblock and start AikoWakeup().boot()
-        # with a genuine user_id already in place. Safe to check/set on
-        # every connection; only the first one matters (Event.set() is
-        # idempotent, and later re-logins/reconnects don't rewind boot).
-        self._current_user_id = uid
-        self._current_display_name = str(session.get("username", "")) or uid
+        user_context_token, display_context_token, display_name = await self._bind_user_context(uid, session)
 
         if not self._login_event.is_set():
             self._authenticated_uid = uid
-            self._authenticated_display_name = self._current_display_name
+            self._authenticated_display_name = display_name
             self._login_event.set()
-        user_context_token = set_current_user_id(uid)
-        set_current_display_name(self._current_display_name)
-        os.environ["AIKO_USER_ID"] = uid
-        os.environ["AIKO_DISPLAY_NAME"] = self._current_display_name
-        if self._memorize:
-            self._memorize.switch_user(uid)
+
         await ws.accept()
+
+        # Send ready state snapshot immediately so clients connecting after boot
+        # don't get stuck on the progress screen waiting for a ready message
+        # that already fired before they connected.
+        if self._fully_ready:
+            await self._safe_send(ws, json.dumps({
+                "type": "phase", "value": "chat"
+            }, ensure_ascii=False))
+            await self._safe_send(ws, json.dumps({
+                "type": "status_finish", "ready": True, "message": "Aiko fully initialized — log in now"
+            }, ensure_ascii=False))
+
+        # Post-login rebinding/seeding runs in the background so the socket
+        # receive loop starts immediately. Done-callback logs failures —
+        # without it an exception outside _on_user_active's inner try
+        # surfaces only as "never retrieved" and is effectively silent.
+        _post_login_task = asyncio.ensure_future(asyncio.to_thread(self._on_user_active, uid))
+
+        def _log_post_login_failure(task: asyncio.Task) -> None:
+            try:
+                task.result()
+            except Exception:
+                log.exception("[webui] post-login background task failed for %s", uid)
+
+        _post_login_task.add_done_callback(_log_post_login_failure)
 
         with self._clients_lock:
             self._clients.add(ws)
+            self._client_users[ws] = uid
+        vision_tasks: set[asyncio.Task[None]] = set()
         log.info("[aiko-web] browser connected  (total=%d)", len(self._clients))
         try:
             while True:
@@ -353,15 +502,11 @@ class AikoWeb:
                     break
                 raw_bytes = message.get("bytes")
                 if raw_bytes is not None:
-                    # browser mic PCM frame — only buffer during an active voice
-                    # turn so stale/late frames don't pollute the next recording.
-                    # Mic stays open continuously (for instant barge-in), so
-                    # drop frames if queue is full to avoid blocking the handler.
                     if self._mic_active.is_set():
                         try:
-                            self._audio_q.put_nowait(raw_bytes)
+                            self._audio_q.put_nowait((raw_bytes, uid, display_name))
                         except queue.Full:
-                            pass
+                            log.debug("webui: audio queue full, dropping frame")
                     continue
 
                 raw_text = message.get("text")
@@ -376,180 +521,394 @@ class AikoWeb:
                     if mtype == "user_input":
                         text = (msg.get("text") or "").strip()
                         if text:
-                            uid = str(session["user_id"])
-                            self._current_user_id = uid
-                            self._current_display_name = str(session.get("username", "")) or uid
-                            set_current_user_id(uid)
-                            set_current_display_name(self._current_display_name)
-                            os.environ["AIKO_USER_ID"] = uid
-                            os.environ["AIKO_DISPLAY_NAME"] = self._current_display_name
-                            if self._memorize:
-                                self._memorize.switch_user(uid)
-                            self._input_q.put(text)
+                            with self._lock:
+                                busy_with_other = (
+                                    self._active_uid is not None
+                                    and self._active_uid != uid
+                                )
+                            if busy_with_other:
+                                # Message is still enqueued below and will be
+                                # served in order — this is just feedback so
+                                # the browser doesn't look frozen while it waits.
+                                self._broadcast(
+                                    {"type": "busy", "message": "Aiko is with someone else right now — you're next."},
+                                    user_id=uid,
+                                )
+                            self._input_q.put((text, uid, display_name))
+
+                    elif mtype == "image_input":
+                        image = _validate_image_data_uri(msg.get("image"))
+                        if image is None:
+                            await self._safe_send(ws, json.dumps({
+                                "type": "vision", "status": "error",
+                                "message": "That camera image was invalid or too large.",
+                            }))
+                            continue
+                        if len(vision_tasks) >= WEBUI_VISION_MAX_IN_FLIGHT:
+                            await self._safe_send(ws, json.dumps({
+                                "type": "vision", "status": "busy",
+                                "message": "A camera image is already being analyzed.",
+                            }))
+                            continue
+                        prompt = str(msg.get("text") or "").strip()
+                        task = asyncio.create_task(self._handle_image_input(image, prompt, uid))
+                        vision_tasks.add(task)
+                        task.add_done_callback(vision_tasks.discard)
+
+                    elif mtype == "screen_input":
+                        # Screen frames are deliberately handled as one-shot vision
+                        # requests. The browser invokes the OS picker for each frame;
+                        # this bridge neither starts capture nor persists the image.
+                        image = _validate_image_data_uri(msg.get("image"))
+                        if image is None:
+                            await self._safe_send(ws, json.dumps({
+                                "type": "vision", "status": "error", "source": "screen",
+                                "message": "That shared screen image was invalid or too large.",
+                            }))
+                            continue
+                        if len(vision_tasks) >= WEBUI_VISION_MAX_IN_FLIGHT:
+                            await self._safe_send(ws, json.dumps({
+                                "type": "vision", "status": "busy", "source": "screen",
+                                "message": "A vision request is already being analyzed.",
+                            }))
+                            continue
+                        prompt = str(msg.get("text") or "").strip()
+                        task = asyncio.create_task(self._handle_image_input(image, prompt, uid, source="screen"))
+                        vision_tasks.add(task)
+                        task.add_done_callback(vision_tasks.discard)
+
+                    elif mtype == "presence":
+                        # T4/T5 motion reflex arc: the browser sends only a
+                        # throttled presence LEVEL (0..1, on bin change, max
+                        # 1/10s) — never video. Shadow logs; live nudges
+                        # attention energy slightly upward on real presence.
+                        try:
+                            level = max(0.0, min(1.0, float(msg.get("level", 0.0))))
+                        except (TypeError, ValueError):
+                            continue
+                        store = getattr(self, "_presence_levels", None)
+                        if store is None:
+                            store = self._presence_levels = {}
+                        store[uid] = (level, time.time())
+                        try:
+                            pmode = (os.getenv("MEMORY_FLYCX_MODE", "off") or "off").strip().lower()
+                        except Exception:
+                            pmode = "off"
+                        log.debug("[aiko-web] presence uid=%s level=%.2f mode=%s", uid, level, pmode)
+                        if pmode == "live" and level >= 0.5:
+                            try:
+                                from cognition.attention import for_identity
+                                st = for_identity(uid)
+                                with st._lock:
+                                    st._energy = max(0.0, min(1.0, st._energy + 0.05 * (level - 0.5) * 2.0))
+                            except Exception as exc:
+                                log.debug("[aiko-web] presence nudge failed: %s", exc)
+                        continue
 
                     elif mtype == "vad":
-                        # browser energy VAD sentinels — update voice status display
-                        # and inject end-of-utterance sentinel into the audio queue
                         event = msg.get("event")
                         if event == "start":
-                            # speech onset — update UI; listen.py will see audio frames arriving
-                            self._broadcast({"type": "voice", "status": "listening"})
+                            self._broadcast({"type": "voice", "status": "listening"}, user_id=uid)
                         elif event == "end":
-                            # speech ended — push empty-bytes sentinel so _chunk_source
-                            # returns None cleanly, ending the recording loop in listen.py
-                            self._broadcast({"type": "voice", "status": "transcribing"})
+                            self._broadcast({"type": "voice", "status": "transcribing"}, user_id=uid)
                             if WEBUI_BROWSER_VAD_GATE and self._mic_active.is_set():
-                                self._audio_q.put(b"")  # end-of-utterance sentinel
-                                
+                                self._audio_q.put((b"", uid, display_name))
+
                     elif mtype == "barge_in":
-                        # Browser's client-side energy VAD detected speech
-                        # while TTS was playing. Browser already stopped its
-                        # own playback locally (zero round-trip) — this stops
-                        # backend generation/synthesis so it doesn't keep
-                        # producing audio that would just refill the (already
-                        # cleared) client queue, and unblocks listen.py's
-                        # wait_or_barge_in() so the next turn can start.
-                        #
-                        # trigger_barge_in() MUST fire before speak.stop()
-                        # so wait_or_barge_in() sees the event while
-                        # is_playing() is still True, returns True, and
-                        # listen.py clears the event — otherwise the stale
-                        # event prematurely cuts off the next turn's TTS.
+                        # S0: master switch — ignore browser barge when disabled
+                        if not _barge_in_enabled():
+                            log.debug("[aiko-web] barge_in ignored (BARGE_IN_ENABLED=0)")
+                            continue
                         self._did_barge_in = True
                         if self._listen is not None:
                             self._listen.trigger_barge_in()
                         if self._speak is not None:
-                            self._speak.stop()
-        
-        except Exception as e:
+                            # stop() busy-waits for the stream thread to end;
+                            # run it off the event loop so a long TTS playback
+                            # doesn't freeze every other browser/request.
+                            await asyncio.to_thread(self._speak.stop)
+
+        except Exception:
             log.exception("[aiko-web] error in WebSocket loop")
         finally:
+            for task in vision_tasks:
+                task.cancel()
+            if vision_tasks:
+                await asyncio.gather(*vision_tasks, return_exceptions=True)
+            reset_current_display_name(display_context_token)
             reset_current_user_id(user_context_token)
             with self._clients_lock:
                 self._clients.discard(ws)
+                self._client_users.pop(ws, None)
+            try:
+                # Ephemeral per-user notices must not leak into the next
+                # login on a shared box. Other browsers of the same user
+                # keep working — their next failure simply re-pushes.
+                from system.notice import drop_session
+                drop_session(uid)
+            except Exception:
+                pass
             log.info("[aiko-web] browser disconnected (total=%d)", len(self._clients))
-            # reset mic state so a reconnecting browser gets mic:start again
             if not self._clients:
-                self._mic_started = False
                 self._did_barge_in = False
 
-    # ------------------------------------------------------------------
-    # broadcast helpers
-    # ------------------------------------------------------------------
-
-    def _broadcast(self, payload: dict) -> None:
-        """Fire-and-forget: schedule a JSON broadcast on the asyncio loop."""
+    def _broadcast(self, payload: dict, *, user_id: str | None = None) -> None:
         if self._loop is None:
             return
-        asyncio.run_coroutine_threadsafe(self._async_broadcast(payload), self._loop)
+        asyncio.run_coroutine_threadsafe(self._async_broadcast(payload, user_id=user_id), self._loop)
 
-    async def _async_broadcast(self, payload: dict) -> None:
+    def _broadcast_to_current_user(self, payload: dict) -> None:
+        uid = current_user_id()
+        self._broadcast(payload, user_id=uid if uid and uid != "guest" else None)
+
+    async def _async_broadcast(self, payload: dict, *, user_id: str | None = None) -> None:
         raw = json.dumps(payload, ensure_ascii=False)
         with self._clients_lock:
-            targets = list(self._clients)
+            if user_id:
+                targets = [ws for ws in self._clients if self._client_users.get(ws) == user_id]
+            else:
+                targets = list(self._clients)
         if not targets:
             return
-        await asyncio.gather(
+        results = await asyncio.gather(
             *(self._safe_send(ws, raw) for ws in targets),
             return_exceptions=True,
         )
+        dead = [ws for ws, res in zip(targets, results) if res is False]
+        if dead:
+            with self._clients_lock:
+                for ws in dead:
+                    self._clients.discard(ws)
+                    self._client_users.pop(ws, None)
+
+    @staticmethod
+    def _infer_image(image: str, question: str, source: str = "camera") -> str:
+        """Ask the configured vision model about an explicitly shared image frame."""
+        from openai import OpenAI
+
+        model = os.getenv("WEBUI_VISION_MODEL", os.getenv("VISION_MODEL", "ministral"))
+        base_url = _vision_base_url()
+        timeout = float(os.getenv("WEBUI_VISION_TIMEOUT", "60"))
+        default_question = "Describe what you see in this image clearly and helpfully."
+        if source == "screen":
+            default_question = (
+                "This is a single, user-consented screenshot. Describe the visible "
+                "application and offer the next useful step. Do not infer or request "
+                "credentials, secrets, or information not visibly present."
+            )
+        instruction = question or default_question
+        response = OpenAI(base_url=base_url, api_key=os.getenv("VISION_API_KEY", "") or os.getenv("LLM_API_KEY", "") or os.getenv("OPENAI_API_KEY", "") or "not-needed").chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": instruction[:1000]},
+                {"type": "image_url", "image_url": {"url": image}},
+            ]}],
+            max_tokens=300,
+            timeout=timeout,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        choices = getattr(response, "choices", None) or []
+        if not choices:
+            log.warning("webui: vision model returned no choices")
+            return "I couldn't interpret that image."
+        return (choices[0].message.content or "I couldn't interpret that image.").strip()
+
+    async def _handle_image_input(self, image: str, question: str, uid: str, source: str = "camera") -> None:
+        """Run vision off the socket loop and return its result to the requesting user."""
+        # The authenticated user explicitly submitted this frame. The optional
+        # fly runtime receives no image bytes, only a consented scalar event.
+        try:
+            observe_fly_runtime(uid, visual_observation(salience=1.0, consented=True), seed_types=("sensory", "T4", "T5", "visual"))
+        except Exception:
+            log.debug("fly visual observation skipped", exc_info=True)
+        # Phase 6: feed the frame into the sensory motion pathway — scalar
+        # motion energy only. Bytes are decoded transiently, never retained.
+        try:
+            await asyncio.to_thread(_note_visual_frame_bounded, uid, image, source)
+        except Exception:
+            log.debug("fly visual pathway skipped", exc_info=True)
+        self._broadcast({"type": "vision", "status": "working", "source": source}, user_id=uid)
+        try:
+            answer = await asyncio.to_thread(self._infer_image, image, question, source)
+        except Exception:
+            log.exception("webui: vision inference failed")
+            self._broadcast({
+                "type": "vision", "status": "error",
+                "message": f"I couldn't analyze that {source} image. Check that the vision model is running.",
+                "source": source,
+            }, user_id=uid)
+            return
+        self._broadcast({"type": "vision", "status": "done", "source": source}, user_id=uid)
+        self._broadcast({"type": "chat", "sender": "aiko", "text": answer}, user_id=uid)
 
     def broadcast_audio_bytes(self, wav_bytes: bytes) -> None:
-        """
-        Fire-and-forget: send raw WAV bytes as a binary WS frame to every
-        connected browser. Called by speak.py's audio sink so TTS audio plays
-        in the remote browser instead of (or alongside) the Jetson's local speaker.
+        """Broadcast TTS audio bytes to the current user's connected browsers.
+
+        Guests (unknown uid) get no broadcast — previously this fanned out
+        to ALL browsers, leaking audio across users on a LAN.
         """
         if self._loop is None:
             return
+        uid = current_user_id()
+        if not uid or uid == "guest":
+            return
+        target_uid = uid
         with self._clients_lock:
-            if not self._clients:
+            has_targets = any(owner == target_uid for owner in self._client_users.values())
+            if not has_targets:
                 return
-        asyncio.run_coroutine_threadsafe(self._async_broadcast_bytes(wav_bytes), self._loop)
+        asyncio.run_coroutine_threadsafe(self._async_broadcast_bytes(wav_bytes, user_id=target_uid), self._loop)
 
-    async def _async_broadcast_bytes(self, raw: bytes) -> None:
+    async def _async_broadcast_bytes(self, raw: bytes, *, user_id: str | None = None) -> None:
         with self._clients_lock:
-            targets = list(self._clients)
+            if user_id:
+                targets = [ws for ws in self._clients if self._client_users.get(ws) == user_id]
+            else:
+                targets = list(self._clients)
         if not targets:
             return
-        await asyncio.gather(
+        results = await asyncio.gather(
             *(self._safe_send(ws, raw) for ws in targets),
             return_exceptions=True,
         )
+        dead = [ws for ws, res in zip(targets, results) if res is False]
+        if dead:
+            with self._clients_lock:
+                for ws in dead:
+                    self._clients.discard(ws)
+                    self._client_users.pop(ws, None)
+            log.debug("webui: evicted %d dead browser client(s)", len(dead))
 
     def has_remote_listener(self) -> bool:
-        """True if at least one browser is connected — speak.py uses this to
-        decide whether local Jetson playback should still also happen."""
+        """Check if any browser clients are currently connected."""
         with self._clients_lock:
             return bool(self._clients)
 
     @staticmethod
-    async def _safe_send(ws, raw) -> None:
+    async def _safe_send(ws, raw) -> bool:
+        """Send one message; returns False when the client is dead (evict it)."""
         try:
             if isinstance(raw, bytes):
                 await ws.send_bytes(raw)
             else:
                 await ws.send_text(raw)
+            return True
         except Exception:
-            pass
-
-    # ------------------------------------------------------------------
-    # ── TUI-compatible draw API ──────────────────────────────────────────
-    # ------------------------------------------------------------------
+            log.warning("webui: failed to send ws message")
+            return False
 
     def _draw(self, buf=None) -> None:
-        """No-op — browser redraws itself from pushed events."""
+        # No-op: preserves AikoTUI's draw interface so orchestrate.run_session()
+        # can call ui._draw() polymorphically regardless of TUI vs WebUI backend.
         pass
 
     def _draw_clock_only(self) -> None:
-        """Push a vitals update (browser shows the clock)."""
+        # Same rationale as _draw(); WebUI pushes vitals instead of redrawing.
         self._push_vitals()
 
-    # ------------------------------------------------------------------
-    # init / boot step API
-    # ------------------------------------------------------------------
+    _BOOT_LABELS: ClassVar[dict[str, str] | None] = None
+
+    @classmethod
+    def _ensure_boot_labels(cls) -> dict[str, str]:
+        if cls._BOOT_LABELS is None:
+            from system.wakeup import AikoWakeup
+            cls._BOOT_LABELS = AikoWakeup.ALL_BOOT_LABELS
+        return cls._BOOT_LABELS
 
     def step_loading(self, key: str, detail: str = "") -> None:
-        self._broadcast({"type": "step", "key": key, "state": "loading", "detail": detail})
+        """Broadcast a boot step loading event to connected clients."""
+        labels = self._ensure_boot_labels()
+        self._broadcast({"type": "step", "key": key, "state": "loading", "label": labels.get(key, key), "detail": detail})
 
     def step_done(self, key: str, detail: str = "") -> None:
-        self._broadcast({"type": "step", "key": key, "state": "done",    "detail": detail})
+        """Broadcast a boot step completion event to connected clients."""
+        labels = self._ensure_boot_labels()
+        self._broadcast({"type": "step", "key": key, "state": "done",    "label": labels.get(key, key), "detail": detail})
 
     def step_skip(self, key: str, detail: str = "") -> None:
-        self._broadcast({"type": "step", "key": key, "state": "skip",    "detail": detail})
+        """Broadcast a boot step skip event to connected clients."""
+        labels = self._ensure_boot_labels()
+        self._broadcast({"type": "step", "key": key, "state": "skip",    "label": labels.get(key, key), "detail": detail})
 
     def step_error(self, key: str, detail: str = "") -> None:
-        self._broadcast({"type": "step", "key": key, "state": "error",   "detail": detail})
+        """Broadcast a boot step error event to connected clients."""
+        labels = self._ensure_boot_labels()
+        self._broadcast({"type": "step", "key": key, "state": "error",   "label": labels.get(key, key), "detail": detail})
 
     def status_finish(self) -> None:
-        """Transition browser from init phase to chat phase."""
+        """Broadcast phase transition to chat mode."""
         self._broadcast({"type": "phase", "value": "chat"})
 
-    # ------------------------------------------------------------------
-    # chat API
-    # ------------------------------------------------------------------
-
     def add_message(self, sender: str, text: str) -> None:
-        """Commit a completed message to the browser conversation log."""
-        self._broadcast({"type": "chat", "sender": sender, "text": text})
+        """Broadcast a complete chat message to the current user."""
+        self._broadcast_to_current_user({"type": "chat", "sender": sender, "text": text})
 
     def stream_token(self, token: str) -> None:
-        """
-        Forward a streaming token to the browser.
-        Intercepts agentic control sentinels so they route to the
-        tool-status display instead of chat text.
-        """
+        """Stream a single LLM token or special status marker to the current user."""
         if token.startswith("__THINKING__"):
-            self._broadcast({"type": "tool", "status": "thinking…"})
-            self._broadcast({"type": "pose", "name": "thinking", "active": True})
+            payload = token[len("__THINKING__"):].lstrip(":").strip()
+            if payload:
+                # Inner-thoughts box content: thinking tags stripped from the
+                # spoken reply. The frontend renders this above the caption.
+                self._broadcast_to_current_user({"type": "thinking", "text": payload})
+            else:
+                self._broadcast_to_current_user({"type": "tool", "status": "thinking…"})
+            self._broadcast_to_current_user({"type": "pose", "name": "thinking", "active": True})
             return
         if token.startswith("__TOOL__:"):
             name = token[len("__TOOL__:"):].split("(", 1)[0].strip()
-            self._broadcast({"type": "tool", "status": f"using {name}"})
+            self._broadcast_to_current_user({"type": "tool", "status": f"using {name}"})
+            return
+        if token.startswith("__STATUS__:"):
+            status = token[len("__STATUS__:"):].strip().split("\n", 1)[0].strip()
+            labels = {
+                "searching": "searching…",
+                "retry": "line’s quiet — trying again…",
+                "offline": "no live results — using what I know…",
+                "ok": "got sources…",
+            }
+            if status.startswith("tool:"):
+                label = f"using {status[5:].strip()}"
+            else:
+                label = labels.get(status, status)
+            self._broadcast_to_current_user({"type": "tool", "status": label})
             return
         if token.startswith("__SEARCHING__:"):
             query = token[len("__SEARCHING__:"):].strip()
-            self._broadcast({"type": "tool", "status": f"searching: {query}"})
+            self._broadcast_to_current_user({"type": "tool", "status": f"searching: {query}"})
+            return
+        if token.startswith("__RETRYING__"):
+            self._broadcast_to_current_user({"type": "tool", "status": "line’s quiet — trying again…"})
+            return
+        if token.startswith("__SOURCES__:"):
+            raw = token[len("__SOURCES__:"):].strip()
+            try:
+                import json as _json
+                items = _json.loads(raw)
+            except Exception:
+                items = []
+            self._broadcast_to_current_user({"type": "sources", "items": items})
+            return
+        if token.startswith("__FILES__:"):
+            raw = token[len("__FILES__:"):].strip()
+            try:
+                import json as _json
+                items = _json.loads(raw)
+            except Exception:
+                items = []
+            self._broadcast_to_current_user({"type": "files", "items": items})
+            return
+        if token.startswith("__META__:"):
+            # emotion|action — optional UI hook; never show in bubble
+            meta = token[len("__META__:"):].strip()
+            parts = meta.split("|", 1)
+            emotion = (parts[0] or "neutral").strip()
+            action = (parts[1] if len(parts) > 1 else "none").strip()
+            self._broadcast_to_current_user({"type": "meta", "emotion": emotion, "action": action})
+            return
+        # Never paint raw JSON tool observations or bracketed system notices
+        stripped = token.strip()
+        if stripped.startswith("[No web results"):
             return
 
         with self._lock:
@@ -560,11 +919,11 @@ class AikoWeb:
             if self._stats["turn_start"] is None:
                 self._stats["turn_start"] = time.time()
 
-        self._broadcast({"type": "pose", "name": "thinking", "active": False})
-        self._broadcast({"type": "token", "text": token})
+        self._broadcast_to_current_user({"type": "pose", "name": "thinking", "active": False})
+        self._broadcast_to_current_user({"type": "token", "text": token})
 
     def stream_commit(self) -> None:
-        """Finalise the active streaming turn."""
+        """Commit the streamed response and reset turn state."""
         with self._lock:
             if self._stats["turn_start"] is not None:
                 elapsed = time.time() - self._stats["turn_start"]
@@ -574,26 +933,35 @@ class AikoWeb:
             self._stats["turn_tok"]   = 0
             self._stats["turn_start"] = None
             self._streaming           = ""
+            self._active_uid          = None
 
-        self._broadcast({"type": "pose", "name": "thinking", "active": False})
-        self._broadcast({"type": "commit"})
+        self._broadcast_to_current_user({"type": "pose", "name": "thinking", "active": False})
+        self._broadcast_to_current_user({"type": "commit"})
         self._push_vitals()
 
+    def turn_abort(self) -> None:
+        """Clear transport busy state when a turn exits exceptionally."""
+        with self._lock:
+            self._active_uid = None
+            self._stats["turn_tok"] = 0
+            self._stats["turn_start"] = None
+            self._streaming = ""
+        # Reset the browser too when a turn exits exceptionally.
+        self._broadcast_to_current_user({"type": "pose", "name": "thinking", "active": False})
+        self._broadcast_to_current_user({"type": "commit"})
+
     def turn_start(self) -> None:
-        """Signal the beginning of a new cognitive turn."""
+        """Mark the start of a new turn and reset turn metrics."""
+        uid = current_user_id()
         with self._lock:
             self._stats["turn_start"] = time.time()
             self._stats["turn_tok"]   = 0
-        self._broadcast({"type": "pose", "name": "thinking", "active": True})
-
-    # ------------------------------------------------------------------
-    # vitals
-    # ------------------------------------------------------------------
+            self._active_uid          = uid if uid and uid != "guest" else None
+        self._broadcast_to_current_user({"type": "pose", "name": "thinking", "active": True})
 
     def _push_vitals(self) -> None:
-        """Broadcast a vitals snapshot to all connected browsers."""
         try:
-            from system.health import _ram_used_str, _db_size_str, _fmt_uptime
+            from system.health import _ram_used_str, _fmt_uptime
             ram    = _ram_used_str()
             uptime = _fmt_uptime(time.time() - self._ts)
         except Exception:
@@ -614,67 +982,93 @@ class AikoWeb:
         })
 
     def update_stats(self, key: str, value) -> None:
-        """Allow main.py to poke individual stat fields (e.g. asr_on, tts_on)."""
+        """Update a statistics value and broadcast vitals to clients."""
         with self._lock:
             self._stats[key] = value
         self._push_vitals()
 
-    # ------------------------------------------------------------------
-    # expression / viseme passthrough
-    # ------------------------------------------------------------------
-
     def set_expression(self, name: str, intensity: float = 1.0) -> None:
-        self._broadcast({"type": "expression", "name": name, "intensity": intensity})
+        """Broadcast an avatar expression change to the current user."""
+        self._broadcast_to_current_user({"type": "expression", "name": name, "intensity": intensity})
 
     def set_viseme(self, viseme: str, weight: float = 1.0) -> None:
-        self._broadcast({"type": "viseme", "viseme": viseme, "weight": weight})
+        """Broadcast a lip-sync viseme to the current user."""
+        self._broadcast_to_current_user({"type": "viseme", "viseme": viseme, "weight": weight})
 
-    # ------------------------------------------------------------------
-    # input
-    # ------------------------------------------------------------------
+    def set_pose(self, name: str, active: bool = True) -> None:
+        """Broadcast a vetted avatar pose intent to the current user."""
+        self._broadcast_to_current_user({"type": "pose", "name": name, "active": bool(active)})
+
+    def play_gesture(self, name: str) -> None:
+        """Broadcast a one-shot avatar gesture to the current user.
+
+        The frontend (vrm.js ``window.aikoPlayGesture``) validates the name
+        against its gesture engine and ignores unknown names, so this is
+        safe to call speculatively from the motion director.
+        """
+        if not name or not isinstance(name, str):
+            return
+        self._broadcast_to_current_user({"type": "gesture", "name": name})
+        self._gesture_active_until = (
+            time.monotonic() + _REACTIVE_GESTURE_DURATIONS.get(name, 3.0)
+        )
+
+    def _gesture_is_active(self) -> bool:
+        return time.monotonic() < getattr(self, "_gesture_active_until", 0.0)
 
     def get_input(self) -> str:
+        """Fetch text input from the queue, binding the source user's identity.
+        
+        Captures contextvar tokens and updates them with the source user's uid/display_name.
+        Unlike _ws_handler, tokens are NOT reset here — the calling code (orchestrate.run_session)
+        manages the turn-level contextvar lifecycle and needs the identity to persist through
+        the entire turn. Caller is responsible for cleanup via reset_current_user_id/reset_current_display_name.
         """
-        Block until the browser submits a user message.
-
-        Pushes a vitals tick every 10 seconds while idle (reduced from 1s)
-        so the browser clock stays live without unnecessary network traffic
-        when the phone screen is on but no conversation is happening.
-        """
-        self._broadcast({"type": "voice", "status": "idle"})
+        self._broadcast_to_current_user({"type": "voice", "status": "idle"})
+        # Instant "I'm listening" — the avatar leans in the moment she starts
+        # waiting for input, so attention lands in <100 ms (presence upgrade).
+        waiting_for_reactive_gesture = False
+        try:
+            waiting_for_reactive_gesture = (
+                getattr(self, "_no_voice", False) and self._gesture_is_active()
+            )
+            if not waiting_for_reactive_gesture:
+                self.play_gesture("leanIn")
+        except Exception:
+            pass
         idle_ticks = 0
         while True:
             try:
-                text = self._input_q.get(timeout=1.0)
-                set_current_user_id(self._current_user_id)
-                set_current_display_name(self._current_display_name)
+                item = self._input_q.get(timeout=1.0)
+                if isinstance(item, tuple):
+                    text, uid, display_name = item
+                else:
+                    text, uid, display_name = item, "guest", "Guest"
+                # Capture existing tokens so caller can reset if needed (defensive pattern).
+                # However, per docstring, these contextvars should be managed by orchestrate.py
+                # for the duration of the turn, not here.
+                set_current_user_id(uid)
+                set_current_display_name(display_name)
                 return text
             except queue.Empty:
                 idle_ticks += 1
-                if idle_ticks % 10 == 0:    # vitals every ~10 s when idle
+                if waiting_for_reactive_gesture:
+                    try:
+                        if not self._gesture_is_active():
+                            waiting_for_reactive_gesture = False
+                            self.play_gesture("leanIn")
+                    except Exception:
+                        pass
+                if idle_ticks % 10 == 0:
                     self._push_vitals()
 
     def get_voice_input(self, listen, speak=None, wait_fn=None):
-        """
-        Capture a voice utterance via the browser's microphone and return the
-        same (text, info) shape as AikoTUI.get_voice_input().
-
-        The browser mic stays open continuously once started, so the browser
-        VAD can detect speech during TTS playback and send instant barge-in
-        messages (zero round-trip). Between turns, the audio queue is only
-        drained if no barge-in occurred — otherwise the speech frames that
-        triggered the barge-in are preserved for recording.
-
-        By default, the browser VAD gates 16 kHz float32 PCM before it enters
-        _audio_q, so only browser-detected speech is sent over the network. Set
-        WEBUI_BROWSER_VAD_GATE=0 for a diagnostic raw-stream mode that bypasses
-        browser gating and lets listen.py run server-side VAD.
-        """
+        """Capture voice input from browser microphone via WebSocket audio streaming."""
         result_holder = [None]
         done_event    = threading.Event()
+        # Track the accepted user identity from the first frame
+        accepted_user = {"uid": None, "display_name": None}
 
-        # If barge-in fired while TTS was playing, the speaker's voice frames
-        # are already in the queue — don't discard them.
         if not self._did_barge_in:
             while True:
                 try:
@@ -683,34 +1077,50 @@ class AikoWeb:
                     break
         self._did_barge_in = False
 
-        BYTES_PER_CHUNK = 512 * 4   # 512 float32 samples = 2048 bytes
-        FRAME_TIMEOUT_S = 5.0       # browser disconnected / stopped delivering PCM
+        BYTES_PER_CHUNK = 512 * 4
+        FRAME_TIMEOUT_S = 5.0
 
         def _chunk_source(n: int):
-            """
-            Pulled by listen.py's _record() loop instead of parec.
-            Returns None on:
-              - empty-bytes sentinel  → browser VAD declared end-of-utterance
-              - timeout               → browser disconnected / went silent
-            listen.py treats None as clean end-of-recording.
+            """Fetch audio chunks for listen.listen(), handling multi-user frames.
+            
+            ⚠️ AMBIGUITY: Returns None for three unrelated conditions:
+               - queue timeout after FRAME_TIMEOUT_S (timeout/EOS scenario)
+               - cross-user frame when user identity has already been accepted (dropped)
+               - VAD end-of-utterance marker (b"") from the client
+            
+            This ambiguity is harmless only if listen.listen() treats timeout and
+            end-marker equivalently. If the contract changes, consider:
+              - Using distinct return values: (None, "timeout") vs (None, "eou")
+              - Raising exceptions for error conditions vs returning None for EOS
+              - Explicitly documenting listen.listen()'s contract in sensory/listen.py
             """
             try:
-                raw = self._audio_q.get(timeout=FRAME_TIMEOUT_S)
+                item = self._audio_q.get(timeout=FRAME_TIMEOUT_S)
             except queue.Empty:
-                return None         # browser stalled or disconnected
+                return None
+
+            if isinstance(item, tuple):
+                raw, uid, display_name = item
+                # Reject frames from different users once we've accepted one
+                if accepted_user["uid"] is None:
+                    accepted_user["uid"] = uid
+                    accepted_user["display_name"] = display_name
+                elif accepted_user["uid"] != uid:
+                    # Drop frame from different user
+                    return None
+                set_current_user_id(uid)
+                set_current_display_name(display_name)
+            else:
+                raw = item
 
             if raw == b"":
-                return None         # browser VAD end-of-utterance sentinel
+                return None
 
             if len(raw) != n:
-                # tolerate boundary-size mismatches by padding/truncating
                 raw = (raw + b"\x00" * n)[:n]
             return raw
 
         def _status_cb(token: str) -> None:
-            # listen.py status tokens → voice status display
-            # Note: listening/transcribing are now also set by vad sentinels
-            # in _ws_handler, so this is a secondary/fallback update path
             mapping = {
                 "__WAITING__":      "waiting",
                 "__LISTENING__":    "listening",
@@ -718,33 +1128,43 @@ class AikoWeb:
                 "__IDLE__":         "idle",
             }
             status = mapping.get(token, "idle")
-            self._broadcast({"type": "voice", "status": status})
+            self._broadcast_to_current_user({"type": "voice", "status": status})
 
         def _run() -> None:
-            set_current_user_id(self._current_user_id)
-            set_current_display_name(self._current_display_name)
-            os.environ["AIKO_USER_ID"] = self._current_user_id
-            os.environ["AIKO_DISPLAY_NAME"] = self._current_display_name
+            # Call listen() with WebUI chunk source. See sensory.listen.AikoListen.listen()
+            # docstring for full parameter contract. Key points:
+            #   - vad_presegmented parameter was removed (no longer supported)
+            #   - Silero VAD scores ALL chunks regardless of source (local mic or WebUI)
+            #   - WEBUI_BROWSER_VAD_GATE only controls pre-gating in browser (static/vad.js),
+            #     not server-side Silero scoring (which is authoritative)
             result_holder[0] = listen.listen(
                 status_callback=_status_cb,
                 speak=speak,
                 wait_fn=wait_fn,
                 chunk_source=_chunk_source,
-                vad_presegmented=WEBUI_BROWSER_VAD_GATE,
             )
             done_event.set()
 
-        # Keep the browser mic open continuously once started, so the browser
-        # VAD can detect speech during TTS playback for instant barge-in.
-        if not self._mic_started:
-            self._mic_active.set()
-            self._broadcast({
-                "type": "mic",
-                "action": "start",
-                "bytes_per_chunk": BYTES_PER_CHUNK,
-                "browser_vad_gate": WEBUI_BROWSER_VAD_GATE,
-            })
-            self._mic_started = True
+        self._mic_active.set()
+
+        # Lazy voice boot: overlap server-side ASR/VAD model load with the
+        # browser's mic-permission/arming UX instead of blocking on it.
+        if listen is not None and hasattr(listen, "ensure_ready"):
+            def _ensure_listen_ready() -> None:
+                try:
+                    listen.ensure_ready()
+                except Exception:
+                    log.exception("[webui] background ASR load failed")
+            threading.Thread(target=_ensure_listen_ready, daemon=True).start()
+
+        self._broadcast({
+            "type": "mic",
+            "action": "start",
+            "bytes_per_chunk": BYTES_PER_CHUNK,
+            "browser_vad_gate": WEBUI_BROWSER_VAD_GATE,
+            "barge_in_enabled": _barge_in_enabled(),
+            "echo_guard_ms": _echo_guard_ms(),
+        })
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -754,39 +1174,97 @@ class AikoWeb:
                 self._push_vitals()
                 try:
                     text_input = self._input_q.get_nowait()
-                    self._audio_q.put(b"")  # Signal end-of-utterance to stop recording
-                    done_event.wait()       # Wait for the listen thread to exit
+                    self._audio_q.put(b"")
+                    done_event.wait()
                     break
                 except queue.Empty:
-                    pass
+                    log.debug("webui: voice input queue empty, retrying")
         finally:
-            self._broadcast({"type": "voice", "status": "idle"})
+            self._mic_active.clear()
+            self._broadcast_to_current_user({"type": "voice", "status": "idle"})
 
-        # Check one last time if a text input arrived as we finished
         if text_input is None:
             try:
                 text_input = self._input_q.get_nowait()
             except queue.Empty:
-                pass
+                log.debug("webui: final voice input queue empty")
 
         if text_input is not None:
+            if isinstance(text_input, tuple):
+                text, uid, display_name = text_input
+                set_current_user_id(uid)
+                set_current_display_name(display_name)
+                return (text, {})
             return (text_input, {})
+
+        # Restore the accepted user identity before returning ASR result
+        if accepted_user["uid"] is not None:
+            set_current_user_id(accepted_user["uid"])
+            set_current_display_name(accepted_user["display_name"])
 
         raw = result_holder[0]
         if isinstance(raw, tuple):
             return raw
         return (raw or "", {})
 
-    # ------------------------------------------------------------------
-    # spin loop
-    # ------------------------------------------------------------------
-
     def spin_loop(self, stop_event: threading.Event) -> None:
-        """Drive periodic vitals pushes during the init phase."""
+        """Idle loop that periodically pushes vitals until stopped."""
         while not stop_event.is_set():
             self._push_vitals()
             stop_event.wait(0.25)
         self._push_vitals()
 
 
-# HTTP static file handler removed. Serving is done via FastAPI StaticFiles.
+# ── Bridge singleton for subliminal → VRM expression ───────────────────────
+_active_webui: "AikoWeb | None" = None
+
+def _register_webui(instance: "AikoWeb") -> None:
+    global _active_webui
+    _active_webui = instance
+
+def webui_bridge() -> "AikoWeb | None":
+    return _active_webui
+
+
+def run_webui(args) -> None:
+    """Launch Aiko with the browser WebUI.
+
+    Boot order (changed from the old parallel-boot design): wakeup.boot()
+    runs to completion BEFORE the HTTP/WS server opens its first socket, so
+    browsers never connect to a half-booted Aiko. Post-login work (memory
+    cleanup, playbook/social seeding) runs in PARALLEL after the first
+    authenticated connect via system/prepare.run_post_auth()."""
+    from system.orchestrate import run_session
+    from system.wakeup import AikoWakeup
+    import socket
+
+    # Construct AikoWeb with servers deferred — no socket until boot finishes.
+    ui = AikoWeb(no_voice=args.text, debug=args.debug, defer_servers=True)
+    _register_webui(ui)
+
+    host_ip = socket.gethostbyname(socket.gethostname())
+    scheme = "https" if WEBUI_HTTPS else "http"
+
+    # Boot progress on stdout — no browsers connected yet to stream it to.
+    labels = AikoWakeup.ALL_BOOT_LABELS
+    def _on_loading(key: str) -> None:
+        print(f"  · {labels.get(key, key)} ...", flush=True)
+    def _on_done(key: str) -> None:
+        print("    ✓", flush=True)
+    def _on_skip(key: str) -> None:
+        print("    – skipped", flush=True)
+
+    print("\n  🌸 Aiko-chan is waking up — WebUI starts when boot finishes.\n")
+    result = AikoWakeup().boot(
+        on_loading=_on_loading,
+        on_done=_on_done,
+        on_skip=_on_skip,
+        enable_tts=not args.text,
+        enable_asr=not args.no_asr,
+    )
+    ui.set_boot_result(result)
+
+    ui.start_servers()                                # idempotent — opens HTTP/WS now that all subsystems are live
+    print(f"\n  🌸 Aiko-chan is ready → {scheme}://{host_ip}:{HTTP_PORT}/\n")
+
+    run_session(ui, args)

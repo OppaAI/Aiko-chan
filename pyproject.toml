@@ -1,7 +1,7 @@
 [project]
 requires-python = ">=3.12,<3.13"
 name = "Aiko-chan"
-version = "0.1.5"
+version = "0.2.0"
 description = "Aiko-chan: AI companion with persistent memory, web search, and conversational interface"
 readme = "README.md"
 dependencies = [
@@ -10,71 +10,75 @@ dependencies = [
     "httpx>=0.28.1",
     "huggingface-hub>=1.21.0",
     "itsdangerous>=2.2.0",
-    "ninja>=1.13.0",
     "numpy>2",
-    "onnxruntime-gpu==1.27.0; platform_machine == 'x86_64'",
-    "onnxruntime-gpu; platform_machine == 'aarch64'",
-    "openai>=2.43.0",
+    "openai>=3.7.0",
     "packaging>=26.2",
     "protobuf>=6.33.6",
     "pyyaml>=6.0.3",
+    "pydantic>=2",
     "python-dotenv>=1.0.0",
     "requests>=2.34.2",
-    "scipy<1.18.0",
-    "sherpa-onnx>=1.13.3",
-    "silero-vad>=6.2.1",
     "sounddevice>=0.5.5",
     "soundfile>=0.14.0",
     "sqlite-vec>=0.1.9",
-    "sympy>=1.14.0",
     "tokenizers>=0.23.1",
-    "torch>=2.12.1; platform_machine == 'x86_64'",
-    "torch==2.11.0; platform_machine == 'aarch64'",
-    "torchvision==0.25.0; platform_machine == 'aarch64'",
-    "torchaudio>=2.11.0; platform_machine == 'x86_64'",
-    "torchaudio==2.10.0; platform_machine == 'aarch64'",
     "trafilatura>=2.1.0",
-    "websockets>=16.0",
+    "websockets>=15.0,<16.0",
     "psutil>=7.2.2",
     "fastapi[standard]>=0.139.0",
     "uvicorn>=0.50.2",
-    "pysqlcipher3>=1.2.0",
     "defusedxml>=0.7.1",
-    "nvidia-cublas==13.1.0.3 ; platform_machine == 'aarch64'",
-    "nvidia-cuda-cupti==13.0.85 ; platform_machine == 'aarch64'",
-    "nvidia-cuda-nvrtc==13.0.88 ; platform_machine == 'aarch64'",
-    "nvidia-cuda-runtime==13.0.96 ; platform_machine == 'aarch64'",
-    "nvidia-cudnn-cu13==9.19.0.56 ; platform_machine == 'aarch64'",
-    "nvidia-cufft==12.0.0.61 ; platform_machine == 'aarch64'",
-    "nvidia-cufile==1.15.1.6 ; platform_machine == 'aarch64'",
-    "nvidia-curand==10.4.0.35 ; platform_machine == 'aarch64'",
-    "nvidia-cusolver==12.0.4.66 ; platform_machine == 'aarch64'",
-    "nvidia-cusparse==12.6.3.3 ; platform_machine == 'aarch64'",
-    "nvidia-cusparselt-cu13==0.8.0 ; platform_machine == 'aarch64'",
-    "nvidia-nccl-cu13==2.28.9 ; platform_machine == 'aarch64'",
-    "nvidia-nvjitlink==13.0.88 ; platform_machine == 'aarch64'",
-    "nvidia-nvshmem-cu13==3.4.5 ; platform_machine == 'aarch64'",
-    "nvidia-nvtx==13.0.85 ; platform_machine == 'aarch64'",
-    "torchvision>=0.27.0 ; platform_machine == 'x86_64'",
     "sentencepiece>=0.2.2",
+    "pytest>=9.1.1",
+    "lark>=1.3.1",
+    "markitdown>=0.1.6",
+    "livekit-wakeword>=0.2.1",
+    "protonmail-api-client>=2.4.3",
+    "discord-py>=2.7.1",
+    "python-telegram-bot>=22.8",
+    "davey>=0.1.6",
+    "pynacl>=1.6.2",
+    "pysqlcipher3==1.2.0",
+    "mcp>=2.1.1",
+    "fastmcp>=4.0.1",
+    "atproto>=0.0.71",
+    "cactus-needle>=3.0.2",
+    "lightgbm>=4.0.0",
+    "sherpa-onnx-core>=1.13.7",
+    "setuptools>=84.0.0",
+    "sherpa-onnx>=1.13.7",
+    "python-shogi>=1.1.1",
+    "onnxruntime-gpu>=1.30.0",
+    "h11>=0.16.0",
+    "crawl4ai>=0.9.4",
+]
+
+[project.optional-dependencies]
+discord = ["discord-py>=2.4.0"]
+telegram = ["python-telegram-bot>=21.0"]
+slack = ["slack-sdk>=3.27.0"]
+matrix = ["matrix-nio>=0.25.0"]
+bluesky = ["atproto>=0.0.34"]
+mastodon = ["Mastodon.py>=1.8.0"]
+youtube = []  # uses raw requests (requests already a core dep)
+msal = ["msal>=1.30.0"]
+adapters = [
+    "discord-py>=2.4.0",
+    "python-telegram-bot>=21.0",
+    "slack-sdk>=3.27.0",
+    "matrix-nio>=0.25.0",
 ]
 
 [tool.uv]
+override-dependencies = [
+    "onnxruntime; sys_platform == 'ignore_this_marker'",
+    "onnxruntime-gpu>=1.17.0"
+]
 
-[[tool.uv.index]]
-url = "https://download.pytorch.org/whl/cu132"
-default = true
+[tool.ruff]
+line-length = 200
+target-version = "py312"
 
-[[tool.uv.index]]
-name = "pypi"
-url = "https://pypi.org/simple/"
-
-[[tool.uv.index]]
-name = "jetson-sbsa-cu130"
-url = "https://pypi.jetson-ai-lab.io/sbsa/cu130/+simple/"
-
-[tool.uv.sources]
-onnxruntime-gpu = { path = "/home/oppa-ai/wheels/onnxruntime_gpu-1.27.0-cp312-cp312-linux_aarch64.whl", marker = "platform_machine == 'aarch64'" }
-torch = { index = "jetson-sbsa-cu130", marker = "platform_machine == 'aarch64'" }
-torchvision = { index = "jetson-sbsa-cu130", marker = "platform_machine == 'aarch64'" }
-torchaudio = { index = "jetson-sbsa-cu130", marker = "platform_machine == 'aarch64'" }
+[tool.ruff.lint]
+select = ["E", "F", "W", "UP", "SIM", "B"]
+ignore = ["E402"]  # main.py intentionally imports after load_config() runs

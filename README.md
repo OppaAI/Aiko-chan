@@ -1,4 +1,5 @@
-# Aiko-chan アイコちゃん
+# Aiko-chan アイコちゃん 
+(Full name: Aino Aiko アイノ・アイコ aka 愛のAI子 aka 相野愛子)
 
 > A local-first AI companion with a browser WebUI + VRM avatar, optional simple CLI, persistent memory, web search, microphone input, and MioTTS voice output.
 > Optimised for constrained hardware — runs on a Jetson Orin Nano with 8GB unified RAM.
@@ -55,7 +56,7 @@ This project currently serves as:
 - **Local-first LLM** — OpenAI-compatible endpoint (llama.cpp `llama-server` recommended), runs entirely on your hardware
 - **Curses TUI** — Full-screen cyberpunk terminal interface with streaming tokens, status panels, and command palette
 - **Browser WebUI (optional)** — Modern web interface with VRM avatar, WebSocket bridge, browser microphone streaming
-- **Persona system** — Rich personality defined in `persona/soul.md` with identity, skills, and user profile
+- **Persona system** — Rich personality defined in `persona/SOUL.md` with identity, skills, and user profile
 
 ### 🧠 Persistent Memory
 - **sqlite-vec + custom Harrier ONNX embedder** — Serverless vector store, no Qdrant/mem0 required
@@ -83,7 +84,7 @@ This project currently serves as:
 ### 🤖 Agentic Skills
 - **ReAct task loop** — LLM plans, calls tools, observes, repeats until done
 - **Toolkit modules** — Web search, fetch, planning, scheduling, workspace notes, photo ingestion, repo inspection
-- **Skill registry** — Markdown workflow definitions in `skills/skillsets/*.md`
+- **Skill registry** — Markdown workflow definitions in `agentic/skillsets/*.md`
 - **Skill context injection** — Relevant skill instructions automatically retrieved in agentic mode
 - **Dual-path routing** — Fast semantic exemplar routing (default) + optional LLM router fallback
 - **Final-answer verification** — Self-critique and repair loop for tool outputs
@@ -152,12 +153,13 @@ flowchart TD
 | Long-term memory | custom sqlite-vec backend (no server required) |
 | Embeddings | Harrier llama.cpp, `harrier-oss-v1-270m via llama.cpp server` |
 | Memory lifecycle | Ebbinghaus-style decay, pinned memories, nightly `dream()` consolidation |
-| Web search | local SearXNG instance through `toolkit/research.py` |
+| Web search | local SearXNG instance through `agentic/toolkit/research.py` |
 | TTS | MioTTS 0.4B via llama.cpp server, external MioCodec synthesizer server |
 | ASR | SenseVoice via sherpa-onnx with Silero VAD and ERes2Net Speaker verification |
+| Conscience judge | Laya SLM served by the ggmlc-built `laya serve` binary (`/v1/decide`; see below) |
 | Reflection publishing | optional GitHub REST API + Hugo markdown |
-| Agentic task mode | `skills/agentic.py` ReAct loop + `toolkit/tools.py` facade + `toolkit/` modules |
-| Skills | `skills/skillsets/*.md` workflow registry loaded by `skills/skills.py` |
+| Agentic task mode | `agentic/agentic.py` ReAct loop + `agentic/toolkit/tools.py` facade + `agentic/toolkit/` modules |
+| Skills | `agentic/skillsets/*.md` workflow registry loaded by `agentic/skills.py` |
 | Scheduling | local schedule/reminder runner using `~/.aiko/<user_id>/schedule.json` |
 | Multi-user | OAuth provider-scoped IDs, per-user `~/.aiko/<user_id>/` isolation |
 | Encryption | optional SQLCipher via `AIKO_SQLITE_ENCRYPTION=1` |
@@ -167,6 +169,19 @@ flowchart TD
 ## Quickstart
 
 **Prerequisites:** Python 3.12, [uv](https://astral.sh/uv), CUDA 12.6, Docker + Compose, a llama.cpp/OpenAI-compatible local LLM server, and a pulled/served chat model (3B+ recommended).
+
+### Laya conscience server (ggmlc)
+
+The conscience layer's Laya judge does not run on stock llama.cpp — it needs the `laya serve` binary built from [ggmlc](https://github.com/monatis/ggmlc) (compiles the PyTorch Laya model to GGUF and serves `/v1/decide`):
+
+```bash
+git clone https://github.com/monatis/ggmlc.git
+cd ggmlc
+# Follow the repo's Installation & Building docs (Python package + CMake
+# native runtime, CUDA backend for Jetson), then build the laya serve binary.
+```
+
+Deployed layout (Jetson Orin): binary at `~/laya-bin/laya-sm86`, model at `models/laya/conscience-phase3-ft3-q8_0.gguf`, serving `/v1/decide`.
 
 > Full installation walkthrough → **[docs/INSTALL.md](docs/INSTALL.md)**
 
@@ -225,15 +240,16 @@ Aiko-chan/
 ├── sensory/
 │   ├── speak.py            # MioTTS HTTP client
 │   └── listen.py           # SenseVoice (sherpa-onnx) + Silero VAD
-├── skills/
+├── agentic/
 │   ├── agentic.py          # ReAct task loop, tool schemas, tool dispatch
-│   ├── schema.py           # graph-first master-plan DAG executor
+│   ├── schema.py           # graph-first playbook DAG executor
 │   ├── capability.py       # capability matching for task-mode tool filtering
 │   ├── experience.py       # procedural task-run experience store
 │   ├── skills.py           # skill registry and workflow retrieval
+│   ├── tools.py            # stable facade for pure callable tools
 │   ├── wiki.py             # wiki-card retrieval for task mode
-│   └── skillsets/          # human-readable workflow documents
-├── toolkit/                # executable tools: research, planning, schedule, photo, repo, jobs
+│   ├── skillsets/          # human-readable workflow documents
+│   └── toolkit/            # focused tool implementations: research, planning, schedule, photo, repo, jobs
 ├── system/                 # config, wakeup, schedule runner, logging, userspace
 ├── interface/
 │   ├── webui/              # browser WebUI backend + static frontend/VRM bridge
@@ -258,7 +274,7 @@ Aiko-chan/
 | 1 | Soul — CLI, Ollama, mem0 + Qdrant, SearXNG | ✅ Done |
 | 1.5 | Stream — streaming pipeline, persona, first UI, test TTS models | ✅ Done |
 | 2 | Voice — SenseVoice ASR, Silero VAD, MioTTS, hands-free talk | ✅ Done |
-| 2.1 | Social — X, Threads, IG, Discord, Reddit, social media | 🔲 Planned |
+| 2.1 | Social — X, Threads, IG, Discord, social media | 🔲 Planned |
 | 2.2 | Message — Email, Telegram, Discord, Slack, messaging services | 🔲 Planned |
 | 2.5 | Agent — tool registry, skill workflows, scheduled local tasks | ⏳ Active |
 | 3 | Face — VRM avatar, three-vrm, expressions, lip-sync | 🔲 Planned |
@@ -325,3 +341,32 @@ Key architectural decisions:
 If you find this project useful, consider buying me a coffee ☕
 
 [![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/oppaai)
+
+## Aiko social lanes (updated)
+
+- Two-way messenger adapters are native background services for WebUI/CLI sessions via `AIKO_MESSENGER_ADAPTERS`; only Telegram, Discord, Matrix, and Slack are supported for conversational ingress/egress.
+- Lane A1 syndicates the weekly Patreon Aiko development post on Saturdays at 18:00: full reposts go to the Hugo-backed GitHub Pages dev blog; short teasers go to X, Bluesky, Mastodon, Discord `#aiko_dev`, and Threads when image hosting is available. YouTube remains video-upload only, not YouTube Community teaser posting. Lane A2 manual posting remains out of Aiko.
+- Lane B is the curated photo pipeline for Pixelfed posting through the social MCP server.
+- Lane C YouTube video posting continues to use the existing MCP posting pipeline.
+- Lane D creates one Threads teaser-list draft per night at 23:00 for tech jobs available today, using only the configured CivicJobs.ca Lower Mainland RSS and Job Bank Canada filtered RSS feeds, filtered by TECH_JOB_KEYWORDS.
+- Bluesky, Mastodon, and YouTube are one-way posting tools only, not two-way adapters.
+- Nightly reflection remains native GitHub/Hugo publishing rather than MCP.
+
+
+## Third-Party Data
+
+This project uses the JLPT vocabulary and kanji dataset from
+[OpenJLPT](https://github.com/evanclan/OpenJLPT) (© evanclan),
+licensed under CC BY-SA 4.0: https://creativecommons.org/licenses/by-sa/4.0/
+
+Used unmodified, as distributed.
+
+OpenJLPT itself is built from:
+- JLPT level lists by Jonathan Waller (https://www.tanos.co.uk/jlpt/) — CC BY
+- KANJIDIC2 (Electronic Dictionary Research and Development Group,
+  https://www.edrdg.org/wiki/KANJIDIC_Project.html) — CC BY-SA 4.0
+- Example sentences from Tatoeba (https://tatoeba.org) — CC-licensed
+
+See OpenJLPT's own NOTICE.md for the complete field-by-field source list.
+
+This work (the dataset as included here) remains licensed under CC BY-SA 4.0.

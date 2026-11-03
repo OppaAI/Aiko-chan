@@ -1,0 +1,64 @@
+{
+  "provenance": {
+    "dataset": "male-cns:v1.0 (minconf-0.5)",
+    "paper": "Berg et al. 2025",
+    "license": "CC-BY",
+    "portal": "https://male-cns.janelia.org/download/",
+    "repos": [
+      "flyconnectome/2025malecns",
+      "connectome-neuprint/neuprint-python",
+      "natverse/malecns (R reference)",
+      "janelia-flyem/male-cns"
+    ],
+    "note": "Slice: KC/MBON/DAN/APL/DPM bodies + top-40 KC input types, weight>=5. Full 1.05GB weights file sliced locally, not shipped."
+  },
+  "nodes": {
+    "KC": 4064,
+    "MBON": 97,
+    "DAN": 332,
+    "APLDPM": 4,
+    "INPUT": 176
+  },
+  "mats": {
+    "KC->MBON": {
+      "edges": 33496,
+      "synapses": 402850,
+      "mean_w": 12.026809171244327
+    },
+    "DAN->MBON": {
+      "edges": 1403,
+      "synapses": 36537,
+      "mean_w": 26.042052744119744
+    },
+    "DAN->KC": {
+      "edges": 5612,
+      "synapses": 36086,
+      "mean_w": 6.430149679258731
+    },
+    "APLDPM->KC": {
+      "edges": 7377,
+      "synapses": 225933,
+      "mean_w": 30.62667751118341
+    },
+    "INPUT->KC": {
+      "edges": 19543,
+      "synapses": 352165,
+      "mean_w": 18.020007163690323
+    },
+    "KC->KC": {
+      "edges": 33247,
+      "synapses": 211732,
+      "mean_w": 6.368454296628268
+    },
+    "MBON->MBON": {
+      "edges": 682,
+      "synapses": 24515,
+      "mean_w": 35.94574780058651
+    },
+    "MBON->DAN": {
+      "edges": 593,
+      "synapses": 7729,
+      "mean_w": 13.03372681281619
+    }
+  }
+}

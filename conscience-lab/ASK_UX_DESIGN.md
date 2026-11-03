@@ -1,0 +1,76 @@
+# Ask-UX design: what "ask the owner" does in the turn pipeline
+
+Design draft for the approval band's consumer side. Builds ONLY on
+machinery that already exists — no new ledger, no new commands.
+
+## Existing pieces (no changes)
+
+- Escalation ledger: `core.py::resolve_escalation(id, approved, note)`,
+  `pending()`, states HITL_APPROVED / HITL_DENIED.
+- Owner commands: `approve ccc-<id>` / `deny ccc-<id>` (hooks.py),
+  resume/discard flows already wired.
+- Gate outcome ASK: `gate.py` already returns
+  `GateOutcome(action=ASK, reason="conscience escalated")` for
+  ESCALATE verdicts — the turn pipeline knows how to pause on ASK.
+- Band signal: `laya_judge.last_band_decision == "ask"` (+ `last_p_violation`,
+  `last_uncertain=True`) from the triage wiring.
+
+## Proposed flow (triage ask in chat)
+
+1. `_score_triage` returns (0, 0) + uncertain (already merged).
+2. `decide()` check #3 → ESCALATE (already merged).
+3. Gate → ASK with reason carrying the situation + P(violation) +
+   suggested category for owner context (NEW: include all three; today
+   the reason carries the verdict only).
+4. Turn pauses; owner is notified through the existing notice path
+   (same bus as tool-approval notices — one inbox, not two).
+5. Owner `approve ccc-<id>` → turn proceeds as allow (log both the
+   approval and the P value for later band calibration).
+   Owner `deny ccc-<id>` → turn refuses with the standard refusal
+   template. Log likewise.
+6. Timeout with no owner response → fail CLOSED to refuse (matches the
+   existing default-closed invariant; needs an explicit timeout value —
+   suggest 10 minutes, env-tunable).
+
+## Non-goals / explicit exclusions
+
+- CSAM/self-harm never enter this flow (hard refuse, policy).
+- No second approval queue: reuse the escalation ledger and the
+  approve/deny commands verbatim.
+- Social (Threads/Bluesky/Mastodon) replies: band-ask there means
+  SKIP (don't publish, log for review) — there is no owner online to
+  ask within a poll cycle. Owner review happens via the ledger's
+  pending list, async.
+
+## Open knobs (env, defaults suggested)
+
+- `HITL_TIMEOUT_SECONDS` = 180 (fail-closed refuse on expiry; yaml-tunable,
+  env `CCC_HITL_TIMEOUT_SECONDS` wins). Covers band asks and tool approvals
+  alike — the separate `ASK_TIMEOUT_S` in the draft was folded into the
+  existing knob rather than adding a second one.
+- Band thresholds: live default [0.40, 0.75] (knob in config/conscience.yaml
+  with measured stricter/looser presets; env CCC_BAND_HI wins). Budget for
+  ~16–29% ask rates at hi=0.75 — dev-fit caps do not hold off-distribution.
+
+## Integration checklist
+
+- [x] Gate ASK reason carries situation + P + category (`gate.py`, from
+      `Verdict.p_violation` / `suggested_category`; plain "conscience
+      escalated" otherwise).
+- [x] Notice bus covers band-ask (same inbox as tool approvals) —
+      `_open_escalation` already pushed to the single notice bus; the
+      message is now enriched with situation + P + category.
+- [x] Approve/deny handlers accept band escalation ids (same
+        `ccc-<id>` namespace — no new id space). Pre-existing
+        `resolve_ccc_approval` machinery; band ids match the format.
+- [x] Timeout path defaults to refuse + logs (`ledger.expire_stale`,
+      swept opportunistically in `_record`; `HITL_TIMEOUT_SECONDS`=180).
+- [x] Social pollers map ask → skip+log (no publish, no owner wait) —
+      `gate_tool` returns `conscience_skip` for triage band asks on
+      social post tools; the ledger row stays pending for async review.
+- [x] Approval/denial + P logged per decision (feeds band recalibration) —
+      `p_violation` / `suggested_category` columns on the ledger
+      (idempotent migration for existing DBs); `resolve()` logs the P.
+
+Implemented 2026-10-11. Items 2–4 were verified pre-existing;
+items 1, 5, 6 are new in this change.

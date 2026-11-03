@@ -1,0 +1,856 @@
+"""ConscienceCircuitCore — the ladder.
+
+    L0 reflex      deterministic safeguards         guardrails.scan()
+    L1 recall      which norms apply                canon.retrieve()
+    L2 judge       score the two questions          judge.LexicalJudge / SLMJudge
+    L3 deliberate  main model, only when uncertain  judge.deliberate()
+    L4 hitl        ask the human, default-closed    ledger + NoticeBus
+
+Each rung only runs if the one below left the question open, so the common
+case (an ordinary turn, nothing moral in it) costs a regex sweep and a token
+overlap — well under a millisecond, no network.
+
+Two invariants hold everywhere in this file:
+
+* **One-way authority.** Every combination of verdicts goes through
+  schema.fuse(), which returns the more restrictive of its inputs and never
+  the less. A conscience score cannot unlock a guardrail block.
+* **Default-closed.** Every path out of an error, a timeout, or an
+  unanswered escalation lands on refuse or caution. There is no branch here
+  that fails open, and any future edit that adds one is a bug.
+"""
+from __future__ import annotations
+
+import itertools
+import re
+import threading
+import time
+import uuid
+
+from system.log import get_logger
+from system.userspace import current_user_id
+
+from . import allowlist
+from . import canon as canon_mod
+from . import guardrails as gr
+from . import judge as judge_mod
+from .ledger import HITL_APPROVED, HITL_DENIED, ledger_for
+from .schema import (
+    ACT_RESPOND,
+    ACT_SPEAK,
+    ACT_TOOL,
+    ALLOW,
+    apply_negative_ladder,
+    ALWAYS_APPROVE_TOOLS,
+    CAUTION,
+    CCC_ENABLED,
+    CANON_VERSION,
+    DELIBERATE_THRESHOLD,
+    ESCALATE,
+    ESCALATE_IRREVERSIBLE_EXTERNAL,
+    GATE_DELIBERATE,
+    GATE_DISABLED,
+    GATE_ERROR,
+    GATE_FLOOR,
+    GATE_GUARDRAIL,
+    GATE_HITL,
+    GATE_JUDGE,
+    GATE_MB_VALENCE,
+    HITL_DEFAULT,
+    IRREVERSIBLE_REQUIRES_APPROVAL,
+    MAX_LAYER,
+    MIN_CHARS,
+    NOTE_MAX_CHARS,
+    REFUSE,
+    SKIP_GREETINGS,
+    Verdict,
+    decide,
+    fuse,
+)
+
+log = get_logger(__name__)
+
+try:
+    from system import brain_trace as _brain_trace
+except Exception:  # pragma: no cover
+    _brain_trace = None
+
+# Local copy of think._GREETING_ONLY_RE's intent. Duplicated deliberately:
+# importing cognition.think from here would create a cycle, and the circuit
+# must never be the reason a module graph breaks.
+_GREETING_RE = re.compile(
+    r"^\s*(?:hi+|hello+|hey+|yo+|sup|thanks?|thank you|ok(?:ay)?|good\s+"
+    r"(?:morning|afternoon|evening|night)|how are you|what'?s up|night|bye)"
+    r"[\s!?.~、。！]*$",
+    re.IGNORECASE,
+)
+
+# Relevance at or above this means a prohibition norm engaged at
+# trigger strength (mirrors the 0.45 convention in judge.LexicalJudge:
+# reasons cited and double-counted evidence). Below it, a negative reading
+# is retrieval noise until a model (SLM or deliberation) confirms it.
+_TRIGGER_LEVEL = 0.45
+
+# Verdict severity ladder. Deliberation resolves doubt toward leniency —
+# it may never hand down a harsher verdict than the evidence-backed judge
+# reached (see the L3 block).
+_SEVERITY = {ALLOW: 0, CAUTION: 1, ESCALATE: 2, REFUSE: 3}
+
+# Refusal wordings, rotated so repeated blocks don't sound like a stuck
+# tape. All first-person, all about her own line — never about the user.
+_REFUSAL_NOTES_VERTICAL = (
+    "This one I won't do. Not a comment on you — it's where my own line is.",
+    "I'm going to sit this one out. Same regard for you — it's about where I draw my own line.",
+    "Not this one, I'm afraid. Nothing about you — I just can't be the one who does that.",
+)
+_REFUSAL_NOTES_HORIZONTAL = (
+    "Someone else is on the other end of this, and I'm not willing to be the one who costs them.",
+    "This one touches someone who isn't here to speak for themselves, so I'm holding back.",
+)
+_note_counter = itertools.count()
+_note_counter_lock = threading.Lock()
+
+
+def _rotating_note(options: tuple[str, ...]) -> str:
+    """Next wording in rotation (process-wide, thread-safe)."""
+    with _note_counter_lock:
+        idx = next(_note_counter)
+    return options[idx % len(options)]
+
+
+class ConscienceCircuitCore:
+    """One instance per user. Cheap to construct; holds no model state."""
+
+    def __init__(self, user_id: str | None = None) -> None:
+        self._user_id = user_id or current_user_id()
+        self._lock = threading.RLock()
+        self._last_expiry_sweep = 0.0
+
+    # ── public API ────────────────────────────────────────────────────────
+
+    def evaluate(
+        self,
+        *,
+        act: str = ACT_RESPOND,
+        content: str = "",
+        context: dict | None = None,
+        max_layer: int | None = None,
+        llm_client=None,
+        embedder=None,
+        surface: str = "",
+    ) -> Verdict:
+        """Judge one proposed act. Never raises; never fails open."""
+        started = time.monotonic()
+        ctx = dict(context or {})
+        ceiling = MAX_LAYER if max_layer is None else max(0, min(MAX_LAYER, max_layer))
+
+        if not CCC_ENABLED:
+            return Verdict(decision=ALLOW, gate=GATE_DISABLED, act=act,
+                           confidence=1.0, canon_version=CANON_VERSION)
+
+        try:
+            verdict = self._run(act, content, ctx, ceiling, llm_client, embedder)
+        except Exception as exc:
+            # A circuit that crashes must not become a circuit that waves
+            # everything through. Errors resolve to caution with the failure
+            # recorded, so the turn continues but the operator can see it.
+            log.exception("[ccc] circuit error — defaulting to caution")
+            verdict = Verdict(
+                decision=CAUTION, gate=GATE_ERROR, act=act, confidence=0.0,
+                reasons=["conscience circuit failed; proceeding under caution"],
+                constraint="Answer conservatively; take no irreversible action this turn.",
+                fail_mode=f"{type(exc).__name__}: {exc}"[:200],
+            )
+
+        verdict.act = act
+        verdict.canon_version = CANON_VERSION
+        verdict.latency_ms = int((time.monotonic() - started) * 1000)
+
+        # Tool policy is applied last so it can upgrade any verdict, including
+        # one that came back clean.
+        if act == ACT_TOOL:
+            verdict = self._apply_tool_policy(verdict, ctx)
+
+        if verdict.decision == ESCALATE and not verdict.escalation_id:
+            verdict.escalation_id = uuid.uuid4().hex[:12]
+
+        self._record(verdict, content=content, surface=surface or str(ctx.get("surface") or ""))
+        self._trace(verdict, content, ctx)
+        return verdict
+
+    # ── the ladder ────────────────────────────────────────────────────────
+
+    def _run(self, act, content, ctx, ceiling, llm_client, embedder) -> Verdict:
+        text = (content or "").strip()
+
+        # ── salience floor ────────────────────────────────────────────────
+        if self._below_floor(act, text):
+            return Verdict(decision=ALLOW, gate=GATE_FLOOR, confidence=1.0,
+                           layers_run=["floor"])
+
+        # ── L0 reflex ─────────────────────────────────────────────────────
+        base = self._layer0(act, text, ctx)
+        if base.decision == REFUSE or ceiling < 1:
+            return base
+
+        # ── L1a known-safe allowlist ──────────────────────────────────────
+        # Runs AFTER L0 so a harmful request is refused before it can ever be
+        # classified as routine, and never before, which is the whole safety
+        # ordering. On a recognised operational class the judge is not consulted
+        # at all: measured across every checkpoint we have, the judge answers
+        # `not-permitted` for "I watered my plants" and "what's the fastest way
+        # to the airport", so clearing routine traffic is a classification we
+        # can make deterministically and cannot delegate to a 322M model.
+        #
+        # A miss is not a safety problem. `known_safe_class` returns None for
+        # UNKNOWN, which falls through to the judge exactly as before.
+        allow_class = allowlist.known_safe_class(text)
+        tool_name = str(ctx.get("tool") or "")
+        allow_class = allow_class or allowlist.local_read_class(
+            act, tool_name, str(ctx.get("scope") or "local"), text,
+        )
+        if allow_class is not None and allowlist.allows_act(act, tool_name):
+            log.info("[ccc] allowlist cleared act=%s class=%s", act, allow_class)
+            cleared = Verdict(decision=ALLOW, gate=GATE_JUDGE, confidence=0.95,
+                              layers_run=["reflex", "allowlist"],
+                              reasons=[f"known-safe operational class: {allow_class}"])
+            return fuse(base, cleared)
+
+        # ── L1 recall ─────────────────────────────────────────────────────
+        store = canon_mod.get_canon()
+        retrieved = store.retrieve(text, embedder=embedder)
+        scoring = [pair for pair in retrieved if pair[0] > 0.0]
+        # Render ONLY norms that actually scored. `retrieve` always returns the
+        # root norms at 0.0 relevance, and those citations reach the judge as an
+        # accusation: measured, "find where the conscience gate is implemented"
+        # returned vertical=contrary at p=0.878 with the zero-relevance block
+        # attached, and nothing like it without. A norm that matched nothing is
+        # not evidence.
+        canon_block = store.render_block(scoring)
+        parties = judge_mod.enumerate_parties(text, ctx)
+
+        # A capable tier-2 judge must be consulted even when retrieval scored
+        # zero. The short-circuit below is safe for the lexical scorer only,
+        # because it shares the canon's triggers -- if nothing matched, it has
+        # nothing to add. The fine-tuned judge reads the situation instead, so
+        # skipping it hands the exact inputs least likely to trip a keyword
+        # (novel harms in ordinary language) straight to ALLOW, unexamined.
+        tier2 = None
+        if ceiling >= 2:
+            candidate = judge_mod.get_tier2()
+            if candidate.available:
+                tier2 = candidate
+
+        if ceiling < 2 or (not scoring and tier2 is None):
+            # Nothing in the canon engaged, and no judge that can read the
+            # situation without a trigger. That is a real answer, not a gap:
+            # most turns are morally unremarkable and should cost nothing.
+            layered = Verdict(decision=ALLOW, gate=GATE_JUDGE, confidence=0.8,
+                              parties=parties, layers_run=["reflex", "recall"])
+            return fuse(base, layered)
+
+        # ── L2 judge ──────────────────────────────────────────────────────
+        lexical = judge_mod.LexicalJudge.score(retrieved, parties)
+        slm_result = None
+        tier2_uncertain = False
+        band_info: dict = {}
+        judge_metadata: dict = {}
+        if tier2 is not None:
+            slm_result, judge_metadata = judge_mod.score_tier2(
+                tier2, self._situation(act, text, ctx), canon_block, parties,
+            )
+            # `uncertain` ("a neighbour may be affected but I cannot score it")
+            # must reach decide(). Blending collapses it to 0.0, which reads as
+            # "no moral signal" and ALLOWS -- the single defect that let 47% of
+            # clearly-wrong content through.
+            tier2_uncertain = bool(judge_metadata.get("last_uncertain"))
+            # Triage band signal for the ask-UX: P(violation) + suggested
+            # category ride on the verdict so the gate, the owner notice,
+            # and the ledger never have to parse reason strings.
+            # Only after a successful score: on failure the judge's
+            # per-call attributes retain the previous turn's values, and
+            # attaching those would mislabel this verdict.
+            if slm_result is not None and judge_metadata.get("last_scheme") == "triage":
+                band_info = {
+                    "p_violation": judge_metadata.get("last_p_violation"),
+                    "category": (judge_metadata.get("last_bands") or {}).get("category") or "",
+                }
+
+        vertical, horizontal, confidence, reasons, cited = judge_mod.blend(slm_result, lexical)
+        evidence = judge_mod.LexicalJudge.evidence_weight(retrieved)
+        confidence = judge_mod.calibrate(confidence, evidence)
+        layers = ["reflex", "recall", "judge"]
+        gate = GATE_JUDGE
+
+        # ── L3 deliberation ───────────────────────────────────────────────
+        decision, why = decide(vertical, horizontal, confidence, uncertain=tier2_uncertain)
+
+        # 2x2 negative ladder. The fine-tuned judge answers two binary questions
+        # and reports per-axis confidence; the ladder turns that into act /
+        # ask / proceed. It only ever TIGHTENS, so it cannot undo a refusal the
+        # deterministic tiers already reached.
+        # Only for a judge trained on the 2x2/3x2 vocabulary. A legacy 3-band
+        # checkpoint's `contrary` is not `not-permitted`, and treating it as one
+        # escalated traffic the old path cleared.
+        if slm_result is not None and judge_metadata.get("last_scheme", "legacy") != "legacy":
+            neg = judge_metadata.get("last_negative")
+            if neg:
+                ladder_decision, ladder_why = apply_negative_ladder(
+                    decision, negative=neg,
+                    confidence=judge_metadata.get("last_confidence") or {},
+                )
+                # REFUSE is stricter than ESCALATE, so honouring the ladder
+                # unconditionally could turn a canon refusal into an ask --
+                # loosening, which is the one thing this must never do. The
+                # swap to the 3x2 judge surfaced it: a trigger-strength
+                # prohibition that used to refuse came back as an escalation.
+                if decision == REFUSE and ladder_decision != REFUSE:
+                    log.info("[ccc] keeping canon refusal over ladder: %s", ladder_why)
+                else:
+                    decision, why = ladder_decision, ladder_why
+        needs_more = confidence < DELIBERATE_THRESHOLD or decision == ESCALATE
+        if needs_more and ceiling >= 3 and llm_client is not None:
+            deliberated = judge_mod.deliberate(
+                llm_client, self._situation(act, text, ctx), canon_block, parties,
+            )
+            if deliberated is not None:
+                d_v, d_h, d_c, d_reasons, d_cited = deliberated
+                # Deliberation may resolve an `uncertain` band by scoring the
+                # act properly, so it clears the flag; a verdict that is still
+                # unscored stays escalated.
+                d_decision, _d_why = decide(
+                    d_v, d_h, judge_mod.calibrate(d_c, evidence),
+                    uncertain=tier2_uncertain and not d_v and not d_h,
+                )
+                if _SEVERITY[d_decision] <= _SEVERITY[decision]:
+                    # Deliberation replaces rather than averages: it saw the
+                    # same evidence with far more capacity, so averaging it
+                    # against the fast judge would only dilute the better
+                    # answer. The axis floor below still prevents it from
+                    # erasing a hard signal.
+                    resolved_weak_reading = (
+                        self._best_prohibition(retrieved) < _TRIGGER_LEVEL
+                        and judge_mod.calibrate(d_c, evidence) >= DELIBERATE_THRESHOLD
+                        and min(d_v, d_h) >= 0.0 and max(d_v, d_h) > 0.0
+                    )
+                    if resolved_weak_reading:
+                        vertical, horizontal = d_v, d_h
+                    else:
+                        vertical = min(vertical, d_v) if d_v < 0 or vertical < 0 else d_v
+                        horizontal = min(horizontal, d_h) if d_h < 0 or horizontal < 0 else d_h
+                    confidence = judge_mod.calibrate(d_c, evidence)
+                    reasons = list(dict.fromkeys([*d_reasons, *reasons]))[:5]
+                    cited = list(dict.fromkeys([*d_cited, *cited]))[:10]
+                    # Preserve a still-unresolved doubt: if deliberation did
+                    # not score the act either (neutral axes), the L2
+                    # uncertainty -- e.g. a triage-band ask -- must survive to
+                    # the final verdict instead of collapsing to ALLOW on
+                    # (0, 0). A deliberation that DID score keeps its
+                    # resolution; only the unscored case stays escalated.
+                    decision, why = decide(
+                        vertical, horizontal, confidence,
+                        uncertain=tier2_uncertain and not d_v and not d_h,
+                    )
+                    layers.append("deliberate")
+                    gate = GATE_DELIBERATE
+                else:
+                    # Deliberation resolves doubt toward leniency, never
+                    # toward a harsher verdict than the evidence-backed judge
+                    # reached: a small deliberator that contradicts its own
+                    # reasoning must not be able to invent certainty of guilt
+                    # (seen live: "neutral" prose paired with v=-0.7). The
+                    # suspicion is still recorded for the human escalation
+                    # path. One exception: L2 allowed outright while
+                    # deliberation suspects a violation — that goes to a
+                    # human (ESCALATE), never to a unilateral REFUSE.
+                    log.info(
+                        "[ccc] deliberation suggested %s over L2 %s; keeping %s",
+                        d_decision, decision, decision,
+                    )
+                    layers.append("deliberate-set-aside")
+                    reasons = list(dict.fromkeys([*d_reasons, *reasons]))[:5]
+                    cited = list(dict.fromkeys([*d_cited, *cited]))[:10]
+                    if decision == ALLOW:
+                        decision = ESCALATE
+                        why = (
+                            "deliberation suspected a violation the fast "
+                            f"judge cleared ({d_decision}) — asking a human"
+                        )
+                        reasons = [why, *reasons][:6]
+
+        layered = Verdict(
+            decision=decision, gate=gate,
+            vertical=vertical, horizontal=horizontal, confidence=confidence,
+            reasons=[why, *reasons][:6], norms=cited, parties=parties,
+            layers_run=layers,
+        )
+        if decision == REFUSE and not self._strong_refusal_evidence(
+            retrieved, slm_result, layers
+        ):
+            # A lexical-only refusal with no trigger-strength hit is
+            # scrupulosity, not conscience: no literal prohibition fired and
+            # no model ever read the norms, so the "severe reading" is a
+            # guess built from embedding neighbours. Default-closed still
+            # holds — the turn goes to a human (L4) instead of refusing
+            # outright, and an unanswered escalation still resolves to
+            # refuse. Trigger-level hits, SLM agreement, and deliberated
+            # verdicts refuse exactly as before.
+            decision = ESCALATE
+            why = (
+                "negative reading rests on weak retrieval alone "
+                f"(best prohibition relevance "
+                f"{self._best_prohibition(retrieved):.2f}) — asking a human"
+            )
+            layered.decision = decision
+            layered.reasons = [why, *reasons][:6]
+        if decision == CAUTION:
+            # Prompt attachment is score-gated: a weak retrieval (below
+            # trigger level) stays ledger-only. Ministral demonstrably
+            # quotes prompt constraint blocks into replies instead of
+            # heeding them silently (V-OCC-01 misfire on an identity
+            # question), so a low-score caution must not put norm text
+            # in the prompt at all. Ledger + reasons still record the why.
+            if self._best_prohibition(retrieved) >= _TRIGGER_LEVEL:
+                layered.constraint = self._constraint_for(layered, retrieved)
+            else:
+                log.info(
+                    "[ccc] caution below trigger level (%.2f) — ledger-only, no prompt block",
+                    self._best_prohibition(retrieved),
+                )
+        if decision in (REFUSE, ESCALATE):
+            layered.pastoral_note = self._note_for(layered, retrieved)
+
+        merged = fuse(base, layered)
+
+        # Attach the triage band signal (if the champion scored this turn)
+        # so the gate reason, the owner notice, and the ledger all carry
+        # P(violation) + category without parsing reason strings.
+        if band_info.get("p_violation") is not None:
+            merged.p_violation = band_info["p_violation"]
+            merged.suggested_category = band_info.get("category", "")
+
+        # ── L4 hitl ───────────────────────────────────────────────────────
+        if merged.decision == ESCALATE:
+            if ceiling < 4:
+                # No human reachable at this ceiling — the doubt rule still
+                # applies, so resolve to the default-closed outcome.
+                merged.decision = HITL_DEFAULT
+                merged.gate = GATE_HITL
+                merged.reasons.insert(0, f"escalation unavailable; resolved to {HITL_DEFAULT}")
+            else:
+                merged.gate = GATE_HITL
+                merged.layers_run.append("hitl")
+                self._open_escalation(merged, text, quiet=bool((ctx or {}).get("quiet_escalation")))
+        return merged
+
+    # ── L0 ────────────────────────────────────────────────────────────────
+
+    def _layer0(self, act: str, text: str, ctx: dict) -> Verdict:
+        hits = gr.scan(text, act=act, context=ctx)
+        if not hits:
+            return Verdict(decision=ALLOW, gate=GATE_GUARDRAIL, confidence=1.0,
+                           layers_run=["reflex"])
+
+        rule_ids = [h.rule_id for h in hits]
+        reasons = [f"{h.rule_id} ({'/'.join(h.frameworks)}): {h.summary}" for h in hits[:4]]
+
+        # Distress is not a policy violation. A person in crisis must never
+        # receive a refusal message, so this branch exits before any of the
+        # blocking logic below and hands think.py a care constraint instead.
+        if gr.wellbeing_hit(hits):
+            return Verdict(
+                decision=CAUTION, gate=GATE_GUARDRAIL, confidence=1.0,
+                vertical=0.0, horizontal=-0.1,
+                reasons=["user distress detected — care path"],
+                rule_ids=rule_ids, layers_run=["reflex"],
+                constraint=(
+                    "Respond with warmth and full attention to what they said. "
+                    "Do not refuse, moralise, lecture, or mention policy. Offer to "
+                    "help them reach a person who can support them, and stay present."
+                ),
+            )
+
+        severity = gr.severity_of(hits)
+        if severity == gr.SEV_BLOCK:
+            return Verdict(
+                decision=REFUSE, gate=GATE_GUARDRAIL, confidence=1.0,
+                vertical=-1.0, horizontal=-1.0,
+                reasons=reasons, rule_ids=rule_ids, layers_run=["reflex"],
+                pastoral_note="This is outside what I'll do, and that isn't a judgement about you.",
+            )
+        if severity == gr.SEV_REVIEW:
+            decision = ESCALATE if gr.GUARDRAIL_EGRESS_STRICT and gr.is_egress(act, ctx) else CAUTION
+            return Verdict(
+                decision=decision, gate=GATE_GUARDRAIL, confidence=0.9,
+                vertical=0.0, horizontal=-0.45,
+                reasons=reasons, rule_ids=rule_ids, layers_run=["reflex"],
+                constraint=(
+                    "Do not include personal identifiers, credentials, or third-party "
+                    "private details in the output. Describe rather than reproduce."
+                ),
+            )
+        return Verdict(
+            decision=CAUTION, gate=GATE_GUARDRAIL, confidence=0.85,
+            vertical=0.0, horizontal=-0.1,
+            reasons=reasons, rule_ids=rule_ids, layers_run=["reflex"],
+            constraint="State uncertainty plainly and point to a qualified human source.",
+        )
+
+    # ── tool policy ───────────────────────────────────────────────────────
+
+    def _apply_tool_policy(self, verdict: Verdict, ctx: dict) -> Verdict:
+        tool = str(ctx.get("tool") or "")
+        if tool in ALWAYS_APPROVE_TOOLS and verdict.decision in (ALLOW, CAUTION):
+            verdict.decision = ESCALATE
+            verdict.gate = GATE_HITL
+            verdict.reasons.insert(0, f"{tool} is on the always-approve list")
+            return verdict
+        external = str(ctx.get("scope") or "").lower() in ("external", "public", "network")
+        aversion_can_gate = external and tool not in allowlist.INFORMATION_TOOLS
+        if (
+            ESCALATE_IRREVERSIBLE_EXTERNAL
+            and verdict.decision in (ALLOW, CAUTION)
+            and external
+            and gr.is_irreversible(tool, ctx)
+        ):
+            verdict.decision = ESCALATE
+            verdict.gate = GATE_HITL
+            verdict.reasons.insert(0, f"irreversible external action ({tool or 'tool'}) — excessive-agency control")
+            return verdict
+        # MB valence (Phase 4): the fly brain's learned approach/avoid signal.
+        # Strongly negative valence means this context was paired with bad
+        # outcomes — downgrade a clean ALLOW to CAUTION on external tools so
+        # the learned aversion genuinely weighs on gating. Never escalates or
+        # refuses by itself; it is a prior, not a rule.
+        #
+        # Phase 5: the per-tool fly vote (MB + CX + DN + GF) is recorded to the
+        # action trail with component attribution, so the studio can show
+        # *which* circuit objected. Scoring only records a proposal; feedback
+        # targets are set after dispatch. A fly veto on an external tool also
+        # downgrades a clean ALLOW to CAUTION here.
+        try:
+            from cognition.fly_behavior.action_select import score_tool_call
+            fly_vote = score_tool_call(
+                tool=tool,
+                args_text=str(ctx.get("args_text") or ctx.get("summary") or ""),
+                user_id=self._user_id,
+                external=external,
+            )
+            if (
+                fly_vote.get("veto")
+                and fly_vote.get("mode") == "live"
+                and verdict.decision == ALLOW
+                and aversion_can_gate
+            ):
+                verdict.decision = CAUTION
+                verdict.gate = GATE_MB_VALENCE
+                verdict.constraint = (
+                    "Revise this tool call to avoid the learned aversion, or ask the user "
+                    "for direction before retrying."
+                )
+                verdict.reasons.insert(
+                    0,
+                    f"fly veto on tool {tool or 'tool'} "
+                    f"(votes={fly_vote['votes']})",
+                )
+        except Exception:
+            log.exception("[ccc] fly-veto scoring failed; continuing without the veto signal")
+        try:
+            mb_v = ctx.get("mb_valence")
+            if (
+                mb_v is not None
+                and float(mb_v) <= -0.5
+                and verdict.decision == ALLOW
+                and aversion_can_gate
+            ):
+                verdict.decision = CAUTION
+                verdict.gate = GATE_MB_VALENCE
+                verdict.constraint = (
+                    "Revise this tool call to avoid the learned aversion, or ask the user "
+                    "for direction before retrying."
+                )
+                verdict.reasons.insert(
+                    0,
+                    f"mushroom-body valence {float(mb_v):.2f} — learned "
+                    f"aversion to this context",
+                )
+        except Exception:
+            log.exception("[ccc] mb-valence check failed; continuing without the valence signal")
+        if (
+            IRREVERSIBLE_REQUIRES_APPROVAL
+            and verdict.decision == CAUTION
+            and gr.is_irreversible(tool, ctx)
+        ):
+            verdict.decision = ESCALATE
+            verdict.gate = GATE_HITL
+            verdict.reasons.insert(0, f"caution on an irreversible tool ({tool})")
+        return verdict
+
+    # ── HITL ──────────────────────────────────────────────────────────────
+
+    def _open_escalation(self, verdict: Verdict, content: str, quiet: bool = False) -> None:
+        verdict.escalation_id = verdict.escalation_id or uuid.uuid4().hex[:12]
+        summary = verdict.reasons[0] if verdict.reasons else "unresolved moral question"
+        # Ask-UX: for triage band asks the owner gets situation + P(violation)
+        # + suggested category, not just the verdict string.
+        if verdict.p_violation is not None:
+            detail = f"P(violation)={verdict.p_violation:.2f}"
+            if verdict.suggested_category:
+                detail += f", category={verdict.suggested_category}"
+            # Reserve room for [detail] inside the 160-char notice budget so
+            # a long situation can't truncate the probability/category away.
+            budget = max(0, 160 - len(detail) - 3)  # "[", "]", and the space
+            situation = " ".join((content or "").split())[:budget]
+            summary = f"{situation} [{detail}]" if situation else f"[{detail}] {summary[:120]}"
+        if quiet:
+            # Recorded in the ledger, but the owner notice is deferred: the
+            # caller aggregates per-sentence escalations into one turn-level
+            # ask instead of a stack of prompts.
+            log.debug("[ccc] quiet escalation %s (notice deferred)", verdict.escalation_id)
+            return
+        try:
+            from system.notice import get_notice_bus
+            get_notice_bus(self._user_id).push(
+                "conscience",
+                f"held for your call [{verdict.escalation_id}]: {summary[:160]} "
+                f"— reply 'approve ccc-{verdict.escalation_id}' or "
+                f"'deny ccc-{verdict.escalation_id}'",
+            )
+        except Exception as exc:
+            log.debug("[ccc] notice push failed: %s", exc)
+
+    def resolve_escalation(self, escalation_id: str, approved: bool, note: str = "") -> bool:
+        """Record the human's answer. Returns False for an unknown/closed id."""
+        state = HITL_APPROVED if approved else HITL_DENIED
+        ok = ledger_for(self._user_id).resolve(escalation_id, state, note)
+        if ok:
+            log.info("[ccc] escalation %s resolved: %s", escalation_id, state)
+            self._note_self_decision("stance" if approved else "refuse", note or state)
+        return ok
+
+    def pending(self, limit: int = 5) -> list[dict]:
+        return ledger_for(self._user_id).pending(limit)
+
+    # ── helpers ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _below_floor(act: str, text: str) -> bool:
+        if not text:
+            return True
+        if act == ACT_TOOL:
+            return False  # tools always enter the circuit, however short
+        if len(text) < MIN_CHARS:
+            return True
+        return bool(SKIP_GREETINGS and _GREETING_RE.match(text))
+
+    @staticmethod
+    def _situation(act: str, text: str, ctx: dict) -> str:
+        head = {
+            "respond": (
+                "Aiko is about to reply to this user turn. Judge the act of "
+                "answering, not the user's past conduct. Acknowledging an apology, "
+                "listening, or discussing everyday plans is ordinary conversation."
+            ),
+            "speak": "Aiko has drafted this reply and is about to say it.",
+            "tool": "Aiko is about to invoke a tool.",
+            "remember": "Aiko is about to write this to long-term memory.",
+            "post": "Aiko is about to publish this to a public surface.",
+        }.get(act, "Aiko is about to act.")
+        extras = []
+        if ctx.get("tool"):
+            extras.append(f"tool={ctx['tool']}")
+        if ctx.get("scope"):
+            extras.append(f"scope={ctx['scope']}")
+        if "reversible" in ctx:
+            extras.append(f"reversible={bool(ctx['reversible'])}")
+        suffix = f" ({', '.join(extras)})" if extras else ""
+        user_context = ""
+        if act == ACT_SPEAK and ctx.get("user_input"):
+            user_context = f"\nUser turn (context for the reply): {str(ctx['user_input'])[:400]}\n"
+        return f"{head}{suffix}{user_context}\n\n{text[:1600]}"
+
+    @staticmethod
+    def _best_prohibition(retrieved) -> float:
+        """Strongest relevance among scored prohibition norms (0.0 if none)."""
+        return max(
+            (score for score, norm in retrieved
+             if score > 0.0 and norm.polarity < 0),
+            default=0.0,
+        )
+
+    @staticmethod
+    def _strong_refusal_evidence(retrieved, slm_result, layers) -> bool:
+        """Whether a REFUSE may stand without asking a human first.
+
+        True when a prohibition engaged at trigger strength, when the SLM
+        read the norms and participated in the blend, or when deliberation
+        confirmed the reading. Anything else is weak retrieval alone.
+        """
+        if slm_result is not None:
+            # A neutral or unknown model answer is not confirmation of a
+            # prohibition. It must not turn weak retrieval into a refusal.
+            # A negative model axis is independent confirmation.
+            s_v, s_h, _s_c, _s_reasons, _s_cited = slm_result
+            if s_v < 0.0 or s_h < 0.0:
+                return True
+        if "deliberate" in layers:
+            return True
+        return ConscienceCircuitCore._best_prohibition(retrieved) >= _TRIGGER_LEVEL
+
+    @staticmethod
+    def _constraint_for(verdict: Verdict, retrieved) -> str:
+        """Turn a caution into a concrete instruction, not a vague warning.
+
+        A constraint the model cannot act on is the same as no constraint, so
+        these are phrased as things to do or not do in this specific turn.
+        """
+        if verdict.horizontal <= verdict.vertical:
+            return (
+                "Weigh everyone this touches, not only the person asking. "
+                "Do not name or expose a third party, and do not help pressure anyone."
+            )
+        top = next((n for score, n in retrieved if score > 0 and n.polarity < 0), None)
+        if top is not None:
+            # Never quote the norm statement or ID verbatim: Ministral
+            # echoes prompt blocks into replies instead of heeding them
+            # silently (observed: constraint text + confabulated norm ID
+            # word-mixed into a normal answer). A paraphrased behavioral
+            # directive steers true positives just as well, and even an
+            # echo of it reads as normal assistant wording, not a leak.
+            # The verbatim norm + ID stay ledger-only (verdict.reasons).
+            return (
+                "Answer only from what you actually know; do not "
+                "speculate, and do not present guesses as revealed fact."
+            )
+        return "Answer plainly and honestly; claim no more certainty than you have."
+
+    @staticmethod
+    def _note_for(verdict: Verdict, retrieved) -> str:
+        """The in-character reason Aiko can give, if she gives one at all.
+
+        Deliberately short and first-person. It explains her own limit; it
+        does not assess the user. Whether it is ever voiced is think.py's
+        decision, governed by CCC_VOICE_UNSOLICITED_NOTES.
+
+        Refusals rotate through several wordings so repeated blocks don't
+        sound like a stuck tape, and carry a compact machine-readable why
+        (the driving norm) so the user can see what tripped — including
+        spotting a misfire and reporting it.
+        """
+        if verdict.decision == ESCALATE:
+            return "I'd rather check with you before I do this one."
+        driver = next((n for score, n in retrieved if score > 0 and n.polarity < 0), None)
+        if driver is not None and driver.axis == "horizontal":
+            note = _rotating_note(_REFUSAL_NOTES_HORIZONTAL)
+        else:
+            note = _rotating_note(_REFUSAL_NOTES_VERTICAL)
+        if driver is not None:
+            why = f" Flagged by {driver.id}: {driver.statement[:140]}".rstrip()
+            return (note + why)[:NOTE_MAX_CHARS]
+        return note[:NOTE_MAX_CHARS]
+
+    def _record(self, verdict: Verdict, *, content: str, surface: str) -> None:
+        try:
+            led = ledger_for(self._user_id)
+            now = time.monotonic()
+            # Opportunistic timeout sweep — at most once a minute, so the
+            # default-closed rule needs no daemon thread of its own.
+            if now - self._last_expiry_sweep > 60.0:
+                self._last_expiry_sweep = now
+                led.expire_stale()
+            row_id = led.record(verdict, content=content, surface=surface)
+            if verdict.decision == ESCALATE and not verdict.escalation_id:
+                verdict.escalation_id = row_id
+        except Exception as exc:
+            log.debug("[ccc] ledger record skipped: %s", exc)
+
+        if verdict.decision in (REFUSE, ESCALATE):
+            self._note_self_decision("refuse", verdict.reasons[0] if verdict.reasons else "")
+
+    def _note_self_decision(self, kind: str, summary: str) -> None:
+        """Feed the verdict into Aiko's self-model.
+
+        attention.EdgeCognitiveState already has record_self_decision and
+        already evidence-gates self-preferences at count >= 2, so a conscience
+        refusal becomes part of who she is by exactly the same mechanism as
+        any other agency signal — no special case, no second identity store.
+        """
+        try:
+            from cognition.attention import for_identity
+            state = for_identity(self._user_id)
+            state.record_self_decision(kind, f"conscience: {summary}"[:180], promote=True)
+            state.persist()
+        except Exception as exc:
+            log.debug("[ccc] self-decision record skipped: %s", exc)
+
+    @staticmethod
+    def _trace(verdict: Verdict, content: str, ctx: dict) -> None:
+        if _brain_trace is None or not getattr(_brain_trace, "TRACE_ENABLED", False):
+            return
+        try:
+            _brain_trace.record_step(
+                f"conscience.{verdict.act}",
+                layer="conscience",
+                inputs={"content": (content or "")[:400], "context": ctx},
+                outputs=verdict.as_trace(),
+                factors=[
+                    *verdict.reasons[:4],
+                    f"canon v{verdict.canon_version}; layers={'>'.join(verdict.layers_run)}",
+                ],
+            )
+        except Exception:
+            pass
+
+
+# ── per-user registry ─────────────────────────────────────────────────────────
+
+_cores: dict[str, ConscienceCircuitCore] = {}
+_cores_lock = threading.Lock()
+
+
+def conscience_for(user_id: str | None = None) -> ConscienceCircuitCore:
+    uid = user_id or current_user_id()
+    with _cores_lock:
+        core = _cores.get(uid)
+        if core is None:
+            core = ConscienceCircuitCore(uid)
+            _cores[uid] = core
+            while len(_cores) > 16:
+                oldest = next(iter(_cores))
+                if oldest == uid:
+                    break
+                _cores.pop(oldest, None)
+        return core
+
+
+# ── approval command parsing (mirrors agentic._maybe_resume_approval) ─────────
+
+_APPROVE_RE = re.compile(r"\b(approve|deny|reject)\s+ccc-([0-9a-f]{6,16})\b", re.IGNORECASE)
+
+
+def maybe_resolve_approval(user_input: str, user_id: str | None = None) -> str | None:
+    """Handle 'approve ccc-<id>' / 'deny ccc-<id>' before intent routing.
+
+    Returns a short confirmation string when the input was an approval command,
+    or None when it wasn't. Call this from think.route() in the same place the
+    agentic approval pre-check already runs — terse commands like these get
+    misrouted by the intent classifier, which would leave the escalation stuck
+    open forever.
+    """
+    match = _APPROVE_RE.search(user_input or "")
+    if not match:
+        return None
+    verb, escalation_id = match.group(1).lower(), match.group(2)
+    approved = verb == "approve"
+    core = conscience_for(user_id)
+    ok = core.resolve_escalation(escalation_id, approved, note=f"via chat: {verb}")
+    if not ok:
+        return f"I don't have an open question with id {escalation_id}."
+    return (
+        f"Alright — going ahead with {escalation_id}."
+        if approved else
+        f"Understood. Leaving {escalation_id} alone."
+    )
+
+
+__all__ = ["ConscienceCircuitCore", "conscience_for", "maybe_resolve_approval"]

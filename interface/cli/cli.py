@@ -1,0 +1,390 @@
+"""
+interface/cli/cli.py
+
+Aiko-chan's plain no-curses CLI front end (testing only — no layout, just
+plain scrolling stdout). The WebUI (interface/webui/webui.py) is the default
+front end for real use; run_cli() here is invoked from main.py via --cli.
+
+Implements the same duck-typed "ui" interface system.orchestrate.run_session()
+expects (add_message, turn_start, stream_token, stream_commit, get_input,
+get_voice_input, _draw, _stats, boot callbacks) but renders everything as
+plain scrolling stdout lines.
+
+Status-marker rendering (fix):
+    cognition/think.py streams "__THINKING__" / "__TOOL__:name(args)" /
+    "__SEARCHING__:query" control tokens mid-turn. These used to be
+    intercepted and rendered by a module-level helper in the old main.py
+    that only the shared main-loop token callback called — meaning the
+    /think and /web commands' own token callbacks (which call
+    ui.stream_token() directly) bypassed it and would print raw marker
+    text inline. Each UI is now responsible for intercepting its own
+    markers inside stream_token() itself, so every call site — main loop,
+    /think, /web — gets correct rendering automatically. See
+    system/orchestrate.py's module docstring for the WebUI side of this
+    same fix.
+"""
+from __future__ import annotations
+
+import os
+import sys
+import threading
+import time
+from pathlib import Path
+
+from system.log import get_logger
+from system.orchestrate import _c, _CTX_COLORS, _ctx_preview
+from system.wakeup import AikoWakeup
+
+log = get_logger(__name__)
+
+# CLI auth (GitHub device flow) — lazy-imported so it doesn't pull in
+# httpx for users who never use --cli
+_CliAuth = None
+def _get_cli_auth():
+    global _CliAuth
+    if _CliAuth is None:
+        from interface.cli.auth import CliAuth
+        _CliAuth = CliAuth()
+    return _CliAuth
+
+
+def handle_logout() -> None:
+    """Clear stored CLI (GitHub OAuth) auth token. Called from main.py's --logout."""
+    _get_cli_auth().logout()
+
+
+_CLI_ROLE_PREFIX = {
+    "you":  "You",
+    "aiko": "Aiko",
+    "sys":  "·",
+}
+
+
+class AikoSimpleCLI:
+    def __init__(self, no_voice: bool = False, debug: bool = False) -> None:
+        self.no_voice = no_voice
+        self.debug = debug
+        self._chat_started = False
+        self._stats: dict = {"tts_on": not no_voice, "asr_on": not no_voice}
+        self._streaming = False
+        self._stream_buf: list[str] = []
+        self._latency_stats: dict = {}
+        self._boot_total = len(AikoWakeup.ALL_BOOT_LABELS)
+        self._boot_done = 0
+        self._boot_current = ""
+        self._boot_lock = threading.Lock()
+        # per-instance agentic step counter for __THINKING__ rendering
+        # (previously a module global in main.py — instance state is
+        # cleaner and doesn't leak across AikoSimpleCLI instances)
+        self._agent_step = 0
+        self.trace_enabled = False
+        # Whether the broken-voice notice below was already printed this
+        # session (see get_voice_input) — the cause prints once, later turns
+        # just note the fallback so typing stays usable without log spam.
+        self._voice_error_shown = False
+
+    # ── boot / status ────────────────────────────────────────────────────
+    _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+    # Bound for one blocking mic read before falling back to typed input.
+    # Headless sessions (SSH, no mic) would otherwise wait forever inside
+    # listen() while typed input sits unread. Env-tunable.
+    _VOICE_LISTEN_TIMEOUT_S = float(os.getenv("VOICE_LISTEN_TIMEOUT_S", "120") or 120)
+
+    def _spin_loop(self, stop_event: threading.Event) -> None:
+        idx = 0
+        while not stop_event.is_set():
+            with self._boot_lock:
+                label = self._boot_current
+            frame = self._SPINNER_FRAMES[idx % len(self._SPINNER_FRAMES)]
+            print(f"\r  {frame} {label:<60}", end="", flush=True)
+            idx += 1
+            stop_event.wait(0.08)
+
+    def step_loading(self, key: str) -> None:
+        if self._chat_started:
+            return
+        label = AikoWakeup.ALL_BOOT_LABELS.get(key, key)
+        with self._boot_lock:
+            if self._boot_current and self._boot_current != label:
+                print()                                                    # finalize previous line before starting a new one
+            self._boot_current = label
+            self._boot_done += 1
+        print(f"\r  ⠋ {label:<60}", end="", flush=True)                   # paint first spinner frame immediately
+
+    def step_done(self, key: str) -> None:
+        if self._chat_started:
+            return
+        label = AikoWakeup.ALL_BOOT_LABELS.get(key, key)
+        with self._boot_lock:
+            self._boot_done += 1
+            self._boot_current = ""
+            print(f"\r  ✓ {label:<60}")                                   # overwrite spinner line with ✓ then newline
+
+    def step_skip(self, key: str) -> None:
+        if self._chat_started:
+            return
+        label = AikoWakeup.ALL_BOOT_LABELS.get(key, key)
+        with self._boot_lock:
+            self._boot_done += 1
+            self._boot_current = ""
+            print(f"\r  ✗ {label:<60}  (skipped)")                        # mark skipped distinctly
+
+    def _render_progress(self) -> None:
+        pct = int(100 * self._boot_done / (self._boot_total or 1))
+        print(f"\r  [{pct:3d}%] {self._boot_current:<50}", end="", flush=True)
+
+    def status_finish(self) -> None:
+        self._chat_started = True
+        # Keep trace state set by run_cli; don't override with unrelated flags
+        if not self.trace_enabled:
+            self.trace_enabled = bool(self.debug)
+        # Plain scrolling CLI — trace steps stream as regular '·' sys lines
+        # via add_message() below (brain_trace sink is wired in
+        # system/orchestrate.run_session). No fixed box / ANSI cursor
+        # positioning here: it swallows trace content and breaks with
+        # plain input()/scrolling stdout.
+        print("\r" + " " * 70 + "\r", end="", flush=True)
+        print("\n🌸 Aiko-chan is ready. Type a message, or /help for commands.\n")
+
+    # ── rendering ────────────────────────────────────────────────────────
+    def _draw(self, buf: list | None = None) -> None:
+        # Plain scrolling CLI — nothing to redraw, output is already live.
+        pass
+
+    def add_message(self, role: str, text: str) -> None:
+        prefix = _CLI_ROLE_PREFIX.get(role, role)
+        print(f"{prefix}: {text}")
+
+    def turn_start(self) -> None:
+        self._streaming = True
+        self._stream_buf = []
+        print("Aiko: ", end="", flush=True)
+
+    def stream_token(self, token: str) -> None:
+        """
+        Forward a streaming token to stdout.
+
+        Intercepts agentic status/control markers (__THINKING__,
+        __TOOL__:name(args), __SEARCHING__:query) and renders them as
+        colored 'sys' lines instead of letting the raw marker text leak
+        into the streamed reply — mirrors AikoWeb.stream_token()'s own
+        marker handling for the WebUI front end. See module docstring.
+        """
+        if not token:
+            return
+        stripped = token.rstrip("\r\n")
+
+        if stripped == "__THINKING__":
+            self._agent_step += 1
+            self.add_message('sys', _c(_CTX_COLORS["thinking"], f"[thinking] step {self._agent_step}"))
+            return
+
+        if stripped.startswith("__THINKING__:"):
+            payload = stripped[len("__THINKING__:"):].strip()
+            self.add_message('sys', _c(_CTX_COLORS["thinking"], f"[inner] {_ctx_preview(payload, 300)}"))
+            return
+
+        if stripped.startswith("__SEARCHING__:"):
+            query = stripped[len("__SEARCHING__:"):].strip()
+            self.add_message('sys', _c(_CTX_COLORS["web"], f"[web] {_ctx_preview(query, 300)}"))
+            return
+
+        if stripped.startswith("__TOOL__:"):
+            payload = stripped[len("__TOOL__:"):].strip()
+            if "(" in payload and payload.endswith(")"):
+                name = payload[:payload.index("(")]
+                args_raw = payload[payload.index("(") + 1:-1]
+                display = name
+                if args_raw and args_raw.strip("{} "):
+                    display = f"{name}({_ctx_preview(args_raw, 200)})"
+            else:
+                display = _ctx_preview(payload, 300)
+            self.add_message('sys', _c(_CTX_COLORS["tools"], f"[tools] {display}"))
+            return
+
+        self._stream_buf.append(token)
+        print(token, end="", flush=True)
+
+    def stream_commit(self) -> None:
+        if self._streaming:
+            print()  # newline after streamed reply
+        self._streaming = False
+        self._stream_buf = []
+
+    def set_latency_stats(self, stats: dict) -> None:
+        """
+        Per-turn debug / latency summary.
+        Detailed context entries are already shown inline via add_message();
+        this just adds a one-line latency summary and the V→A voice metric.
+        """
+        self._latency_stats = stats
+        v_to_a = stats.get("voice_end_to_first_audio")
+        if v_to_a and v_to_a != "n/a":
+            print(f"  ⏱  V→A (voice end → Aiko's first audio): {v_to_a}")
+        if not self.debug:
+            return
+        tok_s = stats.get("tokens_per_second", "n/a")
+        in_t = stats.get("input_tokens", "n/a")
+        out_t = stats.get("output_tokens", "n/a")
+        total = stats.get("total_tokens", "n/a")
+        gen = stats.get("llm_inference", "n/a")
+        asr = stats.get("asr_inference", "n/a")
+        intent = stats.get("agentic_intent", "n/a")
+        search = stats.get("web_search", "n/a")
+        print(f"  ⚡ {tok_s} tok/s  |  in/out/total: {in_t}/{out_t}/{total}  "
+              f"|  asr={asr} intent={intent} search={search} llm={gen}")
+
+    # ── input ────────────────────────────────────────────────────────────
+    def get_input(self):
+        try:
+            text = input("You: ").strip()
+        except EOFError:
+            return "/quit"
+        return text
+
+    def get_voice_input(self, listen, speak=None, wait_fn=None):
+        """
+        Best-effort voice input for CLI testing. The CLI is text-first; if a
+        `listen` backend is loaded, try a few common blocking method names.
+        Rename to match your real ASR backend's single-utterance API if it
+        differs — this is a testing convenience, not the primary voice path
+        (that's the WebUI's AudioWorklet pipeline).
+
+        Returns (text, timing_dict) on a successful voice capture so
+        run_session() can compute V->A latency. `recording_stopped_at` here
+        is approximate — it's stamped when the blocking listen call returns,
+        which includes ASR transcription time, not just end-of-speech. The
+        WebUI's real pipeline stamps this earlier (right at end-of-speech),
+        so CLI latency numbers will read a bit higher than the WebUI's.
+
+        `asr_done_at` is also stamped here (right after the blocking call
+        returns) so main.py can report an ASR-only inference time, even
+        though for this CLI backend it will read the same as
+        recording_stopped_at above — the WebUI path can eventually pass a
+        tighter one from the real ASR component if it starts separating
+        end-of-speech from transcription-complete.
+        """
+        for method_name in ("listen_once", "transcribe_once", "listen"):
+            method = getattr(listen, method_name, None)
+            if callable(method):
+                print("🎤 listening... (speak now)")
+                listen_started_at = time.monotonic()
+                # Bound the blocking mic read: on a headless session with no
+                # mic, listen() never returns and typed input is never read.
+                # Run it on a worker and fall back to typing on timeout —
+                # the orphaned worker is daemon-scoped and discarded.
+                import threading as _threading
+                _voice_box: list = []
+                def _do_listen() -> None:
+                    try:
+                        _voice_box.append(method())
+                    except Exception as e:
+                        _voice_box.append(e)
+                _voice_thread = _threading.Thread(target=_do_listen, name="cli-voice-listen", daemon=True)
+                _voice_thread.start()
+                _voice_thread.join(timeout=self._VOICE_LISTEN_TIMEOUT_S)
+                if _voice_thread.is_alive() or not _voice_box:
+                    print(f"  [voice input timed out after {self._VOICE_LISTEN_TIMEOUT_S:.0f}s — type instead; /listen toggles voice attempts]")
+                    return self.get_input()
+                result = _voice_box[0]
+                if isinstance(result, Exception):
+                    print(f"  [voice input failed: {result}]")
+                    return self.get_input()
+                recording_stopped_at = time.monotonic()
+                asr_done_at = recording_stopped_at
+                info = result[1] if isinstance(result, tuple) and len(result) > 1 else None
+                text = (result[0] if isinstance(result, tuple) else result) or ""
+                text = text.strip()
+                if not text and isinstance(info, dict) and info.get("voice_error"):
+                    # Voice runtime is broken (e.g. sherpa-onnx/onnxruntime
+                    # wheel mismatch) — listen() fails fast with "" on every
+                    # call, which would spin here printing 🎤 forever with no
+                    # way to type. Surface the cause and fall back to typed
+                    # input instead.
+                    if not self._voice_error_shown:
+                        self._voice_error_shown = True
+                        print(f"  [voice unavailable: {info['voice_error']}]")
+                        print("  [voice unavailable — type instead; /listen toggles voice attempts]")
+                    else:
+                        print("  [voice unavailable — type instead]")
+                    return self.get_input()
+                if text:
+                    print(f"You (voice): {text}")
+                return text, {
+                    "listen_started_at": listen_started_at,
+                    "recording_stopped_at": recording_stopped_at,
+                    "asr_done_at": asr_done_at,
+                }
+        # No compatible voice API found on this backend — fall back to typed input.
+        return self.get_input()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# CLI-only auth / identity helpers
+def _cli_display_name(args, uid: str | None = None) -> str:
+    """Resolve the CLI display name: --name, stored preference, or prompt.
+
+    The stored preference lives in the single canonical per-user file
+    (system.userspace.display_name_path), shared with the WebUI.
+    """
+    if args.name:
+        return args.name.strip()
+    try:
+        from system.userspace import read_stored_display_name
+        stored = read_stored_display_name(uid)
+        if stored:
+            return stored
+    except Exception:
+        pass
+    try:
+        raw = input("  What's your name? ").strip()
+        if raw:
+            try:
+                from system.userspace import write_stored_display_name
+                write_stored_display_name(raw, uid)
+            except Exception:
+                log.debug("cli: could not persist display name")
+            return raw
+    except (EOFError, KeyboardInterrupt):
+        log.debug("cli: user cancelled name prompt")
+    return "guest"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ENTRY POINT (called from main.py)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def run_cli(args) -> None:
+    """Launch Aiko with the plain no-curses CLI (testing only).
+    Enforces GitHub OAuth if GITHUB_CLIENT_ID is set in .env."""
+    from system.orchestrate import run_session
+
+    cli_auth = _get_cli_auth()
+    if cli_auth.is_configured():
+        from interface.cli.auth import resolve_cli_user_id
+        gh_user = resolve_cli_user_id()
+        if gh_user is None:
+            print("  Authentication failed — exiting.")
+            sys.exit(1)
+        os.environ["AIKO_USER_ID"] = gh_user
+        from system.userspace import set_current_display_name, read_stored_display_name
+        # Preferred name wins in every interface; GitHub login is fallback.
+        display_name = read_stored_display_name(gh_user) or cli_auth.get_display_name()
+        set_current_display_name(display_name)
+        log.info("CLI session user_id=%s display=%s", gh_user, display_name)
+    else:
+        # Resolve the uid the same way as the session identity so the
+        # display-name file is the single canonical per-user file shared
+        # with the WebUI (not a CLI-only location).
+        from interface.cli.auth import resolve_cli_user_id
+        cli_uid = resolve_cli_user_id() or "guest"
+        os.environ["AIKO_USER_ID"] = cli_uid
+        display_name = _cli_display_name(args, cli_uid)
+        from system.userspace import set_current_display_name
+        set_current_display_name(display_name)
+        log.info("CLI session user_id=%s display=%s", cli_uid, display_name)
+
+    ui = AikoSimpleCLI(no_voice=args.text, debug=args.debug)
+    ui.trace_enabled = args.trace or args.debug
+    run_session(ui, args)

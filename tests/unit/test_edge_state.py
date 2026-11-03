@@ -1,0 +1,488 @@
+import importlib
+import json
+import sqlite3
+import pytest
+
+from cognition import attention
+from cognition import attention_train
+from cognition.attention import EdgeCognitiveState
+
+
+@pytest.fixture(autouse=True)
+def neutral_intent_model(monkeypatch):
+    # These tests cover the deterministic attention rules. A locally trained
+    # optional classifier must not change their trigger or expected reason.
+    monkeypatch.setattr(attention._intent_classifier, "predict", lambda _: (0.0, 0.5))
+
+
+def test_attention_module_is_singleton():
+    """Sanity: importing cognition.attention twice returns the same module."""
+    again = importlib.import_module("cognition.attention")
+    assert again is attention
+
+
+def test_detector_keeps_regex_hits_when_model_predicts_negative(monkeypatch):
+    class Detector:
+        def __init__(self, prediction):
+            self.prediction = prediction
+
+        def predict(self, features):
+            return [self.prediction]
+
+    monkeypatch.setitem(attention._DETECTOR_MODELS, "critical", Detector(0.0))
+    assert attention.is_critical_task("This is an emergency")
+    assert not attention.is_critical_task("This is a routine update")
+    monkeypatch.setitem(attention._DETECTOR_MODELS, "question", Detector(1.0))
+    assert attention._gated_match("question", "A routine statement", attention._QUESTION_RE)
+
+
+def test_pending_training_uses_own_turn_tool_outcomes(monkeypatch):
+    labels = []
+    monkeypatch.setattr(attention_train, "log_example", lambda _features, label, **_kwargs: labels.append(label))
+    state = EdgeCognitiveState()
+
+    state.record_tool_outcome("first", ok=True)
+    state.record("first turn", "")
+    first_mark = state._pending_train["outcome_mark"]
+    state.record("second turn", "")
+    assert labels == [1.0]
+    assert state._pending_train["outcome_mark"] is first_mark
+
+    state.record_tool_outcome("third", ok=False)
+    state.record_tool_outcome("third", ok=True)
+    state.record("third turn", "")
+    assert labels == [1.0, 0.5]
+    state.record("fourth turn", "")
+    assert labels == [1.0, 0.5, 0.0]
+
+
+def test_training_feedback_failure_precedes_success():
+    state = EdgeCognitiveState()
+    assert state._outcome_label_for_previous_turn("Thanks, but that is wrong", 1.0) == 0.0
+    assert state._outcome_label_for_previous_turn("Thanks", 0.0) == 1.0
+    assert state._outcome_label_for_previous_turn("That is wrong", 1.0) == 0.0
+
+
+def test_attention_state_is_bounded_and_retrieves_current_focus():
+    from system.config import env_int
+    max_turns = env_int("EDGE_COGNITION_MAX_TURNS", 7)  # configured bound, not a literal
+    state = EdgeCognitiveState()
+    for i in range(12):
+        state.record(f"remember task {i}", f"Noted item {i}.")
+    block = state.context("task 11")
+    assert "task 11" in block
+    assert "<edge_cognitive_state>" in block
+    assert len(state._events) == max_turns
+    assert len(state._open_loops) == 3
+
+
+def test_attention_state_has_no_context_before_first_turn():
+    assert EdgeCognitiveState().context("hello") == ""
+
+
+def test_inner_speech_turn_block_surfaces_one_queued_aside():
+    state = EdgeCognitiveState()
+    state._inner_speech.queue_aside("A spontaneous thought")
+
+    first = state.inner_speech_turn_block()
+    second = state.inner_speech_turn_block()
+
+    assert "- A spontaneous thought\n</inner_speech>" in first
+    assert "A spontaneous thought" not in second
+
+
+def test_metacognitive_context_carries_no_inner_voice():
+    # Inner speech rides on every turn via inner_speech_block(); the
+    # metacognitive checkpoint must stay pure so deliberation turns don't
+    # get the block twice.
+    state = EdgeCognitiveState()
+    state._inner_speech.queue_aside("A spontaneous thought")
+    block = state.metacognitive_context("hello", [{"memory": "x"}])
+    assert "<inner_speech>" not in block
+    assert "<inner_voice>" not in block
+    assert "A spontaneous thought" not in block
+
+
+def test_detects_recent_contradiction():
+    state = EdgeCognitiveState()
+    state.record("I like coffee", "")
+    state.record("I do not like coffee", "")
+    assert state.snapshot()["contradictions"]
+
+
+def test_prioritizes_goal_relevant_memory():
+    state = EdgeCognitiveState()
+    state.record("I want to finish the release", "")
+    rows = [{"memory": "unrelated note"}, {"memory": "release checklist", "access_count": 3}]
+    ranked = state.prioritize_memories("release", rows)
+    assert ranked[0]["memory"] == "release checklist"
+
+
+def test_requires_confirmation_for_memory_update():
+    state = EdgeCognitiveState()
+    memories = [{"id": "old-1", "memory": "User likes coffee"}]
+    query = "Actually I no longer like coffee"
+    assert state.memory_resolution_guidance(query, memories)
+    state.situation_context(query, memories)
+    assert state.confirm_memory_update("No, keep the old fact") == []
+    state.situation_context(query, memories)
+    pending = state.confirm_memory_update("Yes, that changed")
+    assert pending and pending[0]["memory_id"] == "old-1"
+
+
+def test_promotes_repeated_feedback_to_semantic_rule():
+    state = EdgeCognitiveState()
+    state.record("Please explain this", "Long answer")
+    state.record("This is too verbose", "Short answer")
+    state.record("That was too long, be concise", "Short answer")
+    assert any("Prefer concise responses." in lesson for lesson in state.snapshot()["durable_lessons"])
+
+
+def test_clear_resets_all_state_and_removes_persisted_snapshot(tmp_path, monkeypatch):
+    database = tmp_path / "memory.db"
+    conn = sqlite3.connect(database)
+    conn.execute(
+        "CREATE TABLE cognitive_state "
+        "(user_id TEXT PRIMARY KEY, state_json TEXT NOT NULL)"
+    )
+    conn.execute("INSERT INTO cognitive_state VALUES (?, ?)", ("person", json.dumps({"preferences": {"tone": "brief"}})))
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(
+        "cognition.memory.vecstore.connect_sqlite_db",
+        lambda *_args, **_kwargs: sqlite3.connect(database),
+    )
+
+    state = EdgeCognitiveState("person")
+    state._preferences["tone"] = "brief"
+    state._preference_counts["tone=brief"] = 2
+    state._identity_questions.append("Do you know me?")
+    state._intuitions.append("A tentative thought")
+    state._pending_memory_conflicts.append({"memory_id": "old"})
+
+    state.clear()
+
+    assert not state._preferences
+    assert not state._preference_counts
+    assert not state._identity_questions
+    assert not state._intuitions
+    assert not state._pending_memory_conflicts
+    conn = sqlite3.connect(database)
+    assert conn.execute("SELECT state_json FROM cognitive_state WHERE user_id = ?", ("person",)).fetchone() is None
+    conn.close()
+
+
+def test_restore_realiases_intuitions_to_subliminal_state(tmp_path, monkeypatch):
+    database = tmp_path / "memory.db"
+    conn = sqlite3.connect(database)
+    conn.execute(
+        "CREATE TABLE cognitive_state "
+        "(user_id TEXT PRIMARY KEY, state_json TEXT NOT NULL)"
+    )
+    snapshot = {
+        "intuitions": ["legacy intuition"],
+        "subliminal": {
+            "intuitions": [
+                {"text": "restored intuition", "affective_tag": "warm"}
+            ]
+        },
+    }
+    conn.execute(
+        "INSERT INTO cognitive_state VALUES (?, ?)",
+        ("person", json.dumps(snapshot)),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(attention, "EDGE_COGNITION_PERSIST", True)
+    monkeypatch.setattr(
+        "cognition.memory.vecstore.connect_sqlite_db",
+        lambda *_args, **_kwargs: sqlite3.connect(database),
+    )
+
+    state = EdgeCognitiveState("person")
+    state.load_persistent()
+
+    assert state._intuitions is state._subliminal._intuitions
+    assert list(state._intuitions) == [("restored intuition", "warm")]
+
+
+def test_lesson_evidence_evicts_oldest_signatures_at_fixed_limit():
+    state = EdgeCognitiveState()
+
+    for index in range(attention.EDGE_COGNITION_MAX_LESSON_EVIDENCE + 2):
+        state._add_lesson("Tool limitation: ", f"topic{index:03d}")
+
+    evidence = state.snapshot()["lesson_evidence"]
+    assert len(evidence) == attention.EDGE_COGNITION_MAX_LESSON_EVIDENCE
+    assert "topic000" not in evidence
+    assert "topic001" not in evidence
+    newest = attention.EDGE_COGNITION_MAX_LESSON_EVIDENCE + 1
+    assert f"topic{newest:03d}" in evidence
+
+
+def test_adaptive_guidance_and_reflection_include_state():
+    state = EdgeCognitiveState()
+    state.record("I want to finish the release", "")
+    state.record_perception("voice", prosody={"rms": 0.1, "pause_density": 0.7, "words_per_second": 1.5})
+    assert "calm" in state.adaptive_response_guidance()
+    assert "Active priority" in state.reflection_summary()
+
+
+def test_response_review_flags_unverified_current_claim():
+    state = EdgeCognitiveState()
+    review = state.review_response("What is the latest status?", "It is definitely complete.")
+    assert any("verification" in flag for flag in review["flags"])
+
+
+def test_preference_guidance_is_actionable():
+    state = EdgeCognitiveState()
+    state.record("From now on, be concise and ask before using tools", "")
+    guidance = state.preference_guidance()
+    assert "concise" in guidance
+    assert "Ask before consequential external actions" in guidance
+
+
+def test_adaptive_tts_rate_responds_to_voice_cues():
+    state = EdgeCognitiveState()
+    state.record_perception("voice", prosody={"pause_density": 0.8, "words_per_second": 1.2})
+    assert state.adaptive_tts_rate() == 0.9
+
+
+def test_confirmed_memory_conflict_is_consumed_once():
+    state = EdgeCognitiveState()
+    memories = [{"id": "m1", "memory": "User likes tea"}]
+    query = "Actually I no longer like tea"
+    state.situation_context(query, memories)
+    assert state.confirm_memory_update("Yes, that changed")
+    assert state.confirm_memory_update("Yes, that changed") == []
+
+
+def test_attention_keeps_a_readable_focus_phrase():
+    state = EdgeCognitiveState()
+    state.record("Can you do todays job post?", "")
+    assert state.snapshot()["attention"] == "job post"
+
+
+def test_completed_task_closes_matching_open_loop_and_goal():
+    state = EdgeCognitiveState()
+    state.record("I need to finish the release", "")
+    state.record("Can you check the release?", "")
+    state.record("The release is completed", "")
+    snap = state.snapshot()
+    assert not snap["goals"]
+    assert not snap["open_loops"]
+
+
+def test_reconstructive_recall_uses_active_context_and_reports_confidence():
+    state = EdgeCognitiveState()
+    state.record("I want to finish the release", "")
+    rows = [
+        {"memory": "The release checklist is ready", "valence_score": 1},
+        {"memory": "A recipe for soup", "valence_score": 1},
+    ]
+    ranked = state.prioritize_memories("what is next", rows)
+    assert ranked[0]["memory"] == "The release checklist is ready"
+    assert ranked[0]["_reconstruction_confidence"] in {"moderate", "high"}
+    assert "_reconstruction_confidence" not in rows[0]
+
+
+def test_direct_request_becomes_goal_but_identity_question_stays_open_loop():
+    state = EdgeCognitiveState()
+    state.record("Can you do todays job post?", "")
+    snap = state.snapshot()
+    assert snap["goals"] == ["job post"]
+
+    state.record("Do you know me?", "")
+    snap = state.snapshot()
+    assert any("know me" in loop for loop in snap["open_loops"])
+    assert not any("know me" in goal for goal in snap["goals"])
+
+
+def test_cognitive_health_detects_empty_and_active_state():
+    empty = EdgeCognitiveState().cognitive_health()
+    assert empty["status"] == "empty"
+    assert empty["population"] == 0.0
+
+    state = EdgeCognitiveState()
+    state.record("Can you do todays job post?", "")
+    state.record("From now on, be concise", "")
+    health = state.cognitive_health()
+    assert health["status"] in {"sparse", "active"}
+    assert health["components"]["working_memory"] == 2
+    assert health["attention_valid"] is True
+
+
+def test_lesson_evidence_is_visible_and_actionable():
+    state = EdgeCognitiveState()
+    state.record("Please explain this", "Long answer")
+    state.record("This is too verbose", "Short answer")
+    state.record("That was too long, be concise", "Short answer")
+    snap = state.snapshot()
+    assert snap["lesson_evidence"]
+    assert "lesson_guidance" in state.lesson_guidance()
+    assert "Prefer concise responses." in state.lesson_guidance()
+
+
+def test_tool_outcomes_are_bounded_and_visible():
+    state = EdgeCognitiveState()
+    state.record_tool_outcome("search_jobs", ok=True, detail="1 result")
+    state.record_tool_outcome("write_report", ok=False, detail="permission denied", error_type="OSError")
+    outcomes = state.snapshot()["tool_outcomes"]
+    assert outcomes[0]["tool"] == "write_report"
+    assert outcomes[0]["ok"] is False
+    assert outcomes[0]["error_type"] == "OSError"
+
+
+def test_should_attempt_uses_contradictions_with_energy_available():
+    state = EdgeCognitiveState()
+    state.record("I like coffee", "")
+    state.record("I do not like coffee", "")
+    ok, reason, action = state.should_attempt("Do I still like coffee — update my preference?", mode="agentic")
+    assert not ok
+    assert action == "clarify"
+    assert "contradictions" in reason
+
+
+def test_should_attempt_ignores_single_token_contradiction_overlap():
+    # Regression: the gate mirrors the recorder's topical bar (≥2 shared
+    # content tokens). One shared word must not hijack a turn into clarify.
+    state = EdgeCognitiveState()
+    state.record("I like coffee", "")
+    state.record("I do not like coffee", "")
+    ok, reason, action = state.should_attempt("Tell me about coffee brewing", mode="route")
+    assert ok
+    assert action == "proceed"
+
+
+def test_should_attempt_defers_low_energy_discretionary_work():
+    state = EdgeCognitiveState()
+    with state._lock:
+        state._energy = 0.2
+    ok, reason, action = state.should_attempt("Please write a draft plan", mode="route")
+    assert not ok
+    assert action == "defer"
+    assert "energy low" in reason
+
+
+def test_should_attempt_uses_response_review_flags_for_short_followup():
+    state = EdgeCognitiveState()
+    state.review_response("What failed?", "No.")
+    ok, reason, action = state.should_attempt("fix?", mode="route")
+    assert not ok
+    assert action == "clarify"
+    assert "answer review" in reason
+
+
+def test_should_attempt_proceeds_for_time_sensitive_prompt():
+    state = EdgeCognitiveState()
+    ok, reason, action = state.should_attempt("What is the latest status today?", mode="route")
+    assert ok
+    assert action == "proceed"
+    assert "time-sensitive" in reason
+
+
+def test_repeated_tool_failure_becomes_a_durable_lesson():
+    state = EdgeCognitiveState()
+    state.record_tool_outcome("calendar", ok=False, detail="unavailable", error_type="TimeoutError")
+    state.record_tool_outcome("calendar", ok=False, detail="still unavailable", error_type="TimeoutError")
+    assert any("calendar" in lesson for lesson in state.snapshot()["durable_lessons"])
+
+
+def test_identity_question_creates_grounded_guidance():
+    state = EdgeCognitiveState()
+    state.record("Do you know me?", "")
+    assert state.snapshot()["identity_questions"]
+    guidance = state.identity_guidance()
+    assert "Do not invent recognition" in guidance
+
+
+def test_successful_assistant_outcome_closes_goal():
+    state = EdgeCognitiveState()
+    state.record("Can you fix the release?", "")
+    assert state.snapshot()["goals"]
+    state.record("Here is the release update", "The release is fixed and completed.")
+    assert not state.snapshot()["goals"]
+
+
+def test_evaluation_snapshot_reports_behavioral_metrics():
+    state = EdgeCognitiveState()
+    state.record("I want to finish the release", "")
+    state.record_tool_outcome("repo", ok=True, detail="ok")
+    state.record_tool_outcome("deploy", ok=False, detail="failed", error_type="Timeout")
+    metrics = state.evaluation_snapshot()
+    assert metrics["active_goals"] == 1
+    assert metrics["tool_success_rate"] == 0.5
+    assert metrics["state_status"] != "empty"
+
+
+def test_subconscious_guidance_is_tentative_and_grounded():
+    state = EdgeCognitiveState()
+    state.record("I want to finish the release", "")
+    state.record("Can you check the release?", "")
+    state.record("The release is still blocked", "")
+    guidance = state.subconscious_guidance()
+    assert "tentative hypothesis" in guidance
+    assert "never as facts" in guidance
+
+
+def test_priming_context_is_query_relevant():
+    state = EdgeCognitiveState()
+    state.record("I want to finish the release", "")
+    state.record("Can you review the garden?", "")
+    related = state.priming_context("release status")
+    unrelated = state.priming_context("weather forecast")
+    assert "release" in related
+    assert unrelated == ""
+
+
+def test_identity_priming_leaks_into_identity_query():
+    state = EdgeCognitiveState()
+    state.record("Do you know me?", "")
+    priming = state.priming_context("What is my name?")
+    assert "identity thread" in priming
+    assert "do not infer" in priming
+
+
+def test_self_model_is_grounded_and_non_sentient():
+    state = EdgeCognitiveState()
+    model = state.self_model_context()
+    assert "bounded memory" in model
+    assert "uncertainty" in model
+    assert "conscious" not in model.lower()
+
+
+# ── learned-policy echo peek/ack ─────────────────────────────────────
+
+
+def test_policy_echo_ack_only_peeked_id():
+    """ack must not swallow a newer echo that arrived mid-turn."""
+    from cognition.attention import EdgeCognitiveState
+
+    state = EdgeCognitiveState()
+    state._policy = None  # keep the background machinery out of it
+    # Turn N: echo A ("say yes") is injected into the prompt.
+    state._policy_echo = "confirm policy A?"
+    state._policy_echo_prop = "propA"
+    assert state.peek_policy_echo() == "confirm policy A?"
+    # Mid-turn, a newer teaching lands and replaces the echo.
+    state._policy_echo = "confirm policy B?"
+    state._policy_echo_prop = "propB"
+    # Turn completes: ack must NOT clear B nor mark A delivered.
+    state.ack_policy_echo()
+    assert state.peek_policy_echo() == "confirm policy B?"
+    assert state._delivered_proposal_id is None
+    # Next turn carries B to completion: now it acks.
+    state.peek_policy_echo()
+    state.ack_policy_echo()
+    assert state.peek_policy_echo() == ""
+    assert state._delivered_proposal_id == "propB"
+
+
+def test_policy_echo_ack_clears_stale_peek():
+    from cognition.attention import EdgeCognitiveState
+
+    state = EdgeCognitiveState()
+    state._policy = None
+    # ack with nothing peeked/pending is a safe no-op.
+    state.ack_policy_echo()
+    assert state._delivered_proposal_id is None

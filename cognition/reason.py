@@ -3,7 +3,7 @@
 Shared numpy-vectorized embedding utilities for semantic retrieval and
 condensation. Centralizes what used to be four separate per-module
 implementations (tools.py web-evidence condensation, knowledge.py KB
-ranking, skills.py skill ranking, agentic.py policy filtering) into one
+ranking, agentic/skills.py skill ranking, agentic.py policy filtering) into one
 batched-matmul scoring primitive instead of four Python-loop cosine calls.
 
 Also centralizes the close-vector label-scoring primitive used by
@@ -18,11 +18,21 @@ additive, never a hard dependency.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import re
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
+from pathlib import Path
+import threading
 from typing import Protocol
 
 import numpy as np
+
+from system.log import get_logger
+from system.config import env_int
+
+log = get_logger(__name__)
 
 _WORD_RE = re.compile(r"[a-z0-9_./-]+", re.IGNORECASE)
 
@@ -45,9 +55,118 @@ class Embedder(Protocol):
     def embed_query(self, text: str, instruct: str = "") -> object: ...
     def embed_queries(self, texts: list[str], instruct: str = "") -> object: ...
 
+
+_EMBED_QUERY_CACHE_MAX = env_int("EMBED_QUERY_CACHE_MAX", 1024)
+# Keys hash text and instruct: holding full 1500-char texts x1024 in
+# keys alone costs ~1.5MB of strings on the Nano for zero benefit.
+_embed_query_cache: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
+_embed_query_cache_lock = threading.Lock()
+
+def _cache_key(text: str, instruct: str, embedder=None) -> tuple:
+    from cognition.memory.vecstore import HarrierEmbedder, _flyal_mode
+
+    if isinstance(embedder, HarrierEmbedder):
+        geometry = (embedder.base_url, embedder.model, embedder.dims, _flyal_mode())
+    else:
+        geometry = (id(embedder),)
+    return (
+        hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest(),
+        hashlib.sha256(instruct.encode("utf-8", errors="replace")).hexdigest(),
+        geometry,
+    )
+
+def cached_embed_query(embedder, text: str, instruct: str = "") -> np.ndarray:
+    """Embed one piece of text, reusing a prior vector for the exact same
+    (text, instruct, embedder geometry) pair instead of re-embedding. Safe drop-in replacement
+    for embedder.embed_query(text, instruct=instruct) at any call site that
+    might see repeated text (system prompts, persona blocks, recurring
+    queries) across different call sites/modules."""
+    if not hasattr(embedder, "embed_query"):
+        raise TypeError(
+            f"embedder must expose embed_query(), got {type(embedder).__name__}"
+        )
+    key = _cache_key(text, instruct, embedder)
+    with _embed_query_cache_lock:
+        cached = _embed_query_cache.get(key)
+        if cached is not None:
+            _embed_query_cache.move_to_end(key)
+            # Defensive copy: callers mutate the returned array in place
+            # (e.g. normalization); sharing the cached object would poison
+            # every later lookup of this key.
+            return cached.copy()
+    vec = np.asarray(embedder.embed_query(text, instruct=instruct), dtype=np.float32)
+    with _embed_query_cache_lock:
+        _embed_query_cache[key] = vec
+        _embed_query_cache.move_to_end(key)
+        while len(_embed_query_cache) > _EMBED_QUERY_CACHE_MAX:
+            _embed_query_cache.popitem(last=False)
+    return vec.copy()
+
+
+def cached_embed_batch(embedder, pairs: list[tuple[str, str]]) -> list[np.ndarray]:
+    """Embed several (text, instruct) pairs with a single HTTP POST for the misses.
+
+    Bit-identical vectors to calling cached_embed_query per pair (same cache,
+    same keys, same instruct prefixing, same geometry) — only the transport is
+    batched. Returns one float32 vector per pair, in order; each is a private
+    copy, matching cached_embed_query's contract.
+
+    Falls back to per-pair cached_embed_query when the embedder has no
+    query-semantic batch method or the batch POST fails (which also preserves
+    embed_query's 400-halve-and-retry for oversized inputs).
+    """
+    from cognition.memory.vecstore import HarrierEmbedder, instruct_query_text
+
+    if not pairs:
+        return []
+    keys = [_cache_key(t, i, embedder) for t, i in pairs]
+    out: list[np.ndarray | None] = [None] * len(pairs)
+    miss_idx: list[int] = []
+    with _embed_query_cache_lock:
+        for n, key in enumerate(keys):
+            hit = _embed_query_cache.get(key)
+            if hit is not None:
+                _embed_query_cache.move_to_end(key)
+                out[n] = hit.copy()
+            else:
+                miss_idx.append(n)
+    if miss_idx:
+        # Batch fast path only for embedders with a query-semantic batch
+        # contract: HarrierEmbedder.embed_batch feeds the same _embed_texts
+        # funnel as embed_query, so pre-prefixed batch input yields identical
+        # vectors. A foreign embed_batch/embed_documents/embed may be
+        # document-semantic — those vectors must never be cached as query
+        # vectors, so anything else falls back to per-pair cached_embed_query
+        # (the Embedder protocol's embed_query).
+        batch = embedder.embed_batch if isinstance(embedder, HarrierEmbedder) else None
+        try:
+            if batch is None:
+                raise AttributeError("no query-semantic batch method")
+            prefixed = [instruct_query_text(pairs[n][0], pairs[n][1]) for n in miss_idx]
+            vecs = np.asarray(batch(prefixed), dtype=np.float32)
+            if len(vecs) != len(miss_idx):
+                raise ValueError(f"batch returned {len(vecs)} vectors for {len(miss_idx)} texts")
+        except Exception:
+            # Same outcome as before batching existed, one POST per pair.
+            for n in miss_idx:
+                text, instruct = pairs[n]
+                out[n] = cached_embed_query(embedder, text, instruct=instruct)
+            return [v for v in out if v is not None]
+        with _embed_query_cache_lock:
+            for n, vec in zip(miss_idx, vecs):
+                _embed_query_cache[keys[n]] = vec
+                _embed_query_cache.move_to_end(keys[n])
+                while len(_embed_query_cache) > _EMBED_QUERY_CACHE_MAX:
+                    _embed_query_cache.popitem(last=False)
+                out[n] = vec.copy()
+    return [v for v in out if v is not None]
+
+
 def cosine_similarity(vec_a, vec_b) -> float:
-    a = np.asarray(vec_a, dtype=float)
-    b = np.asarray(vec_b, dtype=float)
+    # float32 throughout: the old float64 default doubled temp memory per
+    # call for precision nothing downstream can use (scores gate thresholds).
+    a = np.asarray(vec_a, dtype=np.float32)
+    b = np.asarray(vec_b, dtype=np.float32)
     na, nb = np.linalg.norm(a), np.linalg.norm(b)
     if na == 0 or nb == 0:
         return 0.0
@@ -61,8 +180,8 @@ def block_relevance_score(embedder, query: str, text: str, instruct: str | None 
     if embedder is None or not query or not text:
         return 0.0
     try:
-        q_vec = embedder.embed_query(query, instruct=instruct)
-        b_vec = embedder.embed_query(text[:1500], instruct=instruct)
+        q_vec = cached_embed_query(embedder, query, instruct=instruct or "")
+        b_vec = cached_embed_query(embedder, text[:1500], instruct=instruct or "")
     except Exception:
         return 0.0
     return cosine_similarity(q_vec, b_vec)
@@ -153,7 +272,7 @@ def embed_batch_or_none(embedder: Embedder, texts: list[str]) -> np.ndarray | No
             except Exception:
                 continue
     try:
-        vecs = [np.asarray(embedder.embed_query(t), dtype=np.float32) for t in texts]
+        vecs = [cached_embed_query(embedder, t) for t in texts]
         return np.stack(vecs) if vecs else np.empty((0, 0), dtype=np.float32)
     except Exception:
         return None
@@ -198,7 +317,7 @@ def select_relevant_chunks(
 
     Uses one batched embed call + one vectorized matmul when an embedder is
     available; falls back to per-chunk keyword overlap otherwise. This is
-    what lets knowledge.py/skills.py/agentic.py inject only the relevant
+    what lets knowledge.py, agentic/skills.py, and agentic/agentic.py inject only the relevant
     slice of a document instead of the whole file.
     """
     if not chunks:
@@ -206,10 +325,7 @@ def select_relevant_chunks(
 
     if embedder is not None and hasattr(embedder, "embed_query"):
         try:
-            query_vec = (
-                embedder.embed_query(query, instruct=instruct) if instruct
-                else embedder.embed_query(query)
-            )
+            query_vec = cached_embed_query(embedder, query, instruct=instruct or "")
             chunk_vecs = embed_batch_or_none(embedder, chunks)
             if chunk_vecs is not None and chunk_vecs.shape[0] == len(chunks):
                 scores = batch_cosine_scores(query_vec, chunk_vecs)
@@ -224,7 +340,7 @@ def select_relevant_chunks(
                         break
                 return out
         except Exception:
-            pass  # fall through to keyword scoring below
+            log.warning("reason: embedding scoring failed, falling through to keyword scoring")
 
     scored = [(keyword_overlap_score(query, c), c) for c in chunks]
     scored = [(s, c) for s, c in scored if s > 0]
@@ -291,3 +407,54 @@ def label_scores_topk(
         label: sum(sorted(values, reverse=True)[:k]) / min(k, len(values))
         for label, values in by_label.items()
     }
+
+# ── shared vector-cache path builder ─────────────────────────────────────────
+# Used by both think.py's route-exemplar cache and capability.py's
+# trigger-embedding cache, so the two on-disk caches derive their keys and
+# directory placement identically instead of drifting apart over time.
+
+def cache_vector_path(
+    key_payload: dict,
+    cache_dir_env: str,
+    default_dir: str,
+    per_user: bool = True,
+) -> "Path | None":
+    """Return the on-disk path for a cached embedding vector, or None if
+    disk caching is disabled or the path can't be built.
+
+    key_payload — JSON-serializable dict identifying what's being cached
+    (e.g. examples + instruct + embedder identity). Hashed with sha256,
+    sorted keys, so any change to the payload content changes the file.
+
+    cache_dir_env / default_dir — env var name (and its default) that
+    holds the cache subdirectory, e.g. ("ROUTE_VECTOR_CACHE_DIR",
+    "route_vectors") or ("CAP_VECTOR_CACHE_DIR", "capability_vectors").
+
+    per_user — if True (default, matches think.py's existing behavior),
+    the cache lives under system.userspace.user_state_dir(current_user_id())
+    unless cache_dir_env resolves to an absolute path. Set False for
+    caches that are identical across users (e.g. capability triggers
+    are not user-specific data — consider per_user=False for those if
+    you'd rather share one file across users instead of duplicating it
+    per user_state_dir).
+    """
+    try:
+        digest = hashlib.sha256(
+            json.dumps(key_payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:24]
+        raw_dir = Path(os.environ.get(cache_dir_env, default_dir)).expanduser()
+        if per_user and not raw_dir.is_absolute():
+            from system.userspace import current_user_id, user_state_dir
+            uid = current_user_id()
+            if uid == "guest":
+                # Guest sentinel: return None so callers skip persistence.
+                # Writing here would materialize ~/.aiko/guest/ at pre-auth
+                # boot (e.g. wakeup's cache prewarm) with throwaway vectors
+                # that are rebuilt under the real user dir after login.
+                return None
+            base = user_state_dir(uid) / raw_dir
+        else:
+            base = raw_dir
+        return base / f"{digest}.npz"
+    except Exception:
+        return None

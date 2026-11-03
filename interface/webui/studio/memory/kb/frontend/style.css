@@ -1,0 +1,268 @@
+:root {
+  --bg: #f4f0e6;
+  --panel: #faf8f1;
+  --text: #4a3728;
+  --muted: #7a8f68;
+  --dim: #d4ddd0;
+  --accent: #3a4a2e;
+  --green: #5b7a4e;
+  --purple: #3a4a2e;
+  --brown: #a0522d;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--dim);
+}
+
+header h1 {
+  font-size: 15px;
+  margin: 0;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+header .sub {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.wrap {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.sidebar {
+  width: 280px;
+  background: var(--panel);
+  border-right: 1px solid var(--dim);
+  padding: 12px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.sidebar label {
+  display: block;
+  margin: 8px 0 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.sidebar input[type=number],
+.sidebar input[type=text],
+.sidebar select {
+  width: 100%;
+  background: #ece6d6;
+  border: 1px solid var(--dim);
+  color: var(--text);
+  padding: 6px 8px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.btn {
+  background: #d4ddd0;
+  border: 1px solid var(--accent);
+  color: var(--text);
+  padding: 7px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  width: 100%;
+}
+
+.btn:hover {
+  background: #b3c49a;
+}
+
+.btn:focus-visible,
+.zoom-ctl button:focus-visible,
+.sidebar input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+#canvas {
+  flex: 1;
+  position: relative;
+  background: radial-gradient(ellipse at 50% 40%, #f4f0e6 0%, var(--bg) 70%);
+}
+
+svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.legend {
+  margin-top: 12px;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.details {
+  margin-top: 14px;
+  padding: 10px;
+  background: #ece6d6;
+  border-radius: 4px;
+  border: 1px solid var(--dim);
+  display: none;
+  font-size: 11px;
+}
+
+.detail-label {
+  color: var(--muted);
+  margin-top: 6px;
+}
+
+.detail-value {
+  overflow-wrap: anywhere;
+}
+
+.score-bar {
+  height: 4px;
+  background: var(--dim);
+  border-radius: 2px;
+  margin: 2px 0 6px;
+}
+
+.score-bar i {
+  display: block;
+  height: 100%;
+  background: var(--green);
+  border-radius: 2px;
+}
+
+/* Reference-style overlays: title top-left, stats top-right */
+.graph-title {
+  position: absolute; top: 14px; left: 18px;
+  font-size: 11px; letter-spacing: .22em; font-weight: 600;
+  color: var(--green); pointer-events: none;
+}
+.graph-stats {
+  position: absolute; top: 14px; right: 18px;
+  font-size: 10px; letter-spacing: .08em;
+  color: var(--muted); pointer-events: none;
+}
+
+.node-label {
+  fill: var(--text); font-size: 9px; pointer-events: none;
+  transition: opacity 0.12s ease-out;
+}
+.node:hover .node-label { opacity: 0.95; }
+
+.zoom-ctl {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  gap: 4px;
+}
+
+.zoom-ctl button {
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+  border: 1px solid var(--dim);
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+}
+
+/* Shared STM / LTM / KB studio tabs, styled like Approval Studio filters. */
+.memory-studio-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 0 0 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--dim);
+}
+.memory-studio-tab {
+  flex: 1;
+  background: #ece6d6;
+  border: 1px solid var(--dim);
+  color: var(--muted);
+  text-align: center;
+  text-decoration: none;
+  font-size: 10px;
+  letter-spacing: .12em;
+  padding: 6px 8px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  transition: border-color .15s, color .15s, background .15s, box-shadow .15s;
+}
+.memory-studio-tab:hover,
+.memory-studio-tab.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(192, 132, 252, 0.12);
+  box-shadow: 0 0 8px rgba(192, 132, 252, 0.22);
+}
+
+/* ── inline-style neutralizers (HTML untouched) ── */
+#back-btn[style*="#1a1028"],
+.back[style*="#1a1028"],
+a[style*="#1a1028"] {
+  background: #e8e2d4 !important;
+}
+/* legend / palette / swatch dots → elegant accents */
+.palette-dot[style*="#e8c84a"], .swatch[style*="#e8c84a"], i[style*="#e8c84a"],
+.palette-dot[style*="#f0c14a"], .swatch[style*="#f0c14a"], i[style*="#f0c14a"],
+.palette-dot[style*="#d68792"], .swatch[style*="#d68792"], i[style*="#d68792"] {
+  background: #c8813a !important;
+}
+.palette-dot[style*="#84d4e8"], .swatch[style*="#84d4e8"], i[style*="#84d4e8"],
+.palette-dot[style*="#3de0ff"], .swatch[style*="#3de0ff"], i[style*="#3de0ff"],
+.palette-dot[style*="#51d4c8"], .swatch[style*="#51d4c8"], i[style*="#51d4c8"],
+.palette-dot[style*="#4ade80"], .swatch[style*="#4ade80"], i[style*="#4ade80"] {
+  background: #5b7a4e !important;
+}
+.palette-dot[style*="#a78bfa"], .swatch[style*="#a78bfa"], i[style*="#a78bfa"],
+.palette-dot[style*="#e879f9"], .swatch[style*="#e879f9"], i[style*="#e879f9"] {
+  background: #3a4a2e !important;
+  box-shadow: none !important;
+}
+.palette-dot[style*="#c651a8"], .swatch[style*="#c651a8"], i[style*="#c651a8"] {
+  background: #c8813a !important;
+}
+
+
+/* ── dark variant: hardcoded light surfaces → dark ── */
+html[data-theme="dark"] .sidebar input[type=number],
+html[data-theme="dark"] .sidebar input[type=text],
+html[data-theme="dark"] .sidebar select { background: #211738; }
+html[data-theme="dark"] .btn { background: #241a3e; }
+html[data-theme="dark"] #canvas { background: radial-gradient(ellipse at 50% 40%, #241a3e 0%, #0d0718 70%); }
+html[data-theme="dark"] .details { background: #211738; }
+html[data-theme="dark"] .memory-studio-tab { background: #211738; }
+
+
+html[data-theme="dark"] .pill.merged { background: linear-gradient(135deg, #241a3e, #211738); }

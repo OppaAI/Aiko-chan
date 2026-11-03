@@ -2,33 +2,54 @@
 cognition/think.py
 
 Aiko's chat facade.
-  - Routes between single-shot chat and the agentic task loop in skills.agentic.
+  - Routes between single-shot chat and the agentic task loop in agentic.agentic.
   - Streams llama.cpp response to console + TTS simultaneously.
-  - Queues long-term memory writes (delegated to memory.memorize's async write queue).
+  - Queues long-term memory writes (delegated to cognition.memory.memorize's async write queue).
   - Owns scheduled-job callbacks and idle learner handoff (delegated to memory.learn).
   - Owns the proactive idle check-in state machine (config/proactive.yaml),
     which is also the "is Aiko resting" signal memory.learn's idle_learner_loop
     waits on before starting autonomous quick-study top-ups.
 
 Memory + knowledge-base fetch:
-  route() kicks off _fetch_memory_and_knowledge() on cognition's
-  shared CONTEXT_POOL BEFORE intent is resolved, since every path
-  (localchat/webchat/agentic) needs memory + KB regardless of which one
-  intent routing picks. The resulting future is handed to whichever
-  handler ends up running, so the fetch overlaps intent classification
-  itself instead of waiting for it to finish first. Wiki/policy/skill/
-  experience context is agentic-only and fetched separately, inside
-  skills.agentic.run_agentic_chat, only once intent has actually resolved
-  to "agentic".
+  route() runs a bounded self-assessment gate (should_attempt, mode=route)
+  *before* quaternary intent routing, so soft outcomes (defer/clarify/
+  degrade_chat) apply even when the turn would have been localchat.
+  Then route() resolves quaternary intent (greeting/localchat/webchat/agentic).
+  Greeting-only turns short-circuit directly to the LLM without memory/KB
+  recall or memory writeback. All other paths start memory + KB recall only
+  after intent is known, then hand the resulting future to the selected
+  handler. Wiki/policy/skill/experience context is agentic-only and fetched
+  separately, inside agentic.agentic.run_agentic_chat, only once intent has
+  actually resolved to "agentic".
+
+Deep-think mode:
+  A human being asked a hard question doesn't just answer with the first
+  idea that comes to mind — they stop, turn it over, check it against what
+  they already know, and only then speak. `/think` and an explicit natural-
+  language ask ("think this through more carefully", "really think about
+  this") both route through chat(deep_think=True) — see _DEEP_THINK_RE and
+  _is_deep_think_request() below. This is detected as a fast regex path in
+  route(), BEFORE quaternary intent classification, because it's a request
+  about *how* to answer (take more care), not *what kind* of task this is —
+  it layers on top of localchat rather than competing with agentic/webchat
+  as a fifth semantic label. Deep-think mode widens memory/knowledge recall
+  (DEEP_THINK_MEMORY_LIMIT/DEEP_THINK_KNOWLEDGE_LIMIT), multiplies the token
+  budget (DEEP_THINK_TOKEN_SCALE), injects the structured scaffold from
+  cognition.deep_think (understand → evidence → filter → deliberate →
+  verify → self-check → synthesize), reranks recall with stricter recency
+  and contradiction flags, and exposes a short structured summary for the
+  UI instead of raw chain-of-thought.
 """
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import os
 import json
 import warnings
-import hashlib
+
+from system.config import env_float, env_int
 
 import numpy as np
 
@@ -38,38 +59,80 @@ logging.getLogger("torch").setLevel(logging.ERROR)
 os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 
 from datetime import datetime
-from datetime import time as dt_time
 from openai import OpenAI
 from pathlib import Path
+import hashlib
 import re
+import contextvars
+from contextlib import contextmanager
 import threading
 import time
 import unicodedata
 
-from memory.memorize import AikoMemorize
-from sensory.speak    import AikoSpeak
-from toolkit.tools    import web_search_context
-from skills.agentic  import run_agentic_chat
-from skills.wiki import wiki_knowledge_context_for
-from memory.knowledge import knowledge_context_for
+from agentic.tools    import web_search_context
+from agentic.agentic  import run_agentic_chat
+from agentic.wiki import wiki_knowledge_context_for
+from cognition.knowledge import knowledge_context_for
+from cognition.knowledge.schema import KNOWLEDGE_QUERY_INSTRUCT
 from cognition import CONTEXT_POOL
+from cognition.recall_budget import fit_block as _fit_recall_block
 from system.log      import get_logger
-from skills.social import run_scheduled_weekly_social
-from system.schedule import DueJob, register_system_handler
-from system.userspace import current_user_id, current_display_name, user_profile_path, user_state_dir
+from system.schedule import DueJob, schedule_job_record, list_schedule_records, cancel_schedule_record
+from system.userspace import current_user_id, current_display_name, user_profile_path
+from system import brain_trace as _brain_trace
 from system import bioclock
 from cognition import reason
-from memory import learn
+from cognition.memory import learn
+from cognition.memory.vecstore import _QUERY_INSTRUCT
+from sensory import latency as _latency
+
+# NOTE: weekly_social handler is registered by system.schedule
+# (register_social_handlers via register_system_handlers_only at boot) — do
+# NOT re-register here. Importing agentic.toolkit.social at think-module load
+# dragged the whole social stack (OpenAI clients, requests, vision deps) into
+# every cognition.think import.
 
 log = get_logger(__name__)
-register_system_handler("weekly_social", run_scheduled_weekly_social)
+
+_GOAL_REVIEW_TITLE = "[Aiko] Goal review"
+
+def _sync_goal_review_schedule(state) -> None:
+    """Keep one gentle recurring review reminder in sync with cognitive state."""
+    try:
+        uid = current_user_id()
+        snap = state.snapshot()
+        active = bool(snap.get("goals") or snap.get("open_loops"))
+        jobs = list_schedule_records(include_disabled=True, user_id=uid)
+        existing = [job for job in jobs if job.get("title") == _GOAL_REVIEW_TITLE]
+        if active and not any(job.get("enabled", True) for job in existing):
+            now = bioclock.local_now()
+            schedule_job_record(
+                _GOAL_REVIEW_TITLE,
+                "Review Aiko\x27s active goals and unresolved threads; ask the user before taking consequential action.",
+                now.strftime("%H:%M"),
+                frequency="interval",
+                interval_seconds=21600,
+                action="announce",
+                user_id=uid,
+            )
+        elif not active:
+            for job in existing:
+                if job.get("enabled", True):
+                    cancel_schedule_record(str(job.get("id")), user_id=uid)
+    except Exception as exc:
+        log.debug("Goal review schedule sync skipped: %s", exc)
 
 # ── boot labels ───────────────────────────────────────────────────────────────
 
+# git-status TTL cache for per-turn project signals (monotonic, signals).
+_GIT_STATUS_CACHE: tuple = (0.0, [])
+
 BOOT_LABELS = {
-    'think_start':  'Loading llama.cpp client + persona...',
-    'think_warmup': 'Warming up language model...',
-    'think_reminders': 'Starting reminder scheduler...',
+    'think_start':    'Loading llama.cpp client + persona...',
+    'think_warmup':   'Warming up language model...',
+    'think_mem_wait': 'Waiting on memory system...',
+    # 'think_prewarm' removed — prewarm moved to system/prepare (post-auth),
+    # so the label would count a step that never fires and skew boot %.
 }
 
 # ── config ────────────────────────────────────────────────────────────────────
@@ -77,30 +140,413 @@ BOOT_LABELS = {
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:8080/v1")
 LLM_MODEL    = os.getenv("LLM_MODEL",    "ministral")
 ROUTER_MODEL = os.getenv("ROUTER_MODEL", LLM_MODEL)
-LLM_TIMEOUT  = float(os.getenv("LLM_TIMEOUT", 120))
+LLM_TIMEOUT  = env_float("LLM_TIMEOUT", 120)
 # Stop sequences sent on every LLM call. Model-specific — only the real
 # EOS matters; the third legacy token ([INST], raw instruct formatting)
 # is never emitted in chat-completions mode and was dead weight. Default
 # keeps the two common EOS tokens and drops [INST]; override per model
 # via LLM_STOP_SEQUENCES (comma-separated) if a different EOS is needed.
 LLM_STOP_SEQUENCES = [s.strip() for s in os.getenv("LLM_STOP_SEQUENCES", "</s>,<|im_end|>").split(",") if s.strip()]
-CONTEXT_WINDOW_TURNS = int(os.getenv("CONTEXT_WINDOW_TURNS", 8))
 
-# Shared default recall/knowledge depth across all three chat paths
-# (localchat/webchat/agentic) — see _fetch_memory_and_knowledge below.
-MEMORY_RECALL_LIMIT = int(os.getenv("MEMORY_RECALL_LIMIT", 3))
-KNOWLEDGE_RECALL_LIMIT = int(os.getenv("KNOWLEDGE_RECALL_LIMIT", 3))
+# llama-server KV-cache reuse: re-evaluate the longest common prompt prefix
+# from cache instead of re-prefilling every turn. No-op on backends that
+# ignore the field. Disable with LLM_CACHE_PROMPT=0 if a non-llama proxy
+# rejects unknown body params.
+_LLM_CACHE_PROMPT = os.getenv("LLM_CACHE_PROMPT", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+# Process-wide cache for deterministic LLM intent classifications
+# (_classify_intent_llm). The classifier runs at temperature=0.0 with
+# max_tokens=6 on a prompt that is fully determined by (model,
+# allow_agentic, include_greeting, user_input), so a repeat input always
+# yields the same label — caching it skips a whole LLM round-trip on the
+# per-turn routing path. Keyed by sha256 over those four components.
+# No TTL: the mapping is content-addressed, not time-sensitive.
+# Only successful, valid classifications are stored; the exception fallback
+# ("localchat") is never cached, and neither are empty or unparseable LLM
+# responses, so a transient glitch can't suppress a later retry.
+# AIKO_INTENT_CACHE_MAX=0 disables the cache (debugging).
+_INTENT_CACHE_MAX = int(os.getenv("AIKO_INTENT_CACHE_MAX", "2048"))
+_intent_llm_cache: dict[str, str] = {}
+_intent_llm_cache_lock = threading.Lock()
+
+
+def _intent_llm_cache_key(
+    user_input: str, *, model: str, allow_agentic: bool, include_greeting: bool
+) -> str:
+    h = hashlib.sha256()
+    h.update(model.encode("utf-8"))
+    h.update(b"\x001" if allow_agentic else b"\x000")
+    h.update(b"\x001" if include_greeting else b"\x000")
+    h.update(user_input.encode("utf-8"))
+    return h.hexdigest()
+
+# No-think mode for hybrid-reasoning templates (MiniCPM5 `enable_thinking`,
+# Qwen3-style `enable_thinking`, MiniCPM4.1 `/no_think` suffix). When set,
+# chat requests both append the `/no_think` suffix to the final user turn
+# (template-level, works through any server that honors the convention)
+# AND send chat_template_kwargs.enable_thinking=false (honored by
+# vLLM/SGLang and any llama.cpp build that forwards template kwargs; inert
+# JSON elsewhere). Either mechanism firing is enough. Leave off for
+# non-thinking models (ministral) — the suffix would be visible prompt
+# noise to a template that doesn't strip it.
+_LLM_NO_THINK = os.getenv("LLM_NO_THINK", "").strip().lower() in {"1", "true", "yes", "on"}
+
+# Piece 3 (MioTTS latency): when on, the earliest *safe* complete sentence is
+# fed to the sentence-streaming TTS pipeline while the rest of the LLM
+# response is still generating, instead of waiting for the full draft to
+# clear review + gate_speak. Every streamed sentence still passes the two
+# required checks at sentence level — local _review_response and the
+# outbound gate_speak conscience gate — before any audio is synthesized for
+# it. Default ON: stream the earliest safe sentences to TTS during
+# generation. Set AIKO_SENTENCE_STREAM=0 to go back to full-draft gating
+# first, then sentence TTS.
+#
+# Tradeoff (explicitly accepted): audio for a sentence that passed its own
+# gates cannot be recalled if the later full-draft review/correction wants
+# to rewrite it. Corrections fire only on >=2 review flags (rare), and any
+# divergence between spoken audio and final text is logged loudly.
+_SENTENCE_STREAM = os.getenv("AIKO_SENTENCE_STREAM", "1").strip().lower() not in {"0", "false", "no", "off", ""}
+# Prompt-elicited thinking tags (<thinking>/<plan>/<check> from the reasoning
+# guide) and parroted private prompt blocks (<inner_speech>,
+# <subconscious_guidance>, <subconscious_priming>). The model is told to keep
+# all of these out of its spoken reply, but small models leak them — so we
+# extract them deterministically instead of hoping.
+# - thinking tags -> UI thinking box via the __THINKING__ channel (fresh
+#   per-turn cognition, worth showing).
+# - private blocks -> dropped silently (prompt echoes, not fresh thinking;
+#   boxing them would fill every turn with the same stale thread).
+# Neither must ever reach TTS, chat text, or stored history as spoken words.
+_THINK_TAGS = ("thinking", "plan", "check")
+_PRIVATE_TAGS = ("inner_speech", "subconscious_guidance", "subconscious_priming")
+_THINK_BLOCK_RE = re.compile(r"<(thinking|plan|check)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
+_PRIVATE_BLOCK_RE = re.compile(
+    r"<(inner_speech|subconscious_guidance|subconscious_priming)>(.*?)</\1>",
+    re.DOTALL | re.IGNORECASE,
+)
+_ANY_OPEN_RE = re.compile(
+    r"<(thinking|plan|check|inner_speech|subconscious_guidance|subconscious_priming)>",
+    re.IGNORECASE,
+)
+_ANY_TRAIL_RE = re.compile(
+    r"<(thinking|plan|check|inner_speech|subconscious_guidance|subconscious_priming)>.*$",
+    re.DOTALL | re.IGNORECASE,
+)
+# A lone closer with no opener — small models parrot half a block. Strip it
+# so literal tags are never spoken aloud or shown in the UI.
+_STRAY_CLOSE_RE = re.compile(
+    r"</(thinking|plan|check|inner_speech|subconscious_guidance|subconscious_priming)>",
+    re.IGNORECASE,
+)
+_THINKING_TEXT_CAP = 2000  # UI box cap; thinking beyond this is truncated
+
+
+def _strip_private_echo(text: str) -> str:
+    """Remove parroted private prompt blocks from harvested thinking text.
+
+    Complete blocks and a trailing unclosed private opener are dropped —
+    they are prompt echoes, not fresh thinking, and must never be boxed
+    into the UI thinking box or persisted as genuine thought.
+    """
+    text = _PRIVATE_BLOCK_RE.sub("", text or "")
+    text = re.sub(
+        r"<(inner_speech|subconscious_guidance|subconscious_priming)>.*$",
+        "", text, flags=re.DOTALL | re.IGNORECASE,
+    )
+    return _STRAY_CLOSE_RE.sub("", text).strip()
+
+
+def _split_thinking(text: str) -> tuple[str, str]:
+    """Split thinking/private blocks out of text.
+
+    Returns (thinking, clean). Thinking tags go to the box; parroted private
+    prompt blocks are dropped silently. Handles complete <tag>...</tag> blocks
+    and a trailing unclosed opener (models often forget the closer). Tag
+    markup is removed from the thinking side too — the box shows her thoughts,
+    not XML.
+    """
+    if not text or "<" not in text:
+        return "", text
+    parts: list[str] = []
+    def _grab(m: "re.Match") -> str:
+        inner = _strip_private_echo(m.group(2) or "")
+        if inner:
+            parts.append(inner)
+        return ""
+    # Drop parroted private prompt blocks BEFORE harvesting thinking: a
+    # <thinking> block nested inside an <inner_speech> wrapper is prompt
+    # parroting, not fresh cognition, and must never reach the thinking box.
+    clean = _PRIVATE_BLOCK_RE.sub("", text)
+    clean = _THINK_BLOCK_RE.sub(_grab, clean)
+    # Trailing unclosed block: thinking content -> box, private content ->
+    # dropped. Either way it is not speech.
+    m = _ANY_TRAIL_RE.search(clean)
+    if m:
+        tag = (m.group(1) or "").lower()
+        inner = _strip_private_echo(_ANY_OPEN_RE.sub("", clean[m.start():]))
+        if tag in _THINK_TAGS and inner:
+            parts.append(inner)
+        clean = clean[:m.start()]
+    clean = _STRAY_CLOSE_RE.sub("", clean)
+    thinking = "\n".join(parts).strip()
+    if len(thinking) > _THINKING_TEXT_CAP:
+        thinking = thinking[:_THINKING_TEXT_CAP].rstrip() + "…"
+    return thinking, clean
+
+
+class _ThinkingTokenFilter:
+    """Token-level filter for thinking tags in the LLM stream.
+
+    Tags can split across tokens, so a small rolling buffer holds back a
+    trailing partial-tag tail until the next chunk (or final flush) decides it.
+    Feed each token's text via .feed(); read .thinking for extracted thoughts
+    and use the returned clean text in place of the token.
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self.thinking_parts: list[str] = []
+
+    def feed(self, token: str, final: bool = False) -> str:
+        if token:
+            self._buf += token
+        # Drop complete parroted private blocks BEFORE harvesting thinking:
+        # a <thinking> block nested inside a private echo is prompt parroting,
+        # not fresh cognition, and must never reach the thinking box.
+        buf = _PRIVATE_BLOCK_RE.sub("", self._buf)
+        out: list[str] = []
+        last = 0
+        for m in _THINK_BLOCK_RE.finditer(buf):
+            out.append(buf[last:m.start()])
+            inner = _strip_private_echo(m.group(2) or "")
+            if inner:
+                self.thinking_parts.append(inner)
+            last = m.end()
+        out.append(buf[last:])
+        clean = _STRAY_CLOSE_RE.sub("", "".join(out))
+        if not final:
+            # Hold back anything from an unclosed thinking opener onward: the
+            # closer may arrive in a later chunk, and text inside the block
+            # must never leak into speech/chat. Hold from the FIRST opener —
+            # anything between an earlier and a later opener is still inside
+            # a block and must not be released.
+            opens = list(_ANY_OPEN_RE.finditer(clean))
+            if opens:
+                self._buf = clean[opens[0].start():]
+                return clean[:opens[0].start()]
+            # Hold back a trailing partial-tag tail ("<", "<th", "<think", …).
+            lt = clean.rfind("<")
+            if lt != -1 and ">" not in clean[lt:]:
+                self._buf = clean[lt:]
+                return clean[:lt]
+            self._buf = ""
+            return clean
+        # Final flush: release everything; an unclosed trailing block counts
+        # as thinking, matching _split_thinking.
+        thinking, clean = _split_thinking(clean)
+        if thinking:
+            self.thinking_parts.append(thinking)
+        self._buf = ""
+        return clean
+
+    @property
+    def thinking(self) -> str:
+        text = "\n".join(self.thinking_parts).strip()
+        if len(text) > _THINKING_TEXT_CAP:
+            text = text[:_THINKING_TEXT_CAP].rstrip() + "…"
+        return text
+_NO_THINK_SUFFIX = " /no_think"
+
+
+def _llm_extra_body() -> dict:
+    """Extra OpenAI body params for chat completions (cache + no-think)."""
+    body: dict = {
+        "cache_prompt": _LLM_CACHE_PROMPT,
+        "repeat_penalty": float(os.getenv("REPEAT_PENALTY", 1.15)),
+        "repeat_last_n":  int(os.getenv("REPEAT_LAST_N", 64)),
+        "top_k":          int(os.getenv("TOP_K", 40)),
+    }
+    if _deep_think_ctx.get():
+        # /think turn: explicitly re-enable thinking (server default may be off).
+        body["chat_template_kwargs"] = {"enable_thinking": True}
+    elif _LLM_NO_THINK:
+        body["chat_template_kwargs"] = {"enable_thinking": False}
+    return body
+
+
+def _apply_no_think(messages: list[dict]) -> list[dict]:
+    """Return a copy with `/no_think` appended to the last user turn.
+
+    Idempotent (skips when already suffixed). History/store keep the raw
+    text — this only touches the request payload. Deep-think (/think) turns
+    are exempt so thinking can be re-enabled on demand.
+    """
+    if not _LLM_NO_THINK or not messages or _deep_think_ctx.get():
+        return messages
+    out = [dict(m) for m in messages]
+    for m in reversed(out):
+        if m.get("role") == "user":
+            content = str(m.get("content") or "")
+            if not content.rstrip().endswith("/no_think"):
+                m["content"] = content.rstrip() + _NO_THINK_SUFFIX
+            break
+    return out
+CONTEXT_WINDOW_TURNS = env_int("CONTEXT_WINDOW_TURNS", 8)
+
+# Shared default recall/knowledge depth across the chat paths —
+# see _fetch_chained_knowledge (localchat/webchat) and
+# _fetch_memory_and_knowledge (agentic, until piece 2).
+MEMORY_RECALL_LIMIT = env_int("MEMORY_RECALL_LIMIT", 3)
+KNOWLEDGE_RECALL_LIMIT = env_int("KNOWLEDGE_RECALL_LIMIT", 3)
+# Recall hard-timeout — a slow local embed (llama.cpp) must not block the turn.
+# On expiry the memory/KB recall is skipped (empty) rather than stalling.
+MEMORY_RECALL_TIMEOUT = env_float("MEMORY_RECALL_TIMEOUT", 5.0)
+# LLM circuit breaker — after N consecutive failures to llama-server, stop
+# paying the full LLM_TIMEOUT on every turn. The circuit half-opens after
+# COOLDOWN seconds to allow one trial call; success closes it, failure re-opens.
+_LLM_CIRCUIT_THRESHOLD = env_int("LLM_CIRCUIT_THRESHOLD", 3)
+_LLM_CIRCUIT_COOLDOWN_S = env_float("LLM_CIRCUIT_COOLDOWN_S", 30.0)
 # Minimum recall score (see _MemoryBackend._rank_and_score's final_score in
 # memory/memorize.py for the formula) a memory must clear to be included in
 # context. Same numeric scale as memorize.py's MEMORY_RECALL_SCORE_THRESHOLD
 # (~0.015) — that constant only decides quick-vs-wide search, this one
 # actually filters weak individual results out of what gets returned.
 # 0 = off (default) — no memory is ever dropped for being weak.
-MEMORY_MIN_SCORE = float(os.getenv("MEMORY_MIN_SCORE", "0.0"))
+MEMORY_MIN_SCORE = env_float("MEMORY_MIN_SCORE", 0.015)
 
-_BASE_PREDICT    = int(os.getenv("LLM_MAX_TOKENS", os.getenv("BASE_PREDICT", 280)))
-_AGENT_MAX_TOKENS = int(os.getenv("AGENT_MAX_TOKENS", _BASE_PREDICT * 4))
-_REASONING_SCALE = int(os.getenv("REASONING_SCALE", 3))
+# ── deep-think mode ───────────────────────────────────────────────────────────
+# See module docstring. Triggered by /think (orchestrate.py) or by an
+# explicit natural-language ask matched by _DEEP_THINK_RE below. Scales well
+# past ordinary self._reasoning mode (_REASONING_SCALE) on every axis: token
+# budget, memory/knowledge recall depth, and prompt structure.
+DEEP_THINK_TOKEN_SCALE = env_int("DEEP_THINK_TOKEN_SCALE", 6)
+DEEP_THINK_MEMORY_LIMIT = env_int("DEEP_THINK_MEMORY_LIMIT", max(MEMORY_RECALL_LIMIT * 3, 8))
+DEEP_THINK_KNOWLEDGE_LIMIT = env_int("DEEP_THINK_KNOWLEDGE_LIMIT", max(KNOWLEDGE_RECALL_LIMIT * 3, 8))
+
+# Reasoning/deep-think mode flags live in ContextVars, not on the instance —
+# one shared AikoThink serves concurrent turns (WebUI connections, monitor
+# daemons). Plain instance bools would let one user's deep-think turn inflate
+# another user's concurrent turn to the 6x token budget. Each thread/request
+# context sees its own value; direct `think._reasoning = ...` assignment keeps
+# working through the property shims on AikoThink below.
+_reasoning_ctx: contextvars.ContextVar[bool] = contextvars.ContextVar("aiko_reasoning", default=False)
+_deep_think_ctx: contextvars.ContextVar[bool] = contextvars.ContextVar("aiko_deep_think", default=False)
+# Stream-harvested thinking text, scoped per call (not per instance): the
+# shared AikoThink serves concurrent turns, so instance state would let one
+# turn's thinking leak into another's UI box / inner-speech store.
+_thinking_text_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("aiko_thinking_text", default="")
+
+
+@contextmanager
+def _deep_think_flag_scope(think, enabled: bool):
+    """Scope the reasoning/deep-think ContextVars to a single turn.
+
+    Set on entry, always reset on exit — a mid-turn exception must never
+    leak the 6x deep-think token budget (or disabled sentence streaming)
+    into the next turn sharing this thread.
+    """
+    if enabled:
+        think._reasoning = True
+        think._deep_think = True
+    try:
+        yield
+    finally:
+        think._reasoning = False
+        think._deep_think = False
+
+def _resolve_base_tokens() -> int:
+    try:
+        return int(os.getenv("LLM_MAX_TOKENS", "280"))
+    except (TypeError, ValueError):
+        return 280
+
+
+_BASE_TOKENS     = _resolve_base_tokens()
+_REASONING_SCALE = env_int("REASONING_SCALE", 3)
+
+# Thinking-model headroom. Reasoning-capable templates (granite-4, MiniCPM-
+# think, …) spend tokens in a separate think channel BEFORE any answer
+# content; with only _BASE_TOKENS (280) they hit `finish=length` mid-think
+# and return 0 content chars — stream and fallback both "empty" with no
+# error. The extra budget is added whenever the backend is a known thinker:
+# explicitly via LLM_THINKING=1, or automatically after the first turn that
+# yields reasoning tokens (see _note_thinker_detected). Tune per model —
+# granite-4.2 needed ~280 think + answer on a greeting; slower Jetson
+# builds pay ~5-10 tok/s for every extra token.
+_LLM_THINK_BUDGET = env_int("LLM_THINK_BUDGET", 512)
+_LLM_THINKING_HINT = os.getenv("LLM_THINKING", "").strip().lower() in {"1", "true", "yes", "on"}
+_THINKER_DETECTED = False
+_THINKER_LOCK = threading.Lock()
+# Chat-template role support. Some llama-server templates (ministral-type
+# Jinja) reject the `system` role with 500 "Only user, assistant and tool
+# roles are supported, got system". That rejection is deterministic per
+# server, so retrying with system messages on every turn burns a full wasted
+# LLM round-trip each time — the first rejection latches for the rest of the
+# process and later turns send user-merged messages upfront instead.
+# Force the no-system layout from the start with LLM_NO_SYSTEM=1 when the
+# server is known to need it.
+_LLM_NO_SYSTEM_ENV = os.getenv("LLM_NO_SYSTEM", "").strip().lower() in {"1", "true", "yes", "on"}
+_SYSTEM_ROLE_REJECTED = False
+
+
+def _note_system_role_rejected() -> None:
+    """Latch that the backend rejects `system` role (idempotent)."""
+    global _SYSTEM_ROLE_REJECTED
+    if _SYSTEM_ROLE_REJECTED:
+        return
+    with _THINKER_LOCK:
+        _SYSTEM_ROLE_REJECTED = True
+    log.warning("LLM backend rejects system role — sending user-merged messages from now on")
+
+
+def _avoid_system_role() -> bool:
+    """True when requests must be sent without `system` messages."""
+    return _LLM_NO_SYSTEM_ENV or _SYSTEM_ROLE_REJECTED
+# Set when the last stream produced reasoning but no content: the empty
+# result is a burned think budget, NOT a message-shape rejection, so the
+# no-system retry would just burn another full budget thinking. The
+# fallback consumes (resets) it when deciding to skip that retry.
+_LAST_STREAM_REASONED = False
+
+
+def _note_thinker_detected() -> None:
+    """Latch that the backend emits thinking-channel tokens (idempotent)."""
+    global _THINKER_DETECTED
+    if _THINKER_DETECTED:
+        return
+    with _THINKER_LOCK:
+        _THINKER_DETECTED = True
+    log.warning("LLM backend emits thinking tokens — adding %d headroom to max_tokens from now on", _LLM_THINK_BUDGET)
+
+
+def _note_stream_reasoned(reasoned_without_content: bool) -> None:
+    """Record whether the last stream thought without answering."""
+    global _LAST_STREAM_REASONED
+    with _THINKER_LOCK:
+        _LAST_STREAM_REASONED = bool(reasoned_without_content)
+
+
+def _take_stream_reasoned() -> bool:
+    """Consume the flag (reset to False), returning its previous value."""
+    global _LAST_STREAM_REASONED
+    with _THINKER_LOCK:
+        val = _LAST_STREAM_REASONED
+        _LAST_STREAM_REASONED = False
+        return val
+
+
+def _effective_max_tokens(base: int) -> int:
+    """Base prediction budget plus think headroom when the backend thinks."""
+    if _LLM_THINKING_HINT or _THINKER_DETECTED:
+        return int(base) + _LLM_THINK_BUDGET
+    return int(base)
+
+
+# Per-request thinking disable for Qwen3-style hybrid thinkers (Agents-A1).
+# Deterministic small calls — intent classification, JSON verification, short
+# social replies — need zero chain-of-thought; thinking only burns their
+# token budget and adds latency. Pass as extra_body=THINK_OFF_EXTRA_BODY.
+# Harmless if the server ignores unknown body fields.
+THINK_OFF_EXTRA_BODY = {"chat_template_kwargs": {"enable_thinking": False}}
 _ROUTE_ENABLED = os.getenv("ROUTE_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
 
 # ROUTE_MODE selects the classification METHOD only (see yaml comment for
@@ -116,59 +562,201 @@ if _ROUTE_MODE not in _ROUTE_VALID_MODES:
 # is excluded from scoring AND from any LLM tie-break/classify, in every
 # ROUTE_MODE, so requests degrade to webchat/localchat instead.
 _AGENTIC_MODE_ON = os.getenv("AGENTIC_MODE_ON", "1").lower() in {"1", "true", "yes", "on"}
+# Local chat/webchat: stream tokens + TTS karaoke when True (default).
+# Set CHAT_STREAM_EMIT=0 to restore old batch _emit-after-finalize behaviour.
+_CHAT_STREAM_EMIT = os.getenv("CHAT_STREAM_EMIT", "1").lower() in {"1", "true", "yes", "on"}
+
 
 # Three separate instruct strings, one per embedding context
-_ROUTE_INSTRUCT_BINARY = "Does this message ask someone to perform a task or action, or is it just conversation?"
-_ROUTE_INSTRUCT_TOOL   = "This is an autonomous task request. Which work steps are likely needed?"
-_ROUTE_INSTRUCT_SEARCH = "Does answering this require looking up current or external data?"
-_ROUTE_INSTRUCT_TERNARY = "What kind of task or question is this?"  # used by route() for ternary intent routing
+_ROUTE_INSTRUCT_QUATERNARY = "What kind of task or question is this?"  # used by route() for quaternary intent routing
+_ROUTE_INSTRUCT_TERNARY = _ROUTE_INSTRUCT_QUATERNARY  # backwards-compatible alias for wakeup/tests
 
-_SEMANTIC_ROUTE_MIN_GAP = float(os.getenv("ROUTE_MIN_GAP", "0.10"))
+_SEMANTIC_ROUTE_MIN_GAP = float(os.getenv("ROUTE_MIN_GAP", "0.12"))
 _SEMANTIC_LABEL_TOP_K = int(os.getenv("ROUTE_LABEL_TOP_K", "3"))
-_ROUTE_VECTOR_CACHE_ENABLED = os.getenv("ROUTE_VECTOR_CACHE_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
 _ROUTE_VECTOR_CACHE_DIR = os.getenv("ROUTE_VECTOR_CACHE_DIR", "route_vectors")
 
-_PERSONA_PATH = Path(__file__).resolve().parent.parent / "persona" / "soul.md"
+# Last-resort websearch net for plain chat: when a message explicitly asks
+# for live internet info but semantic routing classified it as localchat,
+# run one lightweight search and offer the results to the persona prompt.
+# Mirrors the Threads monitor's _threads_research_context gate.
+_CHAT_WEBSEARCH_NET_ENABLED = os.getenv("CHAT_WEBSEARCH_NET", "1").lower() in {"1", "true", "yes", "on"}
+_WEBSEARCH_HINT_RE = re.compile(
+    r"\b(?:internet|web|online|search|look\s+up|verify|current)\b",
+    re.IGNORECASE,
+)
+# Personal-experience narration ("We arrived there at 11am by bus... I will
+# tell you more"). These turns need listening + memory writeback, not search;
+# routing can mislabel them webchat because prices/places embedding clusters.
+_SHARING_RE = re.compile(
+    r"\b(?:i|we)\s+(?:was|were|had|went|arrived|bought|paid|saw|ate|visited|rode|watched|walked|took)\b"
+    r"|\b(?:i|we)\s+did\b"
+    r"|\bi(?:'ll| will)\s+(?:tell|share|explain)\b"
+    r"|\blet me tell\b",
+    re.IGNORECASE,
+)
+
+
+def _is_personal_sharing(text: str) -> bool:
+    """True for first-person experience narration with no question and no
+    explicit internet request — these must not be answered from web results."""
+    body = str(text or "")
+    return (
+        "?" not in body
+        and not _WEBSEARCH_HINT_RE.search(body)
+        and bool(_SHARING_RE.search(body))
+    )
+
+_PERSONA_PATH = Path(__file__).resolve().parent.parent / "persona" / "SOUL.md"
 _LOCAL_KNOWLEDGE_RE = re.compile(
     r"\b("
-    r"aiko|your architecture|your hardware|your features?|your functions?|"
+    # NOTE: no bare "aiko" alternative — it fired on every self-addressed
+    # greeting ("Hi Aiko...") and injected ~3k chars of wiki docs into
+    # smalltalk prompts. Real doc questions match the phrases below.
+    r"your architecture|your hardware|your features?|your functions?|"
     r"what can you do|how do you work|how are you built|"
     r"knowledge base|wiki|docs?|readme|roadmap|install|config|"
-    r"soul\.md|user\.md|skills?\.md|schedule\.md|"
+    r"SOUL\.md|USER\.md|SKILLS?\.md|SCHEDULE\.md|"
     r"repo|repository|codebase|local files|your files"
     r")\b",
     re.IGNORECASE,
 )
 
+# ── conditional persona overrides ────────────────────────────────────────────
+# SOUL.md is the always-loaded steady-state
+# persona; the two override files below are only appended on turns that
+# actually need them (mirrors _LOCAL_KNOWLEDGE_RE / _should_use_local_knowledge
+# just below — same "gate the tokens, don't pay for them every turn" pattern).
+_PERSONA_DIR = _PERSONA_PATH.parent
+_PERSONA_CORE_PATH = _PERSONA_DIR / "SOUL.md"
+_PERSONA_JP_PATH = _PERSONA_DIR / "JAPANESE_CHAT.md"
+_PERSONA_CODE_PATH = _PERSONA_DIR / "CODING_CHAT.md"
+
+_JAPANESE_TRIGGER_RE = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
+_CODE_TRIGGER_RE = re.compile(
+    r"\b(debug|traceback|stack trace|error:|exception|refactor|"
+    r"write (a|the) (function|script|class)|fix (this|my) code|"
+    r"walk me through|\.py\b|\.js\b)\b",
+    re.IGNORECASE,
+)
+
+
+_persona_core_cache: str | None = None
+_persona_core_mtime: float | None = None
+
 
 def _load_static_persona() -> str:
-    """Read the lightweight normal-chat persona (soul.md only — no per-user data).
+    """Read the always-loaded persona core (SOUL.md — no per-user data,
+    no conditional overrides).
 
     Task/tool policy lives in the agentic prompt so casual chat does not pay
-    for skills/schedule tokens on every turn.
+    for agentic/schedule tokens on every turn. Japanese/coding overrides live
+    in separate files and are appended per-turn by _conditional_persona_blocks
+    only when triggered — see _current_system_prompt.
+
+    Cached with an mtime check: zero disk reads on turns where SOUL.md hasn't
+    changed, but edits still picked up without a restart.
     """
-    if not _PERSONA_PATH.exists():
-        raise FileNotFoundError(f"soul.md not found at {_PERSONA_PATH}")
-    return _PERSONA_PATH.read_text(encoding="utf-8").strip()
+    global _persona_core_cache, _persona_core_mtime
+    if not _PERSONA_CORE_PATH.exists():
+        raise FileNotFoundError(f"SOUL.md not found at {_PERSONA_CORE_PATH}")
+    try:
+        mtime = _PERSONA_CORE_PATH.stat().st_mtime
+    except OSError:
+        mtime = None
+    if _persona_core_cache is None or mtime != _persona_core_mtime:
+        _persona_core_cache = _PERSONA_CORE_PATH.read_text(encoding="utf-8").strip()
+        _persona_core_mtime = mtime
+    return _persona_core_cache
+
+
+_persona_jp_cache: str | None = None
+_persona_code_cache: str | None = None
+
+
+def _conditional_persona_blocks(user_input: str) -> str:
+    """Trigger-loaded persona overrides. Only paid for on turns that need them."""
+    global _persona_jp_cache, _persona_code_cache
+    blocks = []
+    if _JAPANESE_TRIGGER_RE.search(user_input):
+        if _persona_jp_cache is None:
+            _persona_jp_cache = _PERSONA_JP_PATH.read_text(encoding="utf-8").strip()
+        blocks.append(_persona_jp_cache)
+    if _CODE_TRIGGER_RE.search(user_input):
+        if _persona_code_cache is None:
+            _persona_code_cache = _PERSONA_CODE_PATH.read_text(encoding="utf-8").strip()
+        blocks.append(_persona_code_cache)
+    return ("\n\n" + "\n\n".join(blocks)) if blocks else ""
+
+
+_user_context_cache: dict[str, tuple[float, str]] = {}  # user_id -> (mtime, block)
+_USER_CONTEXT_CACHE_MAX = 16
 
 
 def _load_user_context() -> tuple[str, str]:
     """Read the current turn's display name + profile block fresh, every call.
 
     Must be called from the turn/request context where current_user_id()
-    already resolves to the real logged-in user — never cached, since
-    AikoThink is a process-wide singleton shared across all users' turns.
+    already resolves to the real logged-in user — cached by (user_id, mtime)
+    so repeated turns for the same user don't re-read an unchanged file.
 
     Returns (display_name, user_block) where user_block is either "" or a
     "\n\n"-prefixed profile chunk ready to append to the static persona.
     """
     display_name = current_display_name()
     user_path = user_profile_path()
+    uid = current_user_id()
+    if uid in _user_context_cache:
+        cached_mtime, cached_block = _user_context_cache[uid]
+        try:
+            current_mtime = user_path.stat().st_mtime
+        except OSError:
+            current_mtime = 0.0
+        if current_mtime == cached_mtime:
+            return display_name, cached_block
     context_blocks = []
     if user_path.exists():
-        context_blocks.append(user_path.read_text(encoding="utf-8").strip())
+        raw = user_path.read_text(encoding="utf-8").strip()
+        if raw:
+            context_blocks.append(
+                "<user_profile>\n"
+                "Who you are speaking with — authoritative for identity. "
+                "Never claim ignorance of this.\n\n"
+                f"{raw}\n"
+                "</user_profile>"
+            )
     user_block = "\n\n" + "\n\n".join(context_blocks) if context_blocks else ""
+    try:
+        _user_context_cache[uid] = (user_path.stat().st_mtime, user_block)
+        while len(_user_context_cache) > _USER_CONTEXT_CACHE_MAX:
+            _user_context_cache.pop(next(iter(_user_context_cache)))
+    except OSError:
+        log.debug("think: user context cache write failed")
     return display_name, user_block
+
+
+_DEBUG_PROMPT_DUMP_PATH = os.getenv("AIKO_DEBUG_PROMPT_DUMP", "/tmp/aiko_last_prompt.txt")
+
+def _dump_full_prompt(debug: dict) -> None:
+    # Default OFF: writes the full prompt blob to SD synchronously EVERY turn
+    # (latency + flash wear). Set AIKO_DEBUG_FULL_PROMPT=1 to opt in.
+    if os.getenv("AIKO_DEBUG_FULL_PROMPT", "0").lower() not in {"1", "true", "yes", "on"}:
+        return
+    try:
+        with open(_DEBUG_PROMPT_DUMP_PATH, "w", encoding="utf-8") as f:
+            f.write(f"=== mode={debug.get('mode')} @ {datetime.now().isoformat()} ===\n\n")
+            f.write("----- SYSTEM PROMPT (full, untruncated) -----\n")
+            f.write(debug.get("system_prompt", "") + "\n\n")
+            f.write("----- MEMORY -----\n")
+            f.write(debug.get("memory_prompt", "") + "\n\n")
+            f.write("----- KNOWLEDGE -----\n")
+            f.write(debug.get("knowledge_prompt", "") + "\n\n")
+            f.write("----- WEB -----\n")
+            f.write(debug.get("web_prompt", "") + "\n\n")
+            f.write("----- PREVIOUS CHAT MESSAGES -----\n")
+            for m in debug.get("previous_chat_messages", []):
+                f.write(f"[{m.get('role')}] {m.get('content')}\n")
+    except Exception:
+        log.exception("Failed to dump full prompt debug")
 
 
 def _should_use_local_knowledge(user_input: str) -> bool:
@@ -180,6 +768,92 @@ def _should_use_local_knowledge(user_input: str) -> bool:
     so casual chat doesn't pay for it on every turn.
     """
     return bool(_LOCAL_KNOWLEDGE_RE.search(user_input))
+
+
+_EMPTY_KNOWLEDGE_MARKERS = (
+    "No matching learned knowledge found.",
+    "No matching local knowledge found.",
+    "No relevant memories found.",
+    "Lookup failed.",
+    "Lookup timed out.",
+)
+
+
+def _blank_empty_knowledge(block: str) -> str:
+    """Return '' for placeholder No-match/Lookup-failed blocks (mirrors agentic._blank_empty_context)."""
+    if not block:
+        return ""
+    for _m in _EMPTY_KNOWLEDGE_MARKERS:
+        if _m in block:
+            return ""
+    # A knowledge_context wrapper with no actual <knowledge_chunk> carries nothing.
+    if "<knowledge_context>" in block and "<knowledge_chunk" not in block:
+        return ""
+    return block
+
+
+_LEARNED_KNOWLEDGE_HINT_RE = re.compile(
+    r"\b(what (do you know|did you learn)|you (learned|researched|studied)|"
+    r"your (notes?|research|knowledge)|learned knowledge|tell me about .*(project|topic)|"
+    r"remind me what you (know|found)|from your (notes|research|study))\b",
+    re.IGNORECASE,
+)
+
+
+_PERSONAL_FACT_RE = re.compile(
+    r"\b(who am i|my name|what(?:'s| is) my|tell me .*my|"
+    r"my (favorite|favourite|birthday|age|location|email|name|hobby|hobbies|"
+    r"likes?|dislikes?|plans?|preferences?))\b",
+    re.IGNORECASE,
+)
+
+
+def _memory_cannot_answer(raw_input: str, memories: list[dict] | None) -> bool:
+    """Memory-side of the on-demand knowledge gate.
+
+    True when memory is absent/weak for this turn, or the turn explicitly
+    asks about learned notes/research — i.e. when an explicit knowledge
+    search is worth its embedding + vector-search cost. This runs BEFORE
+    the knowledge fetch (pre-fetch gating); the old design fetched first
+    and gated only the injection.
+    """
+    mems = memories or []
+    if not mems:
+        return True
+    try:
+        top_conf = (mems[0].get("_reconstruction_confidence") or "").lower() if isinstance(mems[0], dict) else ""
+        if top_conf == "low":
+            return True
+        # All-low confidence -> memory isn't grounding this turn, let knowledge try.
+        if mems and all((isinstance(m, dict) and (m.get("_reconstruction_confidence") or "").lower() == "low") for m in mems):
+            return True
+        try:
+            top_score = float(mems[0].get("_recall_score", 0.0) or 0.0)
+            if top_score < MEMORY_MIN_SCORE * 1.5:
+                return True
+        except (TypeError, ValueError):
+            pass
+    except Exception:
+        pass
+    if _LEARNED_KNOWLEDGE_HINT_RE.search(raw_input or ""):
+        return True
+    return False
+
+
+def _needs_learned_knowledge(raw_input: str, memories: list[dict] | None, knowledge_block: str) -> bool:
+    """On-demand gate for learned-knowledge injection in chat/webchat.
+
+    Memory stays always-on (cheap, personal). Knowledge is dropped unless:
+    - no usable memories survived, or top memory confidence is low, or
+    - weakest kept memory still below MEMORY_MIN_SCORE*1.5, or
+    - explicit learned-note/research phrasing.
+    Kept for the legacy future-based recall path; the chained recall path
+    gates at fetch time via _memory_cannot_answer instead.
+    """
+    kb = _blank_empty_knowledge(knowledge_block)
+    if not kb:
+        return False
+    return _memory_cannot_answer(raw_input, memories)
 
 # ── semantic intent examples ──────────────────────────────────────────────────
 
@@ -197,17 +871,23 @@ def _play_beep() -> None:
             log.warning("Beep playback failed: %s", e)
     threading.Thread(target=_run, daemon=True).start()
 
-# load route examples
-_EXAMPLES_PATH = Path(__file__).resolve().parent / "router_prompts.json"
+# load route examples (quaternary intent only - tools/capability moved to agentic/router)
+_EXAMPLES_PATH = Path(__file__).resolve().parent.parent / "agentic" / "router" / "intent_prompts.json"
 
-def _load_route_examples() -> tuple[dict, dict]:
-    with open(_EXAMPLES_PATH, encoding="utf-8") as f:
-        data = json.load(f)
-    ternary = {k: tuple(v) for k, v in data["ternary"].items()}  # 3 labels
-    tools   = {k: tuple(v) for k, v in data["tools"].items()}
-    return ternary, tools
+def _load_route_examples(*, include_greeting: bool = True) -> dict:
+    try:
+        with open(_EXAMPLES_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        log.warning("[route] examples missing/unreadable at %s: %s", _EXAMPLES_PATH, e)
+        return {}
+    raw = dict(data.get("quaternary") or data.get("ternary") or {})
+    if not include_greeting:
+        raw.pop("greeting", None)
+    return {k: tuple(v) for k, v in raw.items()}
 
-_ROUTE_TERNARY_EXAMPLES, _ROUTE_TOOL_EXAMPLES = _load_route_examples()
+_ROUTE_QUATERNARY_EXAMPLES = _load_route_examples()
+_ROUTE_TERNARY_EXAMPLES = _load_route_examples(include_greeting=False)
 
 _AGENTIC_ROUTE_RE = re.compile(
     r"\b("
@@ -220,10 +900,87 @@ _AGENTIC_ROUTE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_GREETING_ONLY_RE = re.compile(
+    r"^\s*(?:"
+    r"hi+|hello+|hey+|hiya+|yo+|sup|"
+    r"good\s+(?:morning|afternoon|evening)|morning|evening|"
+    r"(?:hi|hello|hey)\s+(?:there|aiko)|"
+    r"how(?:'|’)s\s+it\s+going|how\s+are\s+you(?:\s+doing)?|"
+    r"what(?:'|’)s\s+up|nice\s+to\s+see\s+you|good\s+to\s+see\s+you|"
+    r"just\s+saying\s+hi|thanks?|thank\s+you|okay\s+thanks|cool\s+thanks"
+    r")(?:[\s!?.~、。！]*|\s+(?:lol|haha|hehe)[\s!?.~、。！]*)$",
+    re.IGNORECASE,
+)
 
-def _extract_search_results_block(system_prompt: str) -> str:
-    match = re.search(r"<search_results\b[^>]*>.*?</search_results>", system_prompt or "", re.DOTALL)
-    return match.group(0) if match else ""
+
+def _is_greeting_only(user_input: str) -> bool:
+    return bool(_GREETING_ONLY_RE.match(user_input or ""))
+
+
+# ── deep-think trigger ───────────────────────────────────────────────────────
+# Matches an explicit ask for careful/thorough reasoning, in natural language
+# — distinct from /think (orchestrate.py), which calls chat(deep_think=True)
+# directly. Kept as a fast regex path rather than a fifth semantic-routing
+# label: this is a request about HOW to answer (slow down, work it through),
+# which should layer on top of whatever localchat/webchat/agentic would have
+# picked, not compete with them for the turn.
+_DEEP_THINK_RE = re.compile(
+    r"\b(?:"
+    r"who am i|who are you|do you know who i am|tell me who i am|"
+    r"am i (?:still |really )?oppa|are you (?:still |really )?aiko|"
+    r"do you understand (?:who|that) i am|"
+    r"think (?:more |a bit )?(?:deeply|thoroughly|carefully|harder|longer)|"
+    r"think (?:this |it |that )?through(?: (?:carefully|thoroughly|properly))?|"
+    r"really think (?:about|through|it over)|"
+    r"take (?:your|some) time (?:and |to )?think|"
+    r"deep(?:er)? think(?:ing)?|"
+    r"deep dive(?: into)?|"
+    r"reason (?:more )?(?:deeply|carefully|thoroughly)|"
+    r"give (?:this|it) (?:some |more )?(?:careful |deep )?thought|"
+    r"analy[sz]e (?:this |it )?(?:thoroughly|carefully|deeply|in[- ]depth)|"
+    r"slow down and think|"
+    r"think (?:step[- ]by[- ]step|out loud) (?:carefully|thoroughly|properly)|"
+    r"weigh (?:this |it )?carefully|"
+    r"don'?t rush(?:,)? think|"
+    r"be (?:extra |really )?thorough"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _is_deep_think_request(text: str) -> bool:
+    """True for an explicit ask to reason more carefully than a normal turn."""
+    return bool(_DEEP_THINK_RE.search(text or ""))
+
+
+# Deep-think scaffold + evidence helpers live in cognition.deep_think.
+from cognition.deep_think import (
+    DEEP_THINK_GUIDE as _DEEP_THINK_GUIDE,
+    evidence_preamble as _deep_think_evidence_preamble,
+    format_summary as _deep_think_format_summary,
+    rerank_for_deep_think as _deep_think_rerank,
+    tool_need_hint as _deep_think_tool_hint,
+    trace_payload as _deep_think_trace_payload,
+)
+# Matches our own injected "[Style only — never quote this. ...]" control
+# blocks (see cognition.attention.soft_user_prompt). The LLM prompt keeps
+# them, but recall queries, history, cognitive-state recording and memory
+# writes must use the raw user text — otherwise the instruction words leak
+# into memory search, goals/open-loops ("... style only never quote ask"),
+# false contradiction hits (the same block repeats every clarify turn) and
+# durable semantic facts.
+_STYLE_DIRECTIVE_RE = re.compile(
+    r"\s*\[Style only\s*[—–-]\s*never quote this\.[^\]]*\]",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _strip_style_directives(text: str) -> str:
+    """Remove injected style-control blocks, returning the raw user text."""
+    if not text:
+        return text
+    return _STYLE_DIRECTIVE_RE.sub("", text).strip()
+
 
 
 # ── proactive check-in config (config/proactive.yaml, via os.environ) ─────────
@@ -241,18 +998,38 @@ def _extract_search_results_block(system_prompt: str) -> str:
 
 # ── think ─────────────────────────────────────────────────────────────────────
 
+def _format_system_notices(system_note: str | None) -> str:
+    """Format drained notice-bus lines as an ephemeral system-prompt block."""
+    if not system_note or not system_note.strip():
+        return ""
+    return (
+        "<system_notices>\n"
+        "Ephemeral subsystem status for this turn (already handled — "
+        "acknowledge briefly only if the user notices something wrong, "
+        "otherwise ignore):\n"
+        f"{system_note.strip()}\n"
+        "</system_notices>"
+    )
+
+
 class AikoThink:
-    def __init__(self, memorize: AikoMemorize, speak: AikoSpeak | None = None) -> None:
-        self._client    = OpenAI(base_url=LLM_BASE_URL, api_key="not-needed")
+    def __init__(self) -> None:
+        self._client    = OpenAI(base_url=LLM_BASE_URL,
+                               api_key=os.getenv("LLM_API_KEY", "") or "not-needed",
+                               timeout=LLM_TIMEOUT)  # backstop: any completions call
+                                                     # that forgets a per-call timeout
+                                                     # gets LLM_TIMEOUT, not the SDK's 600s
         self._llm_model = LLM_MODEL
         self._router_model = ROUTER_MODEL
-        self._memorize  = memorize
-        self._speak     = speak
+        self._memorize  = None    # injected later via set_memorize() — see system/wakeup.py
+        self._speak     = None    # injected later via set_speak()    — see system/wakeup.py
         # Guards self._speak against the toggle-vs-background-thread race.
         # set_speak() is called from the main thread (main.py's /voice
         # toggle). Readers snapshot self._speak under the lock so a toggle
         # landing mid-read can't produce a stale ref or a None mismatch.
         self._speak_lock = threading.Lock()
+        self._memorize_lock = threading.Lock()
+
         self._persona   = _load_static_persona()
         self._history:  list[dict] = []
         self._history_lock = threading.Lock()
@@ -265,60 +1042,313 @@ class AikoThink:
         self._active_user_ids: set[str] = set()
         self._active_users_lock = threading.Lock()
         self._reasoning = False
+        # Deep-think mode flag — set alongside self._reasoning by
+        # chat(deep_think=True), and read only by _stream_response to pick
+        # the token-budget scale (DEEP_THINK_TOKEN_SCALE vs _REASONING_SCALE).
+        # See module docstring "Deep-think mode".
+        self._deep_think = False
         self.last_usage: dict = {}
         self.last_prompt_debug: dict = {}
-
         self._last_chat_time = time.time()
-        self._idle_learner_thread = threading.Thread(
-            target=learn.idle_learner_loop, args=(self,), daemon=True
-        )
-        self._idle_learner_thread.start()
+
+        self._idle_learner_thread: threading.Thread | None = None
+        self._warmup_thread: threading.Thread | None = None
 
         # ── rest-signal state for learn.idle_learner_loop ───────────────────
         # The proactive idle check-in state machine lives in main.py's
         # ProactiveIdleRunner. That runner sets this flag via
         # set_proactive_resting() so learn.idle_learner_loop can see when
-        # Aiko is "resting" and pause autonomous study. The flag is cleared
+        # Aiko is "resting" and it is safe to study. The flag is cleared
         # by _note_user_activity() on every normal turn.
         self._proactive_lock = threading.Lock()
         self._proactive_resting = False
 
-        self._warmup_thread = threading.Thread(target=self._warmup_llm, daemon=True)
-        self._warmup_thread.start()
-      
+        # ── LLM circuit breaker ──────────────────────────────────────────
+        # Tracks consecutive llama-server failures so a wedged or restarting
+        # model server doesn't consume the full LLM_TIMEOUT on every turn.
+        self._llm_failures = 0
+        self._llm_circuit_open_until = 0.0
+        self._llm_circuit_lock = threading.Lock()
+
+        # Patch chat.completions.create so every LLM call (chat, intent,
+        # conscience gate, warmup, fallback) passes through the circuit
+        # breaker. A wedged llama-server fails fast instead of blocking the
+        # full LLM_TIMEOUT on each turn.
+        _orig_create = self._client.chat.completions.create
+
+        def _create_with_circuit(**kwargs):
+            if not self._llm_circuit_ok():
+                raise RuntimeError("LLM circuit breaker is open — llama-server may be down")
+            try:
+                result = _orig_create(**kwargs)
+                self._llm_record_success()
+                return result
+            except Exception:
+                self._llm_record_failure()
+                raise
+
+        self._client.chat.completions.create = _create_with_circuit
+
+    def _llm_circuit_ok(self) -> bool:
+        """Return True if LLM calls are allowed (circuit closed or cooldown expired)."""
+        with self._llm_circuit_lock:
+            if self._llm_failures < _LLM_CIRCUIT_THRESHOLD:
+                return True
+            if time.monotonic() >= self._llm_circuit_open_until:
+                return True  # half-open: allow one trial call
+            return False
+
+    def _llm_record_success(self) -> None:
+        with self._llm_circuit_lock:
+            self._llm_failures = 0
+            self._llm_circuit_open_until = 0.0
+
+    def _llm_record_failure(self) -> None:
+        with self._llm_circuit_lock:
+            self._llm_failures += 1
+            if self._llm_failures >= _LLM_CIRCUIT_THRESHOLD:
+                self._llm_circuit_open_until = time.monotonic() + _LLM_CIRCUIT_COOLDOWN_S
+                log.warning(
+                    "[think] LLM circuit breaker open after %d consecutive failures — "
+                    "retrying in %.0fs", self._llm_failures, _LLM_CIRCUIT_COOLDOWN_S
+                )
+
     def _warmup_llm(self) -> None:
         try:
             self._client.chat.completions.create(
                 model=self._llm_model,
                 messages=[{"role": "user", "content": "hi"}],
                 stream=False, max_tokens=1,
+                timeout=LLM_TIMEOUT,
             )
         except Exception as e:
             log.warning("LLM warmup failed: %s", e)
 
-    def join_warmup(self) -> None:
+    def join_warmup(self, timeout: float = 300.0) -> bool:
+        """Join the warmup thread, bounded. Returns False on timeout instead
+        of trapping the caller — a wedged warmup LLM call must degrade,
+        not hang boot."""
         if self._warmup_thread and self._warmup_thread.is_alive():
-            self._warmup_thread.join()
+            self._warmup_thread.join(timeout=timeout)
+            if self._warmup_thread.is_alive():
+                log.warning("[think] warmup join timed out after %.0fs — continuing without warmup.", timeout)
+                return False
+        return True
 
-    def _current_system_prompt(self) -> str:
-        """Assemble this turn's system prompt: static persona + fresh per-user context.
+    def start_warmup(self) -> None:
+        """Kick off the LLM warmup call. Call once, right after construction."""
+        if self._warmup_thread is not None:
+            return
+        self._warmup_thread = threading.Thread(target=self._warmup_llm, daemon=True)
+        self._warmup_thread.start()
 
+    def start_idle_learner(self) -> None:
+        """Start the background idle-learning loop. Call only after
+        set_memorize() has been called — the loop reads self._memorize
+        on its first iteration."""
+        if self._idle_learner_thread is not None:
+            return
+        if self._get_memorize() is None:
+            log.warning("[think] Memory unavailable — idle learner not started.")
+            return
+        self._idle_learner_thread = threading.Thread(
+            target=learn.idle_learner_loop, args=(self,), daemon=True
+        )
+        self._idle_learner_thread.start()
+
+    def _persona_core(self) -> str:
+        """Stable identity core: persona text + owner block.
+
+        Everything that rarely changes within a session lives here so the
+        LLM server's prompt cache (cache_prompt) reuses it across turns —
+        see _current_system_prompt_parts() for the stable/volatile split.
+        """
+        display_name, user_block = _load_user_context()
+        return self._persona.replace("USER_ID_HERE", display_name).replace("USER_NAME", display_name) + user_block
+
+    def _current_system_prompt_parts(self, user_input: str = "") -> tuple[str, str]:
+        """Assemble this turn's system prompt as (stable_core, volatile_tail).
+
+        Same content as _current_system_prompt(), split so chat() can send
+        them as TWO system messages with conversation history in between:
+
+            [system: core] [history...] [system: volatile] [user]
+
+        The volatile tail (time, state ticks, priming, memories) sits right
+        before the newest user turn, leaving the byte-stable core + history
+        prefix intact for llama-server's KV reuse. Call only from within a
+        turn where current_user_id()/current_display_name() already resolve
+        to the real caller — never at construction time.
+        """
+        core = self._persona_core()
+        volatile_parts: list[str] = []
+        global _GIT_STATUS_CACHE
+        try:
+            from cognition.attention import for_identity
+            state_obj = for_identity(current_user_id())
+            state_obj.record_activity(os.getenv("AIKO_ACTIVITY", ""))
+            state_obj.continuous_tick()
+            state_obj.persist()
+            state = state_obj.context(user_input)
+            if state:
+                volatile_parts.append(state)
+            try:
+                from system.schedule import list_schedule_records
+                scheduled_jobs = list_schedule_records(user_id=current_user_id())
+            except Exception:
+                scheduled_jobs = []
+            project_signals = []
+            if _CODE_TRIGGER_RE.search(user_input) or _LOCAL_KNOWLEDGE_RE.search(user_input):
+                try:
+                    # Repo status changes on human timescales, not per-turn:
+                    # cache up to 60s so code-heavy sessions don't pay a
+                    # subprocess spawn every turn.
+                    import time as _time
+                    if _time.monotonic() - _GIT_STATUS_CACHE[0] > 60.0:
+                        result = subprocess.run(
+                            ["git", "status", "--short", "--untracked-files=no"],
+                            cwd=Path.cwd(), capture_output=True, text=True, timeout=1, check=False,
+                        )
+                        _GIT_STATUS_CACHE = (_time.monotonic(),
+                                             [line.strip() for line in result.stdout.splitlines() if line.strip()][:5])
+                    project_signals = _GIT_STATUS_CACHE[1]
+                except Exception:
+                    project_signals = []
+            grounded = for_identity(current_user_id()).grounded_context(
+                now=bioclock.local_now(),
+                idle_seconds=max(0.0, time.time() - self._last_chat_time),
+                resting=self.is_proactive_resting(),
+                scheduled_jobs=scheduled_jobs,
+                project_signals=project_signals,
+            )
+            volatile_parts.append(grounded)
+            volatile_parts.append(state_obj.adaptive_response_guidance())
+            volatile_parts.append(state_obj.reflection_summary())
+            volatile_parts.append(state_obj.preference_guidance())
+            volatile_parts.append(state_obj.lesson_guidance())
+            volatile_parts.append(state_obj.identity_guidance())
+            volatile_parts.append(state_obj.self_model_context())
+            volatile_parts.append(state_obj.subconscious_guidance())
+            # Inner speech on EVERY turn (not just deliberation turns):
+            # genuine thoughts from salient turns + one unprompted aside
+            # if due. Empty on silent turns — this is what keeps her
+            # feeling like the same person across short casual messages.
+            inner_turn = state_obj.inner_speech_turn_block()
+            if inner_turn:
+                volatile_parts.append(inner_turn)
+            # Learned-policy confirmation echo: if Oppa taught a behavior
+            # last turn, confirm it in her own words briefly. Peeked, not
+            # popped — the echo is acknowledged only after this turn
+            # completes successfully (see ack below in chat()).
+            try:
+                policy_echo = state_obj.peek_policy_echo()
+                if policy_echo:
+                    volatile_parts.append(
+                        "Deliver this confirmation to Oppa naturally and briefly,"
+                        " in your own words: " + policy_echo
+                    )
+            except Exception:
+                pass
+            # Structured reasoning instruction (Anthropic-style CoT with explicit tags)
+            reasoning_guide = (
+                "When facing complex questions, use explicit structured reasoning:\n"
+                "<thinking> identify what is being asked, recall relevant memory, evaluate evidence </thinking>\n"
+                "<plan> outline steps: check memory, verify facts, consider context, decide response </plan>\n"
+                "<check> verify no contradictions with user preferences, no invented facts, sufficient evidence </check>\n"
+                "Keep these tags brief (1-2 sentences each) and visible in your internal reasoning. "
+                "Do NOT include these tags in your final spoken response to the user — they are for your own cognition."
+            )
+            volatile_parts.append(reasoning_guide)
+            priming = state_obj.priming_context(user_input)
+            if priming:
+                volatile_parts.append(priming)
+        except Exception:
+            pass
+        volatile_parts.append(_conditional_persona_blocks(user_input))
+        volatile = "\n\n".join(p for p in volatile_parts if p)
+        return core, volatile
+
+    def _current_system_prompt(self, user_input: str = "") -> str:
+        """Assemble this turn's system prompt: static persona core + fresh
+        per-user context + any conditional overrides this input triggers.
+
+        Single-string convenience wrapper over _current_system_prompt_parts()
+        — byte-identical output to the historical sequential construction.
         Call only from within a turn where current_user_id()/current_display_name()
         already resolve to the real caller — never at construction time.
         """
-        display_name, user_block = _load_user_context()
-        return self._persona.replace("USER_ID_HERE", display_name) + user_block
+        core, volatile = self._current_system_prompt_parts(user_input)
+        return core + ("\n\n" + volatile if volatile else "")
 
     # ── public api ────────────────────────────────────────────────────────────
 
-    def route(self, user_input: str, token_callback=None) -> str:
-        """Main entry point. Ternary routing.
+    def _collect_inbound_gate(self, gate_future, user_input: str, user_id: str,
+                              timeout: float = 90.0) -> tuple:
+        """Collect the overlapped gate_respond future submitted in route().
 
-        Memory + knowledge-base fetch is kicked off here, BEFORE intent is
-        known — every path (localchat/webchat/agentic) needs both, so
-        there's no reason to wait for _route_intent() to finish before
-        starting them. The future is threaded through to whichever handler
-        ends up running.
+        Returns (decision, reply, note) with the same caution fallback
+        route() always applied when the gate raised: failures and timeouts
+        degrade to a constraint note, never to a dropped turn.
+        """
+        _fallback_note = (
+            "<conscience_constraint>Conscience evaluation is temporarily unavailable. "
+            "Proceed cautiously and take no irreversible action.</conscience_constraint>"
+        )
+        if gate_future is None:
+            return "caution", "", _fallback_note
+        try:
+            decision, reply, note = gate_future.result(timeout=timeout)
+            return decision, reply, note
+        except concurrent.futures.TimeoutError:
+            log.warning("[route] conscience gate timed out after %.0fs; continuing with caution.", timeout)
+            return "caution", "", _fallback_note
+        except Exception as exc:
+            log.warning("[route] conscience gate failed; continuing with caution: %s", exc)
+            return "caution", "", _fallback_note
+
+    def _apply_gate_verdict(self, decision, reply, note, *, user_input: str, user_id: str,
+                            token_callback, system_note, route_t0) -> tuple:
+        """Apply a collected gate verdict. Returns ("return", reply) when the
+        turn ends here (refuse/escalate), else ("continue", system_note).
+        Shared by the deep-think fast path and the post-intent path so no
+        route can reach chat() without a gate verdict applied.
+        """
+        if decision in ("refuse", "escalate") and reply:
+            from cognition.conscience.ledger import ledger_for
+            ledger_for(user_id).flush()
+            self._emit(reply, token_callback=token_callback)
+            with self._history_lock:
+                self._history.append({"role": "user", "content": user_input})
+                self._history.append({"role": "assistant", "content": reply})
+            try:
+                from cognition.attention import for_identity
+                for_identity(user_id).record_turn_latency(time.monotonic() - route_t0)
+            except Exception:
+                pass
+            return "return", reply
+        if decision == "caution" and note:
+            system_note = (f"{system_note}" + "\n" + note).strip() if system_note else note
+        _latency.mark("conscience_inbound")
+        return "continue", system_note
+
+    def route(self, user_input: str, token_callback=None, system_note: str | None = None) -> str:
+        """Main entry point. Quaternary routing.
+
+        Intent is resolved before recall. Greeting-only turns are
+        intentionally cheap: they go straight to the LLM with persona + recent
+        chat history only and skip memory recall, KB recall, and memory
+        extraction/writeback. The inbound conscience gate runs concurrently
+        with intent classification (both are independent reads of the input).
+        Local/webchat turns run overlapped recall inside chat(): the
+        memory→knowledge chain, system-prompt build, and gated codebase/wiki
+        fetches run on CONTEXT_POOL and assemble in fixed order. Agentic
+        turns keep the shared memory+KB future.
+
+        Deep-think fast path: an explicit ask to think more carefully
+        (_is_deep_think_request) is checked FIRST, before quaternary intent
+        classification — see module docstring "Deep-think mode". It routes
+        straight to chat(deep_think=True) rather than competing with
+        agentic/webchat/localchat as a fifth semantic label.
 
         Per-user-active tracking: multiple users' turns can run concurrently
         (e.g. agentic loop for one user, quick chat for another). Shared
@@ -327,28 +1357,309 @@ class AikoThink:
         user_id = current_user_id()
         with self._active_users_lock:
             self._active_user_ids.add(user_id)
-        self._note_user_activity()
-        try:
-            embedder = self._memorize._mem._embedder
-            query_vec = embedder.embed_query(user_input)
-            mem_kb_future = CONTEXT_POOL.submit(
-                self._fetch_memory_and_knowledge, user_input, query_vec
-            )
 
-            intent = self._route_intent(user_input)
-            log.info("[route] intent=%s", intent)
-
-            if intent == "agentic":
-                return self.agentic_chat(user_input, token_callback=token_callback, mem_kb_future=mem_kb_future, query_vec=query_vec)
-            elif intent == "webchat":
-                return self.webchat(user_input, token_callback=token_callback, mem_kb_future=mem_kb_future)
-            else:  # localchat
-                return self.chat(user_input, token_callback=token_callback, _skip_search=True, mem_kb_future=mem_kb_future)
-        finally:
+        def _finish_route_tracking() -> None:
             with self._active_users_lock:
                 self._active_user_ids.discard(user_id)
                 if not self._active_user_ids:
                     self._last_chat_time = time.time()
+
+        self._note_user_activity()
+        _route_t0 = time.monotonic()
+        # Piece 3 (latency): new typed turn — reset the per-turn tracker and
+        # mark input receipt. Scheduler/agentic jobs that bypass route() get
+        # their marks from chat() onward; stages before recall stay absent.
+        _latency.reset()
+        _latency.mark("input_received")
+        # Phase 5: outcome → teach. Praise/correction on this turn teaches the
+        # MB about the *last* recorded action (route decision or tool call),
+        # closing the loop: state → bias → action → outcome → update.
+        try:
+            from cognition.fly_behavior.action_select import detect_feedback, note_feedback
+            _fb = detect_feedback(user_input)
+            if _fb:
+                note_feedback(user_id, _fb)
+        except Exception as exc:
+            log.debug("[route] feedback teach skipped: %s", exc)
+        # Approval commands ("approve run-<id>", "yes") must be handled
+        # BEFORE intent classification — the quaternary intent LLM labels
+        # terse commands like "Approve run-…" as chat, which would skip
+        # run_agentic_chat and leave the pending tool permanently stuck.
+        try:
+            from agentic.agentic import _maybe_resume_approval
+            resumed = _maybe_resume_approval(self, user_input, token_callback=token_callback)
+            if resumed is not None:
+                try:
+                    from cognition.attention import for_identity
+                    for_identity(user_id).record_turn_latency(time.monotonic() - _route_t0)
+                except Exception:
+                    pass
+                _finish_route_tracking()
+                return resumed
+        except Exception as exc:
+            log.debug("[route] approval resume pre-check skipped: %s", exc)
+
+        # Expired held outputs (streamed turns nobody answered): purge with
+        # a withheld marker at their recorded history positions. A new turn
+        # supersedes a pending hold — the held text never enters the record.
+        try:
+            from cognition.conscience.hooks import sweep_held_outputs
+            for _expired in sweep_held_outputs():
+                self._purge_held_output(
+                    _expired, "[withheld: turn did not pass the final conscience check]")
+        except Exception as exc:
+            log.debug("[route] held-output sweep skipped: %s", exc)
+
+        # Conscience HITL: "approve ccc-<id>" / "deny ccc-<id>"
+        try:
+            from cognition.conscience.hooks import resolve_ccc_approval
+            ccc_reply = resolve_ccc_approval(user_input, user_id=user_id, owner=self)
+            if ccc_reply is not None:
+                self._emit(ccc_reply, token_callback=token_callback)
+                try:
+                    from cognition.attention import for_identity
+                    for_identity(user_id).record_turn_latency(time.monotonic() - _route_t0)
+                except Exception:
+                    pass
+                _finish_route_tracking()
+                return ccc_reply
+        except Exception as exc:
+            log.warning("[route] conscience approval pre-check failed: %s", exc)
+            if re.search(r"\b(?:approve|deny|reject)\s+ccc-[0-9a-f]{6,16}\b", user_input or "", re.I):
+                ccc_reply = "I couldn't safely resolve that approval just now, so nothing was executed."
+                self._emit(ccc_reply, token_callback=token_callback)
+                _finish_route_tracking()
+                return ccc_reply
+
+        # Self-assessment *before* quaternary routing so localchat/webchat
+        # also get executable soft outcomes (defer / clarify / degrade_chat).
+        try:
+            from cognition.attention import for_identity
+            state = for_identity(user_id)
+            ok, gate_reason, gate_action = state.should_attempt(user_input, mode="route")
+            gate_result = (ok, gate_reason, gate_action)
+            snap = state.snapshot()
+            _brain_trace.record_step(
+                "attention.should_attempt",
+                layer="gate",
+                inputs={"user_input": user_input, "mode": "route", "user_id": user_id},
+                outputs={"ok": ok, "reason": gate_reason, "action": gate_action},
+                factors=[
+                    f"energy={snap.get('energy')}",
+                    f"uncertainty={snap.get('uncertainty')}",
+                    f"recent_tool_failures={sum(1 for o in snap.get('tool_outcomes', []) if not o.get('ok'))}",
+                    f"contradictions={len(snap.get('contradictions', []))}",
+                    f"response_review_flags={snap.get('response_reviews', [{}])[0].get('flags', []) if snap.get('response_reviews') else []}",
+                    "time_sensitivity=checked in attention",
+                    "answer_completeness=checked from latest response review",
+                    "self_consistency=checked from latest response review",
+                ],
+            )
+            if not ok:
+                log.info("[route] should_attempt action=%s reason=%s", gate_action, gate_reason)
+                reply = self._soft_gate_reply(
+                    user_input, gate_action, gate_reason, token_callback=token_callback,
+                )
+                _finish_route_tracking()
+                return reply
+        except Exception as exc:
+            log.debug("[route] should_attempt skipped: %s", exc)
+            gate_result = (True, "gate unavailable", "proceed")
+
+        # ── Conscience Circuit Core (inbound gate) ─────────────────────────
+        # Overlapped with intent classification below: both are independent
+        # reads of user_input (gate: SLM/Laya/deliberate chain; intent: LLM
+        # classify). The gate future is collected right after intent returns,
+        # so a turn pays max(gate, intent) instead of gate + intent.
+        from cognition.conscience import hooks as _ccc_hooks
+        _mem_for_gate = self._get_memorize()
+        _mem_inner_gate = getattr(_mem_for_gate, "_mem", None) if _mem_for_gate is not None else None
+        try:
+            _gate_future = CONTEXT_POOL.submit(
+                _ccc_hooks.gate_respond,
+                user_input=user_input,
+                user_id=user_id,
+                llm_client=getattr(self, "_client", None),
+                embedder=getattr(_mem_inner_gate, "_embedder", None),
+                surface="chat",
+            )
+        except Exception as exc:
+            log.warning("[route] conscience gate submit failed; continuing with caution: %s", exc)
+            _gate_future = None
+        # Gate result is collected after intent classification below — or
+        # right here on the deep-think fast path, which bypasses intent.
+        # No route reaches chat() without a gate verdict applied
+        # (see _collect_inbound_gate) — a failed submit degrades to the
+        # same caution fallback at collect time.
+
+        try:
+            # ── deep-think fast path ────────────────────────────────────────
+            # Checked before quaternary intent classification: an explicit
+            # "think this through carefully" style ask is a request about HOW
+            # to answer, not WHAT kind of task this is, so it bypasses
+            # agentic/webchat/localchat classification entirely rather than
+            # competing with them. See module docstring "Deep-think mode".
+            if _is_deep_think_request(user_input):
+                _brain_trace.record_step(
+                    "think.route",
+                    layer="route",
+                    inputs={"user_input": user_input},
+                    outputs={"intent": "think_chat", "handler": "chat(deep_think=True)"},
+                    factors=[
+                        "explicit deep-think phrase matched _DEEP_THINK_RE",
+                        "bypasses quaternary intent routing — same mechanism as /think",
+                    ],
+                )
+                # Same gate verdict as the post-intent path: the fast path
+                # must not skip conscience.
+                _verdict, _text = self._apply_gate_verdict(
+                    *self._collect_inbound_gate(_gate_future, user_input, user_id),
+                    user_input=user_input, user_id=user_id, token_callback=token_callback,
+                    system_note=system_note, route_t0=_route_t0)
+                if _verdict == "return":
+                    _finish_route_tracking()
+                    return _text
+                system_note = _text
+                return self.chat(
+                    user_input,
+                    token_callback=token_callback,
+                    deep_think=True,
+                    system_note=system_note,
+                )
+
+            intent, route_vec = self._route_intent(user_input)
+            log.info("[route] intent=%s", intent)
+            _latency.mark("intent_embedded")
+
+            # Collect the inbound gate overlapped above: a turn pays
+            # max(gate, intent) instead of gate + intent.
+            _verdict, _text = self._apply_gate_verdict(
+                *self._collect_inbound_gate(_gate_future, user_input, user_id),
+                user_input=user_input, user_id=user_id, token_callback=token_callback,
+                system_note=system_note, route_t0=_route_t0)
+            if _verdict == "return":
+                _finish_route_tracking()
+                return _text
+            system_note = _text
+
+            if intent == "greeting":
+                from cognition.conscience.ledger import ledger_for
+                ledger_for(user_id).flush()
+                _brain_trace.record_step(
+                    "think.route",
+                    layer="route",
+                    inputs={"user_input": user_input},
+                    outputs={"intent": "greeting", "handler": "chat(skip_memory=True)"},
+                    factors=["greeting-only regex match OR threshold + gap on greeting label"],
+                )
+                return self.chat(
+                    user_input,
+                    token_callback=token_callback,
+                    skip_memory=True,
+                    store_turn=False,
+                    system_note=system_note,
+                )
+
+            # Reuse the embedding computed during intent routing as the memory
+            # query vector instead of embedding the same text a second time
+            # with _QUERY_INSTRUCT. This drops one HTTP embed call per turn.
+            query_vec = route_vec
+            if query_vec is None:
+                try:
+                    mem = self._get_memorize()
+                    embedder = getattr(getattr(mem, "_mem", None), "_embedder", None) if mem else None
+                    if embedder is not None and hasattr(embedder, "embed_query"):
+                        # Phase 2: shared module cache; explicit instruct to
+                        # match embed_query's default exactly.
+                        query_vec = reason.cached_embed_query(
+                            embedder, user_input, instruct=_QUERY_INSTRUCT)
+                except Exception:
+                    query_vec = None
+            mem_kb_future = None
+            # Live giant-fiber interrupt: never escalate to agentic/web tools.
+            # Checked BEFORE the agentic recall future is started so a
+            # forced-localchat turn never pays for the memory+KB fetch.
+            try:
+                from cognition.neural_state import get_neural_state
+                if get_neural_state(user_id).interrupt:
+                    log.info("[route] fly_interrupt → force localchat (was intent=%s)", intent)
+                    intent = "localchat"
+            except Exception:
+                pass
+
+            if intent == "agentic":
+                # Agentic keeps the shared memory+KB future (reworked in
+                # piece 2); chat paths recall sequentially inside chat().
+                mem_kb_future = CONTEXT_POOL.submit(
+                    self._fetch_memory_and_knowledge, user_input, query_vec
+                )
+                _brain_trace.record_step(
+                    "think.route",
+                    layer="route",
+                    inputs={"user_input": user_input, "intent": "agentic"},
+                    outputs={"handler": "agentic_chat", "vector_reused": route_vec is not None},
+                    factors=["agentic_score >= 0.78 and gap >= min_gap"],
+                )
+                return self.agentic_chat(user_input, token_callback=token_callback, mem_kb_future=mem_kb_future, query_vec=query_vec, _from_route=True, system_note=system_note, gate_result=gate_result)
+            if intent == "webchat":
+                _brain_trace.record_step(
+                    "think.route",
+                    layer="route",
+                    inputs={"user_input": user_input, "intent": "webchat"},
+                    outputs={"handler": "webchat → chat(web_search=True)", "vector_reused": route_vec is not None},
+                    factors=["webchat_score >= 0.72 and gap >= min_gap"],
+                )
+                return self.webchat(user_input, token_callback=token_callback, query_vec=query_vec, system_note=system_note)
+            _brain_trace.record_step(
+                "think.route",
+                layer="route",
+                inputs={"user_input": user_input, "intent": "localchat"},
+                outputs={"handler": "chat", "vector_reused": route_vec is not None, "recall": "chained inside chat()"},
+                factors=["no label cleared greeting/agentic/webchat thresholds"],
+            )
+            return self.chat(user_input, token_callback=token_callback, query_vec=query_vec, system_note=system_note)
+        finally:
+            try:
+                from cognition.attention import for_identity
+                for_identity(user_id).record_turn_latency(time.monotonic() - _route_t0)
+            except Exception:
+                pass
+            _finish_route_tracking()
+
+    def _recall_query(self, user_input: str) -> str:
+        """Recall query enriched with the tail of recent conversation.
+
+        Pronouns ("we went there yesterday") carry no lexical or embedding
+        overlap with the memories that contain the antecedent, so searching
+        the raw input alone misses them. Folding the last exchange into the
+        query lets KNN/FTS find the row "there" points at.
+        """
+        try:
+            with self._history_lock:
+                recent = [
+                    str(m.get("content") or "")[:200]
+                    for m in self._history[-2:]
+                    if m.get("content")
+                ]
+        except Exception:
+            recent = []
+        tail = " ".join(reversed(recent)).strip()
+        # Only use prior dialogue to resolve a referential follow-up.  Folding
+        # every previous answer into every search query lets unrelated stale
+        # topics (for example birthdays) hijack a fresh casual turn.
+        referential = re.search(r"\b(?:it|that|this|there|they|them|he|she|we|our|still|also|again|same|what about|how about)\b", user_input or "", re.IGNORECASE)
+        enriched = user_input
+        if tail and referential:
+            enriched = f"{user_input}\n{tail}"[:600]
+        if _brain_trace and _brain_trace.TRACE_ENABLED:
+            _brain_trace.record_step(
+                "think._recall_query",
+                layer="context",
+                inputs={"user_input": user_input, "enriched": enriched != user_input},
+                outputs={"query": enriched, "tail_chars": len(tail), "enriched_query_preview": enriched[:600]},
+                factors=["pronoun resolution: recent chat tail folded into query for memory recall"],
+            )
+        return enriched
 
     def _fetch_memory_and_knowledge(
         self, user_input: str, query_vector: np.ndarray | None = None,
@@ -357,29 +1668,191 @@ class AikoThink:
         """Fetch long-term memory + learned-knowledge (KB) concurrently.
 
         Both are independent reads against separate stores (memory.db /
-        knowledge.db) with no dependency on user intent, so route() fires
-        this off before intent routing even runs and hands the resulting
-        future to whichever path (agentic/webchat/localchat) gets picked.
+        knowledge.db). route() now starts this only after quaternary intent
+        routing, so greeting-only turns can skip recall entirely while
+        agentic/webchat/localchat still receive the same shared future.
         Callers that run standalone (e.g. a scheduled agentic job with no
-        prior route() call) can call this directly instead.
+        prior route() call, or chat(deep_think=True) with no future) can call
+        this directly instead.
+
+        mem_limit/know_limit — overridable recall depth. chat(deep_think=True)
+        passes DEEP_THINK_MEMORY_LIMIT/DEEP_THINK_KNOWLEDGE_LIMIT here so a
+        deep-think turn pulls in noticeably more context than a normal one.
 
         query_vector — pre-computed _QUERY_INSTRUCT embedding of user_input,
         avoids a redundant HTTP call inside _MemoryBackend.search().
 
         Returns (memories, knowledge_block).
         """
-        embedder = self._memorize._mem._embedder
-        mem_future = CONTEXT_POOL.submit(self._memorize.search, user_input, limit=mem_limit, query_vector=query_vector)
-        know_future = CONTEXT_POOL.submit(
-            knowledge_context_for, user_input, limit=know_limit, max_chars=2000, embedder=embedder
+        memorize = self._get_memorize()
+        if memorize is None:
+            log.warning("[think] Memory unavailable — skipping memory/KB recall.")
+            return [], ""
+
+        recall_query = self._recall_query(user_input)
+        query_for_call = query_vector if recall_query == user_input else None
+
+        with _brain_trace.step(
+            "think._fetch_memory_and_knowledge",
+            layer="recall",
+            inputs={
+                "user_input": user_input,
+                "recall_query": recall_query,
+                "enriched_query": recall_query != user_input,
+                "mem_limit": mem_limit,
+                "know_limit": know_limit,
+                "vector_reused": query_for_call is not None,
+            },
+            factors=[
+                "memory + KB fetched concurrently via CONTEXT_POOL",
+                f"query_vector reused from route() = {query_for_call is not None}",
+            ],
+        ) as ctx:
+            embedder = getattr(getattr(memorize, "_mem", None), "_embedder", None)
+            # Batch the retrieval embeds into one HTTP POST, but only when
+            # both legs actually need a fresh embed of the recall query
+            # (enriched follow-ups). When the route vector is reused the
+            # memory leg needs no embed at all: submit it immediately rather
+            # than blocking it behind the KB embed, and let the KB leg embed
+            # per-leg inside its future as before (its result cache is
+            # checked there before any embed it needs).
+            mem_vec = query_for_call
+            kb_vec = None
+            if mem_vec is None and embedder is not None:
+                try:
+                    vecs = reason.cached_embed_batch(
+                        embedder,
+                        [(recall_query, _QUERY_INSTRUCT),
+                         (recall_query, KNOWLEDGE_QUERY_INSTRUCT)],
+                    )
+                    mem_vec, kb_vec = vecs
+                except Exception as e:
+                    log.debug("retrieval embed batch failed, legs embed per-leg: %s", e)
+            mem_future = CONTEXT_POOL.submit(memorize.search, recall_query, limit=mem_limit, query_vector=mem_vec)
+            know_future = CONTEXT_POOL.submit(
+                knowledge_context_for, recall_query, limit=know_limit, max_chars=2000, embedder=embedder,
+                query_vector=kb_vec,
+            )
+            try:
+                memories = mem_future.result(timeout=MEMORY_RECALL_TIMEOUT)
+            except concurrent.futures.TimeoutError:
+                log.warning("Memory recall timed out after %.1fs; skipping", MEMORY_RECALL_TIMEOUT)
+                memories = []
+            except Exception as e:
+                log.error("Memory search failed: %s", e)
+                memories = []
+
+            if MEMORY_MIN_SCORE > 0:
+                before = len(memories)
+                memories = [m for m in memories if m.get("_recall_score", 0.0) >= MEMORY_MIN_SCORE]
+                if len(memories) < before:
+                    log.debug(
+                        "[memory] filtered %d/%d below MEMORY_MIN_SCORE=%.4f",
+                        before - len(memories), before, MEMORY_MIN_SCORE,
+                    )
+
+            try:
+                knowledge_block = know_future.result(timeout=MEMORY_RECALL_TIMEOUT)
+            except concurrent.futures.TimeoutError:
+                log.warning("Knowledge lookup timed out after %.1fs; skipping", MEMORY_RECALL_TIMEOUT)
+                knowledge_block = "<knowledge_context>\nLookup timed out.\n</knowledge_context>"
+            except Exception as e:
+                log.error("Knowledge lookup failed: %s", e)
+                knowledge_block = "<knowledge_context>\nLookup failed.\n</knowledge_context>"
+
+            # Per-hit preview so the trace file shows what got recalled.
+            hit_preview = []
+            for i, m in enumerate((memories or [])[:10], 1):
+                hit_preview.append({
+                    "rank": i,
+                    "score": round(float(m.get("_recall_score", 0.0)), 4),
+                    "text": (m.get("memory") or m.get("text") or "")[:400],
+                    "kind": m.get("kind"),
+                    "pinned": bool(m.get("pinned")),
+                })
+
+            ctx.set(
+                outputs={
+                    "memories_returned": len(memories),
+                    "knowledge_chars": len(knowledge_block or ""),
+                    "top_hits": hit_preview,
+                },
+                factors=(ctx.__dict__.get("_step", {}).get("factors", []) if False else [
+                    f"min_score filter MEMORY_MIN_SCORE={MEMORY_MIN_SCORE} kept {len(memories)}/{sum(1 for _ in hit_preview)}",
+                    f"knowledge_block {'empty' if not knowledge_block else str(len(knowledge_block)) + ' chars'}",
+                ]),
+            )
+            return memories, knowledge_block
+
+    def _resolve_mem_kb(self, user_input: str, mem_kb_future) -> tuple[list[dict], str]:
+        """Resolve a pending memory+KB future, or fetch directly if this
+        handler was called standalone (no future supplied by route())."""
+        if mem_kb_future is not None:
+            try:
+                return mem_kb_future.result(timeout=MEMORY_RECALL_TIMEOUT)
+            except concurrent.futures.TimeoutError:
+                log.warning("Memory/KB recall timed out after %.1fs; skipping", MEMORY_RECALL_TIMEOUT)
+                return [], "<knowledge_context>\nLookup timed out.\n</knowledge_context>"
+            except Exception as e:
+                log.error("Memory/KB fetch failed: %s", e)
+                return [], "<knowledge_context>\nLookup failed.\n</knowledge_context>"
+        return self._fetch_memory_and_knowledge(user_input, query_vector=None)
+
+    def _speculative_kb_embed(self, raw_input: str):
+        """Submit a speculative (recall_query, KNOWLEDGE_QUERY_INSTRUCT)
+        embed for the chained explicit knowledge search.
+
+        Returns a Future of the vector, or None when no embedder is
+        available. _fetch_chained_knowledge consumes it only if the
+        _memory_cannot_answer gate opens; otherwise the vector is
+        discarded (the embed ran off the critical path on CONTEXT_POOL).
+        """
+        try:
+            memorize = self._get_memorize()
+            embedder = getattr(getattr(memorize, "_mem", None), "_embedder", None)
+            if embedder is None:
+                return None
+            recall_query = self._recall_query(raw_input)
+            return CONTEXT_POOL.submit(
+                reason.cached_embed_query,
+                embedder, recall_query, KNOWLEDGE_QUERY_INSTRUCT,
+            )
+        except Exception as exc:
+            log.debug("[think] speculative KB embed submit failed: %s", exc)
+            return None
+
+    def _fetch_memory_only(
+        self, user_input: str, query_vector: np.ndarray | None = None,
+        mem_limit: int = MEMORY_RECALL_LIMIT,
+    ) -> list[dict]:
+        """Memory recall only — no knowledge fetch.
+
+        First step of the chained chat recall: memory is always-on and
+        cheap; knowledge follows via the entity-link hop
+        (_fetch_linked_knowledge) and, only when memory cannot answer,
+        an explicit search (_fetch_chained_knowledge).
+        """
+        memorize = self._get_memorize()
+        if memorize is None:
+            log.warning("[think] Memory unavailable — skipping memory recall.")
+            return []
+        recall_query = self._recall_query(user_input)
+        query_for_call = query_vector if recall_query == user_input else None
+        mem_future = CONTEXT_POOL.submit(
+            memorize.search, recall_query, limit=mem_limit,
+            query_vector=query_for_call,
         )
         try:
-            memories = mem_future.result()
+            memories = mem_future.result(timeout=MEMORY_RECALL_TIMEOUT)
+        except concurrent.futures.TimeoutError:
+            log.warning(
+                "[think] Memory recall timed out after %.1fs — skipping.",
+                MEMORY_RECALL_TIMEOUT,
+            )
+            memories = []
         except Exception as e:
             log.error("Memory search failed: %s", e)
-            know_future.cancel()
             memories = []
-
         if MEMORY_MIN_SCORE > 0:
             before = len(memories)
             memories = [m for m in memories if m.get("_recall_score", 0.0) >= MEMORY_MIN_SCORE]
@@ -388,24 +1861,305 @@ class AikoThink:
                     "[memory] filtered %d/%d below MEMORY_MIN_SCORE=%.4f",
                     before - len(memories), before, MEMORY_MIN_SCORE,
                 )
+        return memories
 
-        try:
-            knowledge_block = know_future.result()
-        except Exception as e:
-            log.error("Knowledge lookup failed: %s", e)
-            knowledge_block = "<knowledge_context>\nLookup failed.\n</knowledge_context>"
-        return memories, knowledge_block
+    def _recall_chat_blocks(
+        self, raw_input: str, query_vec, mem_limit: int, know_limit: int,
+        deep_think: bool, mem_kb_future,
+    ) -> dict:
+        """Chat recall chain as one submittable unit (CONTEXT_POOL overlap).
 
-    def _resolve_mem_kb(self, user_input: str, mem_kb_future) -> tuple[list[dict], str]:
-        """Resolve a pending memory+KB future, or fetch directly if this
-        handler was called standalone (no future supplied by route())."""
+        Moved verbatim out of chat(): memory → prioritize → deep rerank →
+        weak-set drop → chained knowledge → experience override → format →
+        persona. chat() runs this concurrently with system-prompt/codebase/
+        wiki fetches and assembles the returned blocks in the original
+        order, so the final prompt bytes are unchanged — only the wait
+        overlaps.
+        """
+        from cognition.attention import for_identity
+        memorize = self._get_memorize()
+        _kb_vec_future = None  # speculative KB embed; set in the chained branch below
         if mem_kb_future is not None:
+            # Legacy path: a pre-started future (tests / external
+            # callers). route() no longer passes one for chat.
+            memories, knowledge_block = self._resolve_mem_kb(raw_input, mem_kb_future)
+        else:
+            # Chained recall: memory → entity-link knowledge hop →
+            # explicit knowledge search only when memory can't answer.
+            #
+            # The explicit search (if the _memory_cannot_answer gate opens)
+            # needs a (recall_query, KNOWLEDGE_QUERY_INSTRUCT) vector.
+            # Embed it speculatively on CONTEXT_POOL concurrent with the
+            # memory search, so a gated-open turn pays max(mem, kb_embed)
+            # instead of mem + kb_embed. If the gate stays closed the
+            # vector is discarded; the embed ran off the critical path.
+            _kb_vec_future = self._speculative_kb_embed(raw_input)
+            memories = self._fetch_memory_only(
+                raw_input, query_vector=query_vec, mem_limit=mem_limit,
+            )
+        memories = for_identity(current_user_id()).prioritize_memories(raw_input, memories)
+        deep_think_meta = {}
+        if deep_think:
+            memories, deep_think_meta = _deep_think_rerank(memories, raw_input)
+        # Drop all-low weak sets: prioritize marks low when score<2.0
+        # (no query/context/goal overlap, not pinned/salient). Injecting
+        # those drifts small models off-topic; fall back to knowledge instead.
+        if memories and all(
+            (isinstance(m, dict) and (m.get("_reconstruction_confidence") or "").lower() == "low")
+            for m in memories
+        ):
+            memories = []
+        if mem_kb_future is None:
+            # Knowledge follows memory in the chain (after prioritize /
+            # weak-set drop so the hop and the gate see final memories).
+            knowledge_block = self._fetch_chained_knowledge(
+                raw_input, memories, query_vec, know_limit=know_limit,
+                kb_vec_future=_kb_vec_future,
+            )
+        # Skip cross-store related_knowledge when primary knowledge already
+        # hit — both search the same query, so this only duplicates chunks.
+        # Keep related_experience (different store, still useful).
+        _related_override = None
+        try:
+            if _blank_empty_knowledge(knowledge_block):
+                from cognition.memory.narrative import (
+                    related_experience,
+                    seed_entities_from_memories,
+                )
+                _seeds = seed_entities_from_memories(memories, query=raw_input)
+                _mem_for_exp = self._get_memorize()
+                _emb_for_exp = getattr(getattr(_mem_for_exp, "_mem", None), "_embedder", None)
+                _related_override = {
+                    "knowledge": [],
+                    "experience": related_experience(
+                        raw_input, _seeds, embedder=_emb_for_exp,
+                    ),
+                }
+        except Exception:
+            _related_override = None
+        if _related_override is not None:
+            memory_block = memorize.format_for_context(
+                memories, query=raw_input, query_vector=query_vec,
+                related=_related_override,
+            ) if memorize is not None else ""
+        else:
+            memory_block = memorize.format_for_context(
+              memories, query=raw_input, query_vector=query_vec
+            ) if memorize is not None else ""
+        persona_block = memorize.persona_context() if memorize is not None else ""
+        return {
+            "memories": memories,
+            "knowledge_block": knowledge_block,
+            "memory_block": memory_block,
+            "persona_block": persona_block,
+            "deep_think_meta": deep_think_meta,
+        }
+
+    def _super_node_entities(self) -> set[str]:
+        """Best-effort super-node entity set for link-hop seed filtering.
+
+        Super-nodes (entities mentioned in a large fraction of memories,
+        e.g. the user's name) match a near-random slice of the KB, so the
+        one-link-down hop excludes them from its seeds.
+        """
+        try:
+            mem = self._get_memorize()
+            backend = getattr(mem, "_mem", None)
+            if backend is None:
+                return set()
+            uid = mem.get_user_id() if hasattr(mem, "get_user_id") else current_user_id()
+            lock = getattr(backend, "_db_lock", None)
+            if lock is not None:
+                with lock:
+                    backend._refresh_high_freq_entities(uid)
+            else:
+                backend._refresh_high_freq_entities(uid)
+            return {str(e) for e in (backend._high_freq_entities or set())}
+        except Exception as exc:
+            log.debug("[think] super-node lookup skipped: %s", exc)
+            return set()
+
+    def _fetch_linked_knowledge(
+        self, memories: list[dict], raw_input: str, limit: int = 3,
+    ) -> str:
+        """One-link-down knowledge hop: recalled memories → entities → linked chunks.
+
+        Pure SQLite entity-overlap lookup — no embedding call, no vector
+        search. Returns a formatted <knowledge_context> block, or "" when
+        nothing links.
+        """
+        if not memories:
+            return ""
+        try:
+            from cognition.memory.narrative import seed_entities_from_memories
+            seeds = seed_entities_from_memories(memories, query=raw_input)
+        except Exception as exc:
+            log.debug("[think] linked-knowledge seeds skipped: %s", exc)
+            return ""
+        try:
+            supers = self._super_node_entities()
+            if supers:
+                seeds = [s for s in seeds if s not in supers]
+        except Exception as exc:
+            log.debug("[think] super-node filter skipped: %s", exc)
+        if not seeds:
+            return ""
+        try:
+            from cognition.knowledge import linked_knowledge_for_entities
+            return linked_knowledge_for_entities(seeds, limit=limit, max_chars=2000)
+        except Exception as exc:
+            log.debug("[think] linked knowledge hop failed: %s", exc)
+            return ""
+
+    def _fetch_chained_knowledge(
+        self,
+        raw_input: str,
+        memories: list[dict],
+        query_vec: np.ndarray | None,
+        *,
+        know_limit: int = KNOWLEDGE_RECALL_LIMIT,
+        kb_vec_future=None,
+    ) -> str:
+        """Chained knowledge recall for chat.
+
+        1. One-link-down hop (cheap, no embedding): knowledge chunks sharing
+           entities with the recalled memories.
+        2. Explicit vector search — only when memory cannot answer this turn
+           (no/weak memories, or explicit learned-note phrasing).
+
+        The two legs are independent once memories are known, so they run
+        concurrently on CONTEXT_POOL: a turn pays max(linked, explicit)
+        instead of linked + explicit. The explicit search reuses the
+        speculatively pre-computed KB vector (kb_vec_future) when
+        available, skipping its embedding call; on any failure it falls
+        back to embedding in-leg.
+
+        Returns the concatenated <knowledge_context> blocks ("" when none).
+        """
+        linked_future = CONTEXT_POOL.submit(
+            self._fetch_linked_knowledge, memories, raw_input,
+        )
+        explicit_future = None
+        if _memory_cannot_answer(raw_input, memories):
+            recall_query = self._recall_query(raw_input)
+            memorize = self._get_memorize()
+            embedder = getattr(getattr(memorize, "_mem", None), "_embedder", None) if memorize else None
+            kb_vec = None
+            if kb_vec_future is not None:
+                try:
+                    kb_vec = kb_vec_future.result(timeout=MEMORY_RECALL_TIMEOUT)
+                except Exception as exc:
+                    log.debug("[think] speculative KB vector unavailable, embedding in-leg: %s", exc)
+                    kb_vec = None
             try:
-                return mem_kb_future.result()
+                explicit_future = CONTEXT_POOL.submit(
+                    knowledge_context_for,
+                    recall_query, limit=know_limit, max_chars=2000,
+                    embedder=embedder, query_vector=kb_vec,
+                )
+            except Exception as exc:
+                log.warning("[think] explicit knowledge search submit failed: %s", exc)
+                explicit_future = None
+        blocks: list[str] = []
+        try:
+            linked = _blank_empty_knowledge(linked_future.result(timeout=MEMORY_RECALL_TIMEOUT))
+        except Exception as exc:
+            log.warning("[think] linked knowledge hop failed: %s", exc)
+            linked = ""
+        if linked:
+            blocks.append(linked)
+            log.debug("[think] linked knowledge hop: %d chars", len(linked))
+        if explicit_future is not None:
+            try:
+                explicit = _blank_empty_knowledge(explicit_future.result(timeout=MEMORY_RECALL_TIMEOUT))
+            except Exception as exc:
+                log.warning("[think] explicit knowledge search failed: %s", exc)
+                explicit = ""
+            if explicit:
+                blocks.append(explicit)
+        return "\n\n".join(blocks)
+
+    def _websearch_full_block(self, query: str, token_callback=None) -> str:
+        """Full web-search block for intent-routed webchat turns.
+
+        Extracted from the old webchat(): SearXNG lookup with one retry,
+        strict "answer ONLY using these results" injection (or an explicit
+        search-failed block). Returns "" only on unexpected failure — the
+        normal no-results case returns the <search_failed> block.
+        """
+        from agentic.toolkit.websearch import web_search as _web_search
+        from urllib.parse import urlparse as _urlparse
+
+        def _format_hits(query: str, results: list) -> tuple[str, list]:
+            if not results:
+                return "", []
+            lines = [f"[Web search results for: {query}]"]
+            sources: list[dict] = []
+            for i, result in enumerate(results, 1):
+                title = (result.get("title") or "").strip()
+                url = (result.get("url") or "").strip()
+                content = (result.get("content") or "").strip()
+                lines.append(f"{i}. {title}\n   {url}\n   {content}")
+                domain = ""
+                try:
+                    domain = _urlparse(url).netloc.lower().removeprefix("www.")
+                except Exception:
+                    domain = ""
+                if url:
+                    sources.append({"title": title or url, "url": url, "domain": domain})
+            context = "\n\n".join(lines) + f"\n\nUser asked: {query}"
+            return context, sources
+
+        max_results = int(os.getenv("SEARXNG_MAX_RESULTS", 3))
+        display_name = current_display_name()
+        if token_callback:
+            token_callback("__STATUS__:searching\n")
+            token_callback(f"__SEARCHING__:{query}\n")
+        results, search_err = _web_search(query, max_results)
+        if search_err:
+            log.warning("[webchat] search error: %s", search_err)
+        context, sources = _format_hits(query, results or [])
+
+        if not context:
+            log.info("[webchat] First search returned nothing, retrying once...")
+            if token_callback:
+                token_callback("__STATUS__:retry\n")
+                token_callback("__RETRYING__\n")
+            try:
+                results, search_err = _web_search(query, 1)
+                if search_err:
+                    log.warning("[webchat] retry error: %s", search_err)
+                context, sources = _format_hits(query, results or [])
             except Exception as e:
-                log.error("Memory/KB fetch failed: %s", e)
-                return [], "<knowledge_context>\nLookup failed.\n</knowledge_context>"
-        return self._fetch_memory_and_knowledge(user_input, query_vector=None)
+                log.warning("[webchat] Retry failed: %s", e)
+                context, sources = "", []
+
+        if sources and token_callback:
+            token_callback("__SOURCES__:" + json.dumps(sources, ensure_ascii=False) + "\n")
+
+        if context:
+            if token_callback:
+                token_callback("__STATUS__:ok\n")
+            return (
+                f"<search_results query='{query}'>\n"
+                f"Answer ONLY using these search results:\n\n"
+                f"{context}\n"
+                f"</search_results>"
+            )
+        if token_callback:
+            token_callback("__STATUS__:offline\n")
+        return (
+            "<search_failed>\n"
+            f"Web search returned no usable results. You are speaking with {display_name}.\n"
+            "Respond as Aiko in one or two short natural sentences:\n"
+            "- Briefly acknowledge you could not reach live internet information (vary wording; "
+            "no fixed script, no system tokens, no phrases like 'using local knowledge').\n"
+            "- Do NOT invent time-sensitive facts (weather, scores, headlines, prices).\n"
+            "- If memory or knowledge context genuinely helps a non-live question, offer that "
+            "briefly; otherwise say you do not have current information.\n"
+            "- Stay in character. No meta commentary about tools or pipelines.\n"
+            "</search_failed>"
+        )
 
     def _note_user_activity(self) -> None:
         """Clear the rest flag on real user activity so learn.idle_learner_loop
@@ -414,8 +2168,8 @@ class AikoThink:
             self._proactive_resting = False
 
     def is_proactive_resting(self) -> bool:
-        """True when Aiko is resting and should not start autonomous study.
-        Set by set_proactive_resting() (called from main.py's
+        """True when Aiko is resting and the idle learner may study.
+        Set by set_proactive_resting() (called from system/orchestrate.py's
         ProactiveIdleRunner) and cleared by _note_user_activity() on
         every normal turn. Polled by learn.idle_learner_loop."""
         return self._proactive_resting
@@ -426,8 +2180,8 @@ class AikoThink:
         with self._proactive_lock:
             self._proactive_resting = resting
 
-    def _route_intent(self, user_input: str) -> str:
-        """Ternary routing: single embedding, three-way decision with a
+    def _route_intent(self, user_input: str) -> tuple[str, np.ndarray | None]:
+        """Quaternary routing: single embedding, four-way decision with a
         high-confidence margin so a close call doesn't get committed to
         agentic (or webchat) just because it happened to be checked first.
 
@@ -436,73 +2190,206 @@ class AikoThink:
         only owns the routing policy (thresholds, gap, LLM tie-break).
         ROUTE_MODE picks the classification method; AGENTIC_MODE_ON gates
         whether "agentic" can ever be the result, independent of method.
-        """
-    
-        if not _ROUTE_ENABLED:
-            return "localchat"
-    
-        instruct = _ROUTE_INSTRUCT_TERNARY
-        embedder = self._memorize._mem._embedder
-        query_vec = embedder.embed_query(user_input, instruct=instruct)
-        labels, example_vecs = self._semantic_example_vectors(_ROUTE_TERNARY_EXAMPLES, instruct)
-        scores = reason.label_scores_topk(query_vec, labels, example_vecs, top_k=_SEMANTIC_LABEL_TOP_K)
 
-        if not _AGENTIC_MODE_ON:
-            # Remove agentic from consideration before ranking, so the
-            # existing gap/threshold logic naturally degenerates into a
-            # webchat-vs-localchat decision — no separate code path needed.
-            scores.pop("agentic", None)
-      
-        agentic_score = scores.get("agentic", 0.0)
-        webchat_score = scores.get("webchat", 0.0)
-    
-        ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
-        best_label, best_score = ranked[0] if ranked else ("localchat", 0.0)
-        gap = best_score - ranked[1][1] if len(ranked) > 1 else 1.0
-    
-        agentic_threshold = float(os.getenv("ROUTE_AGENTIC_THRESHOLD", "0.65"))
-        webchat_threshold = float(os.getenv("ROUTE_WEBCHAT_THRESHOLD", "0.60"))
-    
-        log.debug(
-            "[route] ternary scores: agentic=%.3f webchat=%.3f best=%s gap=%.3f for: %r",
-            agentic_score, webchat_score, best_label, gap, user_input
-        )
-    
-        if best_label == "agentic" and agentic_score >= agentic_threshold and gap >= _SEMANTIC_ROUTE_MIN_GAP:
-            return "agentic"
-        if best_label == "webchat" and webchat_score >= webchat_threshold and gap >= _SEMANTIC_ROUTE_MIN_GAP:
-            return "webchat"
-    
-        # Above threshold but too close to call cleanly.
-        ambiguous = (
-            (agentic_score >= agentic_threshold or webchat_score >= webchat_threshold)
-            and gap < _SEMANTIC_ROUTE_MIN_GAP
-        )
-        if ambiguous:
-            if _ROUTE_MODE == "semantic_only":
-                # Deterministic mode: no LLM call on ambiguity.
-                log.debug("[route] semantic_only: ambiguous gap, defaulting localchat")
-                return "localchat"
-            if _ROUTE_MODE == "llm":
-                return self._classify_ternary_intent_llm(user_input, allow_agentic=_AGENTIC_MODE_ON)
-            # "semantic" mode's original binary tie-break. If agentic is
-            # off, there's nothing left for this binary check to decide
-            # (it only ever distinguishes agentic vs chat), so skip the
-            # LLM call entirely rather than spend it on a moot question.
+        Returns (intent, query_vec). The embedding computed for routing is
+        returned so route() can reuse it for memory recall instead of paying
+        for a second embed of the same text (see route()).
+        """
+        with _brain_trace.step("think._route_intent", layer="route",
+                               inputs={"user_input": user_input, "mode": _ROUTE_MODE}) as ctx:
+            if not _ROUTE_ENABLED:
+                ctx.set(outputs={"intent": "localchat", "vector": None},
+                        factors=["ROUTE_ENABLED=0 → forced localchat"])
+                return "localchat", None
+            # Tiny inputs ("dl y", "ok?") carry no signal for semantic
+            # label scoring — embedding noise once routed "dl y" to
+            # greeting with memory skipped. Fall through to localchat
+            # (full recall + store) unless it's an explicit greeting.
+            if len((user_input or "").split()) <= 2 and not _is_greeting_only(user_input):
+                ctx.set(outputs={"intent": "localchat", "vector": None},
+                        factors=["≤2 tokens and no greeting-only regex → localchat default (no semantic score)"])
+                return "localchat", None
+            if _ROUTE_MODE == "llm_only":
+                label = self._classify_quaternary_intent_llm(user_input, allow_agentic=_AGENTIC_MODE_ON)
+                ctx.set(outputs={"intent": label, "vector": None, "method": "llm_only"},
+                        factors=["llm_only mode bypasses semantic scoring"])
+                return label, None
+
+            instruct = _ROUTE_INSTRUCT_QUATERNARY
+            memorize = self._get_memorize()
+            if memorize is None:
+                log.warning("[think] Memory unavailable — intent routing via LLM only")
+                label = self._classify_quaternary_intent_llm(user_input, allow_agentic=_AGENTIC_MODE_ON)
+                ctx.set(outputs={"intent": label, "vector": None, "method": "llm_fallback"},
+                        factors=["memory backend unavailable → fell back to LLM classifier"])
+                return label, None
+            embedder = getattr(getattr(memorize, "_mem", None), "_embedder", None)
+            if embedder is None or not hasattr(embedder, "embed_query"):
+                log.warning("[think] Embedder unavailable — intent routing via LLM only")
+                label = self._classify_quaternary_intent_llm(user_input, allow_agentic=_AGENTIC_MODE_ON)
+                ctx.set(outputs={"intent": label, "vector": None, "method": "llm_fallback"},
+                        factors=["embedder unavailable → fell back to LLM classifier"])
+                return label, None
+            # Phase 2: shared module cache — identical (text, instruct) pairs
+            # embed once per process instead of once per call site.
+            try:
+                query_vec = reason.cached_embed_query(embedder, user_input, instruct=instruct)
+            except Exception as exc:
+                # A RAISING embedder (HTTP 500/timeout/circuit-open) must
+                # degrade exactly like a MISSING one: LLM classifier, no
+                # vector. Previously this bubbled and killed the whole turn
+                # (every Playground idle build died here during outages).
+                log.warning("[think] Embedder failed (%s) — intent routing via LLM only", exc)
+                label = self._classify_quaternary_intent_llm(user_input, allow_agentic=_AGENTIC_MODE_ON)
+                ctx.set(outputs={"intent": label, "vector": None, "method": "llm_fallback"},
+                        factors=["embedder error → fell back to LLM classifier"])
+                return label, None
+            labels, example_vecs = self._semantic_example_vectors(_ROUTE_QUATERNARY_EXAMPLES, instruct)
+            scores = reason.label_scores_topk(query_vec, labels, example_vecs, top_k=_SEMANTIC_LABEL_TOP_K)
+
             if not _AGENTIC_MODE_ON:
-                return "localchat"
-            llm_label = self._classify_agent_intent(user_input)
-            return "agentic" if llm_label == "agentic" else "localchat"
-    
-        return "localchat"
+                scores.pop("agentic", None)
+
+            greeting_score = scores.get("greeting", 0.0)
+            agentic_score = scores.get("agentic", 0.0)
+            webchat_score = scores.get("webchat", 0.0)
+
+            ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+            best_label, best_score = ranked[0] if ranked else ("localchat", 0.0)
+            gap = best_score - ranked[1][1] if len(ranked) > 1 else 1.0
+
+            agentic_threshold = float(os.getenv("ROUTE_AGENTIC_THRESHOLD", "0.78"))
+            webchat_threshold = float(os.getenv("ROUTE_WEBCHAT_THRESHOLD", "0.72"))
+            greeting_threshold = float(os.getenv("ROUTE_GREETING_THRESHOLD", "0.60"))
+
+            log.debug(
+                "[route] quaternary scores: greeting=%.3f agentic=%.3f webchat=%.3f best=%s gap=%.3f for: %r",
+                greeting_score, agentic_score, webchat_score, best_label, gap, user_input
+            )
+
+            ctx.add_extra(scores=dict(scores), best=best_label, gap=gap,
+                          thresholds={"agentic":agentic_threshold, "webchat":webchat_threshold,
+                                     "greeting":greeting_threshold},
+                          method="semantic")
+
+            if best_label == "greeting" and greeting_score >= greeting_threshold and (gap >= _SEMANTIC_ROUTE_MIN_GAP or _is_greeting_only(user_input)):
+                ctx.set(outputs={"intent": "greeting", "vector_dim": int(query_vec.shape[0])},
+                        factors=[f"greeting_score={greeting_score:.3f} ≥ {greeting_threshold}",
+                                 f"gap={gap:.3f} ≥ min_gap={_SEMANTIC_ROUTE_MIN_GAP} OR greeting-only regex hit"])
+                return "greeting", query_vec
+
+            if best_label == "agentic" and agentic_score >= agentic_threshold and gap >= _SEMANTIC_ROUTE_MIN_GAP:
+                ctx.set(outputs={"intent": "agentic", "vector_dim": int(query_vec.shape[0])},
+                        factors=[f"agentic_score={agentic_score:.3f} ≥ {agentic_threshold}",
+                                 f"gap={gap:.3f} ≥ min_gap={_SEMANTIC_ROUTE_MIN_GAP}"])
+                return "agentic", query_vec
+            if best_label == "webchat" and webchat_score >= webchat_threshold and gap >= _SEMANTIC_ROUTE_MIN_GAP:
+                ctx.set(outputs={"intent": "webchat", "vector_dim": int(query_vec.shape[0])},
+                        factors=[f"webchat_score={webchat_score:.3f} ≥ {webchat_threshold}",
+                                 f"gap={gap:.3f} ≥ min_gap={_SEMANTIC_ROUTE_MIN_GAP}"])
+                return "webchat", query_vec
+
+            ambiguous = (
+                (agentic_score >= agentic_threshold or webchat_score >= webchat_threshold or greeting_score >= greeting_threshold)
+                and gap < _SEMANTIC_ROUTE_MIN_GAP
+            )
+            if ambiguous:
+                if _is_greeting_only(user_input):
+                    ctx.set(outputs={"intent": "greeting", "vector_dim": int(query_vec.shape[0])},
+                            factors=["ambiguous but greeting-only regex overrides → greeting"])
+                    return "greeting", query_vec
+                # Phase 5: fly → action selection. The fly scores the close-call
+                # routes; when decisive in live mode it resolves the tie without
+                # spending an LLM call. Otherwise fall through to the tiebreaks.
+                fly_label = self._fly_route_tiebreak(
+                    user_input, scores, current_user_id(), ctx, query_vec
+                )
+                if fly_label is not None:
+                    return fly_label, query_vec
+                if _ROUTE_MODE == "semantic_only":
+                    log.debug("[route] semantic_only: ambiguous gap, defaulting localchat")
+                    ctx.set(outputs={"intent": "localchat", "vector_dim": int(query_vec.shape[0])},
+                            factors=[f"ambiguous gap={gap:.3f}, semantic_only mode → localchat default"])
+                    return "localchat", query_vec
+                if _ROUTE_MODE == "llm":
+                    label = self._classify_quaternary_intent_llm(user_input, allow_agentic=_AGENTIC_MODE_ON)
+                    ctx.set(outputs={"intent": label, "vector_dim": int(query_vec.shape[0]), "method": "llm_tiebreak"},
+                            factors=[f"ambiguous gap={gap:.3f}, llm mode → LLM tiebreak"])
+                    return label, query_vec
+                # Default: ambiguous → localchat. The LLM tiebreak costs a
+                # full TTFT (~1-3s on Jetson) to resolve a close call, and
+                # localchat is the safe default — the user can rephrase if
+                # they wanted tools/web. Explicit opt-in via _ROUTE_MODE=llm.
+                log.debug("[route] ambiguous gap, defaulting localchat (no LLM tiebreak)")
+                ctx.set(outputs={"intent": "localchat", "vector_dim": int(query_vec.shape[0])},
+                        factors=[f"ambiguous gap={gap:.3f} → localchat default (LLM tiebreak skipped)"])
+                return "localchat", query_vec
+
+            if _is_greeting_only(user_input):
+                ctx.set(outputs={"intent": "greeting", "vector_dim": int(query_vec.shape[0])},
+                        factors=["no threshold met but greeting-only regex hit"])
+                return "greeting", query_vec
+
+            ctx.set(outputs={"intent": "localchat", "vector_dim": int(query_vec.shape[0])},
+                    factors=["no threshold met, no greeting regex → default localchat"])
+            return "localchat", query_vec
+
+    def _fly_route_tiebreak(self, user_input, scores, user_id, ctx, query_vec):
+        """Phase 5: let the fly resolve close route calls.
+
+        Returns the winning label when the fly is decisive in live mode,
+        else None (caller falls back to the existing LLM tiebreak).
+        """
+        try:
+            from cognition.fly_behavior.action_select import Candidate, score_candidates
+        except Exception as exc:
+            log.debug("[route] fly tiebreak unavailable: %s", exc)
+            return None
+        _ROUTE_HINTS = {
+            "greeting": ("greeting the user briefly",
+                         {"energy": "low", "speed": "fast"}),
+            "localchat": ("chatting with the user with full memory recall",
+                          {"energy": "med", "speed": "fast"}),
+            "webchat": ("searching the web to answer the user",
+                        {"energy": "med", "speed": "slow", "external": True}),
+            "agentic": ("running autonomous tools to complete a task",
+                        {"energy": "high", "speed": "slow", "external": True}),
+        }
+        candidates = []
+        for label in ("greeting", "localchat", "webchat", "agentic"):
+            if label == "agentic" and not _AGENTIC_MODE_ON:
+                continue
+            desc, hints = _ROUTE_HINTS[label]
+            candidates.append(Candidate(
+                id=label, kind="route", label=label, description=desc,
+                llm_prior=max(0.0, min(1.0, float(scores.get(label, 0.0)))),
+                hints=dict(hints),
+            ))
+        try:
+            rec = score_candidates(candidates, user_id=user_id,
+                                   context_text=user_input, source="router")
+        except Exception as exc:
+            log.debug("[route] fly tiebreak scoring failed: %s", exc)
+            return None
+        if rec.get("applied") and rec.get("winner"):
+            winner = rec["winner"]
+            ctx.set(
+                outputs={"intent": winner,
+                         "vector_dim": int(query_vec.shape[0]),
+                         "method": "fly_tiebreak"},
+                factors=[f"fly decisive in live mode (weight={rec['weight']})",
+                         f"votes={rec['candidates'][winner]['votes']}"],
+            )
+            return winner
+        return None
 
     def _semantic_example_vectors(self, examples_by_label: dict, instruct: str) -> tuple[list[str], object]:
         """Return cached route-example vectors.
 
         Hot turns use the in-memory cache. Cold boots can reuse a per-user
         on-disk NumPy archive keyed by the route examples, instruct string, and
-        embedding backend metadata when ROUTE_VECTOR_CACHE_ENABLED=1. If the
-        cache is missing/stale/unreadable, Aiko recomputes and overwrites it.
+        embedding backend metadata.
+        If the cache is missing/stale/unreadable, Aiko recomputes and overwrites it.
         """
         cache_key = (id(examples_by_label), instruct)
         with self._semantic_example_cache_lock:
@@ -510,7 +2397,10 @@ class AikoThink:
             if cached is not None:
                 return cached
 
-            embedder = self._memorize._mem._embedder
+            mem = self._get_memorize()
+            embedder = getattr(getattr(mem, "_mem", None), "_embedder", None)
+            if embedder is None or not hasattr(embedder, "embed_queries"):
+                raise RuntimeError("embedder unavailable for route-vector cache")
             disk_path = self._route_vector_cache_path(examples_by_label, instruct, embedder)
             if disk_path is not None and disk_path.exists():
                 try:
@@ -518,13 +2408,18 @@ class AikoThink:
                         data = np.load(f, allow_pickle=False)
                         cached = (list(data["labels"].astype(str)), data["vectors"])
                     self._semantic_example_cache[cache_key] = cached
+                    while len(self._semantic_example_cache) > 8:
+                        self._semantic_example_cache.pop(next(iter(self._semantic_example_cache)))
                     return cached
                 except Exception as exc:
                     log.debug("[route] ignoring stale vector cache %s: %s", disk_path, exc)
 
             labels, vectors = reason.embed_example_matrix(embedder, examples_by_label, instruct=instruct)
             cached = (labels, vectors)
-            self._semantic_example_cache[cache_key] = cached
+            with self._semantic_example_cache_lock:
+                self._semantic_example_cache[cache_key] = cached
+                while len(self._semantic_example_cache) > 8:
+                    self._semantic_example_cache.pop(next(iter(self._semantic_example_cache)))
             if disk_path is not None:
                 try:
                     disk_path.parent.mkdir(parents=True, exist_ok=True)
@@ -535,122 +2430,88 @@ class AikoThink:
             return cached
 
     def _route_vector_cache_path(self, examples_by_label: dict, instruct: str, embedder) -> Path | None:
-        if not _ROUTE_VECTOR_CACHE_ENABLED:
-            return None
-        try:
-            payload = {
-                "examples": examples_by_label,
-                "instruct": instruct,
-                "embedder": {
-                    "class": type(embedder).__name__,
-                    "model": getattr(embedder, "model", None) or getattr(embedder, "model_name", None) or getattr(embedder, "name", None),
-                    "dims": os.getenv("EMBED_DIMS", ""),
-                },
-            }
-            digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:24]
-            raw_dir = Path(_ROUTE_VECTOR_CACHE_DIR)
-            base = raw_dir if raw_dir.is_absolute() else user_state_dir(current_user_id()) / raw_dir
-            return base / f"{digest}.npz"
-        except Exception:
-            return None
+        payload = {
+            "examples": examples_by_label,
+            "instruct": instruct,
+            "embedder": {
+                "class": type(embedder).__name__,
+                "model": getattr(embedder, "model", None) or getattr(embedder, "model_name", None) or getattr(embedder, "name", None),
+                "dims": os.getenv("EMBED_DIMS", ""),
+            },
+        }
+        return reason.cache_vector_path(
+            payload,
+            cache_dir_env="ROUTE_VECTOR_CACHE_DIR",
+            default_dir=_ROUTE_VECTOR_CACHE_DIR,
+            per_user=True,
+        )
 
-    def _classify_agent_intent(self, user_input: str, skip_regex: bool = False) -> str:
-        """Ask the local model for a compact binary route label when semantics are ambiguous."""
-        if not skip_regex and _AGENTIC_ROUTE_RE.search(user_input):
-            return "agentic"            
-        try:
-            resp = self._client.chat.completions.create(
-                model=self._router_model,
-                messages=[{"role": "user", "content": (
-                    f"Message: {user_input!r}\n\n"
-                    "Output only the route label. No explanation.\n"
-                    "Labels: [agentic, chat]\n\n"
-                    "Message: 'set a reminder for 9pm'\n"
-                    "Label: agentic\n\n"
-                    "Message: 'write an email to my landlord'\n"
-                    "Label: agentic\n\n"
-                    "Message: 'debug why asyncio.run() hangs'\n"
-                    "Label: agentic\n\n"
-                    "Message: 'make a plan to learn Japanese'\n"
-                    "Label: agentic\n\n"
-                    "Message: 'search for latest llama.cpp release and summarize it'\n"
-                    "Label: agentic\n\n"
-                    "Message: 'compare ollama vs llama.cpp and recommend one'\n"
-                    "Label: agentic\n\n"
-                    "Message: 'open soul.md and show the persona block'\n"
-                    "Label: agentic\n\n"
-                    "Message: 'continue working on the reflection script'\n"
-                    "Label: agentic\n\n"
-                    "Message: 'what do you think about minimalism'\n"
-                    "Label: chat\n\n"
-                    "Message: 'explain semaphores from memory'\n"
-                    "Label: chat\n\n"
-                    "Message: 'is it weird that I find debugging more satisfying than writing features'\n"
-                    "Label: chat\n\n"
-                    "Label:"
-                )}],
-                stream=False, max_tokens=6, temperature=0.0, top_p=1.0, timeout=LLM_TIMEOUT,
+    def _intent_llm_prompt_parts(self, *, allow_agentic: bool, include_greeting: bool) -> tuple[str, str, set[str]]:
+        labels = []
+        guidance_parts: list[str] = []
+        examples: list[str] = []
+        valid: set[str] = set()
+
+        if include_greeting:
+            labels.append("greeting")
+            valid.add("greeting")
+            guidance_parts.append(
+                "greeting = the entire message is only a salutation, thanks, "
+                "or small acknowledgement with no substantive request.\n"
             )
-            label = (resp.choices[0].message.content or "chat").strip().lower()
-            label = re.sub(r"[^a-z_].*$", "", label)
-            return label if label in {"agentic", "chat"} else "chat"
-        except Exception as e:
-            log.warning("Intent routing failed: %s", e)
-            return "chat"
-
-    def _classify_ternary_intent_llm(self, user_input: str, allow_agentic: bool = True) -> str:
-        """LLM classify for ROUTE_MODE=llm (ambiguity tie-break) and
-        ROUTE_MODE=llm_only (sole routing decision, every turn).
-
-        allow_agentic=False collapses this to a binary webchat/chat
-        classification — agentic is never offered as a label, so
-        AGENTIC_MODE_ON=0 holds regardless of which ROUTE_MODE is active.
-        """
-        if allow_agentic and _AGENTIC_ROUTE_RE.search(user_input):
-            return "agentic"
+            examples.extend([
+                "Message: 'hey Aiko'\nLabel: greeting\n",
+                "Message: 'thanks'\nLabel: greeting\n",
+            ])
 
         if allow_agentic:
-            labels_line = "Labels: [agentic, webchat, chat]"
-            guidance = (
+            labels.append("agentic")
+            valid.add("agentic")
+            guidance_parts.append(
                 "agentic = the message asks for an action/task (write, save, "
                 "schedule, debug, plan, remind, research-and-report).\n"
-                "webchat = the message needs current/external information "
-                "(news, prices, scores, recent releases, real-time facts) but "
-                "is not itself a task.\n"
-                "chat = casual conversation, opinions, or something answerable "
-                "from general/persona knowledge alone.\n\n"
-                "Message: 'set a reminder for 9pm'\n"
-                "Label: agentic\n\n"
-                "Message: 'debug why asyncio.run() hangs'\n"
-                "Label: agentic\n\n"
-                "Message: 'what's the weather in Vancouver right now'\n"
-                "Label: webchat\n\n"
-                "Message: 'who won the game last night'\n"
-                "Label: webchat\n\n"
-                "Message: 'what do you think about minimalism'\n"
-                "Label: chat\n\n"
-                "Message: 'explain semaphores from memory'\n"
-                "Label: chat\n\n"
             )
-            valid = {"agentic", "webchat", "chat"}
-        else:
-            labels_line = "Labels: [webchat, chat]"
-            guidance = (
-                "webchat = the message needs current/external information "
-                "(news, prices, scores, recent releases, real-time facts).\n"
-                "chat = casual conversation, opinions, or something answerable "
-                "from general/persona knowledge alone.\n\n"
-                "Message: 'what's the weather in Vancouver right now'\n"
-                "Label: webchat\n\n"
-                "Message: 'who won the game last night'\n"
-                "Label: webchat\n\n"
-                "Message: 'what do you think about minimalism'\n"
-                "Label: chat\n\n"
-                "Message: 'explain semaphores from memory'\n"
-                "Label: chat\n\n"
-            )
-            valid = {"webchat", "chat"}
+            examples.extend([
+                "Message: 'set a reminder for 9pm'\nLabel: agentic\n",
+                "Message: 'debug why asyncio.run() hangs'\nLabel: agentic\n",
+            ])
 
+        labels.extend(["webchat", "chat"])
+        valid.update({"webchat", "chat"})
+        guidance_parts.extend([
+            "webchat = the message needs current/external information "
+            "(news, prices, scores, recent releases, real-time facts) but "
+            "is not itself a task.\n",
+            "chat = casual conversation, opinions, or something answerable "
+            "from general/persona knowledge alone.\n",
+        ])
+        examples.extend([
+            "Message: 'what's the weather in Vancouver right now'\nLabel: webchat\n",
+            "Message: 'who won the game last night'\nLabel: webchat\n",
+            "Message: 'what do you think about minimalism'\nLabel: chat\n",
+            "Message: 'explain semaphores from memory'\nLabel: chat\n",
+        ])
+        return f"Labels: [{', '.join(labels)}]", "\n".join(guidance_parts + examples), valid
+
+    def _classify_intent_llm(self, user_input: str, *, allow_agentic: bool, include_greeting: bool, log_name: str) -> str:
+        if allow_agentic and _AGENTIC_ROUTE_RE.search(user_input):
+            return "agentic"
+        labels_line, guidance, valid = self._intent_llm_prompt_parts(
+            allow_agentic=allow_agentic,
+            include_greeting=include_greeting,
+        )
+        cache_key = None
+        if _INTENT_CACHE_MAX > 0:
+            cache_key = _intent_llm_cache_key(
+                user_input,
+                model=self._router_model,
+                allow_agentic=allow_agentic,
+                include_greeting=include_greeting,
+            )
+            with _intent_llm_cache_lock:
+                hit = _intent_llm_cache.get(cache_key)
+            if hit is not None:
+                return hit
         try:
             resp = self._client.chat.completions.create(
                 model=self._router_model,
@@ -662,131 +2523,191 @@ class AikoThink:
                     "Label:"
                 )}],
                 stream=False, max_tokens=6, temperature=0.0, top_p=1.0, timeout=LLM_TIMEOUT,
+                # The route label needs zero reasoning; a thinking model would
+                # burn the 6-token budget before emitting the label.
+                extra_body={**THINK_OFF_EXTRA_BODY, "cache_prompt": _LLM_CACHE_PROMPT},
             )
-            label = (resp.choices[0].message.content or "chat").strip().lower()
+            label = (resp.choices[0].message.content or "").strip().lower()
             label = re.sub(r"[^a-z_].*$", "", label)
-            if label not in valid:
+            if not label or label not in valid:
+                # Empty or unparseable response: likely transient, so don't
+                # cache it — a later retry with the same input must be able
+                # to classify again instead of being stuck on localchat.
                 return "localchat"
-            return "localchat" if label == "chat" else label
+            route = "localchat" if label == "chat" else label
+            if cache_key is not None:
+                with _intent_llm_cache_lock:
+                    if len(_intent_llm_cache) >= _INTENT_CACHE_MAX:
+                        # FIFO evict the oldest entry; insertion order is
+                        # preserved by dicts.
+                        _intent_llm_cache.pop(next(iter(_intent_llm_cache)))
+                    _intent_llm_cache[cache_key] = route
+            return route
         except Exception as e:
-            log.warning("Ternary LLM routing failed: %s", e)
+            log.warning("%s LLM routing failed: %s", log_name, e)
             return "localchat"
-  
-    def agentic_chat(self, user_input: str, token_callback=None, mem_kb_future=None, query_vec: np.ndarray | None = None) -> str:
-        """Delegate task-mode execution to skills.agentic."""
+
+    def _classify_quaternary_intent_llm(self, user_input: str, allow_agentic: bool = True) -> str:
+        """LLM classify with greeting/agentic/webchat/chat labels."""
+        return self._classify_intent_llm(
+            user_input,
+            allow_agentic=allow_agentic,
+            include_greeting=True,
+            log_name="Quaternary",
+        )
+
+    def _classify_ternary_intent_llm(self, user_input: str, allow_agentic: bool = True) -> str:
+        """Backward-compatible LLM classifier with no greeting label."""
+        return self._classify_intent_llm(
+            user_input,
+            allow_agentic=allow_agentic,
+            include_greeting=False,
+            log_name="Ternary",
+        )
+
+    def _soft_gate_reply(
+        self,
+        user_input: str,
+        action: str,
+        reason: str,
+        token_callback=None,
+        mem_kb_future=None,
+        query_vec: np.ndarray | None = None,
+        include_history: bool = True,
+    ) -> str:
+        """Handle defer / clarify / degrade_chat without starting agentic tools.
+
+        Used by route() (pre-routing) and agentic_chat() (direct agentic entry).
+        Prompts come from attention.soft_user_prompt (one short reply only).
+        """
+        try:
+            from cognition.attention import for_identity
+            state = for_identity(current_user_id())
+            kind = action if action in {"defer", "clarify", "degrade_chat"} else "other"
+            state.record_self_decision(kind, reason)
+            state.persist()
+        except Exception as exc:
+            log.debug("[soft_gate] self-decision record skipped: %s", exc)
+        from cognition.attention import soft_user_prompt
+        prompt = soft_user_prompt(user_input, action, reason)
+        return self.chat(
+            prompt,
+            token_callback=token_callback,
+            mem_kb_future=mem_kb_future,
+            query_vec=query_vec,
+            store_turn=True,
+            include_history=include_history,
+        )
+
+    def agentic_chat(
+        self, user_input: str, token_callback=None, mem_kb_future=None,
+        query_vec: np.ndarray | None = None, _from_route: bool = False,
+        system_note: str | None = None,
+        gate_result: tuple[bool, str, str] | None = None,
+        include_history: bool = True, lean_context: bool = False,
+        worker_mode: bool = False,
+    ) -> str:
+        """Delegate task-mode execution to agentic.agentic.
+
+        Runs a bounded self-assessment gate first (attention.should_attempt).
+        Critical requests always proceed; discretionary work may degrade to
+        chat, defer, or ask for clarification instead of starting the tool loop.
+        Direct entry (scheduled jobs) still gates here; normal turns are gated
+        earlier in route() with mode=route.
+
+        lean_context — scheduled autonomous jobs set this: memory becomes droppable
+        and tool output is capped tighter, because those sessions keep their state
+        in on-disk checkpoints rather than in the prompt.
+
+        worker_mode — autonomous coding ticks set this: the loop runs as a lean
+        coding worker (minimal system prompt, coding tools only, no memory/KB/
+        persona fetch). Fixed overhead drops from ~4-6k tokens to ~1k so a
+        10k/16k window holds real work instead of overhead.
+        """
         user_id = current_user_id()
         with self._active_users_lock:
             self._active_user_ids.add(user_id)
+        _agentic_t0 = time.monotonic()
         try:
-            embedder = self._memorize._mem._embedder
-            cap_vec = embedder.embed_query(
-                user_input,
-                instruct="Which capability/tool domain applies to this task?",
+            # Reuse the route decision for routed turns; direct agentic calls gate once.
+            if gate_result is None:
+                try:
+                    from cognition.attention import for_identity
+                    state = for_identity(user_id)
+                    gate_result = state.should_attempt(user_input, mode="agentic")
+                except Exception as exc:
+                    log.debug("[agentic_chat] should_attempt skipped: %s", exc)
+                    gate_result = (True, "gate unavailable", "proceed")
+            ok, gate_reason, gate_action = gate_result
+            if not ok:
+                log.info("[agentic_chat] should_attempt action=%s reason=%s", gate_action, gate_reason)
+                return self._soft_gate_reply(
+                    user_input, gate_action, gate_reason, token_callback=token_callback,
+                    mem_kb_future=mem_kb_future, query_vec=query_vec,
+                    include_history=include_history,
+                )
+
+            cap_vec = None
+            if not worker_mode:
+                memorize = self._get_memorize()
+                mem_inner = getattr(memorize, "_mem", None) if memorize is not None else None
+                embedder = getattr(mem_inner, "_embedder", None)
+                # Workers already have a fixed coding toolset; embedding the
+                # scheduled prompt cannot change routing and needlessly makes
+                # an idle build depend on the memory/embedding service.
+                cap_vec = reason.cached_embed_query(
+                    embedder,
+                    user_input,
+                    instruct="Which capability/tool domain applies to this task?",
+                ) if embedder is not None and hasattr(embedder, "embed_query") else None
+            if system_note and system_note.strip():
+                # Agentic prompt plumbing lives in run_agentic_chat; carry the
+                # notices as marked situational context so drained notes are
+                # never silently dropped on tool turns.
+                user_input = f"{user_input}\n\n[{_format_system_notices(system_note)}]"
+            response = run_agentic_chat(
+                self, user_input, token_callback=token_callback,
+                mem_kb_future=mem_kb_future, query_vec=query_vec, cap_vec=cap_vec,
+                include_history=include_history, lean_context=lean_context,
+                worker_mode=worker_mode,
             )
-            return run_agentic_chat(self, user_input, token_callback=token_callback, mem_kb_future=mem_kb_future, query_vec=query_vec, cap_vec=cap_vec)
+            return response
         finally:
+            # Only record latency if called directly (not from route, which already records)
+            if not _from_route:
+                try:
+                    from cognition.attention import for_identity
+                    for_identity(user_id).record_turn_latency(time.monotonic() - _agentic_t0)
+                except Exception:
+                    pass
             with self._active_users_lock:
                 self._active_user_ids.discard(user_id)
                 if not self._active_user_ids:
                     self._last_chat_time = time.time()
-              
-    def webchat(self, user_input: str, token_callback=None, mem_kb_future=None) -> str:
-        """Web-aware chat: web_search + optional webfetch fallback."""
-        if self._speak and self._speak.is_playing():
-            self._speak.stop()
-        
-        # Memory + KB — either resolved from route()'s pre-intent future,
-        # or fetched directly if this was called standalone.
-        memories, knowledge_block = self._resolve_mem_kb(user_input, mem_kb_future)
-        memory_block = self._memorize.format_for_context(memories)
 
-        # Build base system (persona + memory + knowledge)
-        system = self._current_system_prompt()
-        system += "\n\n" + bioclock.current_datetime_block()
-        if memory_block:
-            system = f"{system}\n\n{memory_block}"
-        system = f"{system}\n\n{knowledge_block}"
-        
-        # Search directly with the raw user input — same approach as /web.
-        # No LLM-based query condensation: it adds latency, depends on a
-        # small router model that often produces worse queries than the
-        # original text, and /web already proves the raw path works.
-        if token_callback:
-            token_callback(f"__SEARCHING__:{user_input}\n")
-        
-        context = web_search_context(user_input, max_results=int(os.getenv("SEARXNG_MAX_RESULTS", 3)))
+    def webchat(self, user_input: str, token_callback=None, mem_kb_future=None, query_vec: np.ndarray | None = None, system_note: str | None = None) -> str:
+        """Web-aware chat: thin wrapper over chat(web_search=True).
 
-        if not context:
-            log.info("[webchat] First search returned nothing, retrying once...")
-            if token_callback:
-                token_callback("__RETRYING__\n")
-            try:
-                context = web_search_context(user_input, max_results=1)
-            except Exception as e:
-                log.warning("[webchat] Retry failed: %s", e)
-                context = None
-        
-        # Inject web context if available
-        if context:
-            system = (
-                f"{system}\n\n"
-                f"<search_results query='{user_input}'>\n"
-                f"Answer ONLY using these search results:\n\n"
-                f"{context}\n"
-                f"</search_results>"
-            )
-        else:
-            if token_callback:
-                token_callback("[No web results available; using local knowledge]\n")
-            system = (
-                f"{system}\n\n"
-                "<search_failed>\n"
-                "Web search was attempted for this question but returned no usable "
-                "results. You have no current information on this topic — not from "
-                "search, and your training data may be stale on anything time-sensitive "
-                "(scores, news, prices, current events, recent releases). Do not guess "
-                "or invent scores, names, dates, or other current-event details. Say "
-                "plainly that you couldn't retrieve current information on this. It is "
-                "fine and expected to say you don't know.\n"
-                "</search_failed>"
-            )
+        The recall chain, prompt building, and turn handling all live in
+        chat() now; webchat only keeps the personal-sharing guard and sets
+        the web_search flag (the old "/web" tag idea, carried as a parameter
+        so it never leaks into the prompt or history).
+        """
+        # Guard: experience-sharing narration must never be answered from
+        # search results ("Answer ONLY using these results" would discard
+        # what the user just told us). Fall back to plain chat, which keeps
+        # memory recall and turn writeback intact.
+        if _is_personal_sharing(user_input):
+            log.info("[route] webchat override -> chat (personal sharing)")
+            return self.chat(user_input, token_callback=token_callback, mem_kb_future=mem_kb_future, query_vec=query_vec, system_note=system_note)
+        return self.chat(
+            user_input, token_callback=token_callback, mem_kb_future=mem_kb_future,
+            query_vec=query_vec, system_note=system_note, web_search=True,
+            # The full intent-routed web block below covers this turn; the
+            # lighter hint-regex net block must not fire a second search.
+            websearch_net=False,
+        )
 
-        # Build message history (same as chat())
-        llm_prompt = user_input
-        if self._reasoning:
-            llm_prompt = f"{user_input}\n\nThink through this carefully."
-        
-        with self._history_lock:
-            self._history.append({"role": "user", "content": user_input})
-            if len(self._history) > CONTEXT_WINDOW_TURNS * 10:
-                self._history = self._history[-(CONTEXT_WINDOW_TURNS * 10):]
-            trimmed = self._history[-(CONTEXT_WINDOW_TURNS * 2):]
-        
-        trimmed = self._sanitize_history(trimmed)
-        if trimmed and trimmed[-1]["role"] == "user" and llm_prompt != user_input:
-            trimmed = trimmed[:-1] + [{"role": "user", "content": llm_prompt}]
-        
-        # Log debug info
-        self.last_prompt_debug = {
-            "mode": "webchat",
-            "system_prompt": system,
-            "memory_prompt": memory_block or "<memory_context>\nNo memories.\n</memory_context>",
-            "knowledge_prompt": knowledge_block,
-            "web_prompt": _extract_search_results_block(system),
-            "previous_chat_messages": [dict(m) for m in trimmed],
-        }
-        
-        # Stream response
-        raw_response = self._stream_response(trimmed, system=system, token_callback=token_callback)
-        
-        # Store in history
-        with self._history_lock:
-            self._history.append({"role": "assistant", "content": raw_response})
-        
-        self._store_async(user_input, raw_response)
-        self._reasoning = False
-        return raw_response
-  
     def proactive_checkin(self, prompt_hint: str) -> str:
         """Generate one short proactive check-in without storing it as a user turn."""
         _SENTINEL = "_proactive_"
@@ -801,6 +2722,25 @@ class AikoThink:
                 "Keep it natural, warm, and easy to ignore. One or two short sentences max."
             )
             system += "\n\n" + bioclock.current_datetime_block()
+            # MB valence (Phase 4): the fly brain's learned approach/avoid
+            # signal nudges the check-in topic. Negative valence -> gentler,
+            # supportive tone; positive -> warmer/playful. A nudge only —
+            # never overrides the prompt hint.
+            try:
+                from cognition.neural_state import get_neural_state
+                try:
+                    _uid = current_user_id()
+                except Exception:
+                    _uid = None
+                _v = float(get_neural_state(_uid).valence or 0.0)
+                if _v <= -0.4:
+                    system += ("\n\nContext: recent interactions carry a heavy tone. "
+                               "Be extra gentle and supportive, not playful.")
+                elif _v >= 0.4:
+                    system += ("\n\nContext: recent interactions carry a warm tone. "
+                               "A little playfulness is welcome.")
+            except Exception:
+                pass
             messages = [{
                 "role": "user",
                 "content": (
@@ -808,120 +2748,684 @@ class AikoThink:
                     f"Write only the message Aiko should say to {display_name} now."
                 ),
             }]
-            return self._stream_response(messages, system=system, token_callback=None)
+            response = self._stream_response(messages, system=system, token_callback=None, emit=False)
+            response = self._finalize_response(prompt_hint, response, None)
+            return response
         finally:
             with self._active_users_lock:
                 self._active_user_ids.discard(_SENTINEL)
                 if not self._active_user_ids:
                     self._last_chat_time = time.time()
+            try:
+                from cognition.attention import flush_all_persist
+                flush_all_persist()
+            except Exception:
+                log.debug("proactive_checkin: flush_all_persist failed", exc_info=True)
 
     # ── proactive idle check-in loop ──────────────────────────────────────────
 
-    def chat(self, user_input: str, token_callback=None, _skip_search: bool = True, _history_label: str | None = None, mem_kb_future=None) -> str:
-        """Standard chat: local knowledge only (persona + memory + KB)."""
-        if self._speak and self._speak.is_playing():
-            self._speak.stop()
-        
-        # Memory + KB — either resolved from route()'s pre-intent future,
-        # or fetched directly if this was called standalone.
-        memories, knowledge_block = self._resolve_mem_kb(user_input, mem_kb_future)
-        memory_block = self._memorize.format_for_context(memories)
-        
-        system = self._current_system_prompt()
-        system += "\n\n" + bioclock.current_datetime_block()
-        if memory_block:
-            system = f"{system}\n\n{memory_block}"
-        else:
-            system += "\n\n<memory_context>\nNo relevant memories found.\n</memory_context>"
-        system = f"{system}\n\n{knowledge_block}"
-        
-        # Additional narrower wiki lookup — only when the user is asking
-        # about Aiko's own architecture/docs, distinct from the general KB
-        # fetch above. Gated so casual chat doesn't pay for it every turn.
-        if _should_use_local_knowledge(user_input):
-            try:
-                wiki_context = wiki_knowledge_context_for(
-                    user_input, limit=3, max_chars=3000,
-                    embedder=self._memorize._mem._embedder,
+    def _websearch_net_block(self, query: str, token_callback=None) -> str:
+        """One-shot SearXNG lookup for explicit internet asks routed to plain chat.
+
+        Returns an empty string when search is unavailable or finds nothing,
+        so the normal localchat turn proceeds unchanged.
+        """
+        try:
+            max_results = int(os.getenv("SEARXNG_MAX_RESULTS", "3"))
+            from agentic.toolkit.websearch import web_search as _web_search
+            results, err = _web_search(query, max_results)
+            if err:
+                log.warning("[chat] websearch net error: %s", err)
+                return ""
+            lines: list[str] = []
+            sources: list[dict] = []
+            for i, result in enumerate(results or [], 1):
+                title = (result.get("title") or "").strip()
+                url = (result.get("url") or "").strip()
+                content = (result.get("content") or "").strip()
+                if not url:
+                    continue
+                lines.append(f"{i}. {title}\n   {url}\n   {content}")
+                sources.append({"title": title or url, "url": url})
+            if not lines:
+                return ""
+            if token_callback:
+                token_callback("__SOURCES__:" + json.dumps(sources, ensure_ascii=False) + "\n")
+            return "\n\n".join(lines)
+        except Exception as e:
+            log.warning("[chat] websearch net failed: %s", e)
+            return ""
+
+    def chat(
+        self,
+        user_input: str,
+        token_callback=None,
+        _history_label: str | None = None,
+        mem_kb_future=None,
+        *,
+        skip_memory: bool = False,
+        store_turn: bool = True,
+        query_vec: np.ndarray | None = None,
+        websearch_net: bool = True,
+        web_search: bool = False,
+        system_note: str | None = None,
+        deep_think: bool = False,
+        return_deep_think_summary: bool = False,
+        include_history: bool = True,
+    ) -> str | tuple[str, str | None]:
+        """Standard chat: persona plus optional memory/KB context.
+
+        Recall is chained, not parallel: memory → entity-link knowledge hop
+        (one link down from recalled memories, no embedding) → explicit
+        knowledge search only when memory cannot answer. No CONTEXT_POOL
+        future is needed on this path; mem_kb_future is kept only for
+        legacy/test callers.
+
+        web_search — intent-routed webchat turns set this (the old webchat()
+        is now a thin wrapper). Runs the full web-search block; local turns
+        never pay for it. Distinct from websearch_net, the lighter
+        hint-triggered lookup for local turns.
+
+        deep_think — see module docstring "Deep-think mode". Sets
+        self._reasoning + self._deep_think for the duration of this call
+        (both are cleared again before returning), widens memory/knowledge
+        recall to DEEP_THINK_MEMORY_LIMIT/DEEP_THINK_KNOWLEDGE_LIMIT when no
+        mem_kb_future was already supplied, and injects _DEEP_THINK_GUIDE —
+        a structured multi-angle reasoning scaffold — into the system prompt.
+        Set return_deep_think_summary for callers such as /think that need the
+        request-local evidence summary alongside the response.
+        """
+        speak = self._get_speak()
+        if speak and speak.is_playing():
+            speak.stop()
+
+        # Piece 3: direct chat() callers (deep-think summary, web-answer)
+        # bypass route(). If the tracker still holds a completed turn
+        # (first_audio already fired), start fresh so the report isn't
+        # polluted by the previous turn's marks. The route()→chat() path
+        # already reset, so this is a no-op there.
+        if _latency.elapsed("input_received", "first_audio") is not None:
+            _latency.reset()
+        _latency.mark("input_received")
+
+        # Fused soft-gate prompts (see _soft_gate_reply) carry an injected
+        # "[Style only — ...]" control block for the LLM. Everything below
+        # except llm_prompt uses the raw user text so the directive never
+        # leaks into recall, history, cognitive state or memory writes.
+        raw_input = _strip_style_directives(user_input)
+        deep_think_summary: str | None = None
+
+        with _deep_think_flag_scope(self, deep_think), _brain_trace.step("think.chat", layer="context",
+                               inputs={"user_input": user_input, "raw_input": raw_input, "skip_memory": skip_memory,
+                                       "store_turn": store_turn, "websearch_net": websearch_net,
+                                       "web_search": web_search,
+                                       "deep_think": deep_think}) as ctx:
+            situation_block = ""
+            metacognitive_block = ""
+            if skip_memory:
+                memories = []
+                knowledge_block = ""
+                memory_block = ""
+                persona_block = ""
+            else:
+                mem_limit = DEEP_THINK_MEMORY_LIMIT if deep_think else MEMORY_RECALL_LIMIT
+                know_limit = DEEP_THINK_KNOWLEDGE_LIMIT if deep_think else KNOWLEDGE_RECALL_LIMIT
+                # Overlapped recall: the memory→knowledge chain, the system
+                # prompt build, and the gated codebase/wiki fetches are
+                # independent reads — run them concurrently and assemble in
+                # the original order below, so prompt bytes don't change.
+                _recall_future = CONTEXT_POOL.submit(
+                    self._recall_chat_blocks, raw_input, query_vec,
+                    mem_limit, know_limit, deep_think, mem_kb_future,
                 )
-                system = f"{system}\n\n{wiki_context}"
-            except Exception as e:
-                log.error("Local wiki-knowledge lookup failed: %s", e)
-        
-        # Build messages
-        llm_prompt = user_input
-        if self._reasoning:
-            llm_prompt = f"{user_input}\n\nThink through this carefully."
-        
-        with self._history_lock:
-            self._history.append({"role": "user", "content": user_input})
-            if len(self._history) > CONTEXT_WINDOW_TURNS * 10:
-                self._history = self._history[-(CONTEXT_WINDOW_TURNS * 10):]
-            trimmed = self._history[-(CONTEXT_WINDOW_TURNS * 2):]
-        
-        trimmed = self._sanitize_history(trimmed)
-        if trimmed and trimmed[-1]["role"] == "user" and llm_prompt != user_input:
-            trimmed = trimmed[:-1] + [{"role": "user", "content": llm_prompt}]
-        
-        # Log debug
-        self.last_prompt_debug = {
-            "mode": "localchat",
-            "system_prompt": system,
-            "memory_prompt": memory_block or "<memory_context>\nNo memories.\n</memory_context>",
-            "knowledge_prompt": knowledge_block,
-            "web_prompt": "",
-            "previous_chat_messages": [dict(m) for m in trimmed],
-        }
-        
-        # Stream response
-        raw_response = self._stream_response(trimmed, system=system, token_callback=token_callback)
-        
-        # Store
-        with self._history_lock:
-            self._history.append({"role": "assistant", "content": raw_response})
-        
-        self._store_async(user_input, raw_response)
-        self._reasoning = False
-        return raw_response
+                _sys_future = CONTEXT_POOL.submit(self._current_system_prompt_parts, raw_input)
+                _code_wanted = any(k in (raw_input or "").lower() for k in ("codebase", "from your code", "from your codebase", "attention gate", "how does your code", "where is", "repo", "source file"))
+                if _code_wanted:
+                    from cognition.knowledge.codebase import codebase_context_for as _codebase_context_for
+                    _mem_for_code = self._get_memorize()
+                    _emb_for_code = _mem_for_code.embedder() if _mem_for_code is not None else None
+                    _code_future = CONTEXT_POOL.submit(
+                        _codebase_context_for, raw_input, limit=4, max_chars=3500, embedder=_emb_for_code)
+                else:
+                    _code_future = None
+                if _should_use_local_knowledge(raw_input):
+                    _mem_for_wiki = self._get_memorize()
+                    _emb_for_wiki = _mem_for_wiki.embedder() if _mem_for_wiki is not None else None
+                    _wiki_future = CONTEXT_POOL.submit(
+                        wiki_knowledge_context_for, raw_input, limit=3, max_chars=3000,
+                        embedder=_emb_for_wiki)
+                else:
+                    _wiki_future = None
+                try:
+                    _blocks = _recall_future.result(timeout=MEMORY_RECALL_TIMEOUT * 3)
+                except concurrent.futures.TimeoutError:
+                    log.warning("Chat recall chain timed out after %.0fs; continuing without memory.",
+                                MEMORY_RECALL_TIMEOUT * 3)
+                    _blocks = {"memories": [], "knowledge_block": "", "memory_block": "", "persona_block": "",
+                               "deep_think_meta": {}}
+                except Exception:
+                    log.exception("Chat recall chain failed; continuing without memory.")
+                    _blocks = {"memories": [], "knowledge_block": "", "memory_block": "", "persona_block": "",
+                               "deep_think_meta": {}}
+                memories = _blocks["memories"]
+                knowledge_block = _blocks["knowledge_block"]
+                memory_block = _blocks["memory_block"]
+                persona_block = _blocks["persona_block"]
+                deep_think_meta = _blocks.get("deep_think_meta") or {}
+                try:
+                    _sys_pair = _sys_future.result(timeout=MEMORY_RECALL_TIMEOUT * 3)
+                except Exception:
+                    log.exception("System-prompt build failed; continuing bare.")
+                    _sys_pair = ("", "")
+                _recall_core_system, _recall_volatile_system = _sys_pair
+                _code_block = ""
+                if _code_future is not None:
+                    try:
+                        _code_block = _code_future.result(timeout=MEMORY_RECALL_TIMEOUT * 3) or ""
+                    except Exception as e:
+                        log.debug("codebase_context inject failed: %s", e)
+                _wiki_block = ""
+                if _wiki_future is not None:
+                    try:
+                        _wiki_block = _wiki_future.result(timeout=MEMORY_RECALL_TIMEOUT * 3) or ""
+                    except Exception as e:
+                        log.error("Local wiki-knowledge lookup failed: %s", e)
+                try:
+                    from cognition.attention import for_identity
+                    from cognition.memory.narrative import query_wants_emotion
+                    _state = for_identity(current_user_id())
+                    # Answer-first: short factual turns with no memory conflicts
+                    # and no emotional/reflective markers skip the deliberation
+                    # blocks (situation + metacognitive) so the model answers
+                    # instead of talking around the question. Conflict staging
+                    # lives inside situation_context, so turns WITH conflicts
+                    # never skip — the confirmation flow stays intact.
+                    _words = len((raw_input or "").split())
+                    _has_conflicts = bool(_state.memory_conflicts(raw_input, memories))
+                    _skip_deliberation = (
+                        not deep_think
+                        and _words <= 15
+                        and not _has_conflicts
+                        and not query_wants_emotion(raw_input or "")
+                        and not _is_personal_sharing(raw_input or "")
+                    )
+                    if _skip_deliberation:
+                        situation_block = ""
+                        metacognitive_block = ""
+                    else:
+                        situation_block = _state.situation_context(raw_input, memories, knowledge_block)
+                        metacognitive_block = _state.metacognitive_context(raw_input, memories)
+                except Exception:
+                    pass
+
+            if skip_memory:
+                core_system, volatile_system = self._current_system_prompt_parts(raw_input)
+            else:
+                # Pre-fetched concurrently with the recall chain above.
+                core_system, volatile_system = _recall_core_system, _recall_volatile_system
+            if not skip_memory:
+                if persona_block:
+                    volatile_system = f"{volatile_system}\n\n{_fit_recall_block(persona_block, 'persona')}"
+                if memory_block:
+                    volatile_system = f"{volatile_system}\n\n{_fit_recall_block(memory_block, 'memory')}"
+                if situation_block:
+                    volatile_system = f"{volatile_system}\n\n{situation_block}"
+                if metacognitive_block:
+                    volatile_system = f"{volatile_system}\n\n{metacognitive_block}"
+                if not memory_block:
+                    volatile_system += "\n\n<memory_context>\nNo relevant memories found.\n</memory_context>"
+                    # Don't-know discipline: with zero evidence on a personal-
+                    # fact question, say so (or ask) instead of inventing —
+                    # confabulated "facts" get extracted into memory and then
+                    # recalled as truth by later turns.
+                    if _PERSONAL_FACT_RE.search(raw_input or ""):
+                        volatile_system += (
+                            "\n\n<answer_discipline>\nNo memories were found for this "
+                            "question. Check the <persona> profile facts above first — "
+                            "if one answers it, use it. Otherwise, if it asks for a "
+                            "personal fact about the user, say you don't know it yet "
+                            "or ask them — never invent names, preferences, or past "
+                            "events.\n</answer_discipline>"
+                        )
+                # Learned knowledge is on-demand in chat: memory is always-on,
+                # knowledge only when memory is absent/weak or explicitly asked.
+                # The chained recall path (mem_kb_future is None) already gated
+                # at fetch time — the link hop is cheap associative context and
+                # the explicit search only ran when memory couldn't answer — so
+                # a non-blank block is injected as-is. The legacy future path
+                # keeps the old injection-time gate.
+                _kb_clean = _blank_empty_knowledge(knowledge_block)
+                _kb_inject = bool(_kb_clean) and (
+                    deep_think
+                    or mem_kb_future is None
+                    or _needs_learned_knowledge(raw_input, memories, knowledge_block)
+                )
+                if _kb_inject:
+                    volatile_system = f"{volatile_system}\n\n{_fit_recall_block(_kb_clean, 'knowledge')}"
+                # Codebase RAG — pre-fetched concurrently above under the
+                # same keyword gate and args; inject as before.
+                if not skip_memory and _code_block and "No matching codebase" not in _code_block:
+                    volatile_system = f"{volatile_system}\n\n{_fit_recall_block(_code_block, 'codebase')}"
+
+            # Wiki RAG — pre-fetched concurrently above under the same gate
+            # and args; inject as before.
+            if not skip_memory and _wiki_block and _blank_empty_knowledge(_wiki_block):
+                volatile_system = f"{volatile_system}\n\n{_fit_recall_block(_wiki_block, 'wiki')}"
+
+            # Lorebook (World Info): keyword-triggered static lore. Cheap
+            # file reads, no vector search — fetched inline, capped like
+            # every other recall source.
+            if not skip_memory:
+                try:
+                    from cognition.knowledge.lorebook import lorebook_context_for
+                    _lore_block = lorebook_context_for(raw_input)
+                    if _lore_block:
+                        volatile_system = f"{volatile_system}\n\n{_fit_recall_block(_lore_block, 'lorebook')}"
+                except Exception as e:
+                    log.debug("lorebook inject failed: %s", e)
+
+            net_context = ""
+            if (
+                not skip_memory
+                and websearch_net
+                and _CHAT_WEBSEARCH_NET_ENABLED
+                and _WEBSEARCH_HINT_RE.search(raw_input)
+            ):
+                net_context = self._websearch_net_block(raw_input, token_callback)
+                if net_context:
+                    volatile_system = (
+                        f"{volatile_system}\n\n"
+                        f"<search_results query='{raw_input}'>\n"
+                        f"Live web results — use them when they are relevant; do not invent time-sensitive facts:\n\n"
+                        f"{net_context}\n"
+                        f"</search_results>"
+                    )
+
+            # Intent-routed webchat: the full web-search block (SearXNG with
+            # retry, "answer ONLY using these results", or an explicit
+            # search-failed block). Only on web_search turns — local chat
+            # never pays web latency.
+            web_block = ""
+            if web_search and not skip_memory:
+                web_block = self._websearch_full_block(raw_input, token_callback)
+                if web_block:
+                    volatile_system = f"{volatile_system}\n\n{web_block}"
+
+            web_present = bool(net_context or web_block)
+            if deep_think and not skip_memory:
+                deep_think_summary = _deep_think_format_summary(
+                    query=raw_input,
+                    memories=memories,
+                    knowledge_block=knowledge_block or "",
+                    meta=deep_think_meta,
+                    web_present=web_present,
+                )
+                try:
+                    _brain_trace.record_step(
+                        "think.deep_think.evidence",
+                        layer="deep_think",
+                        inputs={"query": raw_input},
+                        outputs=_deep_think_trace_payload(
+                            query=raw_input,
+                            memories=memories,
+                            knowledge_block=knowledge_block or "",
+                            meta=deep_think_meta,
+                            web_present=web_present,
+                        ),
+                        factors=[
+                            f"rerank kept {deep_think_meta.get('kept_count')}/{deep_think_meta.get('input_count')}",
+                            f"contradictions={deep_think_meta.get('contradictions', 0)}",
+                        ],
+                    )
+                except Exception:
+                    pass
+
+            _wm_mem = self._get_memorize()
+            if _wm_mem is not None:
+                try:
+                    _wm_block = _wm_mem.wm_context_block()
+                    if _wm_block:
+                        volatile_system = f"{volatile_system}\n\n{_wm_block}"
+                except Exception:
+                    pass
+
+            # Meta-cognitive self-check for web_search turns (constitutional
+            # style): verify alignment, evidence sufficiency, no invention.
+            # Reuses the already-retrieved memories — no redundant second
+            # memorize.search() like the old webchat() did.
+            if web_search and not skip_memory:
+                try:
+                    _meta_notes = (
+                        "Self-check: user preferences aligned? Evidence sufficient? "
+                        f"Inventing facts? Memory hits: {len(memories)}"
+                    )
+                    volatile_system = f"{volatile_system}\n\n<meta_check>{_meta_notes}</meta_check>"
+                except Exception:
+                    log.debug("Meta-cognitive self-check skipped (no error in response)")
+
+            if deep_think:
+                volatile_system = f"{volatile_system}\n\n{_DEEP_THINK_GUIDE}"
+                volatile_system = (
+                    f"{volatile_system}\n\n"
+                    + _deep_think_evidence_preamble(
+                        memories if not skip_memory else [],
+                        knowledge_block if not skip_memory else "",
+                        web_present=web_present,
+                    )
+                )
+                _tool_hint = _deep_think_tool_hint(
+                    raw_input,
+                    memories if not skip_memory else [],
+                    knowledge_block if not skip_memory else "",
+                )
+                if _tool_hint:
+                    volatile_system = f"{volatile_system}\n\n{_tool_hint}"
+
+            volatile_system = f"{volatile_system}\n\n{bioclock.current_datetime_block()}".strip()
+            notices_block = _format_system_notices(system_note)
+            if notices_block:
+                volatile_system = f"{volatile_system}\n\n{notices_block}"
+
+            llm_prompt = user_input
+            if deep_think:
+                llm_prompt = (
+                    f"{user_input}\n\n"
+                    "Take real time to think this through thoroughly before answering "
+                    "— see the deep-thinking guidance above."
+                )
+            elif self._reasoning:
+                llm_prompt = f"{user_input}\n\nThink through this carefully."
+
+            with self._history_lock:
+                self._history.append({"role": "user", "content": raw_input})
+                if len(self._history) > CONTEXT_WINDOW_TURNS * 10:
+                    self._history = self._history[-(CONTEXT_WINDOW_TURNS * 10):]
+                # include_history=False (scheduled jobs): the turn is still
+                # stored, but prior history is not sent — ticks resume from
+                # checkpoint files, not chat.
+                trimmed = self._history[-(CONTEXT_WINDOW_TURNS * 2):] if include_history else []
+
+            trimmed = self._sanitize_history(trimmed)
+            if trimmed and trimmed[-1]["role"] == "user" and llm_prompt != user_input:
+                trimmed = trimmed[:-1] + [{"role": "user", "content": llm_prompt}]
+
+            self.last_prompt_debug = {
+                "mode": "greeting" if skip_memory else ("webchat" if web_search else ("deep_think" if deep_think else "localchat")),
+                "system_prompt": core_system + ("\n\n" + volatile_system if volatile_system else ""),
+                "memory_prompt": memory_block or "<memory_context>\nNo memories.\n</memory_context>",
+                "knowledge_prompt": knowledge_block,
+                "web_prompt": "",
+                "previous_chat_messages": [dict(m) for m in trimmed],
+            }
+            _dump_full_prompt(self.last_prompt_debug)
+
+            # The two halves of the system prompt get sent as two separate
+            # system messages with conversation history sandwiched between —
+            # see _stream_response for the cache_prompt reasoning.
+            _brain_trace.record_step(
+                "think.chat.prompt_assembled",
+                layer="context",
+                outputs={
+                    "core_chars": len(core_system),
+                    "volatile_chars": len(volatile_system),
+                    "memory_block_chars": len(memory_block or ""),
+                    "memory_block_preview": (memory_block or "")[:600],
+                    "history_turns": len(trimmed),
+                },
+                factors=[
+                    f"memories reranked: {len(memories)}",
+                    f"situation/metacognitive added: {bool(situation_block)}/{bool(metacognitive_block)}",
+                    f"wiki trigger: {_should_use_local_knowledge(raw_input)}",
+                    f"websearch_net trigger: {_WEBSEARCH_HINT_RE.search(raw_input) is not None}",
+                    f"deep_think: {deep_think} (token_scale={DEEP_THINK_TOKEN_SCALE if deep_think else (_REASONING_SCALE if self._reasoning else 1)})",
+                ],
+            )
+
+            _latency.mark("recall_completed")
+            # Piece 3: optional sentence streaming — the earliest *safe*
+            # complete sentence goes to TTS while the rest of the LLM
+            # response is still generating. Off by default; reasoning and
+            # deep-think turns keep full-draft gating.
+            speak = self._get_speak()
+            stream_state: dict = {"aborted": False, "streaming": False, "spoken": []}
+            sink = None
+            if _SENTENCE_STREAM and speak is not None and not self._reasoning and not deep_think:
+                sink = _SentenceSink(self._make_sentence_sink(raw_input, speak, token_callback, stream_state))
+            stream_kwargs: dict = {}
+            if sink is not None:
+                # Sentence-stream mode: token_callback is driven by the
+                # speech-stream worker (karaoke-paced), not the LLM stream.
+                stream_kwargs["sentence_sink"] = sink
+            raw_response = self._stream_response(
+                trimmed,
+                system=core_system,
+                system_tail=volatile_system,
+                token_callback=None if sink is not None else token_callback,
+                emit=False,
+                **stream_kwargs,
+            )
+            spoken_prefix = raw_response[: sink.consumed_chars] if sink is not None else ""
+            if sink is not None and stream_state.get("streaming"):
+                try:
+                    speak.stop_speech_stream()
+                except Exception:
+                    pass
+            _ask_out: dict = {}
+            raw_response = self._finalize_response(
+                raw_input, raw_response, token_callback,
+                already_emitted=False, _spoken_prefix=spoken_prefix,
+                sentences_gated=bool(sink is not None and stream_state.get("streaming")),
+                ask_flags=stream_state.get("ask_flags") if sink is not None else None,
+                _ask_out=_ask_out,
+            )
+
+            if _ask_out.get("escalation_id"):
+                # ASK: the turn's record is held for a human accept/decline.
+                # Nothing enters history or memory yet — the existing
+                # approve/deny ccc-<id> path completes it (commit or purge).
+                from cognition.conscience.hooks import (
+                    hold_output_for_approval, push_turn_ask_notice,
+                )
+                import uuid as _uuid
+                # Stable anchor: history can be prefix-trimmed between the
+                # hold and the decision, so a numeric index is unsafe. Stamp
+                # a token on this turn's user entry; completion resolves it
+                # under the history lock and fails closed when it's gone.
+                _hold_token = _uuid.uuid4().hex[:12]
+                with self._history_lock:
+                    if self._history and self._history[-1].get("role") == "user":
+                        self._history[-1]["_hold_token"] = _hold_token
+                    else:
+                        _hold_token = None
+                hold_output_for_approval(
+                    _ask_out["escalation_id"],
+                    held_text=_ask_out["held_text"],
+                    sentence_indices=_ask_out["sentence_indices"],
+                    categories=_ask_out["categories"],
+                    user_id=_ask_out["user_id"],
+                    history_len=len(self._history),
+                    hold_token=_hold_token,
+                    user_input=raw_input,
+                    store_turn=store_turn,
+                )
+                push_turn_ask_notice(
+                    _ask_out["user_id"], _ask_out["escalation_id"],
+                    _ask_out["notice_summary"],
+                )
+            else:
+                with self._history_lock:
+                    self._history.append({"role": "assistant", "content": raw_response})
+
+            # The turn completed successfully: the pending policy echo that
+            # rode this turn's prompt counts as delivered, unlocking
+            # "yes"-confirmation. An [LLM error] response delivered nothing,
+            # so the echo stays pending for the next turn.
+            try:
+                if not (raw_response or "").startswith("[LLM error]"):
+                    from cognition.attention import for_identity
+                    for_identity(current_user_id()).ack_policy_echo()
+            except Exception:
+                pass
+
+            if store_turn and not _ask_out.get("escalation_id"):
+                # Held turns (ASK) must not reach memory before the human
+                # decides; approval stores via _commit_held_output instead.
+                self._store_async(raw_input, raw_response)
+            ctx.set(outputs={"reply_chars": len(raw_response or "")},
+                    factors=[f"LLM stream done; reply {len(raw_response or '')} chars"])
+            if return_deep_think_summary:
+                return raw_response, deep_think_summary
+            return raw_response
 
     def web_search(self, query: str, token_callback=None) -> str:
         """Explicit /web command path."""
         context = web_search_context(query)
         if not context or "no results" in context or "failed" in context:
             msg = f"[no results for: {query}]"
-            if token_callback: token_callback(msg)
+            if token_callback:
+                token_callback(msg)
             return msg
-        return self.chat(context, token_callback=token_callback, _skip_search=True, _history_label=query)
+        # websearch_net=False — this turn already carries fetched results;
+        # re-triggering the net on the context blob would double-search.
+        return self.chat(context, token_callback=token_callback, _history_label=query, websearch_net=False)
 
     def reset_context(self) -> None:
         with self._history_lock:
             self._history.clear()
+        try:
+            _wm_mem = self._get_memorize()
+            if _wm_mem is not None:
+                _wm_mem.wm_reset()
+        except Exception:
+            pass
 
     def last_turn(self) -> tuple[str, str] | None:
         with self._history_lock:
             history_snapshot = list(self._history)
         users = [m["content"].strip() for m in history_snapshot if m.get("role") == "user" and (m.get("content") or "").strip()]
         assistants = [m["content"].strip() for m in history_snapshot if m.get("role") == "assistant" and (m.get("content") or "").strip()]
-        if not users or not assistants: return None
+        if not users or not assistants:
+            return None
         return users[-1], assistants[-1]
 
     def set_reasoning(self, enabled: bool) -> None: self._reasoning = enabled
 
+    @staticmethod
+    def _should_avoid_system_role() -> bool:
+        """Shared no-system latch for non-chat callers (agentic loop)."""
+        return _avoid_system_role()
+
+    @staticmethod
+    def _note_system_role_rejected() -> None:
+        """Latch the no-system layout from a non-chat caller (agentic loop)."""
+        _note_system_role_rejected()
+
+    # Context-local mode flags (see _reasoning_ctx / _deep_think_ctx above).
+    # Property shims so existing `self._reasoning` / `think._deep_think`
+    # reads and writes keep working unchanged.
+    @property
+    def _reasoning(self) -> bool:
+        return _reasoning_ctx.get()
+
+    @_reasoning.setter
+    def _reasoning(self, value: bool) -> None:
+        _reasoning_ctx.set(bool(value))
+
+    @property
+    def _deep_think(self) -> bool:
+        return _deep_think_ctx.get()
+
+    @_deep_think.setter
+    def _deep_think(self, value: bool) -> None:
+        _deep_think_ctx.set(bool(value))
+
     def set_speak(self, speak) -> None:
         with self._speak_lock:
+            old = self._speak
             self._speak = speak
+        if old is not None and old is not speak:
+            old.stop()   # AikoSpeak.stop() is idempotent/safe to call even if already stopped
+
+    def compare_and_set_speak(self, expected, new_value) -> bool:
+        """Atomically set _speak to new_value only if it's still `expected`.
+        Used by the proactive-checkin save/mute/restore sequence in
+        orchestrate.py: if a concurrent explicit toggle (e.g. /voice) changed
+        _speak while we were muted for the check-in, that change is more
+        recent and should win — we skip the restore instead of stomping it.
+        Returns True if the swap happened, False if _speak had already moved."""
+        with self._speak_lock:
+            if self._speak is expected:
+                old = self._speak
+                self._speak = new_value
+                swapped = True
+            else:
+                old = None
+                swapped = False
+        if swapped and old is not None and old is not new_value:
+            old.stop()
+        return swapped
+
+    def _get_speak(self):
+        with self._speak_lock:
+            return self._speak
+
+    def set_memorize(self, memorize) -> None:
+        """Inject the memory backend after boot. Thread-safe against concurrent reads."""
+        with self._memorize_lock:
+            self._memorize = memorize
+
+    def _get_memorize(self):
+        with self._memorize_lock:
+            return self._memorize
 
     def wait_for_memory(self, timeout: float | None = None) -> bool:
         """Block until AikoMemorize's async write queue drains, or timeout
-        elapses. The queue itself now lives in memory.memorize; this is a
+        elapses. The queue itself now lives in cognition.memory.memorize; this is a
         thin passthrough kept for call sites that only know about the
-        AikoThink instance. No longer called from skills.agentic's turn
+        AikoThink instance. No longer called from agentic.agentic's turn
         start (see run_agentic_chat) — draining there was removed since
         the write's own idle-grace window plus real turn latency meant it
         rarely caught anything. Still available for any caller that
         genuinely needs to block until writes are flushed (e.g. shutdown).
         """
-        return self._memorize.wait_for_writes(timeout=timeout)
+        return self._get_memorize().wait_for_writes(timeout=timeout)
+
+    def prewarm_caches(self) -> None:
+        """Warm both semantic caches used by first-turn routing/capability
+        matching, so the first real user turn never pays an embedding cost.
+
+        Route exemplars (self._semantic_example_vectors): in-memory cache,
+        then per-user on-disk npz cache (cognition.reason.cache_vector_path),
+        then compute+persist if both miss.
+
+        Capability trigger embeddings (agentic.capability._get_trigger_embedding):
+        same three-tier pattern, sharing the same cache_vector_path helper —
+        in-memory dict first, then on-disk npz, then compute+persist.
+
+        On a warm disk cache, this whole call is disk loads only, no
+        embedding calls. On a cold cache (first boot, or after a trigger/
+        exemplar edit), it pays the full embed cost once and persists it.
+
+        No-ops (with a log line) if the memory backend isn't wired up yet —
+        callers don't need to check that themselves. Never raises; boot
+        callers can fire this and move on regardless of outcome.
+        """
+        if self._get_memorize() is None:
+            log.info("[think] Skipping semantic cache prewarm — no memory backend.")
+            return
+        try:
+            # Prewarm intent routing cache
+            self._semantic_example_vectors(_ROUTE_TERNARY_EXAMPLES, _ROUTE_INSTRUCT_TERNARY)    # prewarm routing cache in on-disk npz
+
+            # Prewarm capability trigger embeddings (used by agentic_chat -> match_capabilities)
+            from agentic.capability import CAPABILITIES, _get_trigger_embedding            # for loading intents and tools from Aiko's capabilities
+            embedder = self._get_memorize().embedder()                                    # shared embedder — no DB needed, works pre-login
+            for cap in CAPABILITIES.values():                                              # loop through all Aiko's capabilities
+                _get_trigger_embedding(cap, embedder)                                      # load all the semantic vectors into cache
+
+            log.info("[think] Semantic exemplar cache warmed (intent + capabilities)")    # log success
+        except Exception:                                                                 # if error,
+            log.exception("[think] Semantic exemplar prewarm failed")                     # log failure — single point, full traceback
 
     def handle_scheduled_job(self, job: DueJob) -> None:
         """Announce or execute a due scheduled job without blocking the scheduler."""
@@ -929,46 +3433,374 @@ class AikoThink:
         log.info("[schedule] due %s action=%s: %s", job.id, job.action, text)
         if job.action == "announce":
             _play_beep()
-            if self._speak:
-                self._speak.speak(text)
+            speak = self._get_speak()
+            if speak:
+                speak.speak(text)
             else:
                 log.info(f"Aiko scheduled job: {text}")
             return
-        threading.Thread(target=self._run_scheduled_agentic_job, args=(job,), daemon=True).start()
+        # A plain threading.Thread starts with a fresh contextvars context,
+        # not the caller's — so without copying it here, current_user_id()
+        # (read throughout this class) would fall back to its default on
+        # this worker thread even though ScheduleRunner._run() correctly
+        # set it for whichever user's job this is.
+        ctx = contextvars.copy_context()
+        if job.action == "tool":
+            threading.Thread(target=ctx.run, args=(self._run_scheduled_tool_job, job), daemon=True).start()
+            return
+        if job.action == "chain":
+            threading.Thread(target=ctx.run, args=(self._run_scheduled_chain_job, job), daemon=True).start()
+            return
+        threading.Thread(target=ctx.run, args=(self._run_scheduled_agentic_job, job), daemon=True).start()
+
+    def _run_scheduled_chain_job(self, job: DueJob) -> None:
+        """Run a compiled tool chain from a schedule.json record — no LLM.
+
+        The chain was compiled from the user's sentence once (by the agent);
+        every firing just executes it mechanically: tools in order, structured
+        conditions on their outputs, {dotted.path} templating into args.
+        """
+        try:
+            from agentic.agentic import invoke_registered_tool
+            from agentic.workflows.common.chain import run_chain
+            summary = run_chain(job.tool_chain or [], invoke_registered_tool)
+            log.info("Scheduled chain job %s completed: ran=%s skipped=%s errors=%s",
+                     job.id, summary["ran"], summary["skipped"], summary["errors"])
+        except Exception as e:
+            log.error("Scheduled chain job %s failed: %s", job.id, e)
+
+    def _run_scheduled_tool_job(self, job: DueJob) -> None:
+        """Invoke one registered agentic tool from a schedule.json record."""
+        tool_call = job.tool_call or {}
+        try:
+            from agentic.agentic import invoke_registered_tool
+            result = invoke_registered_tool(tool_call.get("name", ""), tool_call.get("arguments", {}))
+            log.info("Scheduled tool job %s completed: %s", job.id, result)
+        except Exception as e:
+            log.error("Scheduled tool job %s failed: %s", job.id, e)
 
     def _run_scheduled_agentic_job(self, job: DueJob) -> None:
-        """Run a scheduled autonomous task through Aiko's agent loop."""
+        """Run one scheduled autonomous task through Aiko's agent loop.
+
+        Fresh history: each tick appends its skill prompt + result transcript
+        to owner._history, so including it would bloat every later session
+        past the server ctx. Ticks resume from checkpoint files, not chat.
+
+        Lean context: a tick's state lives in its own checkpoint files, so
+        Aiko's recalled memories buy nothing while costing the headroom that
+        keeps the ReAct loop inside the server's context window. Jobs that
+        want the full prompt budget can opt back in with
+        ``lean_context: false`` on the record.
+        """
         prompt = (
             "Scheduled job due. Use only local available tools. If external action "
             "is unavailable, draft/save the best local artifact and state next step.\n\n"
             f"Title: {job.title}\nTask: {job.task}"
+            + (f"\n\nScheduled skill instructions:\n{job.skill}" if job.skill else "")
         )
+        lean = getattr(job, "lean_context", None)
+        if lean is None:
+            lean = True
+        worker = bool(getattr(job, "worker_mode", False))
         try:
-            self.agentic_chat(prompt)
+            self.agentic_chat(prompt, include_history=False, lean_context=bool(lean),
+                              worker_mode=worker)
         except Exception as e:
             log.error("Scheduled agentic job failed: %s", e)
+            # Leave a visible trace for jobs that opt in (e.g. the Playground
+            # loop): without this a dead tick is silent and the next tick
+            # blindly retries the same doomed session.
+            note_dir = getattr(job, "failure_note_dir", None)
+            if note_dir:
+                try:
+                    from pathlib import Path
+                    from datetime import datetime, timezone
+                    p = Path(note_dir) / "loop" / "FAILURE_LOG.md"
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                    with open(p, "a", encoding="utf-8") as f:
+                        f.write(f"\n## {ts} — {job.title} failed\n\n"
+                                f"Error: {str(e)[:500]}\n")
+                except Exception as note_exc:
+                    log.warning("failure-note write failed: %s", note_exc)
 
     # ── internal ──────────────────────────────────────────────────────────────
 
     def _emit(self, text: str, token_callback=None) -> None:
-        if not text: return
+        if not text:
+            return
 
-        # Always drive the TUI callback directly, regardless of TTS
+        # Display: emoji kept, dialogue preserved (markdown ok).
+        # TTS: dialogue-only via extract_dialogue_for_tts inside speak.feed/play_async.
+        try:
+            from sensory.speak import format_for_display
+            display = format_for_display(text) or text
+        except Exception:
+            display = text
+
         if token_callback:
-            words = text.split(" ")
+            words = display.split(" ")
             for i, word in enumerate(words):
                 token_callback(word if i == 0 else " " + word)
                 time.sleep(float(os.getenv("EMIT_DELAY", 0.005)))
 
-        # TTS runs independently
-        if self._speak:
-            self._speak.feed(text)
-            self._speak.play_async()
+        speak = self._get_speak()
+        if speak:
+            speak.feed(text)  # extract_dialogue_for_tts runs inside play_async
+            speak.play_async()
 
-    def _stream_response(self, messages: list[dict], system: str = "", token_callback=None) -> str:
+    def _make_sentence_sink(self, user_input: str, speak, token_callback, state: dict):
+        """Build the per-sentence gate+feed callable for AIKO_SENTENCE_STREAM.
+
+        Every complete sentence passes the same two checks the full draft
+        would face — local _review_response and the outbound gate_speak
+        conscience gate — before any audio is synthesized for it. A sentence
+        that fails either check aborts early audio (the stream is stopped)
+        and the full draft falls back to the normal finalize path.
+        Karaoke/typewriter timing is preserved: words are still paced to
+        real TTS audio durations via the speech stream worker.
+        """
+        from cognition.conscience.hooks import gate_speak
+        from cognition.conscience import ESCALATE as _ESCALATE
+
+        def _sink(sentence: str) -> bool:
+            if state.get("aborted"):
+                return False
+            sentence = (sentence or "").strip()
+            if not sentence:
+                return True
+            # 1. local review, same as the full draft gets in _finalize_response.
+            # Fail-closed: an unevaluated sentence must never reach TTS.
+            try:
+                review = self._review_response(user_input, sentence)
+            except Exception as exc:
+                log.warning("[think] sentence-stream review failed; aborting early audio: %s", exc)
+                state["aborted"] = True
+                try:
+                    speak.stop_speech_stream(cancel=True)
+                except Exception:
+                    pass
+                return False
+            if len(review.get("flags", [])) >= 2:
+                log.warning("[think] sentence-stream: sentence failed local review; aborting early audio")
+                state["aborted"] = True
+                try:
+                    speak.stop_speech_stream(cancel=True)
+                except Exception:
+                    pass
+                return False
+            # 2. outbound conscience gate, same as the full draft gets
+            try:
+                memorize = self._get_memorize()
+                mem_inner = getattr(memorize, "_mem", None) if memorize is not None else None
+                embedder = getattr(mem_inner, "_embedder", None)
+                replaced = gate_speak(
+                    draft=sentence,
+                    user_input=user_input,
+                    llm_client=getattr(self, "_client", None),
+                    embedder=embedder,
+                    already_emitted=False,
+                    # Fail-closed for early audio: an evaluation error must
+                    # surface here so the sink aborts instead of speaking an
+                    # unevaluated sentence. gate_speak's fail-open default
+                    # (return the draft) is preserved for _finalize_response.
+                    fail_closed=True,
+                    # Verdict visibility: an ESCALATE lets the sentence
+                    # through (recorded below for the turn-level hold) while
+                    # a REFUSE aborts. quiet_escalation defers the owner
+                    # notice — one aggregated ask at finalization, not one
+                    # prompt per sentence.
+                    return_verdict=True,
+                    quiet_escalation=True,
+                )
+                _replaced, _verdict = replaced
+                if _replaced is not None and _replaced.strip() != sentence:
+                    log.warning("[think] sentence-stream: gate_speak refused a sentence; aborting early audio")
+                    state["aborted"] = True
+                    try:
+                        speak.stop_speech_stream(cancel=True)
+                    except Exception:
+                        pass
+                    return False
+                if _verdict is not None and _verdict.decision == _ESCALATE:
+                    # ASK: the sentence streams, but the turn's record is
+                    # held for a human accept/decline at finalization.
+                    flags = state.setdefault("ask_flags", [])
+                    flags.append({
+                        "sentence_index": len(state.get("spoken", [])),
+                        "escalation_id": _verdict.escalation_id,
+                        "category": _verdict.suggested_category or "",
+                        "p_violation": _verdict.p_violation,
+                    })
+                    log.info("[think] sentence-stream: sentence escalated; turn held for review")
+            except Exception as exc:
+                # Fail-closed: the conscience gate could not evaluate this
+                # sentence, so it must not be spoken early. The full draft
+                # still gets its normal review+gate in _finalize_response.
+                log.warning("[think] sentence-stream gate_speak failed; aborting early audio: %s", exc)
+                state["aborted"] = True
+                try:
+                    speak.stop_speech_stream(cancel=True)
+                except Exception:
+                    pass
+                return False
+            # Safe: feed to the sentence-streaming TTS pipeline while the
+            # rest of the LLM response is still generating.
+            try:
+                if not state.get("streaming"):
+                    speak.start_speech_stream(token_callback)
+                    state["streaming"] = True
+                speak.feed_speech_stream(sentence)
+                state.setdefault("spoken", []).append(sentence)
+            except Exception as exc:
+                log.warning("[think] sentence-stream feed failed; aborting early audio: %s", exc)
+                state["aborted"] = True
+                try:
+                    speak.stop_speech_stream(cancel=True)
+                except Exception:
+                    pass
+                return False
+            return True
+
+        return _sink
+
+    def _emit_finalized_response(self, text: str, token_callback=None) -> None:
+        """Emit only text that has completed review and conscience gating.
+
+        Karaoke typewriter stays on: words are paced to TTS, but only the
+        dialogue body is streamed (leading emoji is shown once up front).
+        """
+        if not text:
+            return
+        speak = self._get_speak()
+        karaoke_text = bool(
+            speak
+            and token_callback
+            and getattr(speak, "karaoke_text", False)
+            and not self._reasoning
+        )
+        if not karaoke_text:
+            self._emit(text, token_callback=token_callback)
+            return
+
+        try:
+            from sensory.speak import format_for_display, dialogue_for_stream
+            display = format_for_display(text) or text
+            dialogue = dialogue_for_stream(text)
+        except Exception:
+            display, dialogue = text, text
+
+        # Show emoji prefix immediately; karaoke only the dialogue body
+        # so typewriter and TTS stay on the same speakable text.
+        if dialogue and display.endswith(dialogue):
+            prefix = display[: len(display) - len(dialogue)].rstrip()
+            if prefix:
+                token_callback(prefix + "\n")
+        elif display and not dialogue:
+            token_callback(display)
+
+        stream_body = dialogue or display
+        speak.start_speech_stream(token_callback)
+        sentences, remainder = split_stream_sentences(stream_body)
+        for sentence, _rs, _re in sentences:
+            speak.feed_speech_stream(sentence)
+        if remainder.strip():
+            speak.feed_speech_stream(remainder)
+        speak.stop_speech_stream()
+
+    @staticmethod
+    def _messages_without_system(all_messages: list[dict]) -> list[dict]:
+        """Fallback for chat templates that reject `system` role (Jinja: Only user, assistant and tool roles are supported).
+
+        Merges every system message into the next user turn (or appends as user
+        if no user follows) so the prompt content is preserved without the
+        system role. Used as automatic retry when llama.cpp returns 500 with
+        'got system'.
+        """
+        out: list[dict] = []
+        pending: list[str] = []
+        for m in all_messages:
+            role = m.get("role")
+            content = m.get("content") or ""
+            if role == "system":
+                if content.strip():
+                    pending.append(content)
+                continue
+            if pending:
+                prefix = "\n\n".join(pending)
+                pending = []
+                if role == "user":
+                    m = {"role": "user", "content": prefix + "\n\n" + content}
+                else:
+                    # Flush system block as a user turn before an assistant/tool turn
+                    out.append({"role": "user", "content": prefix})
+            out.append(m)
+        if pending:
+            out.append({"role": "user", "content": "\n\n".join(pending)})
+        # Ensure at least one user turn exists
+        if not out:
+            out = [{"role": "user", "content": "\n\n".join(pending)}]
+        return out
+
+    @staticmethod
+    def _is_system_role_error(exc: Exception) -> bool:
+        msg = str(exc)
+        if "got system" not in msg and "system role" not in msg.lower():
+            return False
+        # The Jinja template error from llama-server truncates the inner
+        # raise_exception(...) call to "...Only user, assistant and tool roles ar..."
+        # which then fails the literal substring check below. Match on either
+        # the full phrase OR the prefix that always survives truncation, plus
+        # the templated "role" indicator.
+        return (
+            "Only user, assistant and tool roles are supported" in msg
+            or "Only user, assistant and tool roles ar" in msg
+            or "raise_exception" in msg and "system" in msg
+        )
+
+    def _stream_response(self, messages: list[dict], system: str = "", token_callback=None, emit: bool = False, system_tail: str = "", sentence_sink=None) -> str:
+        """Collect a complete model response without exposing it to UI or TTS.
+
+        ``emit`` remains as a compatibility argument for callers and tests, but
+        final output is deliberately deferred to _finalize_response so the
+        complete draft passes gate_speak before any token or audio is emitted.
+
+        ``sentence_sink``: optional callable(sentence: str) -> bool, honored
+        only when AIKO_SENTENCE_STREAM=1. Complete sentences are parsed
+        incrementally as tokens arrive and handed to the sink (plus a final
+        flush of the remainder when the stream ends). The sink returns True
+        to keep streaming or False to abort early audio; the full text is
+        still collected and returned either way. When the sink exposes
+        ``consumed_chars`` / ``aborted`` attributes they are updated here so
+        the caller can skip re-emitting already-spoken audio.
+        """
         full_response = []
-        max_tokens = _BASE_PREDICT * _REASONING_SCALE if self._reasoning else _BASE_PREDICT
-        all_messages = [{"role": "system", "content": system}] + messages if system else messages
+        if self._reasoning:
+            # Deep-think mode gets its own, much larger scale than ordinary
+            # self._reasoning — see module docstring "Deep-think mode".
+            scale = DEEP_THINK_TOKEN_SCALE if self._deep_think else _REASONING_SCALE
+            base_tokens = _BASE_TOKENS * scale
+        else:
+            base_tokens = _BASE_TOKENS
+        max_tokens = _effective_max_tokens(base_tokens)
+
+        # Message layout for llama-server cache_prompt reuse:
+        #   [system core] [history ...] [system volatile tail] [user]
+        # The tail sits right before the newest user turn so the byte-stable
+        # core + history prefix survives across turns; without a tail this
+        # degrades to the classic [system] + messages layout.
+        all_messages = [{"role": "system", "content": system}] + messages if system else list(messages)
+        if system_tail and all_messages and all_messages[-1].get("role") == "user":
+            all_messages = all_messages[:-1] + [{"role": "system", "content": system_tail}, all_messages[-1]]
+        elif system_tail:
+            all_messages = all_messages + [{"role": "system", "content": system_tail}]
+        # Backend rejects `system` (latched or LLM_NO_SYSTEM=1): merge upfront
+        # instead of paying a doomed first attempt on every turn.
+        if _avoid_system_role() and any(m.get("role") == "system" for m in all_messages):
+            all_messages = self._messages_without_system(all_messages)
+        # No-think suffix applies to the request payload only (see helper).
+        all_messages = _apply_no_think(all_messages)
+
         self.last_usage = {
             "prompt_messages": all_messages,
             "completion_text": "",
@@ -977,15 +3809,62 @@ class AikoThink:
             "total_tokens": None,
         }
 
-        karaoke_text = bool(
-            self._speak and token_callback and getattr(self._speak, "karaoke_text", False)
-            and not self._reasoning
-        )
-        if self._speak:
-            self._speak.start_speech_stream(token_callback if karaoke_text else None)
-
-        sentence_buffer = ""
         stream_success = False
+        reasoning_buffer: list[str] = []
+
+        # Piece 3 (sentence streaming): parse complete sentences incrementally
+        # and hand them to the sink for sentence-level gating + early TTS.
+        # Off unless AIKO_SENTENCE_STREAM=1 AND the caller provided a sink.
+        sink_active = sentence_sink is not None and _SENTENCE_STREAM
+        sentence_buffer = ""
+        consumed_raw = ""
+
+        def _drain_sentence_buffer(final: bool = False) -> None:
+            """Split complete sentences out of the buffer into the sink.
+
+            consumed_raw advances only through raw spans the sink ACCEPTED.
+            A rejected sentence was never spoken, so the finalize path must
+            still emit it — counting it as consumed would silently drop it.
+            """
+            nonlocal sentence_buffer, consumed_raw, sink_active
+            if not sink_active:
+                return
+            prev = sentence_buffer
+            sentences, sentence_buffer = split_stream_sentences(sentence_buffer)
+            accepted_end = 0
+            for text, _rs, re_ in sentences:
+                _latency.mark("first_sentence")
+                try:
+                    keep_going = sentence_sink(text)
+                except Exception as exc:
+                    log.warning("[think] sentence sink failed; aborting early audio: %s", exc)
+                    keep_going = False
+                if not keep_going:
+                    sink_active = False
+                    if hasattr(sentence_sink, "aborted"):
+                        sentence_sink.aborted = True
+                    break
+                accepted_end = re_
+            # Spans are contiguous from 0, so prev[:accepted_end] covers the
+            # accepted sentences plus their inter-sentence whitespace.
+            consumed_raw += prev[:accepted_end]
+            if final and sink_active and sentence_buffer.strip():
+                # Stream ended mid-sentence: the tail still gets its gates.
+                tail = sentence_buffer.strip()
+                tail_raw = sentence_buffer
+                sentence_buffer = ""
+                try:
+                    keep_going = sentence_sink(tail)
+                except Exception as exc:
+                    log.warning("[think] sentence sink failed on tail; aborting early audio: %s", exc)
+                    keep_going = False
+                if keep_going:
+                    consumed_raw += tail_raw
+                else:
+                    sink_active = False
+                    if hasattr(sentence_sink, "aborted"):
+                        sentence_sink.aborted = True
+
         try:
             stream = self._client.chat.completions.create(
                 model=self._llm_model, messages=all_messages, stream=True,
@@ -994,109 +3873,611 @@ class AikoThink:
                 top_p=float(os.getenv("TOP_P", 0.90)),
                 stop=LLM_STOP_SEQUENCES,
                 timeout=LLM_TIMEOUT,
-                extra_body={
-                    "repeat_penalty": float(os.getenv("REPEAT_PENALTY", 1.15)),
-                    "repeat_last_n":  int(os.getenv("REPEAT_LAST_N", 64)),
-                    "top_k":          int(os.getenv("TOP_K", 40)),
-                },
+                extra_body=_llm_extra_body(),
+            )
+            _think_filter = _ThinkingTokenFilter()
+            _brain_trace.record_step(
+                "think._stream_response.llm_open",
+                layer="stream",
+                outputs={"model": self._llm_model, "max_tokens": max_tokens,
+                         "cache_prompt": _LLM_CACHE_PROMPT,
+                         "no_think": _LLM_NO_THINK,
+                         "n_messages": len(all_messages)},
+                factors=["cache_prompt=True reuses KV across turns for stable core prefix"],
             )
             for chunk in stream:
                 delta = chunk.choices[0].delta if chunk.choices else None
                 token = (delta.content or "") if delta else ""
-                
-                if token_callback and token and not karaoke_text:
-                    token_callback(token)
-                
-                full_response.append(token)
-                
-                if self._speak and token:
-                    sentence_buffer += token
-                    sentences, sentence_buffer = split_stream_sentences(sentence_buffer)
-                    for sentence in sentences:
-                        self._speak.feed_speech_stream(sentence)
+                # Prompt-elicited thinking tags (<thinking>/<plan>/<check>) are
+                # stripped at the token level so they never reach the sentence
+                # sink, TTS, chat text, or stored history. Extracted thoughts
+                # ride to the UI thinking box via _finalize_response.
+                try:
+                    token = _think_filter.feed(token)
+                except Exception:
+                    log.warning("[think] thinking-filter failed; dropping token", exc_info=True)
+                    token = ""  # fail closed: a raw <inner_speech> chunk must never reach TTS
+                # Thinking-channel harvest: reasoning-capable templates
+                # (granite-4, MiniCPM-think, …) may emit the whole turn as
+                # thinking tokens. Some servers surface those as
+                # `reasoning_content` deltas with EMPTY content — without
+                # this we burn the full token budget and see "empty".
+                # Collected for diagnostics; never served raw (see below).
+                reason_part = ""
+                if delta is not None:
+                    for attr in ("reasoning_content", "reasoning"):
+                        try:
+                            val = getattr(delta, attr, None)
+                        except Exception:
+                            val = None
+                        if val:
+                            reason_part = str(val)
+                            break
+                    if not reason_part and isinstance(delta, dict):
+                        for key in ("reasoning_content", "reasoning"):
+                            if delta.get(key):
+                                reason_part = str(delta[key])
+                                break
+                if reason_part:
+                    reasoning_buffer.append(reason_part)
 
+                full_response.append(token)
+                if token:
+                    _latency.mark("first_llm_token")
+                    if sink_active:
+                        sentence_buffer += token
+                        if "\n" in token or "\r" in token or any(
+                            c in _STREAM_SENTENCE_END for c in token
+                        ):
+                            _drain_sentence_buffer()
+
+            _tail = _think_filter.feed("", final=True)
+            if _tail:
+                full_response.append(_tail)
+                sentence_buffer += _tail
+            _thinking_text_ctx.set(_think_filter.thinking)
+            _drain_sentence_buffer(final=True)
+            _latency.mark("final_token")
             text = "".join(full_response).strip()
+            if sentence_sink is not None and hasattr(sentence_sink, "consumed_chars"):
+                # Map the consumed raw prefix onto the stripped text so the
+                # caller can skip re-emitting already-spoken audio exactly.
+                raw = "".join(full_response)
+                lead = len(raw) - len(raw.lstrip())
+                sentence_sink.consumed_chars = max(0, len(consumed_raw) - lead)
+            reasoning_text = "".join(reasoning_buffer).strip()
+            _note_stream_reasoned(bool(reasoning_text) and not bool(text))
+            if reasoning_text:
+                _note_thinker_detected()
+                # Recompute from the pre-budget base: the flag may have
+                # flipped mid-stream, in which case the in-turn fallback
+                # below must already carry headroom (same-turn recovery).
+                max_tokens = _effective_max_tokens(base_tokens)
+                # Never served raw, but decisive for diagnosis: content-empty
+                # + reasoning-full means a thinking model spent the budget in
+                # the think channel (raise max_tokens or disable thinking
+                # server-side); content-empty + reasoning-empty means the
+                # template emitted EOS immediately (template/EOS mismatch).
+                log.warning(
+                    "LLM stream thinking-channel: %d reasoning chars, %d content chars (model=%s)",
+                    len(reasoning_text), len(text), self._llm_model,
+                )
+                _brain_trace.record_step(
+                    "think._stream_response.thinking",
+                    layer="stream",
+                    outputs={"model": self._llm_model,
+                             "reasoning_chars": len(reasoning_text),
+                             "content_chars": len(text),
+                             "reasoning_preview": reasoning_text[:300]},
+                    factors=["thinking-channel tokens are never served to the user"],
+                )
             if text:
                 self.last_usage["completion_text"] = text
                 stream_success = True
-                if self._speak and sentence_buffer.strip():
-                    self._speak.feed_speech_stream(sentence_buffer)
         except Exception as e:
-            log.error(f"LLM stream failed: {e}")
-        finally:
-            if self._speak:
-                self._speak.stop_speech_stream()
-
+            if self._is_system_role_error(e):
+                log.warning(f"LLM stream system-role rejected (will retry without system): {e}")
+            else:
+                log.error(f"LLM stream failed: {e}")
+            # Auto-retry without system role if template rejects it (ministral-type Jinja)
+            if self._is_system_role_error(e):
+                _note_system_role_rejected()
+                try:
+                    alt_messages = self._messages_without_system(all_messages)
+                    log.warning("LLM stream system-role rejected; retrying with %d user-merged messages", len(alt_messages))
+                    self.last_usage["prompt_messages"] = alt_messages
+                    # Retry stream with converted messages
+                    stream2 = self._client.chat.completions.create(
+                        model=self._llm_model, messages=alt_messages, stream=True,
+                        max_tokens=max_tokens,
+                        temperature=float(os.getenv("TEMPERATURE", 0.72)),
+                        top_p=float(os.getenv("TOP_P", 0.90)),
+                        stop=LLM_STOP_SEQUENCES,
+                        timeout=LLM_TIMEOUT,
+                        extra_body=_llm_extra_body(),
+                    )
+                    full_response = []
+                    for chunk in stream2:
+                        delta = chunk.choices[0].delta if chunk.choices else None
+                        token = (delta.content or "") if delta else ""
+                        full_response.append(token)
+                    text2 = "".join(full_response).strip()
+                    if text2:
+                        self.last_usage["completion_text"] = text2
+                        stream_success = True
+                        text = text2
+                        # Mark success so we skip fallback
+                        log.info("LLM stream retry without system role succeeded")
+                except Exception as e2:
+                    log.error(f"LLM stream retry without system also failed: {e2}")
         if stream_success:
             return text
 
+        # Stream failed: no partial output exists.  The fallback is also held
+        # for final review and conscience gating by the caller.
         fallback_text = self._fallback_completion(
             all_messages,
             max_tokens,
             "LLM stream failed or completed without content",
         )
-        self._emit(fallback_text, token_callback=token_callback)
         return fallback_text
 
     def _fallback_completion(self, messages: list[dict], max_tokens: int, reason: str) -> str:
         """Try one non-streaming completion before surfacing the LLM error in chat."""
-        try:
+        # Same latch as the stream path: don't open with a layout the server
+        # already proved it rejects.
+        if _avoid_system_role() and any(m.get("role") == "system" for m in messages):
+            messages = self._messages_without_system(messages)
+            self.last_usage["prompt_messages"] = messages
+
+        def _try_once(msgs: list[dict]) -> str | None:
             resp = self._client.chat.completions.create(
                 model=self._llm_model,
-                messages=messages,
+                messages=_apply_no_think(msgs),
                 stream=False,
                 max_tokens=max_tokens,
                 temperature=float(os.getenv("TEMPERATURE", 0.72)),
                 top_p=float(os.getenv("TOP_P", 0.90)),
                 stop=LLM_STOP_SEQUENCES,
                 timeout=LLM_TIMEOUT,
+                extra_body=_llm_extra_body(),
             )
-            text = (resp.choices[0].message.content or "").strip()
-            if text:
-                usage = getattr(resp, "usage", None)
+            choice = resp.choices[0] if resp.choices else None
+            msg = getattr(choice, "message", None)
+            txt = (getattr(msg, "content", None) or "").strip()
+            # Diagnostic surface for empty completions: stop reason +
+            # token counts + thinking channel. llama.cpp reports these on
+            # the non-streaming response; without them "empty" is a guess.
+            finish = getattr(choice, "finish_reason", None)
+            usage = getattr(resp, "usage", None)
+            think_txt = ""
+            if msg is not None:
+                for attr in ("reasoning_content", "reasoning"):
+                    try:
+                        val = getattr(msg, attr, None)
+                    except Exception:
+                        val = None
+                    if val:
+                        think_txt = str(val)
+                        break
+            if not txt:
+                log.warning(
+                    "LLM non-streaming empty: model=%s finish=%s prompt_tok=%s "
+                    "completion_tok=%s thinking_chars=%d n_msgs=%d",
+                    self._llm_model, finish,
+                    getattr(usage, "prompt_tokens", None),
+                    getattr(usage, "completion_tokens", None),
+                    len(think_txt), len(msgs),
+                )
+                if think_txt:
+                    log.warning("LLM thinking-channel preview: %.300s", think_txt)
+            else:
                 self.last_usage.update({
-                    "completion_text": text,
+                    "completion_text": txt,
                     "prompt_tokens": getattr(usage, "prompt_tokens", None),
                     "completion_tokens": getattr(usage, "completion_tokens", None),
                     "total_tokens": getattr(usage, "total_tokens", None),
                 })
+            return txt
+
+        try:
+            text = _try_once(messages)
+            if text:
                 log.warning("%s; recovered with non-streaming completion", reason)
                 return text
+            # Empty but system role present — retry as user-merged (some templates return empty instead of 500).
+            # Skipped when the stream already proved the cause is a burned
+            # think budget (reasoning without content): re-sending would
+            # burn another full budget thinking, not fix anything.
+            if any(m.get("role") == "system" for m in messages) and not _take_stream_reasoned():
+                try:
+                    alt_empty = self._messages_without_system(messages)
+                    log.warning("Non-streaming empty with system role; retrying without system (%d msgs)", len(alt_empty))
+                    self.last_usage["prompt_messages"] = alt_empty
+                    text_retry = _try_once(alt_empty)
+                    if text_retry:
+                        log.warning("%s; recovered with non-streaming (no-system) after empty", reason)
+                        return text_retry
+                except Exception as e_empty:
+                    log.debug("No-system retry after empty failed: %s", e_empty)
             reason = f"{reason}; non-streaming completion was also empty"
         except Exception as e:
-            reason = f"{reason}; non-streaming fallback failed: {e}"
+            # System-role template error — retry with merged user messages
+            if self._is_system_role_error(e):
+                try:
+                    alt = self._messages_without_system(messages)
+                    log.warning("Fallback system-role rejected; retrying non-streaming with %d user-merged messages", len(alt))
+                    self.last_usage["prompt_messages"] = alt
+                    text2 = _try_once(alt)
+                    if text2:
+                        log.warning("%s; recovered with non-streaming (no-system) completion", reason)
+                        return text2
+                    reason = f"{reason}; non-streaming (no-system) also empty"
+                except Exception as e2:
+                    reason = f"{reason}; non-streaming fallback failed: {e} | retry failed: {e2}"
+            else:
+                reason = f"{reason}; non-streaming fallback failed: {e}"
 
         log.error(reason)
         return f"[LLM error] {reason}"
 
     def _sanitize_history(self, messages: list[dict]) -> list[dict]:
-        if not messages: return []
+        if not messages:
+            return []
         sanitized = [messages[0]]
         for msg in messages[1:]:
-            if msg["role"] == sanitized[-1]["role"]: sanitized[-1] = msg
-            else: sanitized.append(msg)
-        while sanitized and sanitized[0]["role"] != "user": sanitized.pop(0)
+            if msg["role"] == sanitized[-1]["role"]:
+                sanitized[-1] = msg
+            else:
+                sanitized.append(msg)
+        while sanitized and sanitized[0]["role"] != "user":
+            sanitized.pop(0)
         return sanitized
+
+    def _finalize_response(self, user_input: str, draft: str, token_callback=None, *, already_emitted: bool = False, _spoken_prefix: str = "",
+                           sentences_gated: bool = False, ask_flags: list | None = None, _ask_out: dict | None = None) -> str:
+        # sentences_gated: True when the sentence-streaming sink gated every
+        # spoken sentence before TTS. The final gate then fails closed for
+        # the persistent record (history/memory) on evaluation outage.
+        # ask_flags: per-sentence ESCALATE records from the sink (list of
+        # dicts with sentence_index/escalation_id/category/p_violation).
+        # _ask_out: dict populated when the turn's record is held for a
+        # human accept/decline (escalation_id, held_text, ...).
+        # Pop stream-harvested thinking (stashed by _stream_response) and strip
+        # any prompt-elicited thinking tags still in the draft (non-streaming
+        # path / safety net). Extracted thinking goes to the UI thinking box via
+        # the __THINKING__ channel — it must never be spoken, shown as chat
+        # text, or stored as her words.
+        stream_thinking = (_thinking_text_ctx.get() or "").strip()
+        _thinking_text_ctx.set("")
+        tag_thinking, draft = _split_thinking(draft)
+        thinking = "\n".join(p for p in (stream_thinking, tag_thinking) if p).strip()
+        if thinking and token_callback:
+            try:
+                token_callback("__THINKING__:" + thinking)
+            except Exception:
+                pass
+        # Inner speech write path: the chat model's <thinking> is genuine
+        # comprehension — the durable, re-thinkable version lives in
+        # inner_speech.db (recalled only inward, never into chat).
+        if thinking:
+            try:
+                from cognition.attention import for_identity as _for_identity_inner
+
+                _state = _for_identity_inner(current_user_id())
+                _inner = getattr(_state, "_inner_speech", None)
+                if _inner is not None:
+                    _inner.capture_thinking(thinking)
+            except Exception:
+                pass
+        review = self._review_response(user_input, draft)
+        _latency.mark("local_review")
+        # No LLM correction: the review flags are logged to the reviews ring
+        # for observability, but the rewrite was the same model fixing its own
+        # output — unproven value for ~1-3s TTFT. Accept the draft.
+        response = draft
+        if response != draft:
+            self._review_response(user_input, response)
+        try:
+            from cognition.conscience.hooks import gate_speak
+            from cognition.conscience import ESCALATE as _ESCALATE, REFUSE as _REFUSE
+            memorize = self._get_memorize()
+            mem_inner = getattr(memorize, "_mem", None) if memorize is not None else None
+            embedder = getattr(mem_inner, "_embedder", None)
+            gated_draft = response or draft
+            replaced, _fverdict = gate_speak(
+                draft=gated_draft,
+                user_input=user_input,
+                llm_client=getattr(self, "_client", None),
+                embedder=embedder,
+                already_emitted=False,
+                # Streamed path: every spoken sentence was already gated
+                # before TTS. A gate outage here must fail closed for the
+                # record — an unevaluated draft must never persist into
+                # history/memory. Non-streamed path keeps fail-open.
+                fail_closed=sentences_gated,
+                return_verdict=True,
+                # Per-sentence asks were quiet; the turn-level ask below
+                # aggregates them into one owner notice.
+                quiet_escalation=True,
+            )
+            if _fverdict is not None and _fverdict.decision == _REFUSE:
+                # BLOCK: hard refusal. Purge the draft from every persistent
+                # surface — history, memory, display. Already-spoken audio
+                # cannot be recalled (logged below); the record is withheld.
+                response = replaced if replaced else \
+                    "[withheld: turn did not pass the final conscience check]"
+                try:
+                    # The already_emitted compatibility path below resets
+                    # for emitted drafts; reset here only when it won't.
+                    if not already_emitted and token_callback is not None \
+                            and hasattr(token_callback, "reset"):
+                        token_callback.reset()
+                except Exception:
+                    pass
+                log.warning("[finalize] conscience refused outbound draft; purged from record")
+            elif replaced is not None:
+                response = replaced
+                if response != gated_draft:
+                    log.info("[finalize] conscience replaced outbound draft")
+            # ASK: final escalation, or any per-sentence escalation — hold
+            # the turn's record for a human accept/decline. The audio/text
+            # already streamed; the decision governs history + memory.
+            _ask_flags = list(ask_flags or [])
+            _final_escalated = _fverdict is not None and _fverdict.decision == _ESCALATE
+            _was_refused = _fverdict is not None and _fverdict.decision == _REFUSE
+            if _ask_out is not None and not _was_refused and (_final_escalated or _ask_flags):
+                _turn_id = (_fverdict.escalation_id if _final_escalated and _fverdict.escalation_id
+                            else (_ask_flags[0].get("escalation_id") if _ask_flags else None))
+                if _turn_id:
+                    _idx = [f.get("sentence_index") for f in _ask_flags]
+                    _cats = sorted({(f.get("category") or "") for f in _ask_flags if f.get("category")})
+                    if _final_escalated and _fverdict.suggested_category:
+                        _cats = sorted(set(_cats) | {_fverdict.suggested_category})
+                    _pvs = [f.get("p_violation") for f in _ask_flags
+                            if f.get("p_violation") is not None]
+                    if _final_escalated and _fverdict.p_violation is not None:
+                        _pvs.append(_fverdict.p_violation)
+                    _detail = ""
+                    if _pvs:
+                        _detail = f"P(violation)={max(_pvs):.2f}"
+                    if _cats:
+                        _detail += (", " if _detail else "") + "category=" + "/".join(_cats)
+                    _sent = f"sentence(s) {sorted(_idx)}" if _idx else "final draft"
+                    _summary = (f"turn flagged — {_sent} escalated"
+                                + (f" [{_detail}]" if _detail else ""))
+                    _ask_out.update({
+                        "escalation_id": _turn_id,
+                        "held_text": response,
+                        "sentence_indices": sorted(_idx),
+                        "categories": _cats,
+                        "notice_summary": _summary,
+                        "user_id": current_user_id(),
+                    })
+                    log.info("[finalize] turn held for human accept/decline: %s", _turn_id)
+        except Exception as exc:
+            if sentences_gated:
+                # Fail closed for the persistent record: the draft was
+                # spoken sentence-by-sentence but the final full-text check
+                # could not run. Withhold it from history/memory/display.
+                log.warning("[finalize] conscience speak gate failed on streamed turn; "
+                            "withholding from record: %s", exc)
+                response = "[withheld: final conscience check unavailable]"
+                try:
+                    if not already_emitted and token_callback is not None \
+                            and hasattr(token_callback, "reset"):
+                        token_callback.reset()
+                except Exception:
+                    pass
+            else:
+                log.warning("[finalize] conscience speak gate failed; preserving draft under caution: %s", exc)
+        _latency.mark("conscience_outbound")
+        try:
+            from cognition.attention import for_identity
+            speak = self._get_speak()
+            if speak is not None and hasattr(speak, "set_expression"):
+                snap = for_identity(current_user_id()).snapshot()
+                affect = float(snap.get("affect", 0.0))
+                volume = 1.05 if affect > 0.25 else 0.9 if affect < -0.25 else 1.0
+                pitch = 0.05 if affect > 0.25 else -0.05 if affect < -0.25 else 0.0
+                try:
+                    _dn_mode = (os.getenv("MEMORY_FLYDN_MODE", "off") or "off").strip().lower()
+                except Exception:
+                    _dn_mode = "off"
+                if _dn_mode in ("shadow", "live"):
+                    # DN output drive: arousal-gated prosody energy. Existing
+                    # clamps inside set_expression stay authoritative.
+                    try:
+                        from cognition.attention import flycx_decisiveness_for_text as _flydec
+                        from cognition.flysense import get_flydn as _get_flydn
+                        _dec = _flydec(response) or 0.5
+                        _drv = _get_flydn().drive(
+                            energy=float(snap.get("energy", 0.5)),
+                            decisiveness=_dec, affect=affect)
+                    except Exception as exc:
+                        log.debug("[finalize] flydn prosody skipped: %s", exc)
+                        _drv = None
+                    if _drv is not None:
+                        log.debug("[finalize] flydn mode=%s arousal=%.2f rate x%.3f vol x%.3f",
+                                  _dn_mode, _drv["arousal"], _drv["rate_mult"], _drv["vol_mult"])
+                    if _drv is not None and _dn_mode == "live":
+                        # DN-gated vigor: arousal scales speech rate/volume
+                        # inside the existing clamps (never overrides them).
+                        base_rate = for_identity(current_user_id()).adaptive_tts_rate()
+                        base_rate = max(0.85, min(1.15, base_rate * _drv["rate_mult"]))
+                        volume = max(0.5, min(1.2, volume * _drv["vol_mult"]))
+                    else:
+                        base_rate = for_identity(current_user_id()).adaptive_tts_rate()
+                    speak.set_expression(base_rate, volume, pitch)
+            elif speak is not None and hasattr(speak, "set_speech_rate"):
+                speak.set_speech_rate(for_identity(current_user_id()).adaptive_tts_rate())
+        except Exception:
+            pass
+        # Compatibility for any out-of-tree caller that already emitted an
+        # accepted draft.  A refusal/escalation replacement must still be sent;
+        # current in-tree streaming callers always arrive with no prior output.
+        if already_emitted and response == draft:
+            return response
+        if already_emitted and token_callback and hasattr(token_callback, "reset"):
+            token_callback.reset()
+        if _spoken_prefix and response.startswith(_spoken_prefix):
+            # Piece 3 (sentence streaming): this leading text was already
+            # gated per-sentence and spoken; emit only the remainder so it
+            # is not synthesized twice.
+            rest = response[len(_spoken_prefix):]
+            if rest.strip():
+                self._emit_finalized_response(rest, token_callback=token_callback)
+            return response
+        if _spoken_prefix:
+            # Full-draft review/correction rewrote already-spoken audio.
+            # The spoken sentences passed their own gates; the corrected
+            # text is what gets stored/displayed. Accepted tradeoff, logged.
+            log.warning(
+                "[finalize] sentence-stream: full-draft review changed already-spoken "
+                "text; spoken audio diverges from final text"
+            )
+        self._emit_finalized_response(response, token_callback=token_callback)
+        return response
+
+    def _review_response(self, user_input: str, response_text: str) -> dict:
+        try:
+            from cognition.attention import for_identity
+            state = for_identity(current_user_id())
+            review = state.review_response(user_input, response_text)
+            state.persist()
+            return review
+        except Exception:
+            return {}
+
+    def _commit_held_output(self, held: dict) -> None:
+        """Commit an approved held turn: insert the text just after its user
+        message and queue the memory write. Token resolve and insert happen
+        under a single lock acquisition (no TOCTOU gap where a concurrent
+        trim could shift the position). Raises when the anchor is gone
+        (trimmed) so the caller fails closed instead of misplacing it."""
+        token = held.get("hold_token")
+        with self._history_lock:
+            idx = None
+            if token:
+                for i, m in enumerate(self._history):
+                    if isinstance(m, dict) and m.get("_hold_token") == token:
+                        idx = i + 1
+                        break
+            if idx is None:
+                raise ValueError("held-output anchor missing (trimmed?)")
+            self._history.insert(idx, {"role": "assistant", "content": held["held_text"]})
+        if held.get("store_turn"):
+            self._store_async(held.get("user_input") or "", held["held_text"])
+        log.info("[think] held output committed to history at position %d", idx)
+
+    def _purge_held_output(self, held: dict, marker: str) -> None:
+        """Purge a declined/expired held turn: a withheld marker takes the
+        turn's slot; nothing is stored to memory. Resolve and insert are
+        atomic under the history lock. Falls back to the recorded numeric
+        position for holds that predate token anchoring."""
+        token = held.get("hold_token")
+        with self._history_lock:
+            idx = None
+            if token:
+                for i, m in enumerate(self._history):
+                    if isinstance(m, dict) and m.get("_hold_token") == token:
+                        idx = i + 1
+                        break
+            if idx is None:
+                idx = max(0, min(held.get("history_len", 0), len(self._history)))
+            self._history.insert(idx, {"role": "assistant", "content": marker})
+        log.info("[think] held output purged; marker at position %d", idx)
 
     def _store_async(self, user_input: str, response_text: str) -> None:
         """Queue a fire-and-forget memory write. The actual queue/worker
-        thread now lives on AikoMemorize (memory.memorize); this just wires
+        thread now lives on AikoMemorize (cognition.memory.memorize); this just wires
         up this instance's idle-tracking callables (is_active_turn /
         idle_since) so the write waits for a genuinely idle window before
         using the shared LLM for fact extraction. Kept as a method (rather
-        than inlining self._memorize.queue_write(...) at every call site)
-        because skills.agentic's run_agentic_chat also calls
+        than inlining self._get_memorize().queue_write(...) at every call site)
+        because agentic.agentic's run_agentic_chat also calls
         owner._store_async(...) directly at the end of the agent loop.
+
+        EMC-2: also stage the turn into episodic memory (best-effort, never
+        blocks the turn and never invents metadata).
         """
-        def _is_any_active():
-            with self._active_users_lock:
-                return bool(self._active_user_ids)
-        self._memorize.queue_write(
-            user_input,
-            response_text,
-            is_active_turn=_is_any_active,
-            idle_since=lambda: self._last_chat_time,
-        )
+        cognitive_state = None
+        with _brain_trace.step("think._store_async", layer="write",
+                               inputs={"user_input": user_input, "response_chars": len(response_text or "")}) as ctx:
+            try:
+                from cognition.attention import for_identity
+                state = for_identity(current_user_id())
+                confirmed = state.confirm_memory_update(user_input)
+                if confirmed:
+                    memorize = self._get_memorize()
+                    for conflict in confirmed:
+                        if conflict.get("memory_id") and memorize is not None:
+                            memorize.supersede_exact(conflict["memory_id"], conflict.get("current", user_input), current_user_id())
+            except Exception:
+                # Conflict confirmation must never skip recording below.
+                pass
+            try:
+                from cognition.attention import for_identity as _for_identity
+                _state = _for_identity(current_user_id())
+                _state.record(user_input, response_text)
+                _sync_goal_review_schedule(_state)
+                _state.persist()
+                cognitive_state = _for_identity(current_user_id()).snapshot()
+            except Exception:
+                pass
+
+            def _is_any_active():
+                with self._active_users_lock:
+                    return bool(self._active_user_ids)
+            mem = self._get_memorize()
+            mem.queue_write(
+                user_input,
+                response_text,
+                user_id=current_user_id(),
+                display_name=current_display_name(),
+                is_active_turn=_is_any_active,
+                idle_since=lambda: self._last_chat_time,
+            )
+            try:
+                mem.queue_episode(
+                    user_input,
+                    response_text,
+                    cognitive_state=cognitive_state,
+                    user_id=current_user_id(),
+                )
+            except Exception:
+                pass
+            try:
+                mem.wm_record_turn(user_input, response_text)
+            except Exception:
+                pass
+            try:
+                # Phase 2: conscience verdicts were buffered all turn — write
+                # them now in one executemany + single commit.
+                from cognition.conscience.ledger import ledger_for
+                ledger_for(current_user_id()).flush()
+            except Exception:
+                pass
+            try:
+                # Phase 2: knowledge access-count touches accumulated all turn
+                # — one UPDATE + single commit.
+                from cognition.knowledge.search import flush_access_counts
+                flush_access_counts(current_user_id())
+            except Exception:
+                pass
+            ctx.set(
+                outputs={
+                    "write_queued": True,
+                    "episodic_queued": True,
+                    "wm_recorded": True,
+                    "memory_conflicts_consumed": cognitive_state is not None,
+                },
+                factors=[
+                    "attention.record() updates affect/energy/uncertainty/goals/loops",
+                    "queue_write → background thread, waits for idle window before LLM fact extraction",
+                    "queue_episode → EpisodicStore staging",
+                ],
+            )
 
 
 _STREAM_SENTENCE_END = set(".?!。？！")
@@ -1118,12 +4499,36 @@ def _is_stream_noise(char: str) -> bool:
     return unicodedata.category(char)[0] == "S"
 
 
-def split_stream_sentences(buffer: str) -> tuple[list[str], str]:
+class _SentenceSink:
+    """Callable wrapper carrying sentence-stream bookkeeping.
+
+    ``consumed_chars``: number of leading chars of the stripped draft that
+    were handed to (and accepted by) the sink — i.e. already gated and
+    spoken, so _finalize_response must not re-emit them.
+    ``aborted``: True when the sink refused a sentence and early audio was
+    stopped; the full draft still goes through the normal finalize path.
+    """
+
+    def __init__(self, fn) -> None:
+        self._fn = fn
+        self.consumed_chars = 0
+        self.aborted = False
+
+    def __call__(self, sentence: str) -> bool:
+        return bool(self._fn(sentence))
+
+
+def split_stream_sentences(buffer: str) -> tuple[list[tuple[str, int, int]], str]:
     """
     Parse the streaming buffer, extract completed sentences, and return
-    a list of completed sentences and the remaining partial sentence text.
+    a list of (stripped sentence, raw start, raw end) triples plus the
+    remaining partial sentence text.
+
+    The raw spans are contiguous from 0 and include inter-sentence
+    whitespace, so callers can map accepted sentences back onto the raw
+    buffer exactly (stripped text alone cannot be re-aligned).
     """
-    sentences = []
+    sentences: list[tuple[str, int, int]] = []
     start = 0
     i = 0
     while i < len(buffer):
@@ -1147,7 +4552,7 @@ def split_stream_sentences(buffer: str) -> tuple[list[str], str]:
 
         sentence = buffer[start:end].strip()
         if sentence:
-            sentences.append(sentence)
+            sentences.append((sentence, start, end))
         start = end
         i = end
 
@@ -1158,5 +4563,6 @@ def split_stream_sentences(buffer: str) -> tuple[list[str], str]:
             split_pt = max([p for p in split_pts if p <= 150] or [split_pts[-1]])
             sentence = remaining[:split_pt + 1].strip()
             tail = remaining[split_pt + 1:]
-            return ([sentence] if sentence else []), tail
+            base = len(buffer) - len(remaining)
+            return ([(sentence, base, base + split_pt + 1)] if sentence else []), tail
     return sentences, remaining

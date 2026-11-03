@@ -1,0 +1,193 @@
+"""
+toolkit/common.py
+
+Shared helpers for Aiko tool modules.
+
+This module provides utilities used across multiple toolkit modules:
+
+  - workspace_root()  — user-specific workspace directory
+  - notes_dir()       — user notes subdirectory
+  - now_stamp()       — UTC timestamp for generated files
+  - slugify()         — stable file slug generation from text
+  - safe_path()       — path resolution with traversal prevention
+  - json_block()      — formatted JSON output for tool results
+  - llm_timeout_seconds() / chat_completions_create()
+                      — global LLM_TIMEOUT for agentic completions
+
+All functions respect the per-user isolation provided by system/userspace.py.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import re
+from system.bioclock import local_now, timezone_name
+from pathlib import Path
+from typing import Any
+
+from system.userspace import user_workspace_root
+
+MAX_WRITE_CHARS = int(os.getenv("MAX_WRITE_CHARS", 50_000))
+MAX_READ_CHARS = int(os.getenv("MAX_READ_CHARS", 12_000))
+
+# Global default for agentic chat.completions calls (seconds).
+# Override via config/agentic.yaml LLM_TIMEOUT or env LLM_TIMEOUT.
+_DEFAULT_LLM_TIMEOUT = 30.0
+
+
+def workspace_root() -> Path:
+    """Resolve the active user workspace root lazily."""
+    return user_workspace_root()
+
+
+def notes_dir() -> Path:
+    """Resolve the active user notes directory lazily."""
+    return workspace_root() / "notes"
+
+
+def now_stamp() -> str:
+    """Return a compact local-timezone timestamp for generated notes and plans."""
+    now = local_now()
+    return now.strftime(f"%Y-%m-%d %H:%M {timezone_name()}")
+
+
+def slugify(text: str, fallback: str = "task") -> str:
+    """Create a stable lowercase file slug from arbitrary user text."""
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", text.lower()).strip("-")
+    return (slug or fallback)[:80]
+
+
+def safe_path(relative_path: str) -> Path:
+    """Resolve a user path under the active WORKSPACE_ROOT, rejecting traversal."""
+    root = workspace_root()
+    cleaned = relative_path.strip().lstrip("/\\")
+    path = (root / cleaned).resolve()
+    if path != root and root not in path.parents:
+        raise ValueError(f"path escapes workspace: {relative_path}")
+    return path
+
+
+def json_block(title: str, payload: dict[str, Any]) -> str:
+    """Render machine-readable tool output with a short human title."""
+    return f"[{title}]\n" + json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def extra_jail_roots() -> list[Path]:
+    """Additional repo-tool jail roots beyond the Aiko-chan checkout.
+
+    The Playground (sibling checkout where the idle-build worker works)
+    cannot live inside the repo without breaking its own git history, so
+    the repo_* file tools accept absolute paths under these roots too.
+    Default: ~/Aiko-Playground (same rule as system.playground);
+    override/extend with colon-separated AIKO_WORKER_ROOTS. Only
+    existing directories are admitted; everything else (extensions,
+    secrets, skip-dirs) is enforced exactly as for the repo root.
+    """
+    raw = os.getenv("AIKO_WORKER_ROOTS", "").strip()
+    explicit = [c for c in raw.split(":") if c.strip()]
+    # Default order matters: the canonical checkout first, passwd-home
+    # second. Path.home() follows the passwd DB, which disagrees with $HOME
+    # on multi-checkout dev boxes — never let it shadow the real location.
+    default = ["/home/oppa-ai/Aiko-Playground", str(Path.home() / "Aiko-Playground")]
+    from system.playground import playground_dir
+    default.insert(0, str(playground_dir()))
+    configured = os.getenv("AIKO_PLAYGROUND_DIR", "").strip()
+    candidates = ([configured] if configured else []) + (explicit or default)
+    roots = []
+    for c in candidates:
+        try:
+            p = Path(c).expanduser().resolve()
+        except Exception:
+            continue
+        # Admit only real playground checkouts (GOALS.md present): this
+        # keeps the jail tight AND deterministic across machines — a bare
+        # existing dir is not enough to earn file-tool access.
+        if p.is_dir() and (p / "GOALS.md").is_file() and p not in roots:
+            roots.append(p)
+    return roots
+
+
+def resolve_extra_jail(cleaned: str) -> Path | None:
+    """Resolve an absolute path under an extra jail root, else None.
+
+    Callers try their repo root first and fall back here, so relative
+    paths keep their existing meaning and only absolute paths inside an
+    admitted root escape the repo.
+    """
+    stripped = cleaned.strip().lstrip("/\\")
+    if not stripped:
+        return None
+    try:
+        path = Path("/" + stripped).resolve()
+    except Exception:
+        return None
+    for root in extra_jail_roots():
+        if path == root or root in path.parents:
+            return path
+    return None
+
+
+def llm_timeout_seconds(default: float = _DEFAULT_LLM_TIMEOUT) -> float:
+    """Per-request timeout for agentic LLM completions (seconds).
+
+    Reads LLM_TIMEOUT from env / config yaml (via load_config). Falls back
+    to ``default`` when unset, invalid, or non-finite. Minimum 1 second.
+    """
+    raw = os.getenv("LLM_TIMEOUT", str(default))
+    try:
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError("timeout must be finite")
+        return max(1.0, value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def chat_completions_create(client, **kwargs: Any):
+    """client.chat.completions.create with global LLM_TIMEOUT applied.
+
+    Passes ``timeout=llm_timeout_seconds()`` unless the caller already set
+    ``timeout``. If the SDK/client rejects the injected timeout kwarg
+    (TypeError), retries once without it so local OpenAI-compatible servers
+    still work. Caller-provided timeout is never stripped.
+
+    Also adds think headroom to ``max_tokens`` when the backend is a known
+    thinking model (see cognition.think._effective_max_tokens): a thinker
+    burns the prediction budget reasoning before emitting content.
+    """
+    injected_timeout = "timeout" not in kwargs
+    if injected_timeout:
+        kwargs = {**kwargs, "timeout": llm_timeout_seconds()}
+    if "max_tokens" in kwargs:
+        try:
+            from cognition.think import _effective_max_tokens
+            kwargs = {**kwargs, "max_tokens": _effective_max_tokens(kwargs["max_tokens"])}
+        except Exception:
+            pass
+    try:
+        return client.chat.completions.create(**kwargs)
+    except TypeError as exc:
+        if not injected_timeout or "timeout" not in str(exc).casefold():
+            raise
+        kwargs = {k: v for k, v in kwargs.items() if k != "timeout"}
+        return client.chat.completions.create(**kwargs)
+
+
+def ask_llm_json(client, model: str, prompt: str, max_tokens: int) -> dict | None:
+    """Best-effort structured LLM call returning parsed JSON or None."""
+    try:
+        resp = chat_completions_create(
+            client,
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            stream=False,
+            max_tokens=max_tokens,
+            temperature=0.0,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+        return json.loads(match.group(0) if match else raw)
+    except Exception:
+        return None

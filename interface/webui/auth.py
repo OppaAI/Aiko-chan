@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import json
 import secrets
@@ -10,15 +11,171 @@ from urllib.parse import urlencode
 from fastapi import FastAPI, HTTPException, Request, Depends, WebSocket
 from fastapi.responses import RedirectResponse
 import httpx
-from dotenv import load_dotenv
+from system.config import load_config
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
 from system import bioclock
 from system.userspace import normalize_user_id, user_state_path
 
-load_dotenv()
+load_config()
+
+log = logging.getLogger(__name__)
 
 app = FastAPI()
+
+# Mount studio backends
+# LTM Graph Studio
+try:
+    from interface.webui.studio.memory.ltm.backend.api import app as ltm_studio_app
+    app.mount("/studio/memory/ltm", ltm_studio_app)
+except ImportError as e:
+    log.warning(f"Could not mount LTM studio: {e}")
+
+
+# STM Studio (combined STM/LTM/KB entry)
+try:
+    from interface.webui.studio.memory.stm.backend.api import app as stm_studio_app
+    app.mount("/studio/memory/stm", stm_studio_app)
+except ImportError as e:
+    log.warning(f"Could not mount STM studio: {e}")
+
+# ITM Studio (episodic memory pipeline)
+try:
+    from interface.webui.studio.memory.itm.backend.api import app as itm_studio_app
+    app.mount("/studio/memory/itm", itm_studio_app)
+except ImportError as e:
+    log.warning(f"Could not mount ITM studio: {e}")
+
+# Inner Speech Studio (read-only thought journal)
+try:
+    from interface.webui.studio.innerspeech.backend.api import app as innerspeech_studio_app
+    app.mount("/studio/innerspeech", innerspeech_studio_app)
+except ImportError as e:
+    log.warning(f"Could not mount Inner Speech studio: {e}")
+
+
+
+@app.get("/studio/grasp", include_in_schema=False)
+@app.get("/studio/grasp/", include_in_schema=False)
+async def redirect_legacy_grasp_studio():
+    return RedirectResponse(url="/studio/memory/stm/", status_code=307)
+
+
+@app.get("/studio/memory", include_in_schema=False)
+@app.get("/studio/memory/", include_in_schema=False)
+async def redirect_legacy_memory_studio():
+    return RedirectResponse(url="/studio/memory/ltm/", status_code=307)
+
+# DAG Studio
+try:
+    from interface.webui.studio.dag.backend.api import app as dag_studio_app
+    app.mount("/studio/dag", dag_studio_app)
+except ImportError as e:
+    log.warning(f"Could not mount DAG studio: {e}")
+
+# Calendar Studio — local-first chief-of-staff workspace for appointments,
+# tasks, drafts, reminders, and scheduled workflows.
+try:
+    from interface.webui.studio.calendar.backend.api import app as calendar_studio_app
+    app.mount("/studio/calendar", calendar_studio_app)
+except ImportError as e:
+    log.warning(f"Could not mount Calendar studio: {e}")
+
+# KB Storage Viewer Studio
+try:
+    from interface.webui.studio.memory.kb.backend.api import app as kb_studio_app
+    app.mount("/studio/memory/kb", kb_studio_app)
+except ImportError as e:
+    log.warning(f"Could not mount KB studio: {e}")
+
+# Approval Studio
+try:
+    from interface.webui.studio.approval.backend.api import app as approval_studio_app
+    app.mount("/studio/approval", approval_studio_app)
+except ImportError as e:
+    log.warning(f"Could not mount approval studio: {e}")
+
+# MCP Studio
+try:
+    from interface.webui.studio.mcp.backend.api import app as mcp_studio_app
+    app.mount("/studio/mcp", mcp_studio_app)
+except ImportError as e:
+    log.warning(f"Could not mount MCP studio: {e}")
+
+# Spec Studio (Layer 4)
+try:
+    from interface.webui.studio.spec.backend.api import app as spec_studio_app
+    app.mount("/studio/spec", spec_studio_app)
+except ImportError as e:
+    log.warning(f"Could not mount Spec studio: {e}")
+
+# Log Studio
+try:
+    from interface.webui.studio.log.backend.api import app as log_studio_app
+    app.mount("/studio/log", log_studio_app)
+except ImportError as e:
+    log.warning(f"Could not mount Log studio: {e}")
+
+# Settings Studio — tabbed editor for config/*.yaml + .env.age secrets
+try:
+    from interface.webui.studio.settings.backend.api import app as settings_studio_app
+    app.mount("/studio/settings", settings_studio_app)
+except Exception as e:
+    log.warning(f"Could not mount Settings studio: {e}")
+
+# Fly Circuit Studio — NeuralState motif graph
+try:
+    import os, sys
+    # auth.py is at interface/webui/auth.py → up 3 dirs = Aiko-chan root
+    aiko_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if aiko_root not in sys.path:
+        sys.path.insert(0, aiko_root)
+    from interface.webui.studio.fly.backend.api import app as fly_studio_app
+    app.mount("/studio/fly", fly_studio_app)
+except ImportError as e:
+    log.warning(f"Could not mount Fly studio: {e}")
+
+# Lingo Japanese Learning API (Android-app backend)
+try:
+    from interface.android_app.lingo.router import router as lingo_router
+    app.include_router(lingo_router)
+except Exception as e:
+    log.warning(f"Could not mount Lingo router: {e}")
+
+# Shogi game API (Android-app backend, moved from interface/webui/shogi/)
+try:
+    from interface.android_app.shogi import router as shogi_router
+    app.include_router(shogi_router)
+except Exception as e:
+    log.warning(f"Could not mount Shogi router: {e}")
+
+# Go (囲碁) game API — Android-app backend, parallel to shogi/
+try:
+    from interface.android_app.go import router as go_router
+    app.include_router(go_router)
+except Exception as e:
+    log.warning(f"Could not mount Go router: {e}")
+
+# Koi-Koi (こいこい, hanafuda) game API — Android-app backend, parallel to go/
+try:
+    from interface.android_app.koikoi import router as koikoi_router
+    app.include_router(koikoi_router)
+except Exception as e:
+    log.warning(f"Could not mount Koi-Koi router: {e}")
+
+# Companion game (Sengoku-era RPG) API — backend, parallel to games/
+try:
+    from interface.android_app.game import router as game_router
+    app.include_router(game_router)
+except Exception as e:
+    log.warning(f"Could not mount game router: {e}")
+
+# Codebase Figure Studio (sharp silhouette — brain/eyes/ears/mouth/legs)
+try:
+    from interface.webui.studio.codebase.backend.api import app as codebase_studio_app
+    app.mount("/studio/codebase", codebase_studio_app)
+except Exception as e:
+    log.warning(f"Could not mount Codebase studio: {e}")
 
 # ── cookie signing ────────────────────────────────────────────────────────────
 # SECRET_KEY signs the session cookie so it can't be forged or edited client-side.
@@ -28,10 +185,12 @@ app = FastAPI()
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
-    raise RuntimeError(
-        "SECRET_KEY is not set. Generate one with "
-        "`python -c \"import secrets; print(secrets.token_hex(32))\"` "
-        "and add it to your .env."
+    SECRET_KEY = secrets.token_hex(32)
+    log.warning(
+        "SECRET_KEY not set in .env — generated ephemeral key. "
+        "All sessions will be invalidated on restart. "
+        "Generate a permanent one with: "
+        "`python -c \"import secrets; print(secrets.token_hex(32))\"`"
     )
 
 signer = URLSafeTimedSerializer(SECRET_KEY, salt="aiko-session-cookie")
@@ -78,7 +237,7 @@ TERMS_STORE_PATH = os.getenv("TERMS_STORE_PATH", "").strip()
 
 
 def _terms_store_path(user_id: str | None) -> Path:
-    """Per-user terms acceptance store next to profile/user.md by default."""
+    """Per-user terms acceptance store next to profile/USER.md by default."""
     if TERMS_STORE_PATH:
         override = Path(TERMS_STORE_PATH).expanduser()
         if override.is_absolute():
@@ -123,10 +282,71 @@ def _record_terms_acceptance(provider: str, user_id) -> None:
     _save_terms_store(uid, store)
 
 
+# ── session persistence ──────────────────────────────────────────────────────
+# sessions used to live only in RAM *and* the cookie signer was ephemeral
+# unless SECRET_KEY was set — so every main.py restart logged all browsers
+# out and every studio fell back to guest. Sessions now persist to disk
+# (0600) and reload on boot; entries older than the 30-day TTL are dropped.
+# NOTE: a permanent SECRET_KEY in .env is still required — otherwise the
+# signer rotates each restart and old cookies fail signature checks anyway.
+_SESSIONS_PATH = Path.home() / ".aiko" / "sessions.json"
+
+
+def _load_sessions() -> None:
+    try:
+        raw = json.loads(_SESSIONS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(raw, dict):
+        return
+    now = bioclock.local_now()
+    kept = 0
+    for session_id, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            created = entry.get("created_at")
+            created_at = (bioclock.local_now().fromisoformat(created)
+                          if isinstance(created, str) else created)
+            if now - created_at > timedelta(days=30):
+                continue
+            entry["created_at"] = created_at
+            sessions[str(session_id)] = entry
+            kept += 1
+        except Exception:
+            continue
+    if kept:
+        log.info("auth: restored %d persisted session(s)", kept)
+
+
+def _save_sessions() -> None:
+    try:
+        _SESSIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        serialisable = {}
+        for session_id, entry in sessions.items():
+            created = entry.get("created_at")
+            serialisable[str(session_id)] = {
+                **entry,
+                "created_at": (created.isoformat() if hasattr(created, "isoformat")
+                               else str(created)),
+            }
+        tmp = _SESSIONS_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(serialisable, ensure_ascii=False), encoding="utf-8")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        tmp.replace(_SESSIONS_PATH)
+    except Exception as exc:
+        log.debug("auth: session persist skipped: %s", exc)
+
+
 # ── in-memory state ──────────────────────────────────────────────────────────
-# Use redis or a DB in production; fine for solo/small-community use for now.
+# sessions also persist to ~/.aiko/sessions.json (see above); oauth_states
+# stay RAM-only — a restart mid-OAuth just means logging in again.
 
 sessions: dict[str, dict] = {}
+_load_sessions()
 
 # oauth_states maps state -> expiry timestamp. Generated on /login, consumed
 # (and deleted) on /callback. Prevents CSRF: an attacker cannot forge a valid
@@ -143,6 +363,7 @@ def _new_state() -> str:
 
 def _consume_state(state: str | None) -> None:
     """Validate and burn a state token. Raises 400 if missing/unknown/expired."""
+    _sweep_expired_states()
     if not state or state not in oauth_states:
         raise HTTPException(status_code=400, detail="Invalid or missing OAuth state")
     expiry = oauth_states.pop(state)
@@ -150,9 +371,23 @@ def _consume_state(state: str | None) -> None:
         raise HTTPException(status_code=400, detail="OAuth state expired — try logging in again")
 
 
+def _sweep_expired_states() -> None:
+    now = bioclock.monotonic_now()
+    for key, exp in list(oauth_states.items()):
+        if now > exp:
+            oauth_states.pop(key, None)
+
+
 def _create_session(user_id, username: str, email: str | None, provider: str) -> str:
     session_id = secrets.token_urlsafe(32)
-    runtime_user_id = normalize_user_id(provider, user_id)
+    # Owner alias: OppaAI's GitHub id (205369547) should use display name as
+    # runtime id so memories/drafts stay under OppaAI, not github_205369547
+    if provider == "github" and str(user_id) == "205369547":
+        runtime_user_id = "OppaAI"
+    elif username and username.lower() == "oppaai":
+        runtime_user_id = "OppaAI"
+    else:
+        runtime_user_id = normalize_user_id(provider, user_id)
     sessions[session_id] = {
         "user_id": runtime_user_id,
         "provider_user_id": str(user_id),
@@ -164,18 +399,20 @@ def _create_session(user_id, username: str, email: str | None, provider: str) ->
         # accepted this exact terms version in a previous session
         "accepted_terms": _has_accepted_terms(provider, runtime_user_id),
     }
+    _save_sessions()
     return session_id
 
 
-def _set_session_cookie(response: RedirectResponse, session_id: str) -> None:
+def _set_session_cookie(response: RedirectResponse, session_id: str, request: Request | None = None) -> None:
     signed_value = signer.dumps(session_id)
+    is_https = request.url.scheme == "https" if request else REDIRECT_BASE.startswith("https://")
     response.set_cookie(
         "session_id",
         signed_value,
         max_age=SESSION_MAX_AGE_SECONDS,
         httponly=True,
         samesite="lax",
-        secure=True,  # requires HTTPS — matches your Tailscale Funnel / Cloudflare setup
+        secure=is_https,
     )
 
 
@@ -185,9 +422,10 @@ def _callback_url(provider: str) -> str:
     return f"{REDIRECT_BASE}/auth/{provider}/callback"
 
 
-def _authorize_url(base: str, **params: str) -> str:
-    """Properly URL-encode query params instead of raw f-string interpolation."""
-    return f"{base}?{urlencode(params)}"
+def _authorize_url(base: str, **params: str | None) -> str:
+    """Properly URL-encode query params, filtering out any None values."""
+    filtered = {k: v for k, v in params.items() if v is not None}
+    return f"{base}?{urlencode(filtered)}"
 
 
 # ── dependencies for gating protected routes ─────────────────────────────────
@@ -211,6 +449,7 @@ async def require_session(request: Request) -> dict:
     session = sessions[session_id]
     if bioclock.local_now() - session["created_at"] > timedelta(days=30):
         del sessions[session_id]
+        _save_sessions()
         raise HTTPException(status_code=401, detail="Session expired")
 
     return session
@@ -239,6 +478,11 @@ async def get_auth_config():
 
 @app.get("/auth/github/login")
 async def github_login():
+    if not GITHUB_CLIENT_ID:
+        raise HTTPException(
+            status_code=400,
+            detail="GitHub OAuth is not configured on this server. Set GITHUB_CLIENT_ID in .env.",
+        )
     state = _new_state()
     url = _authorize_url(
         "https://github.com/login/oauth/authorize",
@@ -262,7 +506,7 @@ async def _is_contributor(username: str, access_token: str) -> bool:
 
 
 @app.get("/auth/github/callback")
-async def github_callback(code: str, state: str | None = None):
+async def github_callback(request: Request, code: str, state: str | None = None):
     _consume_state(state)
 
     async with httpx.AsyncClient() as client:
@@ -296,7 +540,7 @@ async def github_callback(code: str, state: str | None = None):
 
     session_id = _create_session(user["id"], username, user.get("email"), "github")
     response = RedirectResponse(url="/")
-    _set_session_cookie(response, session_id)
+    _set_session_cookie(response, session_id, request)
     return response
 
 
@@ -311,6 +555,11 @@ PATREON_IDENTITY_URL = "https://www.patreon.com/api/oauth2/v2/identity"
 
 @app.get("/auth/patreon/login")
 async def patreon_login():
+    if not PATREON_CLIENT_ID:
+        raise HTTPException(
+            status_code=400,
+            detail="Patreon OAuth is not configured on this server. Set PATREON_CLIENT_ID in .env.",
+        )
     state = _new_state()
     url = _authorize_url(
         PATREON_AUTHORIZE_URL,
@@ -324,7 +573,7 @@ async def patreon_login():
 
 
 @app.get("/auth/patreon/callback")
-async def patreon_callback(code: str, state: str | None = None):
+async def patreon_callback(request: Request, code: str, state: str | None = None):
     _consume_state(state)
 
     async with httpx.AsyncClient() as client:
@@ -370,7 +619,7 @@ async def patreon_callback(code: str, state: str | None = None):
 
     session_id = _create_session(user_id, username, None, "patreon")
     response = RedirectResponse(url="/")
-    _set_session_cookie(response, session_id)
+    _set_session_cookie(response, session_id, request)
     return response
 
 
@@ -388,7 +637,10 @@ async def accept_terms(request: Request, session: dict = Depends(require_session
         raise HTTPException(status_code=400, detail="Must explicitly accept")
 
     cookie_value = request.cookies.get("session_id")
-    session_id = signer.loads(cookie_value, max_age=SESSION_MAX_AGE_SECONDS)
+    try:
+        session_id = signer.loads(cookie_value, max_age=SESSION_MAX_AGE_SECONDS)
+    except (BadSignature, SignatureExpired, TypeError):
+        raise HTTPException(status_code=401, detail="Invalid session")
     sessions[session_id]["accepted_terms"] = True
     _record_terms_acceptance(session["provider"], session["user_id"])
     return {"accepted": True}
@@ -400,9 +652,15 @@ async def logout(request: Request):
     if cookie_value:
         try:
             session_id = signer.loads(cookie_value, max_age=SESSION_MAX_AGE_SECONDS)
-            sessions.pop(session_id, None)
+            session = sessions.pop(session_id, None)
+            if session:
+                try:
+                    from system.notice import drop_session
+                    drop_session(session.get("user_id", ""))
+                except Exception:
+                    pass
         except (BadSignature, SignatureExpired):
-            pass  # already invalid/expired, nothing to clean up
+            log.debug("auth: session cookie invalid/expired, nothing to clean up")
     response = RedirectResponse(url="/")
     response.delete_cookie("session_id")
     return response

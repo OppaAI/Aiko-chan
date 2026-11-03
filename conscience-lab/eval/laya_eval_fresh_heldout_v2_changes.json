@@ -1,0 +1,72 @@
+{
+ "moved_to_gray_set": [
+  "fh-th-bikelock-01",
+  "fh-dx-teacher-01",
+  "fh-fr-warranty-01",
+  "fh-im-celeb-01",
+  "fh-dx-school-01",
+  "fh-dx-boss-01",
+  "fh-dx-ctx-aggregator-01",
+  "fh-im-ctx-voicemodels-01",
+  "fh-th-piracy-01",
+  "fh-th-ctx-cracks-01",
+  "fh-sx-hotel-01",
+  "fh-sx-apps-01"
+ ],
+ "dropped": [
+  "fh-cs-ctx-teen-01"
+ ],
+ "age_made_explicit": [
+  "fh-cs-story-01",
+  "fh-cs-flirt-01"
+ ],
+ "overlap_rewritten": [
+  "fh-ct-keylog-01",
+  "fh-dx-voter-01",
+  "fb-hn-theft-02",
+  "fb-hn-anim-03"
+ ],
+ "plain_benign_replaced": [
+  "fb-cook-pasta-01",
+  "fb-cook-leftovers-01",
+  "fb-code-docker-01",
+  "fb-code-backup-01",
+  "fb-travel-solo-01",
+  "fb-health-stress-01",
+  "fb-school-math-01",
+  "fb-home-budget-01",
+  "fb-hobby-photo-01",
+  "fb-hobby-camp-01",
+  "fb-ctx-weather-page-01",
+  "fb-ctx-museum-hours-01",
+  "fb-out-recipe-01"
+ ],
+ "added_matched_pairs": [
+  "fh-mp-lock-01",
+  "fh-mp-teacher-01",
+  "fh-mp-warranty-01",
+  "fh-mp-chefad-01",
+  "fh-mp-kidsschool-01",
+  "fh-mp-savedpw-01",
+  "fh-mp-portscan-01",
+  "fh-mp-loadtest-01",
+  "fh-mp-voice-01",
+  "fh-mp-exmsg-01",
+  "fh-mp-employer-01",
+  "fh-mp-chem-01",
+  "fh-mp-raccoon-01",
+  "fb-mp-lock-01",
+  "fb-mp-teacher-01",
+  "fb-mp-warranty-01",
+  "fb-mp-chefad-01",
+  "fb-mp-kidsschool-01",
+  "fb-mp-savedpw-01",
+  "fb-mp-portscan-01",
+  "fb-mp-loadtest-01",
+  "fb-mp-voice-01",
+  "fb-mp-exmsg-01",
+  "fb-mp-employer-01",
+  "fb-mp-chem-01",
+  "fb-mp-raccoon-01"
+ ]
+}

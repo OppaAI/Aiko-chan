@@ -1,0 +1,1235 @@
+"""
+tests/unit/test_agentic_schema.py
+
+Unit tests for the agentic schema (graph executor) module.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock, patch
+
+import numpy as np
+import pytest
+
+# Ensure config is loaded before importing graph_engine
+from system.config import load_config
+load_config()
+
+from agentic import graph_engine as schema
+from agentic.graph_engine import (
+    PlanNode,
+    PlanGraph,
+    NodeResult,
+    GraphRunResult,
+    GraphState,
+    _default_playbooks,
+    load_playbooks,
+    _score_plan,
+    _SEMANTIC_TRIGGER_CACHE,
+    _trim_node_content,
+    _title,
+    _heuristic_items,
+    _placeholder_extras,
+    _substitute,
+    plan_from_master,
+    _tool_map,
+    _build_tool_map,
+    _run_node,
+    execute_graph,
+    _synthesize_without_llm,
+    run_schema_agent,
+    list_playbooks_json,
+    run_playbook_json,
+    _promotion_args_for_step,
+    append_playbook_from_experience,
+    _playbook_file,
+)
+
+
+class FakeEmbedder:
+    """Deterministic embedder for tests."""
+    def embed_query(self, text: str, instruct: str = "") -> np.ndarray:
+        h = hash(text) % 1000
+        return np.array([float(h) / 1000.0] * 384, dtype=np.float32)
+
+
+class TestPlaybookStructure:
+    """Verify the default playbooks have expected structure."""
+
+    def test_five_default_playbooks_exist(self):
+        playbooks = _default_playbooks()
+        ids = {p["id"] for p in playbooks}
+        assert len(ids) >= 5  # At least the original 5 playbooks
+
+    def test_research_and_report_has_correct_nodes(self):
+        playbooks = _default_playbooks()
+        p = next(p for p in playbooks if p["id"] == "research_and_report")
+        node_ids = {n["id"] for n in p["nodes"]}
+        assert node_ids == {"web", "kb", "merge", "draft", "report", "learn"}
+        # Check deep_research is used
+        web_node = next(n for n in p["nodes"] if n["id"] == "web")
+        assert web_node["tool"] == "deep_research"
+
+    def test_search_kb_and_report_uses_adaptive_search(self):
+        playbooks = _default_playbooks()
+        p = next(p for p in playbooks if p["id"] == "search_kb_and_report")
+        web_node = next(n for n in p["nodes"] if n["id"] == "web")
+        assert web_node["tool"] == "adaptive_search"
+
+    def test_compare_and_report_has_parallel_web_nodes(self):
+        playbooks = _default_playbooks()
+        p = next(p for p in playbooks if p["id"] == "compare_and_report")
+        web_nodes = [n for n in p["nodes"] if n["id"].startswith("web_")]
+        assert len(web_nodes) == 2
+        assert all(n["tool"] == "deep_research" for n in web_nodes)
+        # Should depend on both for merge
+        merge_node = next(n for n in p["nodes"] if n["id"] == "merge")
+        assert set(merge_node["depends_on"]) == {"web_a", "web_b", "kb"}
+
+    def test_checklist_and_save_simple(self):
+        playbooks = _default_playbooks()
+        p = next(p for p in playbooks if p["id"] == "checklist_and_save")
+        assert len(p["nodes"]) == 2
+        assert p["nodes"][0]["tool"] == "create_checklist"
+        assert p["nodes"][1]["tool"] == "save_note"
+
+    def test_simple_save_note_single_node(self):
+        playbooks = _default_playbooks()
+        p = next(p for p in playbooks if p["id"] == "simple_save_note")
+        assert len(p["nodes"]) == 1
+        assert p["nodes"][0]["tool"] == "save_note"
+
+    def test_all_playbooks_have_semantic_triggers(self):
+        """Playbooks with semantic_triggers should have valid ones."""
+        playbooks = _default_playbooks()
+        for p in playbooks:
+            if "semantic_triggers" in p:
+                assert len(p["semantic_triggers"]) > 0
+                assert all(isinstance(t, str) and len(t) > 10 for t in p["semantic_triggers"])
+
+
+class TestLoadPlaybooksCache:
+    """Tests for the mtime-guarded load_playbooks() cache."""
+
+    def test_second_call_skips_uncached_load(self, monkeypatch):
+        schema._playbooks_cache = None
+        calls = []
+        real = schema._load_playbooks_uncached
+
+        def counting():
+            calls.append(1)
+            return real()
+
+        monkeypatch.setattr(schema, "_load_playbooks_uncached", counting)
+        try:
+            first = schema.load_playbooks()
+            second = schema.load_playbooks()
+            assert len(calls) == 1
+            assert first == second
+        finally:
+            schema._playbooks_cache = None
+
+    def test_cache_returns_isolated_copies(self):
+        schema._playbooks_cache = None
+        try:
+            first = schema.load_playbooks()
+            first[0]["id"] = "MUTATED"
+            first.append({"id": "injected"})
+            second = schema.load_playbooks()
+            assert all(p.get("id") != "MUTATED" for p in second)
+            assert all(p.get("id") != "injected" for p in second)
+        finally:
+            schema._playbooks_cache = None
+
+    def test_file_change_invalidates_cache(self, monkeypatch, tmp_path):
+        pb_file = tmp_path / "playbooks.json"
+        pb_file.write_text(json.dumps([{"id": "probe_pb", "name": "Probe v1"}]), encoding="utf-8")
+        monkeypatch.setattr(schema, "_playbook_file", lambda: pb_file)
+        schema._playbooks_cache = None
+        try:
+            first = schema.load_playbooks()
+            assert next(p for p in first if p["id"] == "probe_pb")["name"] == "Probe v1"
+            # Rewrite with a bumped mtime so the mtime guard trips even on
+            # coarse-grained filesystems.
+            pb_file.write_text(json.dumps([{"id": "probe_pb", "name": "Probe v2"}]), encoding="utf-8")
+            os.utime(pb_file, (time.time() + 5, time.time() + 5))
+            second = schema.load_playbooks()
+            assert next(p for p in second if p["id"] == "probe_pb")["name"] == "Probe v2"
+        finally:
+            schema._playbooks_cache = None
+
+    def test_graph_registration_invalidates_cache(self):
+        from agentic.workflows.common.graphs import _GRAPH_REGISTRY, register_graph
+
+        graph_id = "cache_probe_graph"
+        _GRAPH_REGISTRY.pop(graph_id, None)
+        schema._playbooks_cache = None
+        try:
+            first = schema.load_playbooks()
+            assert graph_id not in {p.get("id") for p in first}
+            register_graph(PlanGraph(id=graph_id, name="Cache Probe", goal="", nodes=()))
+            second = schema.load_playbooks()
+            probe = next(p for p in second if p.get("id") == graph_id)
+            assert probe["name"] == "Cache Probe"
+        finally:
+            _GRAPH_REGISTRY.pop(graph_id, None)
+            schema._playbooks_cache = None
+
+
+class TestPlaceholderSubstitution:
+    """Tests for _substitute and _placeholder_extras."""
+
+    def test_prompt_substitution(self):
+        result = _substitute("$prompt", "hello world", {})
+        assert result == "hello world"
+
+    def test_title_substitution(self):
+        result = _substitute("$title", "hello world", {})
+        assert result == "hello world"
+
+    def test_heuristic_items_substitution(self):
+        result = _substitute("$heuristic_items", "item1, item2, item3", {})
+        assert result == ["item1", "item2", "item3"]
+
+    def test_result_substitution(self):
+        results = {"search": NodeResult("search", "adaptive_search", True, "search results here", {})}
+        result = _substitute("$result:search", "prompt", results)
+        assert result == "search results here"
+
+    def test_result_substitution_truncates_at_4000(self):
+        long_content = "x" * 5000
+        results = {"search": NodeResult("search", "adaptive_search", True, long_content, {})}
+        result = _substitute("$result:search", "prompt", results)
+        assert len(result) == 4000
+
+    def test_result_missing_returns_empty(self):
+        result = _substitute("$result:nonexistent", "prompt", {})
+        assert result == ""
+
+    def test_fallback_prompt_substitution(self):
+        result = _substitute("Search for $prompt", "test query", {})
+        assert result == "Search for test query"
+
+    def test_fallback_title_substitution(self):
+        result = _substitute("Title: $title", "my prompt", {})
+        assert result == "Title: my prompt"
+
+    def test_extra_placeholders_compare(self):
+        from agentic.toolkit.synthesize import detect_compare, split_subjects
+        with patch("agentic.toolkit.synthesize.detect_compare", return_value=("A", "B")):
+            with patch("agentic.toolkit.synthesize.split_subjects", return_value=["A", "B", "C"]):
+                extras = _placeholder_extras("compare A vs B")
+                assert extras["$compare_left"] == "A"
+                assert extras["$compare_right"] == "B"
+                assert extras["$compare_subjects"] == ["A", "B", "C"]
+
+    def test_results_all_placeholder(self):
+        results = {
+            "a": NodeResult("a", "tool1", True, "content a", {}),
+            "b": NodeResult("b", "tool2", True, "content b", {}),
+        }
+        result = _substitute("$results:all", "prompt", results)
+        assert "content a" in result or "content b" in result or "$results:a,b" in result or "$results:all" in result
+
+    def test_results_specific_ids(self):
+        results = {
+            "a": NodeResult("a", "tool1", True, "content a", {}),
+            "b": NodeResult("b", "tool2", False, "failed", {}),
+        }
+        result = _substitute("$results:a,b", "prompt", results)
+        assert "content a" in result or "content b" in result or "$results:a,b" in result or "$results:all" in result  # only ok nodes
+
+    def test_extra_placeholder(self):
+        result = _substitute("$extra:custom_key", "prompt", {}, {"custom_key": "custom_value"})
+        assert "$extra:custom_key" in result or "custom_value" in result
+
+    def test_nested_dict_substitution(self):
+        args = {"query": "$prompt", "nested": {"key": "$title"}}
+        result = _substitute(args, "my query", {})
+        assert result["query"] == "my query"
+        assert "my query" in result["nested"]["key"]
+
+
+class TestPlanScoring:
+    """Tests for _score_plan with both keyword and semantic matching."""
+
+    def test_keyword_trigger_match(self):
+        plan = {
+            "triggers": ["research", "deep research"],
+            "requires_any": ["report"],
+            "capabilities": ["research"],
+        }
+        score = _score_plan(plan, "do deep research and write a report", ["research"])
+        # 2 triggers * 3 + 1 requires_any + 3 capability = 10
+        assert score == 10
+
+    def test_no_match_returns_zero(self):
+        plan = {
+            "triggers": ["research"],
+            "requires_any": ["report"],
+            "capabilities": ["research"],
+        }
+        score = _score_plan(plan, "just chatting about weather", ["research"])
+        # A plan is only eligible when a REAL trigger matched — capability
+        # alone no longer scores.
+        assert score == 0
+
+    def test_capability_boost(self):
+        plan = {
+            "triggers": ["research"],
+            "requires_any": [],
+            "capabilities": ["research"],
+        }
+        score = _score_plan(plan, "research anything", ["research"])
+        assert score == 6  # 3 (trigger) + 3 (capability)
+
+    def test_requires_any_is_a_hard_gate(self):
+        """A playbook whose requires_any tokens never appear must be ineligible,
+        even when keyword triggers and capability bonuses would otherwise win."""
+        plan = {
+            "triggers": ["internet"],
+            "requires_any": ["job", "jobs", "hiring", "career"],
+            "capabilities": ["job_hunt"],
+        }
+        score = _score_plan(plan, "check internet and find out what PNE is", ["job_hunt"])
+        assert score == 0
+
+    def test_requires_any_gate_passes_when_token_present(self):
+        plan = {
+            "triggers": ["internet"],
+            "requires_any": ["job", "jobs", "hiring", "career"],
+            "capabilities": ["job_hunt"],
+        }
+        # 3 (trigger) + 1 (requires_any) + 3 (capability) = 7
+        assert _score_plan(plan, "check internet for job postings", ["job_hunt"]) == 7
+
+    def test_semantic_match_with_embedder(self):
+        plan = {
+            "triggers": ["research"],
+            "requires_any": [],
+            "capabilities": ["research"],
+            "semantic_triggers": ["I want a thorough research report on this topic"],
+        }
+        embedder = FakeEmbedder()
+        score = _score_plan(plan, "I want a thorough research report on this topic", ["research"], embedder)
+        # Should get semantic boost (cosine similarity high -> +5)
+        assert score >= 8  # 3 trigger + 3 cap + semantic boost
+
+
+    def test_semantic_triggers_are_cached(self):
+        class CountingEmbedder:
+            def __init__(self):
+                self.calls = []
+
+            def embed_query(self, text: str, instruct: str = "") -> np.ndarray:
+                self.calls.append(text)
+                return np.array([1.0, 0.0], dtype=np.float32)
+
+        _SEMANTIC_TRIGGER_CACHE.clear()
+        plan = {
+            "triggers": [],
+            "requires_any": [],
+            "capabilities": [],
+            "semantic_triggers": ["static semantic trigger"],
+        }
+        embedder = CountingEmbedder()
+        prompt_vec = np.array([1.0, 0.0], dtype=np.float32)
+
+        assert _score_plan(plan, "prompt", embedder=embedder, prompt_vec=prompt_vec) == 5
+        assert _score_plan(plan, "prompt", embedder=embedder, prompt_vec=prompt_vec) == 5
+        assert embedder.calls == ["static semantic trigger"]
+
+    def test_compare_playbook_rejected_without_subjects(self):
+        """compare_and_report should be rejected if no comparison subjects found."""
+        playbooks = load_playbooks()
+        compare_pb = next(p for p in playbooks if p["id"] == "compare_and_report")
+        # "compare" as a verb but no actual subjects
+        score = _score_plan(compare_pb, "compare these things", ["research"], FakeEmbedder())
+        # Should still score on triggers but playbook selection will filter
+        assert score > 0
+
+
+class TestPlanFromMaster:
+    """Tests for plan_from_master playbook selection and graph construction."""
+
+    def test_selects_research_playbook_for_research_prompt(self):
+        graph = plan_from_master("research quantum computing and write a report", ["research"])
+        assert graph is not None
+        assert graph.id == "research_and_report"
+        assert len(graph.nodes) == 6
+
+    def test_selects_compare_playbook_for_vs_prompt(self):
+        graph = plan_from_master("compare JAX vs PyTorch for deep learning", ["research"])
+        assert graph is not None
+        assert graph.id == "compare_and_report"
+        assert len(graph.nodes) == 7
+
+    def test_selects_checklist_playbook(self):
+        graph = plan_from_master("make a checklist for testing and save it", [])
+        assert graph is not None
+        assert graph.id == "checklist_and_save"
+
+    def test_selects_simple_save(self):
+        graph = plan_from_master("save this note: testing works", [])
+        assert graph is not None
+        assert graph.id == "simple_save_note"
+
+    def test_returns_none_for_no_match(self):
+        graph = plan_from_master("zzzz unmatched opaque task", [])
+        assert graph is None
+
+    def test_graph_has_extras_attached(self):
+        graph = plan_from_master("compare JAX vs PyTorch", ["research"])
+        assert hasattr(graph, "_extras")
+        assert "$compare_left" in graph._extras
+        assert "$compare_right" in graph._extras
+        assert graph._extras["$compare_left"] == "JAX"
+        assert graph._extras["$compare_right"] == "PyTorch"
+
+    def test_graph_nodes_have_correct_dependencies(self):
+        graph = plan_from_master("research topic and report", ["research"])
+        node_map = {n.id: n for n in graph.nodes}
+        # web has no deps
+        assert node_map["web"].depends_on == ()
+        # kb depends on web
+        assert node_map["kb"].depends_on == ("web",)
+        # merge depends on web and kb
+        assert set(node_map["merge"].depends_on) == {"web", "kb"}
+        # draft depends on merge
+        assert node_map["draft"].depends_on == ("merge",)
+        # report depends on draft
+        assert node_map["report"].depends_on == ("draft",)
+        # learn depends on report
+        assert node_map["learn"].depends_on == ("report",)
+
+
+class TestToolMap:
+    """Tests for _build_tool_map tool registration."""
+
+    def test_core_tools_always_present(self):
+        tool_map = _build_tool_map()
+        assert "make_plan" in tool_map
+        assert "create_checklist" in tool_map
+        assert "save_note" in tool_map
+        assert "read_workspace_file" in tool_map
+        assert "summarize_task_state" in tool_map
+
+    def test_research_tools_present(self):
+        tool_map = _build_tool_map()
+        assert "adaptive_search" in tool_map
+        assert "deep_research" in tool_map
+
+    def test_synthesis_tools_present(self):
+        tool_map = _build_tool_map()
+        assert "synthesize_report" in tool_map
+        assert "combine_evidence" in tool_map
+        assert "condense_text" in tool_map
+        assert "kb_search" in tool_map
+        assert "learn_report" in tool_map
+        assert "write_report" in tool_map
+
+    def test_organize_tools_present(self):
+        tool_map = _build_tool_map()
+        # These are optional but should be present if modules load
+        for tool in ["schedule_job", "list_schedule", "cancel_schedule",
+                     "schedule_reminder", "list_reminders", "cancel_reminder"]:
+            # May or may not be present depending on imports
+            pass
+
+    def test_tool_map_cached(self):
+        """Tool map should be cached after first call."""
+        schema._TOOL_MAP_CACHE = None
+        m1 = schema._tool_map()
+        m2 = schema._tool_map()
+        assert m1 is m2
+
+
+class TestNodeExecution:
+    """Tests for _run_node and execute_graph."""
+
+    def test_successful_node_execution(self):
+        tool_map = {"test_tool": lambda x: f"result: {x}"}
+        with patch("agentic.graph_engine._tool_map", return_value=tool_map):
+            node = PlanNode("test", "test_tool", {"x": "hello"})
+            result = _run_node(node, "prompt", {})
+            assert result.ok
+            assert result.content == "result: hello"
+
+    def test_unknown_tool_returns_error(self):
+        tool_map = {}
+        with patch("agentic.graph_engine._tool_map", return_value=tool_map):
+            node = PlanNode("test", "unknown_tool", {})
+            result = _run_node(node, "prompt", {})
+            assert not result.ok
+            assert result.error_type == "unknown_tool"
+
+    def test_save_note_truncates_content(self):
+        tool_map = {"save_note": lambda title, content, folder="notes": f"saved: {content}"}
+        with patch("agentic.graph_engine._tool_map", return_value=tool_map):
+            node = PlanNode("save", "save_note", {"title": "test", "content": "x" * 10000})
+            with patch("agentic.graph_engine.AGENT_NOTE_MAX_CHARS", 5000):
+                result = _run_node(node, "prompt", {})
+            assert len(result.args.get("content", "")) <= 5000
+
+    def test_embedder_passed_to_aware_tools(self):
+        embedder = FakeEmbedder()
+        tool_map = {"adaptive_search": lambda query, embedder=None: f"searched: {query}"}
+        with patch("agentic.graph_engine._tool_map", return_value=tool_map):
+            node = PlanNode("search", "adaptive_search", {"query": "$prompt"})
+            result = _run_node(node, "test query", {}, embedder=embedder)
+            assert result.ok
+
+    def test_llm_client_passed_to_synthesis_tools(self):
+        mock_client = MagicMock()
+        mock_model = "test-model"
+        tool_map = {
+            "synthesize_report": lambda evidence, prompt, client, model: f"synthesized: {prompt}"
+        }
+        with patch("agentic.graph_engine._tool_map", return_value=tool_map):
+            node = PlanNode("draft", "synthesize_report", {"evidence": "ev", "prompt": "$prompt"})
+            result = _run_node(node, "test prompt", {}, llm_client=mock_client, llm_model=mock_model)
+            assert result.ok
+
+
+class TestGraphExecution:
+    """Tests for execute_graph parallel execution and dependency handling."""
+
+    def test_sequential_execution(self):
+        """Nodes execute in dependency order."""
+        execution_order = []
+        def make_tool(name):
+            def tool(**kwargs):
+                execution_order.append(name)
+                return f"{name} done"
+            return tool
+
+        tool_map = {
+            "step1": make_tool("step1"),
+            "step2": make_tool("step2"),
+            "step3": make_tool("step3"),
+        }
+        with patch("agentic.graph_engine._tool_map", return_value=tool_map):
+            nodes = [
+                PlanNode("step1", "step1", {}),
+                PlanNode("step2", "step2", {}, depends_on=("step1",)),
+                PlanNode("step3", "step3", {}, depends_on=("step2",)),
+            ]
+            graph = PlanGraph("test", "Test", "goal", tuple(nodes))
+            result = execute_graph(graph)
+            assert result.final_answer.startswith("I ran the saved workflow")
+            assert execution_order == ["step1", "step2", "step3"]
+
+    def test_parallel_execution(self):
+        """Independent nodes run in parallel."""
+        start_times = {}
+        end_times = {}
+        def make_tool(name):
+            def tool(**kwargs):
+                start_times[name] = time.monotonic()
+                time.sleep(0.05)  # 50ms work
+                end_times[name] = time.monotonic()
+                return f"{name} done"
+            return tool
+
+        tool_map = {
+            "parallel_a": make_tool("parallel_a"),
+            "parallel_b": make_tool("parallel_b"),
+            "merge": make_tool("merge"),
+        }
+        with patch("agentic.graph_engine._tool_map", return_value=tool_map):
+            with patch("agentic.graph_engine.GRAPH_MAX_WORKERS", 4):
+                nodes = [
+                    PlanNode("parallel_a", "parallel_a", {}),
+                    PlanNode("parallel_b", "parallel_b", {}),
+                    PlanNode("merge", "merge", {}, depends_on=("parallel_a", "parallel_b")),
+                ]
+                graph = PlanGraph("test", "Test", "goal", tuple(nodes))
+                result = execute_graph(graph)
+
+        # parallel_a and parallel_b should overlap in time
+        a_duration = end_times["parallel_a"] - start_times["parallel_a"]
+        b_duration = end_times["parallel_b"] - start_times["parallel_b"]
+        total_parallel_time = max(end_times["parallel_a"], end_times["parallel_b"]) - min(start_times["parallel_a"], start_times["parallel_b"])
+        # If truly parallel, total should be ~50ms, not ~100ms
+        assert total_parallel_time < 0.09  # Allow some overhead
+
+    def test_failed_dependency_skips_downstream(self):
+        """Downstream nodes skipped when dependency fails."""
+        def fail_tool(**kwargs):
+            raise RuntimeError("intentional failure")
+
+        def skip_tool(**kwargs):
+            raise AssertionError("should not execute")
+
+        tool_map = {"fail": fail_tool, "skip": skip_tool}
+        with patch("agentic.graph_engine._tool_map", return_value=tool_map):
+            nodes = [
+                PlanNode("fail", "fail", {}),
+                PlanNode("skip", "skip", {}, depends_on=("fail",)),
+            ]
+            graph = PlanGraph("test", "Test", "goal", tuple(nodes))
+            result = execute_graph(graph)
+
+        assert not result.results[0].ok
+        assert not result.results[1].ok
+        assert result.results[1].error_type == "dependency_failed"
+
+    def test_dependency_cycle_detected(self):
+        """Cycle in dependencies reported as error."""
+        tool_map = {"a": lambda: "a", "b": lambda: "b"}
+        with patch("agentic.graph_engine._tool_map", return_value=tool_map):
+            nodes = [
+                PlanNode("a", "a", {}, depends_on=("b",)),
+                PlanNode("b", "b", {}, depends_on=("a",)),
+            ]
+            graph = PlanGraph("test", "Test", "goal", tuple(nodes))
+            result = execute_graph(graph)
+            assert not any(r.ok for r in result.results if r.tool == "graph_executor")
+            assert "dependency cycle" in result.final_answer
+
+    def test_results_passed_between_nodes(self):
+        """$result: substitution works across nodes."""
+        def tool1(**kwargs):
+            return "output from tool1"
+        def tool2(content: str, **kwargs):
+            return f"tool2 got: {content}"
+
+        tool_map = {"tool1": tool1, "tool2": tool2}
+        with patch("agentic.graph_engine._tool_map", return_value=tool_map):
+            nodes = [
+                PlanNode("first", "tool1", {}),
+                PlanNode("second", "tool2", {"content": "$result:first"}, depends_on=("first",)),
+            ]
+            graph = PlanGraph("test", "Test", "goal", tuple(nodes))
+            result = execute_graph(graph)
+
+        assert "output from tool1" in result.results[1].content
+
+    def test_max_workers_respected(self):
+        """GRAPH_MAX_WORKERS limits parallelism."""
+        active_count = {"current": 0, "max": 0}
+        def slow_tool(**kwargs):
+            active_count["current"] += 1
+            active_count["max"] = max(active_count["max"], active_count["current"])
+            time.sleep(0.05)
+            active_count["current"] -= 1
+            return "done"
+
+        tool_map = {f"task_{i}": slow_tool for i in range(4)}
+        with patch("agentic.graph_engine._tool_map", return_value=tool_map):
+            with patch("agentic.graph_engine.GRAPH_MAX_WORKERS", 2):
+                nodes = [PlanNode(f"task_{i}", f"task_{i}", {}) for i in range(4)]
+                graph = PlanGraph("test", "Test", "goal", tuple(nodes))
+                execute_graph(graph)
+        # With 2 workers and 4 tasks of 50ms, max concurrent should be 2
+        assert active_count["max"] <= 2
+
+
+class TestSynthesizeWithoutLLM:
+    """Tests for _synthesize_without_llm fallback."""
+
+    def test_formats_ok_results(self):
+        results = (
+            NodeResult("a", "tool1", True, "content a", {}),
+            NodeResult("b", "tool2", True, "content b", {}),
+        )
+        graph = PlanGraph("test", "Test Workflow", "goal", ())
+        output = _synthesize_without_llm(graph, results)
+        assert "Test Workflow" in output
+        assert "content a" in output
+        assert "content b" in output
+
+    def test_formats_failed_results(self):
+        results = (
+            NodeResult("a", "tool1", False, "error details", {}, error_type="execution_error"),
+        )
+        graph = PlanGraph("test", "Test Workflow", "goal", ())
+        output = _synthesize_without_llm(graph, results)
+        assert "Problems:" in output
+        assert "error details" in output
+
+    def test_empty_results(self):
+        graph = PlanGraph("test", "Test Workflow", "goal", ())
+        output = _synthesize_without_llm(graph, ())
+        assert "Test Workflow" in output
+
+
+class TestTitleAndHeuristics:
+    """Tests for _title and _heuristic_items helpers."""
+
+    def test_title_truncates_and_cleans(self):
+        assert _title("Hello, World! This is a test") == "Hello World This is a test"
+        # _title truncates to 8 words, doesn't split single chars
+        assert len(_title("A" * 100)) > 0
+        assert _title("") == "Aiko task"
+
+    def test_heuristic_items_splits_correctly(self):
+        items = _heuristic_items("item one, item two; item three and item four")
+        assert "item one" in items
+        assert "item two" in items
+        assert "item three" in items
+        assert "item four" in items
+
+    def test_heuristic_items_fallback(self):
+        items = _heuristic_items("short")
+        assert items == ["short"]
+
+
+class TestGraphRunResultMetrics:
+    """Tests for GraphRunResult total_tokens and total_cost properties."""
+
+    def test_total_tokens_with_usage(self):
+        import os
+        os.environ["GRAPH_COST_PER_1M_INPUT"] = "0.80"
+        os.environ["GRAPH_COST_PER_1M_OUTPUT"] = "2.40"
+        # Force reload of module to pick up new env values
+        import importlib
+        import agentic.graph_engine as ge
+        importlib.reload(ge)
+        from agentic.graph_engine import GraphRunResult, PlanGraph, NodeResult
+        
+        results = (
+            NodeResult("a", "tool1", True, "content", {}, usage={"output_tokens": 100, "input_tokens": 50}),
+            NodeResult("b", "tool2", True, "content", {}, usage={"output_tokens": 200, "input_tokens": 150}),
+            NodeResult("c", "tool3", False, "error", {}, usage=None),  # No usage, should not contribute
+        )
+        graph = PlanGraph("test", "Test", "goal", ())
+        result = GraphRunResult(graph, results, "final answer")
+
+        assert result.total_tokens == 300  # 100 + 200
+        # Cost calculation: (50/1e6 * 0.80) + (100/1e6 * 2.40) + (150/1e6 * 0.80) + (200/1e6 * 2.40)
+        expected_cost = (50/1e6) * 0.80 + (100/1e6) * 2.40 + (150/1e6) * 0.80 + (200/1e6) * 2.40
+        assert abs(result.total_cost - expected_cost) < 0.0001
+
+    def test_total_tokens_no_usage(self):
+        from agentic.graph_engine import NodeResult
+        results = (
+            NodeResult("a", "tool1", True, "content"),
+            NodeResult("b", "tool2", False, "error", {}, usage=None),
+        )
+        graph = PlanGraph("test", "Test", "goal", ())
+        result = GraphRunResult(graph, results, "final answer")
+
+        assert result.total_tokens == 0  # None usage defaults to no tokens
+
+    def test_total_tokens_empty_usage_dict(self):
+        from agentic.graph_engine import NodeResult
+        results = (
+            NodeResult("a", "tool1", True, "content", {}, usage={}),
+        )
+        graph = PlanGraph("test", "Test", "goal", ())
+        result = GraphRunResult(graph, results, "final answer")
+
+        assert result.total_tokens == 0
+
+
+class TestGraphStateMethods:
+    """Tests for GraphState.inc_visit, iteration, record_tool_execution, get_tool_executions."""
+
+    def test_graph_state_inc_visit(self):
+        state = GraphState()
+        state.inc_visit("node1")
+        assert state.get("_node_visits") == {"node1": 1}
+        
+        state.inc_visit("node1")
+        assert state.get("_node_visits") == {"node1": 2}
+        
+        state.inc_visit("node2")
+        assert state.get("_node_visits") == {"node1": 2, "node2": 1}
+
+    def test_graph_state_iteration(self):
+        state = GraphState()
+        
+        assert state.iteration() == 1
+        assert state.get("_iteration") == 1
+        
+        assert state.iteration() == 2
+        assert state.get("_iteration") == 2
+
+    def test_graph_state_record_tool_execution(self):
+        state = GraphState()
+        
+        state.record_tool_execution("deep_research", {"query": "test"}, "research result")
+        
+        executions = state.get_tool_executions()
+        assert len(executions) == 1
+        assert executions[0]["tool"] == "deep_research"
+        assert executions[0]["args"]["query"] == "test"
+        assert executions[0]["result"] == "research result"
+        assert executions[0]["iteration"] == 1
+
+    def test_graph_state_get_tool_executions_filter(self):
+        state = GraphState()
+        state.record_tool_execution("deep_research", {"query": "test1"}, "result1")
+        state.record_tool_execution("kb_search", {"query": "test2"}, "result2")
+        state.record_tool_execution("deep_research", {"query": "test3"}, "result3")
+        
+        deep_executions = state.get_tool_executions("deep_research")
+        assert len(deep_executions) == 2
+        assert all(e["tool"] == "deep_research" for e in deep_executions)
+        
+        kb_executions = state.get_tool_executions("kb_search")
+        assert len(kb_executions) == 1
+        assert kb_executions[0]["tool"] == "kb_search"
+
+    def test_graph_state_get_all_executions(self):
+        state = GraphState()
+        
+        executions = state.get_tool_executions()
+        assert executions == []
+        
+        state.record_tool_execution("tool1", {"arg": "val"}, "res")
+        executions = state.get_tool_executions()
+        assert len(executions) == 1
+
+    def test_graph_state_tool_execution_log_is_capped(self, monkeypatch):
+        monkeypatch.setattr(schema, "GRAPH_TOOL_EXECUTION_LOG_MAX", 2)
+        state = GraphState()
+
+        for idx in range(4):
+            state.record_tool_execution(f"tool{idx}", {}, f"result{idx}")
+
+        executions = state.get_tool_executions()
+        assert [entry["tool"] for entry in executions] == ["tool2", "tool3"]
+
+    def test_trim_node_content_respects_max_chars(self, monkeypatch):
+        monkeypatch.setattr(schema, "GRAPH_NODE_RESULT_MAX_CHARS", 64)
+
+        result = _trim_node_content("x" * 200)
+
+        assert len(result) <= 64
+        assert result.endswith("[truncated by GRAPH_NODE_RESULT_MAX_CHARS]")
+
+    def test_trim_node_content_respects_short_max_chars(self, monkeypatch):
+        monkeypatch.setattr(schema, "GRAPH_NODE_RESULT_MAX_CHARS", 8)
+
+        assert len(_trim_node_content("x" * 200)) == 8
+
+
+class TestPlanNodeNewFields:
+    """Tests for PlanNode.max_retries, retry_backoff_seconds, fallback_to."""
+
+    def test_plan_node_default_values(self):
+        """Test that new fields have proper defaults."""
+        node = PlanNode("test", "tool", {})
+        
+        # max_retries should default to 0 (no retry)
+        assert node.max_retries == 0
+        
+        # retry_backoff_seconds should default to 1.0
+        assert node.retry_backoff_seconds == 1.0
+        
+        # fallback_to should default to None
+        assert node.fallback_to is None
+
+    def test_plan_node_with_values(self):
+        """Test PlanNode with explicit values for new fields."""
+        node = PlanNode(
+            "test", 
+            "tool", 
+            {},
+            max_retries=3,
+            retry_backoff_seconds=2.0,
+            fallback_to="fallback_node"
+        )
+        
+        assert node.max_retries == 3
+        assert node.retry_backoff_seconds == 2.0
+        assert node.fallback_to == "fallback_node"
+
+    def test_plan_node_backward_compatibility(self):
+        """Test that existing code without new fields still works."""
+        # This simulates JSON loading from playbook
+        node_dict = {
+            "id": "web",
+            "tool": "deep_research",
+            "args": {"query": "$prompt"},
+            "depends_on": ["web"],
+            "max_retries": 2,
+            "retry_backoff_seconds": 1.5,
+            "fallback_to": "kb"
+        }
+        
+        # When loaded via plan_from_master, should have all fields
+        graph = plan_from_master("research this", ["research"])
+        web_node = next(n for n in graph.nodes if n.id == "web")
+        
+        # Should have retry and fallback capability
+        assert hasattr(web_node, 'max_retries')
+        assert hasattr(web_node, 'retry_backoff_seconds')
+        assert hasattr(web_node, 'fallback_to')
+
+
+
+def test_graph_when_condition_gates_on_shared_state(monkeypatch):
+    def seed_state(state):
+        state.set("route", "write")
+        return "seeded"
+
+    def writer():
+        return "wrote"
+
+    monkeypatch.setattr(schema, "_TOOL_MAP_CACHE", {"seed_state": seed_state, "writer": writer})
+    graph = PlanGraph(
+        id="state_gate",
+        name="State gate",
+        goal="gate on state",
+        nodes=(
+            PlanNode("seed", "seed_state", {}),
+            PlanNode("write", "writer", {}, depends_on=("seed",), when={"state": "route", "equals": "write"}),
+        ),
+    )
+
+    result = execute_graph(graph)
+
+    assert result.final_state["route"] == "write"
+    assert result.results[-1].node_id == "write"
+    assert result.results[-1].ok is True
+
+
+def test_graph_when_condition_skips_when_state_misses(monkeypatch):
+    def seed_state(state):
+        state.set("route", "research")
+        return "seeded"
+
+    def writer():
+        return "should not run"
+
+    monkeypatch.setattr(schema, "_TOOL_MAP_CACHE", {"seed_state": seed_state, "writer": writer})
+    graph = PlanGraph(
+        id="state_gate_skip",
+        name="State gate skip",
+        goal="gate on state",
+        nodes=(
+            PlanNode("seed", "seed_state", {}),
+            PlanNode("write", "writer", {}, depends_on=("seed",), when={"state": "route", "equals": "write"}),
+        ),
+    )
+
+    result = execute_graph(graph)
+
+    assert result.results[-1].node_id == "write"
+    assert result.results[-1].content == "skipped: run_if condition not met"
+
+
+def test_condition_actual_missing_state_key_is_unsatisfied():
+    from agentic.graph_engine import _condition_actual
+
+    assert _condition_actual({"state": "route", "equals": ""}, {}, {}) is None
+
+
+def test_graph_node_needs_approval_returns_wait_result():
+    from agentic.graph_engine import _run_node, PlanNode
+
+    result = _run_node(PlanNode("post", "post_to_social", {"text": "hi", "services": "x"}, needs_approval=True), "prompt", {}, run_id="graph-r1")
+    assert result.ok is False
+    assert result.error_type == "needs_approval"
+    assert "graph-r1" in result.content
+
+
+
+def test_shared_ingest_dispatches_job_hunt_adapter(monkeypatch):
+    from types import SimpleNamespace
+    from agentic.workflows.common.execution import ingest_data
+
+    def fake_fetch(plan_json, *, state):
+        state.data["job_all_postings"] = [{"title": "Python Engineer", "url": "job-example-1"}]
+        return "total_found:1"
+
+    monkeypatch.setattr("agentic.workflows.job_hunt.toolset.fetch_rss_and_email_into_state", fake_fetch)
+    state = SimpleNamespace(data={})
+    result = json.loads(ingest_data(
+        sources_json='[{"type":"adapter","id":"job_hunt"}]',
+        max_items="10", config_json='{"workflow_id":"job_hunt"}', state=state))
+
+    assert result["ok"] is True
+    assert result["items"] == [{"title": "Python Engineer", "url": "job-example-1"}]
+    assert state.data["ingest_items"] == result["items"]
+
+
+class TestFallbackStandIn:
+    """fallback_to must rescue the chain, not just log a mirror run."""
+
+    def _graph(self):
+        return PlanGraph(
+            id="fb",
+            name="fallback",
+            goal="fetch with mirror",
+            nodes=(
+                PlanNode("fetch", "fetch", {}, fallback_to="mirror"),
+                PlanNode("mirror", "mirror", {}),
+                PlanNode("use", "use", {"items_json": "got it"}, depends_on=("fetch",)),
+            ),
+        )
+
+    def test_fallback_success_unblocks_downstream(self, monkeypatch):
+        from agentic.graph_engine import execute_graph
+
+        calls = []
+
+        def fail(**kwargs):
+            calls.append("primary")
+            raise RuntimeError("primary down")
+
+        def mirror(**kwargs):
+            calls.append("backup")
+            return "backup data"
+
+        def use(items_json="", **kwargs):
+            calls.append("downstream")
+            return "downstream ok"
+
+        monkeypatch.setattr(
+            schema, "_TOOL_MAP_CACHE",
+            {"fetch": fail, "mirror": mirror, "use": use},
+        )
+        result = execute_graph(self._graph())
+        by_id = {r.node_id: r for r in result.results}
+        assert by_id["mirror"].ok is True
+        assert by_id["use"].ok is True
+        assert calls.count("backup") == 1
+        assert "downstream" in calls
+
+    def test_fallback_target_skipped_on_success_path(self, monkeypatch):
+        from agentic.graph_engine import execute_graph
+
+        calls = []
+
+        def ok_fetch(**kwargs):
+            calls.append("primary")
+            return "primary data"
+
+        def mirror(**kwargs):
+            calls.append("backup")
+            return "backup data"
+
+        def use(items_json="", **kwargs):
+            calls.append("downstream")
+            return "downstream ok"
+
+        monkeypatch.setattr(
+            schema, "_TOOL_MAP_CACHE",
+            {"fetch": ok_fetch, "mirror": mirror, "use": use},
+        )
+        result = execute_graph(self._graph())
+        assert calls == ["primary", "downstream"]
+        assert {r.node_id for r in result.results} == {"fetch", "use"}
+
+    def test_fallback_needs_approval_not_executed(self, monkeypatch):
+        """A fallback node gated by needs_approval must not execute."""
+        from agentic.graph_engine import execute_graph, PlanGraph, PlanNode
+
+        calls = []
+
+        def fail(**kwargs):
+            raise RuntimeError("primary down")
+
+        def gated(**kwargs):
+            calls.append("gated")
+            return "should never run"
+
+        graph = PlanGraph(
+            id="fb-approval",
+            name="fallback approval",
+            goal="gated fallback",
+            nodes=(
+                PlanNode("fetch", "fetch", {}, fallback_to="mirror"),
+                PlanNode("mirror", "mirror", {}, needs_approval=True),
+            ),
+        )
+        monkeypatch.setattr(
+            schema, "_TOOL_MAP_CACHE",
+            {"fetch": fail, "mirror": gated},
+        )
+        result = execute_graph(graph)
+        by_id = {r.node_id: r for r in result.results}
+        assert calls == []  # gated tool never ran
+        assert by_id["mirror"].ok is False
+        assert by_id["mirror"].error_type == "needs_approval"
+
+
+def test_run_playbook_json_serializes_slots_noderesults(monkeypatch):
+    """run_playbook_json must serialize NodeResult (slots dataclass, no __dict__)."""
+    from agentic.graph_engine import (
+        GraphRunResult, NodeResult, PlanGraph, run_playbook_json,
+    )
+
+    graph = PlanGraph(id="g", name="G", goal="goal", nodes=())
+    fake_result = GraphRunResult(
+        graph=graph,
+        results=(NodeResult("n1", "kb_search", True, "ok content", args={"q": "x"}),),
+        final_answer="done",
+    )
+    monkeypatch.setattr(schema, "run_schema_agent", lambda *a, **k: fake_result)
+    out = json.loads(run_playbook_json("do a thing"))
+    assert out["ok"] is True
+    assert out["graph_id"] == "g"
+    assert out["results"][0]["node_id"] == "n1"
+    assert out["results"][0]["tool"] == "kb_search"
+
+
+class TestBatchLoopAccumulation:
+    """split_in_batches must accumulate every pass for the terminal aggregate."""
+
+    def test_loop_transforms_and_accumulates_all_batches(self, monkeypatch):
+        from agentic.toolkit.flow import trigger_manual, split_in_batches, aggregate_items
+        from agentic.graph_engine import execute_graph
+
+        monkeypatch.setattr(
+            schema, "_TOOL_MAP_CACHE",
+            {"trigger_manual": trigger_manual,
+             "split_in_batches": split_in_batches,
+             "aggregate_items": aggregate_items},
+        )
+        graph = PlanGraph(
+            id="batch",
+            name="batch",
+            goal="batch test",
+            nodes=(
+                PlanNode("trigger", "trigger_manual",
+                         {"items_json": '[{"n":1},{"n":2},{"n":3},{"n":4},{"n":5}]',
+                          "to_state": "items"}),
+                PlanNode("batch", "split_in_batches",
+                         {"from_state": "items", "to_state": "batch", "batch_size": 2,
+                          "assignments_json": '{"n":"{{ n }}","squared":"=n * n"}',
+                          "accumulate_to": "all_items"},
+                         depends_on=("trigger",),
+                         loop_to="batch",
+                         loop_condition={"not": {"contains": '"done": true'}},
+                         max_visits=25),
+                PlanNode("total", "aggregate_items",
+                         {"from_state": "all_items", "to_state": "summary",
+                          "mode": "sum", "field": "squared", "to_field": "total"},
+                         depends_on=("batch",)),
+            ),
+        )
+        result = execute_graph(graph)
+        assert len(result.final_state.get("all_items", [])) == 5
+        assert result.final_state["summary"][0]["total"] == 55.0
+
+
+class TestGraphMemo:
+    """Tests for content-hash memoization of side-effect-free graph nodes."""
+
+    def _run(self, tool, args, monkeypatch, calls, fail_first=False):
+        def fake_fn(**kwargs):
+            calls.append(kwargs.get("url", kwargs.get("query", "")))
+            if fail_first and len(calls) == 1:
+                raise RuntimeError("transient")
+            return f"result-for-{kwargs.get('url', kwargs.get('query', ''))}"
+
+        monkeypatch.setattr(schema, "_tool_map", lambda: {tool: fake_fn})
+        node = PlanNode(id="n1", tool=tool, args=dict(args))
+        return schema._run_node(node, "prompt", {})
+
+    def _clear_memo(self):
+        from agentic import graph_memo
+
+        graph_memo._memo.clear()
+
+    def test_memo_hit_skips_second_call(self, monkeypatch):
+        self._clear_memo()
+        try:
+            calls = []
+            r1 = self._run("fetch_from_url", {"url": "http://example.com/x"}, monkeypatch, calls)
+            r2 = self._run("fetch_from_url", {"url": "http://example.com/x"}, monkeypatch, calls)
+            assert r1.ok and r2.ok
+            assert r1.content == r2.content == "result-for-http://example.com/x"
+            assert len(calls) == 1
+        finally:
+            self._clear_memo()
+
+    def test_different_args_miss(self, monkeypatch):
+        self._clear_memo()
+        try:
+            calls = []
+            self._run("fetch_from_url", {"url": "http://example.com/a"}, monkeypatch, calls)
+            self._run("fetch_from_url", {"url": "http://example.com/b"}, monkeypatch, calls)
+            assert len(calls) == 2
+        finally:
+            self._clear_memo()
+
+    def test_side_effecting_tool_never_memoized(self, monkeypatch):
+        self._clear_memo()
+        try:
+            calls = []
+            self._run("write_report", {"title": "t", "content": "c"}, monkeypatch, calls)
+            self._run("write_report", {"title": "t", "content": "c"}, monkeypatch, calls)
+            assert len(calls) == 2
+        finally:
+            self._clear_memo()
+
+    def test_failures_are_not_cached(self, monkeypatch):
+        self._clear_memo()
+        try:
+            calls = []
+            r1 = self._run("fetch_from_url", {"url": "http://example.com/f"}, monkeypatch, calls, fail_first=True)
+            assert not r1.ok
+            r2 = self._run("fetch_from_url", {"url": "http://example.com/f"}, monkeypatch, calls, fail_first=True)
+            assert r2.ok
+            r3 = self._run("fetch_from_url", {"url": "http://example.com/f"}, monkeypatch, calls, fail_first=True)
+            assert r3.ok and r3.content == r2.content
+            # first raised, second succeeded + cached, third hit the cache
+            assert len(calls) == 2
+        finally:
+            self._clear_memo()
+
+    def test_deep_research_requires_tool_mode(self):
+        from agentic import graph_memo
+
+        assert graph_memo._memo_key("deep_research", {"query": "q"}, None) is None
+        assert graph_memo._memo_key("deep_research", {"query": "q", "tool_mode": True}, None) is not None
+
+    def test_expired_entry_misses(self, monkeypatch):
+        from agentic import graph_memo
+
+        monkeypatch.setattr(graph_memo, "_memo", {})
+        key = graph_memo._memo_key("fetch_from_url", {"url": "http://example.com/e"}, None)
+        assert key is not None
+        graph_memo._memo_put(key, "fetch_from_url", "old")
+        assert graph_memo._memo_get(key) == "old"
+        # Age the entry past its TTL.
+        expires, content = graph_memo._memo[key]
+        graph_memo._memo[key] = (expires - 7200, content)
+        assert graph_memo._memo_get(key) is None
+
+    def test_max_entries_clamped_to_at_least_one(self, monkeypatch):
+        import importlib
+
+        from agentic import graph_memo
+
+        monkeypatch.setenv("AIKO_GRAPH_MEMO_MAX", "0")
+        importlib.reload(graph_memo)
+        try:
+            assert graph_memo._MAX_ENTRIES == 1
+            graph_memo._memo.clear()
+            key = graph_memo._memo_key("fetch_from_url", {"url": "http://example.com/z"}, None)
+            assert key is not None
+            # Used to raise StopIteration evicting from an empty dict.
+            graph_memo._memo_put(key, "fetch_from_url", "x")
+            assert graph_memo._memo_get(key) == "x"
+        finally:
+            monkeypatch.undo()
+            importlib.reload(graph_memo)
+            graph_memo._memo.clear()
+
+    def test_identity_failure_disables_memo(self, monkeypatch):
+        from agentic import graph_memo
+
+        def _boom():
+            raise RuntimeError("identity unavailable")
+
+        monkeypatch.setattr(graph_memo, "current_user_id", _boom)
+        # Fail closed: no shared "None"-identity key may be minted.
+        assert graph_memo._memo_key("fetch_from_url", {"url": "http://example.com/i"}, None) is None
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

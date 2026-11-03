@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spec Studio</title>
+    <script>try{var __t=localStorage.getItem('aiko-theme')||'light';document.documentElement.dataset.theme=(__t==='dark'?'dark':'light');window.addEventListener('storage',function(e){if(e&&e.key==='aiko-theme'){document.documentElement.dataset.theme=(e.newValue==='dark'?'dark':'light');}});}catch(__e){document.documentElement.dataset.theme='light';}</script>
+<link rel="stylesheet" href="shared/css/tokens.css">
+    <link rel="stylesheet" href="shared/css/base.css">
+    <link rel="stylesheet" href="static/style.css">
+<base target="_blank">
+</head>
+<body>
+    <header class="studio-header">
+        <div style="display: flex; align-items: center; gap: 14px;">
+            <a href="#" id="back-btn" title="Return to previous page" style="display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; background: #1a1028; border: 1px solid var(--dim); border-radius: 50%; color: var(--purple); text-decoration: none; transition: all 0.2s; font-weight: bold; font-size: 16px;">←</a>
+            <h1>Spec Studio</h1>
+        </div>
+        <div class="header-actions">
+            <span class="header-status" id="header-status"></span>
+            <button id="btn-auto-layout" class="btn" type="button" title="Snap nodes to grid layout">Auto Layout</button>
+            <button id="spec-toggle-btn" class="btn" type="button" title="Toggle Spec editor">Spec</button>
+            <button id="export-btn" class="btn btn-primary" type="button">Export</button>
+            <button id="refresh-btn" class="btn" type="button">Refresh</button>
+        </div>
+    </header>
+
+    <div class="studio-body">
+        <aside class="sidebar">
+            <h2>Playbooks</h2>
+            <div id="playbooks-list"></div>
+
+            <div class="node-palette">
+                <h3>Add Node</h3>
+                <div class="palette-item" data-tool="tools.llm.generate" data-name="LLM Generate">
+                    <span class="palette-dot" style="background:var(--purple)"></span> LLM Generate
+                </div>
+                <div class="palette-item" data-tool="tools.web_search" data-name="Web Search">
+                    <span class="palette-dot" style="background:var(--cyan)"></span> Web Search
+                </div>
+                <div class="palette-item" data-tool="tools.human.review" data-name="Human Review">
+                    <span class="palette-dot" style="background:var(--pink)"></span> Human Review
+                </div>
+                <div class="palette-item" data-tool="tools.storage.upload" data-name="Upload">
+                    <span class="palette-dot" style="background:#e8c84a"></span> Upload
+                </div>
+                <div class="palette-item" data-tool="tools.data.join" data-name="Data Join">
+                    <span class="palette-dot" style="background:#84d4e8"></span> Data Join
+                </div>
+                <div class="palette-item" data-tool="custom" data-name="Custom Node">
+                    <span class="palette-dot" style="background:var(--dim)"></span> Custom Node
+                </div>
+            </div>
+        </aside>
+
+        <div class="canvas-area" id="canvas-area">
+            <svg id="canvas"></svg>
+            <div class="canvas-info" id="graph-info">Select a playbook</div>
+            <div class="legend" id="legend">
+                <div class="legend-item"><span class="legend-line solid"></span> depends_on</div>
+                <div class="legend-item"><span class="legend-line dashed"></span> loop_to</div>
+                <div class="legend-item"><span class="legend-line orange"></span> fallback_to</div>
+            </div>
+            <div class="zoom-controls">
+                <button class="zoom-btn" id="zoom-in" title="Zoom in">+</button>
+                <button class="zoom-btn" id="zoom-out" title="Zoom out">−</button>
+                <button class="zoom-btn" id="zoom-fit" title="Fit to view">⊡</button>
+            </div>
+            <div class="floating-toolbar" id="floating-toolbar" style="display:none;">
+                <button class="btn btn-danger" id="btn-delete" title="Delete selected (Del)">Delete</button>
+                <button class="btn" id="btn-disconnect" title="Remove all edges from selected node">Disconnect</button>
+            </div>
+            <div class="details-panel" id="details-panel" style="display:none">
+                <h3>Node Details</h3>
+                <div id="details-content"></div>
+            </div>
+            <div class="tooltip" id="tooltip"></div>
+            <div class="keyboard-hint" id="keyboard-hint">Click node to select · Drag to move · Drag port→port to connect · Del to remove</div>
+        </div>
+    </div>
+
+    <div class="spec-drawer" id="spec-drawer" hidden>
+        <div class="spec-drawer-header">
+            <span id="spec-drawer-title">Spec</span>
+            <span id="spec-source" class="badge">—</span>
+            <div class="spec-drawer-actions">
+                <button class="btn" id="btn-validate" type="button">Validate</button>
+                <button class="btn" id="btn-preview-spec" type="button">Preview Spec</button>
+                <button class="btn btn-primary" id="btn-save-spec" type="button">Save</button>
+                <button class="btn" id="btn-close-spec" type="button">Close</button>
+            </div>
+        </div>
+        <textarea id="spec-editor" spellcheck="false" placeholder='{ "spec_version": "1", ... }'></textarea>
+        <pre id="spec-message" class="spec-message">Select a Spec-backed playbook to edit</pre>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+    <script src="shared/graph-bootstrap.js"></script>
+    <script src="static/script.js"></script>
+    <script>
+      document.getElementById('back-btn').addEventListener('click', function(e) {
+        e.preventDefault();
+        if (window.history.length > 1) {
+          window.history.back();
+        } else {
+          window.location.href = '/';
+        }
+      });
+    </script>
+</body>
+</html>

@@ -186,7 +186,7 @@ config/index.yaml       # ordered list of YAML files loaded at startup
 config/system.yaml      # identity, logging, userspace, schedule, reflection/social settings
 config/cognition.yaml   # cognition/think.py LLM endpoints, routing, token limits, vector cache
 config/memory.yaml      # memory/memorize.py, embed, forget, experience, consolidation settings
-config/skills.yaml      # skills/agentic.py, skills/schema.py, tool schemas, skill/wiki RAG budgets
+config/skills.yaml      # agentic/agentic.py, agentic/schema.py, tool schemas, skill/wiki RAG budgets
 config/sensory.yaml     # sensory/speak.py and sensory/listen.py voice, ASR, VAD, barge-in
 config/interface.yaml   # WebUI ports, avatar path, streaming behavior
 ```
@@ -241,11 +241,11 @@ curl http://localhost:8001/health
 uv run python -c "import sqlite_vec, tokenizers, onnxruntime, sherpa_onnx, silero_vad, sounddevice, websockets; print('OK')"
 
 # Skill registry and agentic tool schemas
-uv run python -c "from skills.skills import list_skillsets; print(list_skillsets())"
-uv run python -c "from skills.agentic import tool_schemas; print([s['function']['name'] for s in tool_schemas()])"
+uv run python -c "from agentic.skills import list_skillsets; print(list_skillsets())"
+uv run python -c "from agentic.agentic import tool_schemas; print([s['function']['name'] for s in tool_schemas()])"
 
 # Memory backend
-uv run python -c "from memory.memorize import AikoMemorize; m=AikoMemorize(silent=True); print(m.get_all()[:1])"
+uv run python -c "from cognition.memory.memorize import AikoMemorize; m=AikoMemorize(silent=True); print(m.get_all()[:1])"
 ```
 
 ---
@@ -273,3 +273,53 @@ uv run python main.py --clear-mem
 ```
 
 In-app commands include `/quit`, `/reset`, `/memory`, `/clear`, `/remember`, `/think <question>`, `/web <query>`, `/voice`, `/listen`, and `/help`.
+
+### Optional Needle 3 ReAct worker
+
+Aiko can use a local Needle 3 playground server only for novel-task ReAct tool selection;
+known graph/playbook workflows remain deterministic and the configured main LLM
+remains the fallback for low-confidence or unavailable Needle responses.
+
+```dotenv
+AGENT_REACT_BACKEND=needle
+NEEDLE_BASE_URL=http://127.0.0.1:8082
+NEEDLE_CONFIDENCE_THRESHOLD=0.85
+NEEDLE_TIMEOUT=15
+```
+
+Start a playground server with the base weights (tools are sent per request,
+so no startup catalogue is needed — optionally export one for reference):
+
+```bash
+needle playground --weights models/needle3.cact --port 8082
+# optional: uv run python util/export_needle_tools.py needle-tools.json
+```
+
+Configure the server port in `NEEDLE_BASE_URL`. Needle proposes calls from the
+per-request tool list, while Aiko rejects any call outside its already
+capability-filtered subset, validates all arguments through the registry, and
+retains every existing approval gate. Tuned (`.cact`) weights report
+`confidence: None`, so threshold gating is skipped and validation alone
+decides. Set `AGENT_REACT_BACKEND=openai` (the
+default) to disable Needle.
+
+### Optional deterministic Needle 3 worker fan-out
+
+Set `AGENT_REACT_BACKEND=needle_multi` to fan each *novel-task ReAct turn* out
+to explicitly configured Needle workers. This is deterministic orchestration,
+not an LLM supervisor: Aiko starts no processes itself, so run one isolated
+playground server per worker (`needle playground --weights <name.cact> --port <port>`)
+and give each worker only its role's tools via `allowed_tools`.
+
+```dotenv
+AGENT_REACT_BACKEND=needle_multi
+NEEDLE_MAX_WORKERS=4
+NEEDLE_WORKERS=[{"id":"research","role":"researcher","base_url":"http://127.0.0.1:8082","allowed_tools":["adaptive_search","deep_read"]},{"id":"planner","role":"planner","base_url":"http://127.0.0.1:8083","allowed_tools":["create_checklist","save_note"]}]
+```
+
+Workers run concurrently. Aiko deduplicates identical proposed calls, then
+uses the same registry validation, approval gates, retries, and result loop as
+single-worker Needle ReAct. A failed, low-confidence, or ineligible worker is
+excluded; if every worker fails, Aiko escalates the turn to the configured main
+LLM. Do not point several workers at a shared Needle server unless that Needle
+deployment documents isolated concurrent sessions.

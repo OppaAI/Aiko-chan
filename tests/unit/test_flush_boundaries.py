@@ -1,0 +1,328 @@
+"""Regression coverage for buffered audit, memory, and teaching writes."""
+from __future__ import annotations
+
+import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+
+def test_ledger_retries_after_partial_insert_and_exposes_same_turn_rows(tmp_path):
+    from cognition.conscience.ledger import ConscienceLedger
+    from cognition.conscience.schema import LEDGER_DDL, Verdict
+
+    class FailingConnection(sqlite3.Connection):
+        fail_batch = False
+
+        def executemany(self, sql, rows):
+            if self.fail_batch:
+                self.fail_batch = False
+                super().executemany(sql, rows[:1])
+                raise sqlite3.OperationalError("injected failure")
+            return super().executemany(sql, rows)
+
+    path = tmp_path / "ledger.db"
+    conn = sqlite3.connect(path, factory=FailingConnection, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(LEDGER_DDL)
+    ledger = ConscienceLedger("user-1")
+    ledger._conn = conn
+    first = ledger.record(Verdict(decision="caution"))
+    second = ledger.record(Verdict(decision="refuse"))
+
+    conn.fail_batch = True
+    assert ledger.flush() == 0
+    assert len(ledger._pending) == 2
+    with sqlite3.connect(path) as reader:
+        assert reader.execute("SELECT count(*) FROM conscience_ledger").fetchone()[0] == 0
+
+    assert ledger.stats()["total"] == 2
+    assert {row["id"] for row in ledger.harvest()} == {first, second}
+    assert ledger.set_gold(first, 0.3, 0.4)
+    assert len(ledger.harvest(only_gold=True)) == 1
+    ledger.close()
+
+
+@pytest.mark.parametrize("action", ["pending", "resolve"])
+def test_ledger_reads_and_updates_wait_for_batch_commit(tmp_path, action):
+    from cognition.conscience.ledger import ConscienceLedger
+    from cognition.conscience.schema import LEDGER_DDL, Verdict
+
+    started = threading.Event()
+    release = threading.Event()
+    reading_started = threading.Event()
+
+    class BlockingConnection(sqlite3.Connection):
+        def executemany(self, sql, rows):
+            result = super().executemany(sql, rows)
+            started.set()
+            assert release.wait(3)
+            return result
+
+    path = tmp_path / "ledger.db"
+    conn = sqlite3.connect(path, factory=BlockingConnection, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(LEDGER_DDL)
+    ledger = ConscienceLedger("user-1")
+    ledger._conn = conn
+    row_id = ledger.record(Verdict(decision="escalate"))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        flushing = pool.submit(ledger.flush)
+        assert started.wait(3)
+        def access_pending():
+            reading_started.set()
+            if action == "pending":
+                return ledger.pending()
+            return ledger.resolve(row_id, "approved")
+
+        reading = pool.submit(access_pending)
+        assert reading_started.wait(3)
+        assert not reading.done()
+        release.set()
+        assert flushing.result(timeout=3) == 1
+        result = reading.result(timeout=3)
+        if action == "pending":
+            assert [row["id"] for row in result] == [row_id]
+        else:
+            assert result is True
+    ledger.close()
+
+
+def test_dopamine_debounce_expires_and_serializes_same_user(monkeypatch):
+    # Phase 10A: the duplicate-event debounce lives in the rate-based
+    # credit engine (credit._LAST_EVENT), not the old pulse module state.
+    from cognition import fly_registry
+    from cognition.flymemory import credit
+
+    now = [0.0]
+    calls = []
+    mb = SimpleNamespace(reinforce=lambda *_args: calls.append(True) or 0.2)
+    monkeypatch.setattr(credit, "_mb_mode", lambda: "live")
+    monkeypatch.setattr(credit, "dopamine_mode", lambda: "live")
+    monkeypatch.setattr(credit.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(fly_registry, "get_flymb", lambda _uid: mb)
+    monkeypatch.setattr(credit, "_LAST_EVENT", {})
+    monkeypatch.setattr(credit, "_STATE", {})
+    kc = np.array([1.0, 0.0])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: credit.credit_event("dedup-user", 0.4, kc=kc), range(2)))
+    assert sorted(result["reason"] for result in results) == ["dedup", "ok"]
+    assert len(calls) == 1
+    now[0] = 3.0
+    assert credit.credit_event("dedup-user", 0.4, kc=kc)["applied"] is True
+    assert len(calls) == 2
+
+
+def test_direct_teaching_flushes_once_per_applied_event(monkeypatch):
+    # Phase 10A: the online-teach path is one rate-based credit event;
+    # assign_credit is no longer part of it. Each applied teaching event
+    # flushes exactly once (Phase 2 convention); unapplied teaching never
+    # flushes.
+    from cognition import fly_registry, neural_state
+    from cognition.flymemory import dopamine, online_teach, teach_api
+
+    flushed = []
+    mb = SimpleNamespace(encode=lambda _: np.array([1.0]), valence_bias=lambda _: 0.2)
+    store = SimpleNamespace(flush_mb=lambda _mb: flushed.append(True))
+    monkeypatch.setattr(online_teach, "_mode", lambda: "live")
+    monkeypatch.setattr(teach_api, "extract_topic", lambda _: None)
+    monkeypatch.setattr(fly_registry, "get_flymb", lambda _: mb)
+    monkeypatch.setattr(fly_registry, "get_fly_store", lambda _: store)
+    monkeypatch.setattr(dopamine, "pulse", lambda *_args, **_kwargs: {"reason": "ok", "applied": True, "delta": 0.2})
+    monkeypatch.setattr(neural_state, "get_neural_state", lambda _: SimpleNamespace(publish_mb=lambda *_args, **_kwargs: None, record_influence=lambda _: None))
+
+    online_teach.teach_from_user_text("thanks!", user_id="direct-user")
+    online_teach.teach_interrupt_honored(user_id="direct-user")
+    assert len(flushed) == 2
+
+
+def test_direct_teaching_never_flushes_when_not_applied(monkeypatch):
+    from cognition import fly_registry, neural_state
+    from cognition.flymemory import dopamine, online_teach, teach_api
+
+    flushed = []
+    mb = SimpleNamespace(encode=lambda _: np.array([1.0]), valence_bias=lambda _: 0.2)
+    store = SimpleNamespace(flush_mb=lambda _mb: flushed.append(True))
+    monkeypatch.setattr(online_teach, "_mode", lambda: "live")
+    monkeypatch.setattr(teach_api, "extract_topic", lambda _: None)
+    monkeypatch.setattr(fly_registry, "get_flymb", lambda _: mb)
+    monkeypatch.setattr(fly_registry, "get_fly_store", lambda _: store)
+    monkeypatch.setattr(dopamine, "pulse", lambda *_args, **_kwargs: {"reason": "shadow", "applied": False, "delta": 0.0})
+    monkeypatch.setattr(neural_state, "get_neural_state", lambda _: SimpleNamespace(publish_mb=lambda *_args, **_kwargs: None, record_influence=lambda _: None))
+
+    online_teach.teach_from_user_text("thanks!", user_id="direct-user")
+    online_teach.teach_interrupt_honored(user_id="direct-user")
+    assert len(flushed) == 0
+
+
+def test_episode_direct_writes_and_read_only_touches_commit(tmp_path):
+    from cognition.memory.episode import EpisodicStore
+
+    path = tmp_path / "episodes.db"
+    store = EpisodicStore(str(path), user_id="episode-user")
+    timestamp = "2026-09-24T12:00:00+00:00"
+    first = store.bind(timestamp=timestamp, trace="We walked through a beautiful forest.")
+    with sqlite3.connect(path) as reader:
+        assert reader.execute("SELECT trace FROM emc_staging WHERE id = ?", (first,)).fetchone()[0].startswith("We walked")
+
+    second = store.ingest_turn("I will hike with Ashley through the green forest tomorrow.",
+                               "I will remember the hike with Ashley through the forest tomorrow.")
+    assert second > 0
+    with sqlite3.connect(path) as reader:
+        assert reader.execute(
+            "SELECT count(*) FROM emc_staging WHERE id = ?", (second,)
+        ).fetchone()[0] == 1
+
+    store._conn.execute(
+        "INSERT INTO emc_storage (id, user_id, timestamp, date, trace) VALUES (1, ?, ?, ?, ?)",
+        ("episode-user", timestamp, "2026-09-24", "We walked through a forest."),
+    )
+    store._conn.commit()
+    store._touch_episodes([1])
+    assert store._touch_timer is not None
+    store._touch_timer.cancel()
+    store._touch_timer.function()
+    with sqlite3.connect(path) as reader:
+        assert reader.execute("SELECT recall_count FROM emc_storage WHERE id = 1").fetchone()[0] == 1
+    store._touch_episodes([1])
+    store.close()
+    with sqlite3.connect(path) as reader:
+        assert reader.execute("SELECT recall_count FROM emc_storage WHERE id = 1").fetchone()[0] == 2
+
+
+def test_knowledge_access_flushes_below_threshold(monkeypatch):
+    from cognition.knowledge import search
+
+    written = []
+    monkeypatch.setattr(search, "_write_access_counts", lambda uid, ids: written.append((uid, ids)))
+    search._increment_access_count(["one"], "access-user")
+    assert search._ACCESS_TIMERS["access-user"] is not None
+    search._ACCESS_TIMERS["access-user"].cancel()
+    search._ACCESS_TIMERS["access-user"].function("access-user")
+    assert written == [("access-user", ["one"])]
+
+    monkeypatch.setattr(search, "_ACCESS_FLUSH_THRESHOLD", 2)
+    search._increment_access_count(["one", "two"], "access-user")
+    assert written[-1] == ("access-user", ["one", "two"])
+    assert "access-user" not in search._ACCESS_TIMERS
+
+
+def test_embed_query_cache_separates_geometry_and_flyal_mode(monkeypatch):
+    from cognition import reason
+    from cognition.memory.memorize import _MemoryBackend
+    from cognition.memory import vecstore
+
+    mode = ["off"]
+    calls = []
+    monkeypatch.setattr(vecstore, "_flyal_mode", lambda: mode[0])
+    reason._embed_query_cache.clear()
+    first = vecstore.HarrierEmbedder(base_url="http://unused", model="one", dims=2)
+    second = vecstore.HarrierEmbedder(base_url="http://unused", model="one", dims=2)
+    backend = object.__new__(_MemoryBackend)
+    backend._embedder = first
+    monkeypatch.setattr(first, "embed_query", lambda *_args, **_kwargs: calls.append("first") or np.array([1.0, 0.0]))
+    monkeypatch.setattr(second, "embed_query", lambda *_args, **_kwargs: calls.append("second") or np.array([0.0, 1.0]))
+
+    assert backend._embed("hello", query=True) == [1.0, 0.0]
+    backend._embedder = second
+    assert backend._embed("hello", query=True) == [1.0, 0.0]
+    second.model = "two"
+    assert backend._embed("hello", query=True) == [0.0, 1.0]
+    mode[0] = "live"
+    assert reason.cached_embed_query(first, "hello").tolist() == [1.0, 0.0]
+    assert calls == ["first", "second", "first"]
+    reason._embed_query_cache.clear()
+
+
+def test_band_columns_migrated_on_legacy_db(tmp_path, monkeypatch):
+    """Pre-migration ledger DBs gain p_violation/suggested_category via
+    idempotent ALTER (ask-UX item 6)."""
+    import sqlite3
+
+    from cognition.conscience import ledger as ledger_mod
+
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    old_ddl = ledger_mod.LEDGER_DDL.replace("    p_violation    REAL,\n", "").replace(
+        "    suggested_category TEXT NOT NULL DEFAULT '',\n", ""
+    )
+    assert "p_violation" not in old_ddl
+    conn.executescript(old_ddl)
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(ledger_mod, "LEDGER_DB_PATH", str(db_path))
+    led = ledger_mod.ConscienceLedger("user-1")
+    cols = {r[1] for r in led._db().execute("PRAGMA table_info(conscience_ledger)")}
+    assert "p_violation" in cols
+    assert "suggested_category" in cols
+    # Second open must not raise (idempotent).
+    led2 = ledger_mod.ConscienceLedger("user-1")
+    led2._ensure_band_columns(led2._db())
+
+
+def test_band_p_persisted_and_logged_on_resolve(tmp_path, monkeypatch, caplog):
+    """Approval/denial rows carry P(violation) + category, and resolve()
+    logs the P for band recalibration (ask-UX item 6)."""
+    import logging
+
+    from cognition.conscience import ledger as ledger_mod
+    from cognition.conscience.schema import ESCALATE, Verdict
+
+    monkeypatch.setattr(ledger_mod, "LEDGER_DB_PATH", str(tmp_path / "c.db"))
+    monkeypatch.setattr(ledger_mod, "LEDGER_ENABLED", True)
+    led = ledger_mod.ConscienceLedger("user-1")
+
+    v = Verdict(
+        decision=ESCALATE, gate="hitl", act="respond", reasons=["ask"],
+        escalation_id="abc123def456", p_violation=0.62,
+        suggested_category="fraud",
+    )
+    row_id = led.record(v, content="test content")
+    assert row_id == "abc123def456"
+    assert led.flush() == 1
+
+    row = led._db().execute(
+        "SELECT p_violation, suggested_category, hitl_state FROM conscience_ledger WHERE id = ?",
+        (row_id,),
+    ).fetchone()
+    assert row[0] == 0.62
+    assert row[1] == "fraud"
+    assert row[2] == "pending"
+
+    with caplog.at_level(logging.INFO):
+        assert led.resolve(row_id, "approved", note="ok") is True
+    assert "p_violation=0.62" in caplog.text
+
+
+def test_open_escalation_preserves_detail_with_long_situation(monkeypatch):
+    """CodeRabbit: a long situation must not truncate the [P(violation),
+    category] detail out of the owner notice."""
+    from cognition.conscience.core import ConscienceCircuitCore
+    from cognition.conscience.schema import ESCALATE, Verdict
+
+    pushed = []
+
+    class FakeBus:
+        def push(self, area, brief):
+            pushed.append(brief)
+
+    monkeypatch.setattr(
+        "system.notice.get_notice_bus", lambda user_id: FakeBus()
+    )
+    core = ConscienceCircuitCore.__new__(ConscienceCircuitCore)
+    core._user_id = "user-1"
+    v = Verdict(
+        decision=ESCALATE, gate="hitl", act="respond", reasons=["ask"],
+        escalation_id="abc123def456", p_violation=0.52,
+        suggested_category="fraud",
+    )
+    core._open_escalation(v, "x" * 500)
+    assert pushed, "no notice pushed"
+    assert "P(violation)=0.52" in pushed[0]
+    assert "fraud" in pushed[0]

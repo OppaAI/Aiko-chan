@@ -7,37 +7,64 @@
 LLM_BASE_URL: "http://localhost:8080/v1"  # OpenAI-compatible chat endpoint, usually llama.cpp /v1 URL.
 LLM_MODEL: "ministral"  # Main chat model id/alias; must match the server model name.
 REFLECT_MODEL: "ministral"  # Model used for reflection/consolidation; often same as LLM_MODEL.
-LLM_TIMEOUT: "120"  # Seconds before chat/reflection LLM HTTP calls time out.
+LLM_TIMEOUT: "120"
+LLM_NO_SYSTEM: "1"  # llama.cpp chat template rejects system roles; merge persona/context into user messages.  # Seconds before chat/reflection LLM HTTP calls time out.
+# API key passed to every text LLM request. Leave blank for unauthenticated local
+# servers (Aiko supplies the harmless OpenAI-client placeholder automatically).
+# To use AISA Fable, set this to your AISA key, then set LLM_BASE_URL and
+# LLM_MODEL to the endpoint and exact model ID shown in AISA's documentation.
+LLM_API_KEY: ""
+
+# -- Inner speech --
+# Model used for inner-speech thinking (the voice in her head). Blank falls
+# back to LLM_MODEL. Point at a tiny model (SmolLM2-class) when one is
+# available; ministral (already loaded) costs zero extra VRAM.
+INNER_SPEECH_MODEL: ""
+INNER_SPEECH_MAX_TOKENS: "96"  # Inner utterances are short; keep them compressed.
+INNER_SPEECH_TIMEOUT: "30"  # Seconds before an inner-speech LLM call times out.
+INNER_SPEECH_SALIENCE: "0.5"  # Gate threshold 0..1; higher = thinks less often.
+
+# -- WebUI camera vision --
+# The camera button sends one in-memory JPEG to this OpenAI-compatible vision
+# endpoint. Leave the URL blank to use VISION_BASE_URL, then LLM_BASE_URL.
+WEBUI_VISION_MODEL: "ministral"
+WEBUI_VISION_BASE_URL: ""
+WEBUI_VISION_TIMEOUT: "60"
+# Optional override for vision requests; blank falls back to LLM_API_KEY, then
+# the unauthenticated local-server placeholder.
+VISION_API_KEY: ""
 
 # -- Token budgets --
 LLM_MAX_TOKENS: "280"  # Base max tokens for normal chat replies.
-BASE_PREDICT: "280"  # Legacy alias for LLM_MAX_TOKENS; keep equal unless old scripts need another value.
 CONTEXT_WINDOW_TURNS: "5"  # Number of recent user+assistant turns sent as short-term context.
 REASONING_SCALE: "3"  # Multiplier applied to LLM_MAX_TOKENS for reasoning mode.
+LLM_THINKING: "0"  # 1/0 — set 1 when the backend is a thinking model (qwen3.5, granite4.2): adds LLM_THINK_BUDGET headroom immediately instead of waiting for auto-detect on the first reasoning turn.
+LLM_THINK_BUDGET: "2048"  # Extra max_tokens reserved for the think channel when LLM_THINKING=1 or thinking is auto-detected. The thinker fills whatever it gets, so raise only if answers still truncate after thinking ends.
+LLM_NO_THINK: "0"  # 1/0 — ask hybrid-reasoning templates for direct answers: appends /no_think to the request's final user turn and sends chat_template_kwargs.enable_thinking=false. Needs a template/server that honors either; inert otherwise. Set 1 for hybrid-reasoning models (Agent A1); /think turns are exempt (think.py skips no-think when deep-think is active).
 
 # -- Sampling --
-TEMPERATURE: "0.80"  # Creativity/randomness; common range 0.2-1.0, higher is more varied.
+TEMPERATURE: "0.5"  # Creativity/randomness; 0.7 made small models word-salad under long persona prompts. Persona carries the voice; keep sampling conservative.
 REPEAT_PENALTY: "1.15"  # Penalty for repeated tokens; common range 1.05-1.25.
 REPEAT_LAST_N: "64"  # Token lookback window for repeat penalty; 0 disables on some backends.
 TOP_P: "0.92"  # Nucleus sampling cutoff; common range 0.8-0.95.
-TOP_K: "50"  # Limits next-token choices to top K; common values 40-100, 0 may disable depending backend.
+TOP_K: "40"  # Limits next-token choices to top K; lower = fewer wild token picks on small models.
 
 # Agentic config
 #
-# Settings for skills/agentic.py plus chat-vs-agent routing used by cognition/think.py.
+# Settings for agentic/agentic.py plus chat-vs-agent routing used by cognition/think.py.
 # Use this to tune when Aiko enters tool/task mode and how much work one task may do.
 
 # -- Routing --
 AGENTIC_MODE_ON: 1          # 1/0 — whether "agentic" is a reachable outcome at all, independent of ROUTE_MODE
 ROUTE_ENABLED: "1"  # Automatic chat-vs-agent routing toggle; options: 1/0, true/false, yes/no, on/off.
 ROUTE_MODE: semantic        # semantic | semantic_only | llm | llm_only — picks the classification METHOD only
-ROUTE_VECTOR_CACHE_ENABLED: "1"  # Cache static route-example embeddings on disk after first build.
 ROUTE_VECTOR_CACHE_DIR: "route_vectors"  # Per-user route-vector cache dir unless absolute. Safe to delete/rebuild.
 ROUTE_AGENTIC_THRESHOLD: "0.65"   # Route to agentic if score > this
 ROUTE_WEBCHAT_THRESHOLD: "0.60"   # Route to webchat if score > this (else localchat)
 ROUTE_LABEL_TOP_K: "3"  # Average each label strongest N examples; higher is smoother but less sharp.
 ROUTE_MIN_GAP: "0.025"  # Required score gap between best and second route labels.
 ROUTER_MODEL: ""  # Small model for LLM routing fallback; only used when ROUTE_MODE needs LLM routing.
+CHAT_WEBSEARCH_NET: "1"  # Last-resort SearXNG lookup when a localchat message explicitly asks for internet info (internet/web/search/look up/verify/current).
 
 # Reflect config
 #
@@ -50,7 +77,7 @@ GITHUB_REPO: "OppaAI/aiko-blog"  # Repository for reflection posts, e.g. owner/r
 GITHUB_BRANCH: "main"  # Branch to write reflection posts to.
 HUGO_CONTENT_PATH: "content/posts"  # Path inside repo where markdown posts are written.
 HUGO_IMAGES_PATH: "static/images"  # Path inside repo where generated reflection images are written.
-SOUL_PATH: "persona/soul.md"  # Local persona/soul prompt file used by reflection.
+SOUL_PATH: "persona/SOUL.md"  # Local persona/soul prompt file used by reflection.
 
 # -- Reflection content --
 REFLECT_MAX_MEMS: "100"  # Maximum memory snippets included in a reflection prompt.

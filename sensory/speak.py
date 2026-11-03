@@ -1,14 +1,19 @@
 """
 sensory/speak.py
 
-Aiko's voice output via MioTTS inference server.
-Preset-based voice reference: "jp_female", "en_female", or a custom registered preset.
+Aiko's voice output via MioTTS synthesis.
+Preset-based voice reference: "jp_female", "aiko_flat", or a custom registered preset.
 
 Server setup (run separately):
-    # 1. Start the local OpenAI-compatible model server with the miotts model.
-    # 2. Start MioTTS synthesis API:
-    python run_server.py --llm-base-url http://localhost:8080/v1 \
-        --llm-model "miotts"
+    # Using mmnga/mio-tts-cpp (C++ implementation):
+    ./build/mio-tts-server \
+      -m ~/Aiko-chan/models/miotts/MioTTS-0.4B-Q4_K_M.gguf \
+      -mv ~/Aiko-chan/models/miotts/miocodec.gguf \
+      --tts-wavlm-model ~/Aiko-chan/models/miotts/wavlm_base_plus_2l_f32.gguf \
+      --reference-file-json '[{"key":"jp_female","path":"~/Aiko-chan/models/miotts/jp_female.emb.gguf"},{"key":"aiko_flat","path":"~/Aiko-chan/models/miotts/aiko_flat.emb.gguf"}]'
+    
+    # Or via systemd:
+    sudo systemctl start miotts
 
 Standalone test:
     python sensory/speak.py
@@ -17,10 +22,8 @@ Standalone test:
     python sensory/speak.py --wait "Block until done."
     python sensory/speak.py --synced --wait "Watch the words land with the voice."
 """
-
 from __future__ import annotations
 
-import base64
 import io
 import os
 import re
@@ -30,7 +33,9 @@ import threading
 import argparse
 import unicodedata
 import queue
+from system.config import env_float, env_int
 from system.log import get_logger, silent_stderr
+from sensory import latency as _latency
 
 log = get_logger(__name__)
 
@@ -46,16 +51,22 @@ BOOT_LABELS = {
 
 MIOTTS_API_URL = os.getenv("MIOTTS_API_URL",  "http://localhost:8001")
 MIOTTS_PRESET  = os.getenv("MIOTTS_PRESET",   "jp_female")
-MIOTTS_DEVICE  = int(os.getenv("MIOTTS_DEVICE", "-1"))
+MIOTTS_DEVICE  = env_int("MIOTTS_DEVICE", -1)
 
-MIOTTS_MAX_TOKENS         = int(os.getenv("MIOTTS_MAX_TOKENS", "300"))
-MIOTTS_TEMPERATURE        = float(os.getenv("MIOTTS_TEMPERATURE", "0.8"))
-MIOTTS_TOP_P              = float(os.getenv("MIOTTS_TOP_P", "1.0"))
-MIOTTS_REPETITION_PENALTY = float(os.getenv("MIOTTS_REPETITION_PENALTY", "1.15"))
-MIOTTS_PRESENCE_PENALTY   = float(os.getenv("MIOTTS_PRESENCE_PENALTY", "0.0"))
-MIOTTS_FREQUENCY_PENALTY  = float(os.getenv("MIOTTS_FREQUENCY_PENALTY", "0.0"))
+MIOTTS_MAX_TOKENS         = env_int("MIOTTS_MAX_TOKENS", 300)
+# Client-side HTTP timeout. Measured on-device: a 300-char chunk costs
+# ~7s warm and ~17s cold, but under load (llm-router jobs, concurrent
+# chat) MioTTS stretches past 30s and the whole chunk was discarded --
+# 15 dropped chunks on 2026-10-17. TTS runs on a background thread, so a
+# longer wait is strictly better than losing the audio entirely.
+MIOTTS_TIMEOUT            = env_int("MIOTTS_TIMEOUT", 90)
+MIOTTS_TEMPERATURE        = env_float("MIOTTS_TEMPERATURE", 0.8)
+MIOTTS_TOP_P              = env_float("MIOTTS_TOP_P", 1.0)
+MIOTTS_REPETITION_PENALTY = env_float("MIOTTS_REPETITION_PENALTY", 1.15)
+MIOTTS_PRESENCE_PENALTY   = env_float("MIOTTS_PRESENCE_PENALTY", 0.0)
+MIOTTS_FREQUENCY_PENALTY  = env_float("MIOTTS_FREQUENCY_PENALTY", 0.0)
 MIOTTS_BEST_OF_N_ENABLED  = os.getenv("MIOTTS_BEST_OF_N_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
-MIOTTS_BEST_OF_N          = int(os.getenv("MIOTTS_BEST_OF_N", "2"))
+MIOTTS_BEST_OF_N          = env_int("MIOTTS_BEST_OF_N", 2)
 
 # ── text sanitization ─────────────────────────────────────────────────────────
 
@@ -148,9 +159,30 @@ def _split_oversized_text(text: str, max_chars: int) -> list[str]:
     return parts
 
 
+# Numbered lists should still be spoken ("one", "two") but MioTTS often
+# garbles "1." / "2)" into repeats or letter-soup. Normalize to "N, ".
+_LIST_MARKER_RE = re.compile(
+    r"(?m)^\s*(?:(\d{1,2})[.)]\s+|[-*•]\s+)"
+)
+_INLINE_ENUM_RE = re.compile(
+    r"(?:(?<=\s)|(?<=^)|(?<=[.!?]))(\d{1,2})[.)]\s+"
+)
+
+
+def _normalize_list_markers(text: str) -> str:
+    """Keep ordinal numbers speakable; drop only bare bullet symbols."""
+    def _num(m: re.Match) -> str:
+        n = m.group(1)
+        return f"{n}, " if n else ""
+    text = _LIST_MARKER_RE.sub(_num, text)
+    text = _INLINE_ENUM_RE.sub(_num, text)
+    return text
+
+
 def sanitize_for_tts(text: str) -> str:
     """Keep only text and common punctuation the MioTTS phonemizer handles."""
     text = text.lstrip()
+    text = _normalize_list_markers(text)
     for pattern, replacement in _RE_REPLACEMENTS:
         text = pattern.sub(replacement, text)
 
@@ -184,6 +216,106 @@ def sanitize_for_tts(text: str) -> str:
     return text.strip()
 
 
+_EMOJI_LEADING_RE = re.compile(
+    r"^\s*([\U0001F300-\U0001FAFF\u2600-\u27BF\u2300-\u23FF\u2B00-\u2BFF\uFE00-\uFE0F]|\:[a-zA-Z0-9_-]+\:)\s*:?\s*",
+    re.UNICODE
+)
+_EMOJI_TO_EMOTION = {
+    "😊": "happy", "😄": "happy", "😁": "happy", "😆": "happy", "🥰": "happy", "😍": "happy", "🙂": "happy", "😋": "happy", "🌸": "happy", "✨": "happy", "❤️": "happy", "💖": "happy", "☺️": "happy",
+    "😒": "angry", "😡": "angry", "😠": "angry", "😤": "angry", "🤬": "angry", "💢": "angry",
+    "😭": "sorrow", "😢": "sorrow", "🥺": "sorrow", "☹️": "sorrow", "🙁": "sorrow", "😔": "sorrow", "😞": "sorrow", "💧": "sorrow",
+    "😮": "surprised", "😯": "surprised", "😲": "surprised", "😳": "surprised", "🤯": "surprised", "😱": "surprised", "⁉️": "surprised", "❓": "surprised",
+    "😜": "fun", "🤪": "fun", "😏": "fun", "😈": "fun", "🙃": "fun", "😉": "fun",
+    "😐": "neutral", "😑": "neutral", "😶": "neutral", "🤖": "neutral", "😴": "neutral", "🤔": "thinking", "💭": "thinking",
+}
+_EMOJI_HEADER_RE = re.compile(
+    r"^\s*(?:[\U0001F300-\U0001FAFF\u2600-\u27BF\u2300-\u23FF\u2B00-\u2BFF\uFE00-\uFE0F]|\:[a-zA-Z0-9_-]+\:)?\s*:\s*",
+    re.UNICODE
+)
+_THOUGHT_PAREN_RE = re.compile(r"\([^)]+\)")
+_FEELING_BRACKET_RE = re.compile(r"\[[^\]]+\]")
+_STRUCTURED_SEP_RE = re.compile(r"\n\s*---\s*\n")
+_EMOTION_LINE_RE = re.compile(r"(?im)^\s*EMOTION\s*:\s*([A-Za-z_][A-Za-z0-9_\-]*)\s*$")
+_DISPLAY_STRUCTURAL_LINE_RE = re.compile(r"(?im)^[ \t]*EMOTION\s*:[^\r\n]*(?:\r?\n|$)")
+_ALLOWED_EMOTIONS = {
+    "neutral", "happy", "shy", "sad", "annoyed", "surprised", "thinking",
+}
+
+
+def parse_aiko_response(text: str) -> dict:
+    """Split a model reply into emotion / dialogue channels.
+
+    There is no forced action channel: the model weaves any physical gesture
+    naturally into its reply (or omits it), and that prose is ordinary
+    dialogue — visible in bubbles and speakable by TTS.
+    """
+    if isinstance(text, (list, tuple)):
+        raw = text[0] if text else ""
+    else:
+        raw = str(text or "")
+    emotion = "neutral"
+    body = raw.strip()
+
+    body = re.sub(r"(?m)^\s*---+\s*$", "", body)
+
+    em_match = _EMOTION_LINE_RE.search(body)
+    if em_match:
+        cand = em_match.group(1).strip().lower()
+        emotion = cand if cand in _ALLOWED_EMOTIONS else _EMOJI_TO_EMOTION.get(cand, cand)
+        body = _EMOTION_LINE_RE.sub("", body)
+    else:
+        emoji_match = _EMOJI_LEADING_RE.match(body)
+        if emoji_match:
+            symbol = emoji_match.group(1).strip()
+            emotion = _EMOJI_TO_EMOTION.get(symbol, symbol)
+            body = _EMOJI_LEADING_RE.sub("", body)
+
+    body = re.sub(r"(?m)^\s*---+\s*$", "", body)
+    body = _EMOJI_HEADER_RE.sub("", body)
+    # Strip only the asterisk markers, keeping the wrapped words so natural
+    # action prose and emphasis stay visible in bubbles and speakable in TTS.
+    body = re.sub(r"\*\*([^*]+)\*\*", r"\1", body)
+    body = re.sub(r"\*([^*]+)\*", r"\1", body)
+    body = _THOUGHT_PAREN_RE.sub("", body)
+    body = _FEELING_BRACKET_RE.sub("", body)
+    body = re.sub(r"\*+", " ", body)
+    dialogue = re.sub(r"\s{2,}", " ", body).strip()
+    return {
+        "emotion": emotion,
+        "dialogue": dialogue,
+        "raw": raw,
+    }
+
+
+def extract_dialogue_for_tts(text: str) -> str:
+    """Extract pure dialogue for TTS from structured or legacy mixed replies."""
+    if not text:
+        return ""
+    parsed = parse_aiko_response(text)
+    return sanitize_for_tts(parsed["dialogue"])
+
+
+def _parse_for_display(text: str) -> str:
+    """Remove response metadata without changing dialogue markup."""
+    if isinstance(text, (list, tuple)):
+        text = text[0] if text else ""
+    return _DISPLAY_STRUCTURAL_LINE_RE.sub("", str(text or "")).strip()
+
+
+def format_for_display(text: str) -> str:
+    """UI text with only structural ``EMOTION:`` lines removed."""
+    if not text:
+        return ""
+    return _parse_for_display(text)
+
+
+def dialogue_for_stream(text: str) -> str:
+    """Plain dialogue for karaoke sentence-splitting (no emoji chrome)."""
+    if not text:
+        return ""
+    return (parse_aiko_response(text).get("dialogue") or "").strip()
+
+
 # ── speak ─────────────────────────────────────────────────────────────────────
 
 class AikoSpeak:
@@ -202,12 +334,17 @@ class AikoSpeak:
 
     def __init__(self, silent: bool = False) -> None:
         self._lock      = threading.Lock()
+        # Serializes ALL PortAudio/sounddevice calls (play/wait/stop).
+        # Concurrent sd.play + sd.stop from overlapping speak threads
+        # corrupts the PortAudio heap -> "double free or corruption (out)".
+        self._sd_lock   = threading.Lock()
         self._playing   = threading.Event()
         self._stop_flag = threading.Event()
         self._silent    = silent
-        with silent_stderr():
-            import sounddevice as _sd
-            self._sd = _sd                 # eagerly loaded to avoid curses fd conflict
+        # Lazy PortAudio init via _load_sd() (text mode never pays for it).
+        # NOTE: an older revision loaded sounddevice eagerly here to dodge a
+        # curses fd conflict; current boot has no curses UI, so lazy is safe.
+        self._sd = None
         self._token_buf: list[str] = []        # accumulate feed() tokens
         self._stream_chunks: list[str] = []
         self._stream_queue = None
@@ -216,12 +353,22 @@ class AikoSpeak:
         self._streaming_active = False
         self._first_audio_callback = None
         self._first_audio_fired = threading.Event()
+        self._speech_rate = 1.0
+        self._speech_volume = 1.0
+        self._speech_pitch = 0.0
 
         # When enabled, streamed TTS drives the UI token callback word-by-word
         # against real WAV duration, instead of letting LLM tokens paint early.
         self.karaoke_text = os.getenv("KARAOKE_TEXT", "0").lower() in {
             "1", "true", "yes", "on",
         }
+        # Owner uid captured on the caller's thread for notice-bus pushes.
+        # Worker threads don't inherit contextvars, so _synthesize failures
+        # inside _speech_stream_worker would otherwise key by guest/env.
+        self._notice_uid: str | None = None
+        # Persistent HTTP session for MioTTS (keep-alive: one TCP handshake
+        # per process instead of per 280-char chunk).
+        self._http_session = None
 
         # ── remote audio sink (WebUI) ────────────────────────────────────
         # If set, _play_wav_bytes() also hands each synthesized WAV chunk to
@@ -240,6 +387,26 @@ class AikoSpeak:
         if not silent:
             log.info(f"[speak] MioTTS ready | url: {MIOTTS_API_URL} | preset: {MIOTTS_PRESET}")
 
+    def set_karaoke_enabled(self, enabled: bool) -> None:
+        """Runtime toggle for karaoke text pacing (e.g. /karaoke command)."""
+        self.karaoke_text = bool(enabled)
+
+    def set_speech_rate(self, rate: float) -> None:
+        """Set a bounded optional synthesis speed for the next utterances."""
+        try:
+            self._speech_rate = max(0.85, min(1.15, float(rate)))
+        except (TypeError, ValueError):
+            self._speech_rate = 1.0
+
+    def set_expression(self, rate: float = 1.0, volume: float = 1.0, pitch: float = 0.0) -> None:
+        """Set bounded optional per-utterance expressive controls."""
+        try:
+            self._speech_rate = max(0.85, min(1.15, float(rate)))
+            self._speech_volume = max(0.75, min(1.15, float(volume)))
+            self._speech_pitch = max(-0.15, min(0.15, float(pitch)))
+        except (TypeError, ValueError):
+            self._speech_rate, self._speech_volume, self._speech_pitch = 1.0, 1.0, 0.0
+
     def set_first_audio_callback(self, callback) -> None:
         """Register a callback invoked when the next utterance starts playback."""
         self._first_audio_callback = callback
@@ -249,6 +416,8 @@ class AikoSpeak:
         if self._first_audio_fired.is_set():
             return
         self._first_audio_fired.set()
+        _latency.mark("first_audio")
+        log.info(_latency.report())
         callback = self._first_audio_callback
         if callback is not None:
             try:
@@ -316,7 +485,22 @@ class AikoSpeak:
 
     def warmup(self) -> bool:
         """Health-check the MioTTS server — called from wakeup.py during boot."""
-        return self._health_check()
+        ok = self._health_check()
+        if ok:
+            # Prime synthesis in the background: the health ping doesn't
+            # warm the server's synthesis path, so the first utterance
+            # otherwise pays the full cold cost mid-turn. Fire-and-forget —
+            # boot and turns never wait on it.
+            import threading as _threading
+
+            def _prime() -> None:
+                try:
+                    self._synthesize("ok")
+                except Exception:
+                    pass
+
+            _threading.Thread(target=_prime, name="tts-synth-prime", daemon=True).start()
+        return ok
 
     def _health_check(self) -> bool:
         """Ping /health to confirm the server is up."""
@@ -338,49 +522,70 @@ class AikoSpeak:
 
     # ── synthesis ─────────────────────────────────────────────────────────────
 
+    def _http(self):
+        """Lazy persistent session (HTTP keep-alive) for MioTTS calls."""
+        if self._http_session is None:
+            import requests
+            from requests.adapters import HTTPAdapter
+            session = requests.Session()
+            session.mount("http://", HTTPAdapter(pool_connections=2, pool_maxsize=4))
+            session.mount("https://", HTTPAdapter(pool_connections=2, pool_maxsize=4))
+            self._http_session = session
+        return self._http_session
+
     def _synthesize(self, text: str) -> bytes | None:
         """
-        POST to MioTTS /v1/tts and return raw WAV bytes.
+        POST to MioTTS /mio/tts/stream and return raw WAV bytes.
         Returns None on failure.
+
+        The stream endpoint returns the WAV bytes inline (audio/wav,
+        chunked) — no server-side file, no read+unlink round-trip.
+        HTTP keep-alive via _http() keeps per-chunk setup cheap.
         """
         import json
-        import urllib.request
-        if len(text) > 300:
+        # Skip empty chunks (e.g. emoji/markup-only LLM output that
+        # sanitizes to nothing) — the server 400s on empty text.
+        text = (text or "").strip()
+        if not text:
+            log.debug("[speak] skipping TTS synthesis for empty text")
+            return None
+        # Increased limit from 300 to 600 for Lingo support
+        if len(text) > 600:
             log.warning(f"[speak] truncating oversized TTS chunk: {len(text)} chars")
-            text = text[:300]  # MioTTS hard limit
-        payload = json.dumps({
+            text = text[:600]
+
+        payload_data = {
             "text": text,
-            "reference": {"type": "preset", "preset_id": MIOTTS_PRESET},
-            "llm": {
-                "temperature": MIOTTS_TEMPERATURE,
-                "top_p": MIOTTS_TOP_P,
-                "max_tokens": MIOTTS_MAX_TOKENS,
-                "repetition_penalty": MIOTTS_REPETITION_PENALTY,
-                "presence_penalty": MIOTTS_PRESENCE_PENALTY,
-                "frequency_penalty": MIOTTS_FREQUENCY_PENALTY,
-            },
-            "best_of_n": {
-                "enabled": MIOTTS_BEST_OF_N_ENABLED,
-                "n": MIOTTS_BEST_OF_N,
-            },
-            "output": {"format": "base64"},
-        }).encode()
-        req = urllib.request.Request(
-            f"{MIOTTS_API_URL}/v1/tts",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        timeout = 60 if MIOTTS_BEST_OF_N_ENABLED else 30
+            "reference_key": MIOTTS_PRESET,
+            "temp": MIOTTS_TEMPERATURE,
+            "top_p": MIOTTS_TOP_P,
+            "n_predict": MIOTTS_MAX_TOKENS,
+            "repeat_penalty": MIOTTS_REPETITION_PENALTY,
+        }
+        if abs(self._speech_rate - 1.0) > 0.01:
+            payload_data["speed"] = round(self._speech_rate, 3)
+        if os.getenv("MIOTTS_EXPRESSIVE_CONTROLS", "0").lower() in {"1", "true", "yes", "on"}:
+            if abs(self._speech_volume - 1.0) > 0.01:
+                payload_data["volume"] = round(self._speech_volume, 3)
+            if abs(self._speech_pitch) > 0.01:
+                payload_data["pitch"] = round(self._speech_pitch, 3)
+
+        timeout = MIOTTS_TIMEOUT
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                body = json.loads(r.read())
-                if "audio" not in body:
-                    log.error(f"[speak] unexpected TTS response keys: {list(body.keys())}")
-                    return None
-                return base64.b64decode(body["audio"])
+            # /mio/tts/stream returns the WAV bytes inline (audio/wav,
+            # chunked) — no server-side file, no read+unlink round-trip.
+            r = self._http().post(f"{MIOTTS_API_URL}/mio/tts/stream", json=payload_data, timeout=timeout)
+            r.raise_for_status()
+            wav_bytes = r.content
+            if not wav_bytes or len(wav_bytes) < 46:
+                log.error("[speak] TTS stream returned no audio")
+                self._push_notice("TTS", "voice synthesis failed — continuing in text")
+                return None
+            _latency.mark("first_tts_synth")
+            return wav_bytes
         except Exception as e:
             log.error(f"[speak] synthesis error: {e}")
+            self._push_notice("TTS", "voice synthesis failed — continuing in text")
             return None
 
     @staticmethod
@@ -430,37 +635,58 @@ class AikoSpeak:
                 time.sleep(0.05)
             return
 
-        import scipy.io.wavfile as wav_io
+        # Prefer soundfile (present on Jetson) — scipy is broken on aarch64
+        # (missing _ccallback_c). Fall back to scipy only if soundfile unavailable.
+        def _read_wav_sf(b: bytes):
+            try:
+                import soundfile as sf
+                data, rate = sf.read(io.BytesIO(b), always_2d=False)
+                return rate, data
+            except Exception:
+                import scipy.io.wavfile as wav_io  # last resort; may be broken on Jetson
+                return wav_io.read(io.BytesIO(b))
+
+        def _resample_fallback(data, orig_rate: int, target: int = 48000):
+            if orig_rate == target:
+                return data, target
+            try:
+                from scipy.signal import resample
+                num_samples = int(len(data) * target / orig_rate)
+                return resample(data, num_samples).astype(data.dtype), target
+            except Exception:
+                # linear interpolation fallback — no scipy needed
+                import numpy as np
+                xp = np.linspace(0, 1, len(data))
+                x_new = np.linspace(0, 1, int(len(data) * target / orig_rate))
+                if data.ndim == 1:
+                    return np.interp(x_new, xp, data).astype(data.dtype), target
+                # stereo: interpolate per channel
+                out = np.stack([np.interp(x_new, xp, data[:, c]) for c in range(data.shape[1])], axis=1)
+                return out.astype(data.dtype), target
+
         try:
             sd = self._load_sd()
-            rate, data = wav_io.read(io.BytesIO(wav_bytes))
+            rate, data = _read_wav_sf(wav_bytes)
             device = MIOTTS_DEVICE if MIOTTS_DEVICE >= 0 else None
 
-            # Resample if output device doesn't natively support the source rate
-            # (e.g. cheap USB DACs locked to 48000 Hz while MioTTS outputs 44100)
-            if device is not None:
-                dev_info = sd.query_devices(device)
-                target_rate = int(dev_info["default_samplerate"])
-                if target_rate != rate:
-                    from scipy.signal import resample
-                    num_samples = int(len(data) * target_rate / rate)
-                    data = resample(data, num_samples).astype(data.dtype)
-                    rate = target_rate
+            # Always resample to 48000 Hz (device requirement)
+            if rate != 48000:
+                data, rate = _resample_fallback(data, rate, 48000)
 
-            sd.play(data, rate, device=device)
-            while sd.get_stream().active:
+            # PortAudio is not thread-safe: never overlap play/wait/stop
+            # across speak threads. Hold _sd_lock for the whole sequence so
+            # a concurrent stop() or next chunk can't free the stream mid-play
+            # (glibc "double free or corruption").
+            with self._sd_lock:
+                sd.play(data, rate, device=device)
+                sd.wait()  # Wait until playback finishes
                 if self._stop_flag.is_set():
-                    sd.stop()
-                    break
-                time.sleep(0.05)
+                    try:
+                        sd.stop()
+                    except Exception:
+                        pass
         except Exception as e:
             log.error(f"[speak] playback error: {e}")
-        finally:
-            try:
-                sd = self._load_sd()
-                sd.stop()
-            except Exception:
-                pass
 
     def _speak_thread(self, text: str) -> None:
         """Split into sentence chunks ≤300 chars, synthesize and play each."""
@@ -493,10 +719,10 @@ class AikoSpeak:
                 chunk = chunk_queue.get()
                 if chunk is None:
                     break
-                clean = sanitize_for_tts(chunk)
+                # Chunk may be a lone emoji line after sentence split —
+                # never fall back to typing/speaking the raw structured chrome.
+                clean = extract_dialogue_for_tts(chunk)
                 if not clean:
-                    if on_word:
-                        self._emit_words_timed(chunk, 0.0, on_word)
                     continue
                 pieces = list(self._chunk_text(clean))
                 next_synth = None  # (thread, result_container)
@@ -510,6 +736,11 @@ class AikoSpeak:
                         wav = synth_result[0] if synth_result else None
                     else:
                         wav = self._synthesize(piece)
+
+                    # Recheck: the flag may have been set while synthesis
+                    # was in flight — never play or emit a cancelled chunk.
+                    if self._stop_flag.is_set():
+                        break
 
                     if not wav:
                         if on_word:
@@ -558,11 +789,25 @@ class AikoSpeak:
         if not words:
             return
         if duration <= 0:
-            # couldn't determine audio length — just emit immediately
+            # TTS failed or WAV unreadable — fall back to estimated pacing
+            # (instead of instant burst) so karaoke text still types at a
+            # readable rate while silent. Keeps UI usable during MioTTS OOM.
+            try:
+                fallback_wps = float(os.getenv("KARAOKE_FALLBACK_WPS", "2.6"))
+            except (TypeError, ValueError):
+                fallback_wps = 2.6
+            fallback_wps = max(0.5, min(10.0, fallback_wps))
+            log.warning("[speak] karaoke duration=0, fallback pacing %.1f wps for %d words",
+                        fallback_wps, len(words))
+            start = time.monotonic()
             for i, word in enumerate(words):
+                if self._stop_flag.is_set():
+                    break
                 self._emit_viseme(self._viseme_for_word(word), 0.85)
                 if on_word:
                     on_word(word if i == 0 else " " + word)
+                if i + 1 < len(words):
+                    time.sleep(1.0 / fallback_wps)
             self._emit_viseme("A", 0.0)
             return
 
@@ -588,6 +833,10 @@ class AikoSpeak:
             sleep_time = (start + elapsed) - time.monotonic()
             if sleep_time > 0:
                 time.sleep(sleep_time)
+                # Recheck: a stop during the pacing sleep must not emit
+                # one trailing word after it.
+                if self._stop_flag.is_set():
+                    break
             self._emit_viseme(self._viseme_for_word(word), 0.85)
             if on_word:
                 on_word(word if i == 0 else " " + word)
@@ -658,11 +907,40 @@ class AikoSpeak:
 
     # ── public api ────────────────────────────────────────────────────────────
 
+    def _capture_notice_uid(self) -> None:
+        try:
+            from system.userspace import current_user_id
+            self._notice_uid = current_user_id()
+        except Exception:
+            pass
+
+    def _push_notice(self, area: str, brief: str) -> None:
+        """Push a one-line notice; never raises (bus must not break audio)."""
+        try:
+            from system.notice import get_notice_bus
+            from system.userspace import current_user_id
+            uid = self._notice_uid or current_user_id()
+            get_notice_bus(uid).push(area, brief)
+        except Exception:
+            pass
+
+    def _playback_cancelled(self) -> bool:
+        """Apply current speech controls and report whether playback is blocked."""
+        try:
+            from cognition.fly_behavior.dn_tts import apply_dn_prosody
+            from system.userspace import current_user_id
+            return bool(apply_dn_prosody(self, user_id=current_user_id()).get("cancelled"))
+        except Exception:
+            return False
+
     def speak(self, text: str) -> bool:
         """Synthesize a complete string, non-blocking. Caller prints to console."""
-        clean = sanitize_for_tts(text)
+        if self._playback_cancelled():
+            return False
+        clean = extract_dialogue_for_tts(text)
         if not clean:
             return False
+        self._capture_notice_uid()
         self.stop()
         self._first_audio_fired.clear()
         self._playing.set()
@@ -679,9 +957,12 @@ class AikoSpeak:
         speak(). on_word receives each word pre-padded with a leading space
         except the first, e.g. "Hello", " I'm", " Aiko".
         """
-        clean = sanitize_for_tts(text)
+        if self._playback_cancelled():
+            return False
+        clean = extract_dialogue_for_tts(text)
         if not clean:
             return False
+        self._capture_notice_uid()
         self.stop()
         self._first_audio_fired.clear()
         self._playing.set()
@@ -695,13 +976,21 @@ class AikoSpeak:
         """Accumulate a token for deferred synthesis."""
         if token:
             self._token_buf.append(token)
+            # Drop-oldest cap: a producer outpacing play_async can't grow
+            # this without bound on long sessions.
+            total = sum(len(t) for t in self._token_buf)
+            while total > 4000 and len(self._token_buf) > 1:
+                total -= len(self._token_buf.pop(0))
 
     def play_async(self) -> None:
         """Synthesize and play all buffered tokens, then clear the buffer."""
-        text = sanitize_for_tts("".join(self._token_buf))
+        text = extract_dialogue_for_tts("".join(self._token_buf))
         self._token_buf.clear()
+        if self._playback_cancelled():
+            return
         if not text:
             return
+        self._capture_notice_uid()
         self.stop()
         self._first_audio_fired.clear()
         self._playing.set()
@@ -713,9 +1002,12 @@ class AikoSpeak:
         tokens = []
         for token in token_iterator:
             tokens.append(token)
-        text = sanitize_for_tts("".join(tokens))
+        text = extract_dialogue_for_tts("".join(tokens))
+        if self._playback_cancelled():
+            return
         if not text:
             return
+        self._capture_notice_uid()
         self.stop()
         self._first_audio_fired.clear()
         self._playing.set()
@@ -724,6 +1016,9 @@ class AikoSpeak:
 
     def start_speech_stream(self, on_word=None) -> None:
         """Start sentence-level TTS playback for one streamed response."""
+        if self._playback_cancelled():
+            return
+        self._capture_notice_uid()
         self.stop()
         self._first_audio_fired.clear()
         with self._lock:
@@ -740,17 +1035,43 @@ class AikoSpeak:
             self._stream_thread.start()
 
     def feed_speech_stream(self, text: str) -> None:
-        """Queue a completed streamed sentence/chunk for immediate TTS."""
+        """Queue a completed streamed sentence/chunk for immediate TTS.
+
+        Prefer dialogue-only text from the caller; still re-extract here so a
+        stray emoji line never reaches synthesis.
+        """
         if not text:
+            return
+        clean = extract_dialogue_for_tts(text)
+        if not clean:
             return
         with self._lock:
             if self._streaming_active:
-                self._stream_chunks.append(text)
+                self._stream_chunks.append(clean)
+                total = sum(len(c) for c in self._stream_chunks)
+                while total > 4000 and len(self._stream_chunks) > 1:
+                    total -= len(self._stream_chunks.pop(0))
                 if self._stream_queue is not None:
-                    self._stream_queue.put(text)
+                    self._stream_queue.put(clean)
 
-    def stop_speech_stream(self) -> None:
-        """Finish the current sentence-level TTS stream."""
+    def stop_speech_stream(self, cancel: bool = False) -> None:
+        """Finish the current sentence-level TTS stream.
+
+        Default (cancel=False) is graceful: the worker drains already-queued
+        sentences, then exits on the pill. Normal completion must never drop
+        the tail — in sentence-stream mode the display itself is driven by
+        the worker, so cancelled-but-fed sentences would vanish.
+
+        cancel=True aborts: sets _stop_flag (under the lock) so the worker
+        stops emitting words promptly — even mid-chunk — then joins it with
+        a bounded timeout. When the join completes, "stop" is synchronous
+        for word emission: no further on_word calls will fire, so a refusal
+        note (or anything else) emitted on the calling thread can no longer
+        word-interleave with the stream. If the worker is wedged and the
+        join times out, the flag stays set and the thread handle is retained
+        so a later stop() can reap it; the worker exits on its own as soon
+        as it unsticks.
+        """
         with self._lock:
             if not self._streaming_active:
                 return
@@ -759,30 +1080,75 @@ class AikoSpeak:
             self._stream_on_word = None
             stream_queue = self._stream_queue
             self._stream_queue = None
+            stream_thread = self._stream_thread
+            self._stream_thread = None
+            if cancel:
+                # Set under the lock: start_speech_stream() clears the flag
+                # under the same lock, so a new stream cannot slip in between
+                # the state transition and this set and get its fresh flag
+                # clobbered by a stale stop request.
+                self._stop_flag.set()
+        # The pill releases a worker blocked in queue.get(); on the drain
+        # path it lands behind already-queued sentences so they still play.
         if stream_queue is not None:
             stream_queue.put(None)
+        if cancel and stream_thread is not None \
+                and stream_thread is not threading.current_thread():
+            stream_thread.join(timeout=5.0)
+            if stream_thread.is_alive():
+                # Wedged (e.g. hung synth HTTP): don't discard the only
+                # handle — a later stop() reaps it in the background.
+                # The flag stays set so it can't emit once it unsticks.
+                log.warning("[speak] stop_speech_stream: worker still alive "
+                            "after 5s join; retaining handle for later reap")
+                with self._lock:
+                    if self._stream_thread is None:
+                        self._stream_thread = stream_thread
 
     def is_playing(self) -> bool:
         return self._playing.is_set()
 
-    def wait(self) -> None:
-        """Block until playback finishes naturally."""
+    def wait(self, timeout: float = 600.0) -> bool:
+        """Block until playback finishes naturally. Bounded: returns False
+        (and logs) if the playing flag never clears, so a wedged audio
+        backend can't trap turn_done forever."""
+        import time as _time
+        deadline = _time.monotonic() + max(0.0, timeout)
         while self.is_playing():
-            time.sleep(0.05)
+            if _time.monotonic() >= deadline:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "speak.wait() timed out after %.0fs with playback still flagged — releasing turn.", timeout)
+                return False
+            _time.sleep(0.05)
+        return True
 
-    def wait_or_barge_in(self, barge_in_event: threading.Event) -> bool:
+    def wait_or_barge_in(self, barge_in_event: threading.Event, timeout: float = 600.0) -> bool:
         """
         Block until TTS finishes naturally OR barge_in_event is set.
         Returns True if interrupted, False if finished naturally.
+        Bounded like wait(): returns False with a warning on timeout.
         """
+        import time as _time
+        deadline = _time.monotonic() + max(0.0, timeout)
         while self.is_playing():
             if barge_in_event.is_set():
                 self.stop()
                 return True
-            time.sleep(0.02)
+            if _time.monotonic() >= deadline:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "speak.wait_or_barge_in() timed out after %.0fs — releasing turn.", timeout)
+                return False
+            _time.sleep(0.02)
         return False
 
     def stop(self) -> None:
+        # Signal synchronously; heavy teardown joins in the background.
+        # A barge-in must never block the new turn on audio teardown
+        # (the join + playing-flag drain below cost up to ~4s serially).
+        # The audible halt (sd.stop) stays on the calling thread so the
+        # user hears the old audio stop immediately.
         self._stop_flag.set()
         with self._lock:
             self._streaming_active = False
@@ -790,22 +1156,48 @@ class AikoSpeak:
             self._stream_on_word = None
             stream_queue = self._stream_queue
             self._stream_queue = None
+            stream_thread = self._stream_thread
+            self._stream_thread = None
         if stream_queue is not None:
             stream_queue.put(None)
 
+        # Skip ALSA probe entirely when audio was never initialized
+        # (e.g. text-mode sessions): nothing is playing, so nothing to stop.
+        # Take _sd_lock so stop() can't race a thread inside sd.play/wait.
+        if self._sd is not None:
+            try:
+                sd = self._load_sd()
+                with self._sd_lock:
+                    sd.stop()
+            except Exception:
+                log.warning("speak: sd.stop() failed in stop_stream")
+
+        # Join the dead stream thread and drain a stale playing flag in the
+        # background. The thread object is captured here so a concurrent
+        # start_speech_stream (which installs a new thread) can't confuse
+        # the joiner, and a second stop() finds _stream_thread None —
+        # idempotent, no duplicate joiners.
+        if (stream_thread is not None and stream_thread.is_alive()) or self.is_playing():
+            threading.Thread(
+                target=self._stop_join_bg,
+                args=(stream_thread,),
+                name="aiko-speak-stop-join",
+                daemon=True,
+            ).start()
+
+    def _stop_join_bg(self, stream_thread) -> None:
+        """Background half of stop(): join the dead stream thread, then
+        drain a stale playing flag. Bounded exactly like the old serial
+        path (2s + 2s); a wedged backend can't trap anything — this thread
+        just exits."""
         try:
-            sd = self._load_sd()
-            sd.stop()
+            if stream_thread is not None and stream_thread.is_alive():
+                stream_thread.join(timeout=2.0)
+            deadline = time.monotonic() + 2.0
+            while self.is_playing() and time.monotonic() < deadline:
+                time.sleep(0.02)
         except Exception:
             pass
-
-        if self._stream_thread is not None:
-            if self._stream_thread.is_alive():
-                self._stream_thread.join(timeout=2.0)
-            self._stream_thread = None
-
-        while self.is_playing():
-            time.sleep(0.02)
 
 
 # ── list audio devices ────────────────────────────────────────────────────────

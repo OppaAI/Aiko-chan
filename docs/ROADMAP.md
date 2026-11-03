@@ -14,11 +14,17 @@ Aiko-chan is built in phases. Each phase is a self-contained capability layer th
 
 | Feature | Status |
 |---|---|
-| CLI chatbot architecture | ✅ Done |
-| Local inference via Ollama | ✅ Done |
-| Persistent memory — mem0 + Qdrant | ✅ Done |
+| CLI + WebUI chat architecture | ✅ Done |
+| Local inference via llama.cpp server (`ministral`) | ✅ Done |
+| Persistent memory — custom sqlite-vec + KNN/FTS5/RRF (replaced mem0 + Qdrant: OOM on Nano) | ✅ Done |
+| Episodic memory (EMC store, staging → flush → distill) | ✅ Done |
+| Entity graph, supersession chains, dream consolidation | ✅ Done |
+| Recall diversity filter — near-duplicate collapse (`cognition/memory/diversity.py`, SM + EMC paths) | ✅ Done 2026-09-20 |
+| Attention attempt-gate — contradiction clarify at ≥2 shared tokens, matching recorder bar | ✅ Done 2026-09-20 |
 | Async (non-blocking) memory writes | ✅ Done |
 | Web search integration via SearXNG | ✅ Done |
+
+Known envelope (Jetson Orin Nano, Sep 2026): ~2 tok/s, ~20 s time-to-first-token on long-context turns, RAM ~7.2/7.4 GB under ASR + LLM + TTS. Fly connectome telemetry runs off the hot path (`observe_background`, stride-tunable via `AIKO_FLY_BG_EVERY_N`). Per-turn recall budget: 5 semantic + 4 episodic + persona blob. Further latency work needs on-device measurement, not code guesses.
 
 ---
 
@@ -38,8 +44,8 @@ Aiko-chan is built in phases. Each phase is a self-contained capability layer th
 | Realtime speech synthesis via MioTTS | ✅ Done |
 | Background LLM warmup — eliminates cold-start latency | ✅ Done |
 | Background TTS warmup — eliminates cold-start latency | ✅ Done |
-| Soul persona system (`persona/soul.md`) | ✅ Done |
-| Identity metadata and character framework (`persona/identity.md`) | ✅ Done |
+| Soul persona system (`persona/SOUL.md`) | ✅ Done |
+| Identity metadata and character framework (`persona/SOUL.md`) | ✅ Done |
 | Architectural renaming (`brain → think`, `memory → memorize`) | ✅ Done |
 | Non-blocking memory queue worker | ✅ Done |
 | Search output filtering and instruction refinement | ✅ Done |
@@ -83,6 +89,7 @@ Aiko-chan is built in phases. Each phase is a self-contained capability layer th
 | Optional owner voice verification via sherpa-onnx speaker embeddings | ✅ Done |
 | TTS runtime decision — MioTTS active; Kokoro/RealtimeTTS removed | ✅ Done |
 | MioTTS HTTP client + local sounddevice playback | ✅ Done (*OOM issue)|
+| Karaoke display/TTS pipeline — bubbles render dialogue text, actions/emphasis words kept (no span deletion) | ✅ Done 2026-09-20 |
 | Remote/browser TTS audio sink for WebUI playback | ✅ Done |
 | Browser/WebUI microphone streaming into ASR/VAD pipeline | ✅ Done |
 | Staged TTS/ASR/VAD warmup during boot | ✅ Done |
@@ -108,17 +115,19 @@ Aiko-chan is built in phases. Each phase is a self-contained capability layer th
 
 *Let Aiko introduce herself carefully. Social posting starts supervised, low-volume, and platform-aware before any autonomous public presence.*
 
-**Goal:** Give Aiko a safe outbound social layer for publishing introductions, status updates, workspace photos, and longer reflections with explicit owner approval, audit logs, and per-platform tone/risk controls.
+**Goal:** Give Aiko a safe outbound social layer for publishing introductions, status updates, workspace photos, and video, with explicit owner approval, audit logs, and per-platform tone/risk controls.
 
 | Feature | Status |
 |---|---|
-| Social account connector registry — X, Threads, Instagram, Discord, Reddit, Bluesky, Mastodon, Pixelfed | 🔲 Planned |
-| Draft-first posting workflow — Aiko prepares posts, owner approves before publish | 🔲 Planned |
-| Platform policy and community-fit guardrails before posting | 🔲 Planned |
+| Social account connectors — Threads, Pixelfed, YouTube, Bluesky, Mastodon | ✅ Done |
+| Draft-first posting workflow — Aiko prepares posts, owner approves before publish | ✅ Done |
+| Platform-specific safety rules baked into drafting prompts (no private details, no engagement bait, per-platform length limits) | ✅ Done |
+| Workspace photo picker for Pixelfed (vision-captioned, LLM-selected, public-safe filter, MCP posted) | ✅ Done |
+| YouTube video queue — description-grounded posting, no auto-selection, human writes the source note | ✅ Done |
+| Long-lived token auto-refresh (Threads) | ✅ Done |
+| Discord server introduction posting with rate limits and community rules checks | 🔲 Planned |
 | Social identity/persona card for public introductions | 🔲 Planned |
-| Workspace photo picker for future Instagram/Pixelfed posts | 🔲 Planned |
-| Discord and Reddit introduction posting with rate limits and community rules checks | 🔲 Planned |
-| Post history archive with links, timestamps, captions, and used media | 🔲 Planned |
+| Post history archive — consolidated view across drafts (links, timestamps, captions, media) | 🟡 Partial — per-draft `draft.json`/`posted.json` exist; no cross-draft archive view yet |
 | Abuse/spam prevention — cooldowns, blocklists, and no unsolicited mass outreach | 🔲 Planned |
 | Human handoff mode for replies and moderation | 🔲 Planned |
 
@@ -126,15 +135,13 @@ Aiko-chan is built in phases. Each phase is a self-contained capability layer th
 
 | Platform | Roadmap stance | Reason |
 |---|---|---|
-| X | ✅ Primary experiment | Large public reach, already added, useful for short updates despite higher moderation/reputation risk |
-| Threads | ✅ Primary experiment | Already added, friendlier mainstream short-post channel and a natural Instagram-adjacent path |
-| Instagram | 🔲 Later, photo-gated | Best fit once Aiko can select approved workspace photos and write captions |
-| Discord | ✅ Community introduction channel | Good for controlled server-by-server introductions and future bot-style presence |
-| Reddit | 🟡 Careful experiment | Useful for long introductions, but subreddit rules and anti-promotion norms require strict approval |
-| Bluesky | 🟡 Optional experiment | Good replacement for users avoiding X; likely better for open-web identity if AI disclosure is clear |
-| Mastodon | 🟡 Optional experiment | Federation culture can be skeptical of bots/AI, so use only opt-in instances and explicit labeling |
-| Pixelfed | 🟡 Later, photo-gated | Instagram-like fediverse option, but AI-generated or AI-curated media needs careful labeling and instance fit |
-| Facebook | ❌ Not prioritized | Older social graph and lower value for Aiko's public identity experiments |
+| Threads | ✅ Active | Live; weekly Patreon dev-post teaser fanout, image posting via imgbb |
+| Pixelfed | ✅ Active | Lane B curated photo showcase via MCP |
+| YouTube | ✅ Active | Live; video lane, description-grounded — you choose the video, Aiko only polishes the write-up |
+| Discord | ✅ Active | Two-way messenger adapter plus one-way #aiko_dev MCP webhook/channel posting |
+| Bluesky | ✅ Active | One-way Lane A1 teaser fanout only; no two-way adapter |
+| Mastodon | ✅ Active | One-way Lane A1 teaser fanout only; no two-way adapter |
+| Pixelfed | ✅ Active | Lane B photo target via MCP |
 | Flickr | ❌ Not prioritized | Mostly archival/photo-community use; not a strong discovery channel for Aiko |
 
 ---
@@ -172,7 +179,7 @@ Aiko-chan is built in phases. Each phase is a self-contained capability layer th
 |---|---|
 | ReAct-style task loop with tool dispatch | ✅ Done |
 | Semantic Intent Routing for fast delegation | ✅ Done |
-| Graph-first master-plan executor with model-free DAG tool nodes | ✅ Done |
+| Graph-first playbook executor with model-free DAG tool nodes | ✅ Done |
 | Autonomous sub-agent worker runtime with queues/leases/cancellation | 🔲 Planned |
 | Implement goal-based DAG HTN One-step LLM Agentic architecture | ✅ Done |
 | Persistent schedule jobs with reminder | ✅ Done |
@@ -192,9 +199,9 @@ Aiko-chan is built in phases. Each phase is a self-contained capability layer th
 | Routing | Keyword-only (`/web`, `/think`, task keywords) | **Dual-path: fast semantic exemplar routing by default, optional LLM router/fallback for context-heavy cases** |
 | Embeddings | BGE v1.5 (fastembed, 1024d, MEAN pooling) | **Harrier OSS v1 270M (custom ONNX, 640d, last-token pooling, query instructions)** |
 | Embedder | `fastembed` library | **Custom `cognition/reason.py` ONNX Harrier embedder** (fastembed only exposed MEAN/CLS pooling) |
-| Tools | Scattered functions | **Focused `toolkit/` modules: web, planning, scheduling, photo, architecture** |
-| Skills | N/A | **`skills/skillsets/*.md` workflow registry loaded by `skills/skills.py`** |
-| Agentic facade | Direct calls | **`toolkit/tools.py` compatibility facade + graph-first executor + ReAct fallback loop** |
+| Tools | Scattered functions | **Focused `agentic/toolkit/` modules: web, planning, scheduling, photo, architecture** |
+| Skills | N/A | **`agentic/skillsets/*.md` workflow registry loaded by `agentic/skills.py`** |
+| Agentic facade | Direct calls | **`agentic/toolkit/tools.py` compatibility facade + graph-first executor + ReAct fallback loop** |
 
 ---
 
@@ -252,6 +259,17 @@ Aiko-chan is built in phases. Each phase is a self-contained capability layer th
 | Avatar integration on mobile screen | 🔲 Planned |
 | Network resilience — survives Wi-Fi ↔ cellular handoff | 🔲 Planned |
 
+**Desktop companion decision (2026-10-12): NO.**
+
+Tauri desktop shell exists in the repo but is **not a deliverable** for any phase. Rationale:
+
+- WebUI already provides full desktop access from any browser (zero install, auto-updated, works on Linux/macOS/Windows/ChromeOS)
+- Tauri would add native menu/tray integration and offline cache — marginal value vs. WebUI
+- Maintenance cost: separate Rust/Cargo build, signing, notarization, auto-update pipeline
+- Phase 5 budget is mobile-first; desktop can wait until a concrete need appears (e.g. offline-first, hardware integration, system tray presence)
+
+Tauri code stays in the repo (no deletion). Revisit only if a specific desktop-only requirement emerges that WebUI cannot satisfy.
+
 ---
 
 ## Phase 6 — Multimodal 🔲
@@ -303,6 +321,22 @@ The `dream()` consolidation system runs across all phases and improves continuou
 | Hugo + GitHub daily reflection publishing | ✅ Done |
 | Cross-session memory coherence improvements | 🔲 Ongoing |
 | Dream-driven personality drift (subtle, long-term) | 🔲 Phase 4+ |
+| Episodic decay (forgetting curve, 60d half-life) | ✅ Done |
+| Episodic supersede-on-distill (retire absorbed rows) | ✅ Done |
+| Dream illustration (FLUX via Modal txt2img, Hugo + GitHub publish) | ✅ Done |
+| On-request imagegen in chat threads | ✅ Done |
+
+### Deliberately not built (memory subsystem)
+
+These were considered, prototyped in discussion, and rejected with
+reasons. Re-proposing any of them requires answering its objection —
+they are not backlog, they are decisions.
+
+| Item | Why not |
+|---|---|
+| **Time-based retrains** (periodic LightGBM retrain on a timer) | The threshold trigger (50 buffered rows / 10 min) already covers the workload: new information enters only via turns, which is exactly what the threshold counts. A timer would burn GPU relearning identical buffers. Revisit only if quiet-day staleness is ever measured (it hasn't been). |
+| **Touch-on-cache-hit** (bump recall counts on TTL cache hits) | Explicit anti-write-amplification design: hot queries would issue a DB write per turn. Counts still accrue on every uncached search — sufficient signal for decay resistance. Changing this trades a real correctness property for counter precision. |
+| **Replay write-back** (shadow replay outcomes modify EMC rows) | Replay runs in shadow mode by design; its outputs are observations, not decisions. Letting an unreviewed simulator edit memory needs a doctrine rule for what replay may change — that rule doesn't exist yet. Promoting replay past shadow is a doctrine call, not a code gap. |
 
 ---
 
@@ -312,3 +346,13 @@ The `dream()` consolidation system runs across all phases and improves continuou
 - Phase numbering is mostly fixed; half-phases such as 1.5 and 2.5 are used when a major enabling layer belongs between two visible product phases.
 - Hardware target throughout: **Jetson Orin Nano** (8 GB), with x86 as secondary.
 - This roadmap reflects the Aiko-chan standalone project. The broader cognitive architecture lives in [GRACE / AuRoRA](https://github.com/OppaAI/AGi).
+
+## Aiko social lanes (updated)
+
+- Two-way messenger adapters are native background services for WebUI/CLI sessions via `AIKO_MESSENGER_ADAPTERS`; only Telegram, Discord, Matrix, and Slack are supported for conversational ingress/egress.
+- Lane A1 syndicates the weekly Patreon Aiko development post on Saturdays at 18:00: full reposts go to the Hugo-backed GitHub Pages dev blog; short teasers go to Bluesky, Mastodon, Discord `#aiko_dev`, and Threads when image hosting is available. YouTube remains video-upload only, not YouTube Community teaser posting. Lane A2 manual posting remains out of Aiko. X is not a target.
+- Lane B is the curated photo pipeline for Pixelfed posting through the social MCP server.
+- Lane C YouTube video posting continues to use the existing MCP posting pipeline.
+- Lane D creates one Threads teaser-list draft per night at 23:00 for tech jobs available today, using only the configured CivicJobs.ca Lower Mainland RSS and Job Bank Canada filtered RSS feeds, filtered by TECH_JOB_KEYWORDS.
+- Bluesky, Mastodon, and YouTube are one-way posting tools only, not two-way adapters.
+- Nightly reflection remains native GitHub/Hugo publishing rather than MCP.

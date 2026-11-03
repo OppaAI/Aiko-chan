@@ -1,0 +1,1880 @@
+# Declarative tool catalog for Aiko's agentic toolkit.
+# Runtime source of truth for @tool decorator metadata.
+# Normalize with: uv run python util/export_tools_catalog.py
+{
+  "tools": [
+    {
+      "handler": "agentic.toolkit.research:adaptive_search",
+      "name": "adaptive_search",
+      "description": "The default tool for any internet lookup. Adaptively searches, judges if snippets suffice, and only fetches full pages if needed.",
+      "props": {
+        "query": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "domain": "research",
+      "scope": "network",
+      "react": true,
+      "graph": true,
+      "wiki": true,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.tool_result_cache_tools:cache_gc_tool",
+      "name": "cache_gc",
+      "description": "Drop old tool-result cache runs for a workflow (retention).",
+      "props": {
+        "workflow": {
+          "type": "string"
+        },
+        "keep_runs": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "workflow"
+      ],
+      "domain": "cache",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.tool_result_cache_tools:cache_read_tool",
+      "name": "cache_read",
+      "description": "Read records from the tool-result cache (debug / drill-down).",
+      "props": {
+        "workflow": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "workflow"
+      ],
+      "domain": "cache",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.tool_result_cache_tools:cache_select_tool",
+      "name": "cache_select",
+      "description": "Select a compact ranked subset from the tool-result cache for LLM synthesis. Returns plain-text evidence (not full JSONL) for synthesize_report.",
+      "props": {
+        "workflow": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "keywords": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "keywords_env": {
+          "type": "string",
+          "description": "Environment variable name containing comma-separated keywords"
+        },
+        "matched_only": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "to_state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workflow"
+      ],
+      "domain": "cache",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.tool_result_cache_tools:cache_write_tool",
+      "name": "cache_write",
+      "description": "Append tool results to the unified on-disk JSONL tool-result cache. Use after fetch/search so full payloads stay out of the LLM context. Pass items (string or list) or from_state to read a GraphState key.",
+      "props": {
+        "items": {
+          "description": "Result object(s) or text from prior node ($result:...)"
+        },
+        "workflow": {
+          "type": "string",
+          "description": "Workflow id, e.g. research_and_report"
+        },
+        "source": {
+          "type": "string",
+          "description": "rss|email|web|kb|tool"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "from_state": {
+          "type": "string",
+          "description": "GraphState key holding items"
+        }
+      },
+      "required": [
+        "workflow"
+      ],
+      "domain": "cache",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.organize:cancel_reminder",
+      "name": "cancel_reminder",
+      "description": "Cancel reminder by id.",
+      "props": {
+        "reminder_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reminder_id"
+      ],
+      "domain": "scheduling",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.organize:cancel_schedule",
+      "name": "cancel_schedule",
+      "description": "Cancel schedule item.",
+      "props": {
+        "job_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "domain": "scheduling",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.workflows.aurora_forecast.graph:check_aurora",
+      "name": "check_aurora",
+      "description": "Fetch NOAA aurora + Kp + cloud cover and score viewability (domain adapter).",
+      "props": {
+        "config_path": {
+          "type": "string"
+        }
+      },
+      "domain": "weather",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.workflows.job_hunt.graph:check_jobs_remaining",
+      "name": "check_jobs_remaining",
+      "description": "Check if more jobs remain to be processed. Returns 'more' or 'done'.",
+      "props": {},
+      "domain": "jobs",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.workflows.owner_email.graph:check_owner_email",
+      "name": "check_owner_email",
+      "description": "Poll ProtonMail inbox for messages FROM AIKO_EMAIL and extract prompts.",
+      "props": {},
+      "domain": "email",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.workflows.common.nodes:check_system_health",
+      "name": "check_system_health",
+      "description": "Check Jetson system health (CPU, RAM, Disk). Compat shim — prefer it_ops:sys_health.",
+      "props": {},
+      "domain": "it_ops",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.coding:code_apply_patch",
+      "name": "code_apply_patch",
+      "description": "Apply old->new replacement with backup (APPROVAL REQUIRED).",
+      "props": {},
+      "domain": "coding",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false,
+      "needs_approval": true
+    },
+    {
+      "handler": "agentic.toolkit.coding:code_diff_preview",
+      "name": "code_diff_preview",
+      "description": "Preview unified diff for old->new text (no write).",
+      "props": {},
+      "domain": "coding",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.coding:code_lint",
+      "name": "code_lint",
+      "description": "Syntax-check a Python file (py_compile, read-only).",
+      "props": {},
+      "domain": "coding",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.coding:code_plan",
+      "name": "code_plan",
+      "description": "Break a coding task into small reviewable steps (heuristic + optional LLM).",
+      "props": {},
+      "domain": "coding",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.coding:code_run_tests",
+      "name": "code_run_tests",
+      "description": "Run bounded pytest (90s timeout, tail output).",
+      "props": {},
+      "domain": "coding",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.codebase:codebase_context",
+      "name": "codebase_context",
+      "description": "Retrieve formatted <codebase_context> block for a codebase question (RAG). For prompt injection.",
+      "props": {},
+      "domain": "codebase",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.codebase:codebase_ingest",
+      "name": "codebase_ingest",
+      "description": "Ingest (or refresh) the entire Aiko codebase into the per-user codebase.db. Incremental by SHA1; safe to call repeatedly. Optimized for Jetson (batched 32, WAL, cosine).",
+      "props": {},
+      "domain": "codebase",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.workflows.codebase_refresh.graph:codebase_refresh_status_tool",
+      "name": "codebase_refresh_status",
+      "description": "Check codebase.db existence and stats.",
+      "props": {},
+      "domain": "codebase",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.codebase:codebase_search",
+      "name": "codebase_search",
+      "description": "Search Aiko's codebase RAG (separate DB at <USER_SPACE_ROOT>/<user_id>/knowledge/codebase.db) for code/docs relevant to the query. Optimized for Jetson Orin Nano 8GB (harrier 640d, 900-char chunks). Use for 'where is X', 'how does Y work', 'find file for Z'.",
+      "props": {},
+      "domain": "codebase",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.recall:retrieve_context",
+      "name": "retrieve_context",
+      "description": "Pull long-term memory, learned knowledge, past task experience, wiki operating cards, or skill instructions on demand mid-task. Use when upfront context was omitted for low relevance or you need specifics — do not guess from the system prompt. stores: comma-separated subset of memory,knowledge,experience,wiki,skill.",
+      "props": {
+        "query": {
+          "type": "string"
+        },
+        "stores": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "domain": "memory",
+      "always_on": true,
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.synthesize:combine_evidence",
+      "name": "combine_evidence",
+      "description": "Concatenate non-empty evidence blocks with a visible separator.",
+      "props": {
+        "parts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "separator": {
+          "type": "string"
+        }
+      },
+      "domain": "reports",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.synthesize:condense_text",
+      "name": "condense_text",
+      "description": "Condense a long evidence block to its most query-relevant chunks.",
+      "props": {
+        "text": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "max_chars": {
+          "type": "integer"
+        }
+      },
+      "domain": "reports",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.plan:create_checklist",
+      "name": "create_checklist",
+      "description": "Make checklist.",
+      "props": {
+        "title": {
+          "type": "string"
+        },
+        "items": {
+          "type": "string",
+          "description": "Newline-separated checklist items."
+        }
+      },
+      "required": [
+        "title",
+        "items"
+      ],
+      "domain": "planning",
+      "always_on": true,
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.research:deep_read",
+      "name": "deep_read",
+      "description": "Fetch and extract content from one EXACT known URL. Handles HTML pages (with JS-render escalation), PDFs, DOCX, PPTX, XLSX, EPUB, CSV, and more. Use when you already have the specific URL to read — not for discovery (use adaptive_search for that).",
+      "props": {
+        "url": {
+          "type": "string",
+          "description": "The exact URL to fetch and read."
+        },
+        "query": {
+          "type": "string",
+          "description": "Optional focus query — if given, content is relevance-filtered to what matters for this question."
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "domain": "research",
+      "scope": "network",
+      "react": true,
+      "graph": true,
+      "wiki": true,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.research:deep_read_enriched",
+      "name": "deep_read_enriched",
+      "description": "Fetch one EXACT URL and return BOTH markdown text AND ARIA interactive elements (links, buttons, forms) from the accessibility tree. Unlike deep_read (plain text only), this returns structured data: extracted markdown, page title, and interactive elements with roles/names/URLs. Use when you need to understand page structure, find specific links/buttons, or extract structured data from interactive pages.",
+      "props": {
+        "url": {
+          "type": "string",
+          "description": "The exact URL to fetch and read."
+        },
+        "query": {
+          "type": "string",
+          "description": "Optional focus query — if given, text is relevance-filtered while interactive elements are kept intact."
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "domain": "research",
+      "scope": "network",
+      "react": true,
+      "graph": true,
+      "wiki": true,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.research:deep_research",
+      "name": "deep_research",
+      "description": "Research tool that fetches and synthesizes full source pages from discovered URLs. Use when the research itself is the deliverable or for deep/thorough self-learning.",
+      "props": {
+        "query": {
+          "type": "string",
+          "description": "The research question. Can be broader/less scoped since the tool refines it internally."
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "domain": "research",
+      "scope": "network",
+      "react": true,
+      "graph": true,
+      "wiki": true,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.it_ops:disk_large_files",
+      "name": "disk_large_files",
+      "description": "Preview largest files under a directory (read-only, never deletes).",
+      "props": {},
+      "domain": "it_ops",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.it_ops:dns_lookup",
+      "name": "dns_lookup",
+      "description": "Resolve hostname to IP addresses (read-only).",
+      "props": {},
+      "domain": "it_ops",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.it_ops:docker_ps",
+      "name": "docker_ps",
+      "description": "Preview running docker containers (read-only, 5s timeout).",
+      "props": {},
+      "domain": "it_ops",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.social:draft_job_post_social",
+      "name": "draft_job_post_social",
+      "description": "Create a Vancouver-area daily job-post draft for Meta Threads review. Does NOT post anything.",
+      "props": {
+        "force": {
+          "type": "boolean",
+          "description": "Create a new draft even if one already exists for today."
+        }
+      },
+      "domain": "social",
+      "react": true,
+      "graph": false,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.social:draft_photo_social",
+      "name": "draft_photo_social",
+      "description": "Scan the photo inbox, caption and curate candidates, and create a Pixelfed photo draft bundle for human review. Does NOT post anything.",
+      "props": {
+        "inbox": {
+          "type": "string",
+          "description": "Optional workspace-relative photo inbox override."
+        },
+        "force": {
+          "type": "boolean",
+          "description": "Create a new draft even if one already exists for this run."
+        }
+      },
+      "domain": "social",
+      "react": true,
+      "graph": false,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.workflows.job_hunt.graph:draft_single_job",
+      "name": "draft_single_job",
+      "description": "Draft a single job post from one job dict, optionally enriching with LLM.",
+      "props": {
+        "job_json": {
+          "type": "string",
+          "description": "JSON from get_next_job containing job dict."
+        },
+        "template": {
+          "type": "string",
+          "description": "Optional template override."
+        }
+      },
+      "required": [
+        "job_json"
+      ],
+      "domain": "jobs",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.social:draft_video_social",
+      "name": "draft_video_social",
+      "description": "Queue the oldest not-yet-drafted video in the video inbox that already has a matching .txt description file (same stem, case-insensitive), polishing it into a YouTube title/description for human review. Does NOT post, and does NOT choose which video — dropping the file with its description IS the selection.",
+      "props": {
+        "inbox": {
+          "type": "string",
+          "description": "Optional workspace-relative video inbox override."
+        }
+      },
+      "domain": "social",
+      "react": true,
+      "graph": false,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.ingest:fetch_from_url",
+      "name": "fetch_from_url",
+      "description": "Download and extract text from any URL. Handles HTML pages, PDFs, DOCX, PPTX, XLSX, EPUB, CSV, XML, ZIP, IPYNB, MSG. Lightweight alternative to deep_read — no JS rendering, no relevance filtering, no Crawl4AI escalation. Use when you have a known URL and want its plain text.",
+      "props": {
+        "url": {
+          "type": "string",
+          "description": "The exact URL to fetch and read."
+        },
+        "max_chars": {
+          "type": "integer",
+          "description": "Maximum characters to return (default FETCH_FROM_URL_MAX_CHARS)."
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "domain": "research",
+      "react": true,
+      "graph": true,
+      "wiki": true,
+      "skill": false
+    },
+    {
+      "handler": "agentic.workflows.job_hunt.graph:fetch_rss_and_email_into_state",
+      "name": "fetch_rss_and_email_into_state",
+      "description": "Fetch all RSS + email jobs into state for incremental graph processing. Returns summary with total_found and sources.",
+      "props": {
+        "plan_json": {
+          "type": "string",
+          "description": "JSON plan with max_results and other fetch options."
+        }
+      },
+      "required": [
+        "plan_json"
+      ],
+      "domain": "jobs",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.it_ops:file_find",
+      "name": "file_find",
+      "description": "Bounded filename search under repo/workspace (glob, max 50).",
+      "props": {},
+      "domain": "it_ops",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.agentic:final_answer",
+      "name": "final_answer",
+      "description": "Final answer.",
+      "props": {
+        "answer": {
+          "type": "string",
+          "description": "The final answer text."
+        }
+      },
+      "required": [
+        "answer"
+      ],
+      "always_on": true,
+      "react": true,
+      "graph": false,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.workflows.job_hunt.graph:get_next_job",
+      "name": "get_next_job",
+      "description": "Get the next unprocessed job from state.job_all_postings (thread-safe). Returns job dict or done signal.",
+      "props": {
+        "worker_id": {
+          "type": "string",
+          "description": "Worker identifier for logging."
+        }
+      },
+      "domain": "jobs",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.it_ops:http_check",
+      "name": "http_check",
+      "description": "Lightweight HTTP status check (no JS, 8s timeout).",
+      "props": {},
+      "domain": "it_ops",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.workflows.common.nodes:ingest_data",
+      "name": "ingest_data",
+      "description": "Layer-1 shared node: ingest from sources (http_json, adapter:aurora, …) into normalized items[].",
+      "props": {
+        "sources_json": {
+          "type": "string",
+          "description": "JSON list of source objects {type, id, ...}."
+        },
+        "filters_json": {
+          "type": "string",
+          "description": "Optional filter tree JSON."
+        },
+        "parallel": {
+          "type": "string",
+          "description": "true|false"
+        },
+        "max_items": {
+          "type": "string"
+        },
+        "config_json": {
+          "type": "string",
+          "description": "Optional config overlay JSON."
+        }
+      },
+      "domain": "workflow",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.synthesize:kb_search",
+      "name": "kb_search",
+      "description": "Search Aiko's learned-knowledge RAG store for relevant context.",
+      "props": {
+        "query": {
+          "type": "string"
+        },
+        "max_chars": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "domain": "kb",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "",
+      "name": "learn_knowledge",
+      "description": "Store durable learned knowledge in Aiko's vector RAG store (encrypted when SQLite encryption is enabled). Use only when the user asks Aiko to remember/add/store knowledge, ingest pasted document text, or after explicit self-learning/research should be retained. Do not use for private personal preferences; those belong in memory. Do not use for merely saving a human-readable note; use save_note for that.",
+      "props": {
+        "title": {
+          "type": "string",
+          "description": "Short title for the learned document or fact set."
+        },
+        "text": {
+          "type": "string",
+          "description": "Knowledge text to chunk, embed, and retrieve later. Use this for pasted/extracted text."
+        },
+        "relative_path": {
+          "type": "string",
+          "description": "Optional workspace-relative document path to ingest instead of text."
+        },
+        "source": {
+          "type": "string",
+          "description": "Optional source URL/path/context for pasted text."
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "ingested",
+            "self_learned",
+            "study_note"
+          ],
+          "description": "Where this knowledge came from."
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "domain": "kb",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.synthesize:learn_report",
+      "name": "learn_report",
+      "description": "Ingest a synthesized report into Aiko's learned-knowledge RAG store.",
+      "props": {
+        "title": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "text"
+      ],
+      "domain": "kb",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.graph_engine:list_playbooks",
+      "name": "list_playbooks",
+      "description": "List graph/playbook workflows available to the model-free graph executor.",
+      "props": {},
+      "domain": "graph",
+      "always_on": true,
+      "react": true,
+      "graph": false,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.organize:list_reminders",
+      "name": "list_reminders",
+      "description": "List reminders.",
+      "props": {
+        "include_disabled": {
+          "type": "boolean"
+        }
+      },
+      "domain": "scheduling",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.organize:list_schedule",
+      "name": "list_schedule",
+      "description": "List schedule.",
+      "props": {
+        "include_disabled": {
+          "type": "boolean"
+        }
+      },
+      "domain": "scheduling",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.skills:list_skillsets",
+      "name": "list_skillsets",
+      "description": "List Aiko's predefined local workflow skillsets.",
+      "props": {},
+      "domain": "skills",
+      "react": true,
+      "graph": false,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.skills:load_skillset",
+      "name": "load_skillset",
+      "description": "Load the full markdown instructions for one predefined skillset by id.",
+      "props": {
+        "skill_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "skill_id"
+      ],
+      "domain": "skills",
+      "react": true,
+      "graph": false,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.skills:load_skill",
+      "name": "load_skill",
+      "description": "Load the full instructions for one skill by name (or id). Use after list_skillsets/search_skillsets_json to read the complete workflow only when needed.",
+      "props": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "domain": "skills",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false,
+      "always_on": true
+    },
+    {
+      "handler": "agentic.toolkit.it_ops:log_triage",
+      "name": "log_triage",
+      "description": "Tail a log file and extract ERROR/WARNING lines (bounded).",
+      "props": {},
+      "domain": "it_ops",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.plan:make_plan",
+      "name": "make_plan",
+      "description": "Make plan.",
+      "props": {
+        "goal": {
+          "type": "string"
+        },
+        "constraints": {
+          "type": "string"
+        },
+        "max_steps": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "goal"
+      ],
+      "domain": "planning",
+      "always_on": true,
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.workflows.common.nodes:needle_multi_agent_delegate",
+      "name": "needle_multi_agent_delegate",
+      "description": "Delegate subtasks to Needle 3 workers. Compat shim — prefer needle_team:needle_team_run.",
+      "props": {},
+      "domain": "multi_agent",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.needle_team:needle_team_run",
+      "name": "needle_team_run",
+      "description": "Fan out a task to Needle 3 workers and merge proposals.",
+      "props": {},
+      "domain": "multi_agent",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.needle_team:needle_team_status",
+      "name": "needle_team_status",
+      "description": "Show Needle 3 worker config (roles/tools, no secrets).",
+      "props": {},
+      "domain": "multi_agent",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.it_ops:net_info",
+      "name": "net_info",
+      "description": "Hostname + local IPs summary (read-only).",
+      "props": {},
+      "domain": "it_ops",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.workflows.common.nodes:output_user_results",
+      "name": "output_user_results",
+      "description": "Layer-1 shared node: deliver verified results via email and/or social tools.",
+      "props": {
+        "results_json": {
+          "type": "string"
+        },
+        "email_json": {
+          "type": "string"
+        },
+        "social_json": {
+          "type": "string"
+        },
+        "config_json": {
+          "type": "string"
+        }
+      },
+      "domain": "workflow",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.workflows.common.nodes:parse_logs",
+      "name": "parse_logs",
+      "description": "Extract recent errors/warnings from a log file. Compat shim — prefer it_ops:log_triage.",
+      "props": {},
+      "domain": "it_ops",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.it_ops:pass_gen",
+      "name": "pass_gen",
+      "description": "Generate a random password (secrets, never logged).",
+      "props": {},
+      "domain": "everyday",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.synthesize:polish_text",
+      "name": "polish_text",
+      "description": "Rewrite an already-synthesized draft in the requested style.",
+      "props": {
+        "text": {
+          "type": "string"
+        },
+        "style": {
+          "type": "string"
+        },
+        "max_tokens": {
+          "type": "integer"
+        }
+      },
+      "domain": "reports",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.it_ops:port_check",
+      "name": "port_check",
+      "description": "TCP port check with 2s timeout (read-only).",
+      "props": {},
+      "domain": "it_ops",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.social:post_job_post_social",
+      "name": "post_job_post_social",
+      "description": "Post an ALREADY HUMAN-APPROVED daily job-post draft to Meta Threads only. Will refuse unless a person has approved this exact draft outside this conversation. When the user asks to post the daily job post without giving a path, call this with NO draft_dir — it posts the most recently approved job-post draft automatically. Do NOT re-draft when an approved draft already exists.",
+      "props": {
+        "draft_dir": {
+          "type": "string",
+          "description": "OPTIONAL. The draft_dir path returned by draft_job_post_social or given by the user. Omit to auto-post the latest human-approved draft."
+        }
+      },
+      "domain": "social",
+      "react": true,
+      "graph": true,
+      "wiki": true,
+      "skill": false,
+      "needs_approval": true
+    },
+    {
+      "handler": "agentic.toolkit.social:post_photo_social",
+      "name": "post_photo_social",
+      "description": "Post an ALREADY HUMAN-APPROVED photo draft to Pixelfed. Will refuse (ok=false) unless a person has approved this exact draft outside this conversation, and refuses to post the same draft twice. Only call when the user explicitly asks to publish/post the draft now. If draft_dir is omitted, posts the most recently approved photo draft.",
+      "props": {
+        "draft_dir": {
+          "type": "string",
+          "description": "Optional. The draft_dir path returned by draft_photo_social or given by the user. Omit to post the most recently approved photo draft."
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "pixelfed"
+            ]
+          }
+        }
+      },
+      "domain": "social",
+      "react": true,
+      "graph": true,
+      "wiki": true,
+      "skill": false,
+      "needs_approval": true
+    },
+    {
+      "handler": "agentic.toolkit.social:post_to_social",
+      "name": "post_to_social",
+      "description": "Post text and optional image to one or more social platforms. services is a comma-separated list e.g. 'bluesky,mastodon'. Supported platforms: x, threads, bluesky, mastodon, discord. Does NOT require human approval.",
+      "props": {
+        "text": {
+          "type": "string",
+          "description": "The text content to post."
+        },
+        "services": {
+          "type": "string",
+          "description": "Comma-separated list of target platforms, e.g. 'bluesky,mastodon'."
+        },
+        "image_path": {
+          "type": "string",
+          "description": "Optional absolute path to an image file to attach."
+        }
+      },
+      "required": [
+        "text",
+        "services"
+      ],
+      "domain": "social",
+      "react": true,
+      "graph": true,
+      "wiki": true,
+      "skill": false,
+      "needs_approval": true
+    },
+    {
+      "handler": "agentic.toolkit.social:post_video_social",
+      "name": "post_video_social",
+      "description": "Post an ALREADY HUMAN-APPROVED video draft to YouTube. Will refuse (ok=false) unless a person has approved this exact draft outside this conversation, and refuses to post the same draft twice. Only call when the user explicitly asks to publish/post the draft now. If draft_dir is omitted, posts the most recently approved video draft.",
+      "props": {
+        "draft_dir": {
+          "type": "string",
+          "description": "Optional. The draft_dir path returned by draft_video_social or given by the user. Omit to post the most recently approved video draft."
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "youtube"
+            ]
+          }
+        }
+      },
+      "domain": "social",
+      "react": true,
+      "graph": true,
+      "wiki": true,
+      "skill": false,
+      "needs_approval": true
+    },
+    {
+      "handler": "agentic.toolkit.it_ops:process_top",
+      "name": "process_top",
+      "description": "List top processes by CPU/RAM (read-only, no kill).",
+      "props": {},
+      "domain": "it_ops",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.photography:propose_photo_ingestion",
+      "name": "propose_photo_ingestion",
+      "description": "Create a safe dry-run ingestion plan for photo files without moving or editing metadata.",
+      "props": {
+        "inbox": {
+          "type": "string"
+        },
+        "library_root": {
+          "type": "string"
+        },
+        "rating_rule": {
+          "type": "string"
+        }
+      },
+      "domain": "photo",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.plan:read_workspace_file",
+      "name": "read_workspace_file",
+      "description": "Read workspace file.",
+      "props": {
+        "relative_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "relative_path"
+      ],
+      "domain": "planning",
+      "always_on": true,
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.workflows.codebase_refresh.graph:refresh_codebase_tool",
+      "name": "refresh_codebase",
+      "description": "Refresh per-user codebase RAG DB (incremental SHA1, prune stale). Nightly 22:00, Jetson-optimized.",
+      "props": {},
+      "domain": "codebase",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.workflows.owner_email.graph:reply_owner_email",
+      "name": "reply_owner_email",
+      "description": "Generate LLM replies for owner email prompts and send them back.",
+      "props": {},
+      "domain": "email",
+      "scope": "external",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.self_improve:repo_file_tree",
+      "name": "repo_file_tree",
+      "description": "List repository text files for Aiko architecture/code navigation.",
+      "props": {
+        "prefix": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      },
+      "domain": "repo",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.self_improve:repo_read_file",
+      "name": "repo_read_file",
+      "description": "Read one repository text file for architecture/code work.",
+      "props": {
+        "relative_path": {
+          "type": "string"
+        },
+        "max_chars": {
+          "type": "integer"
+        },
+        "offset": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "relative_path"
+      ],
+      "domain": "repo",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.self_improve_write:repo_replace_text",
+      "name": "repo_replace_text",
+      "description": "Replace specific text in a repository file. APPROVAL REQUIRED — prefer code_diff_preview + code_apply_patch.",
+      "props": {},
+      "domain": "self_improve",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false,
+      "needs_approval": true
+    },
+    {
+      "handler": "agentic.toolkit.self_improve:repo_search_text",
+      "name": "repo_search_text",
+      "description": "Search repository text files with simple substring matching.",
+      "props": {
+        "query": {
+          "type": "string"
+        },
+        "prefix": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "domain": "repo",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.self_improve_write:repo_write_file",
+      "name": "repo_write_file",
+      "description": "Write content to a file in the repository. Restricted to safe text formats. APPROVAL REQUIRED — prefer code_diff_preview + code_apply_patch.",
+      "props": {},
+      "domain": "self_improve",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false,
+      "needs_approval": true
+    },
+    {
+      "handler": "agentic.workflows.job_hunt.graph:report_job_run",
+      "name": "report_job_run",
+      "description": "Generate an RSS Lane D audit report from accumulated results.",
+      "props": {
+        "plan": {
+          "type": "string",
+          "description": "JSON from fetch_rss_and_email_into_state."
+        },
+        "search": {
+          "type": "string",
+          "description": "JSON search results."
+        },
+        "draft": {
+          "type": "string",
+          "description": "JSON draft results."
+        },
+        "save": {
+          "type": "string",
+          "description": "JSON save results."
+        }
+      },
+      "domain": "jobs",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.social:run_job_post_playbook",
+      "name": "run_job_post_playbook",
+      "description": "Legacy schedule tool name → Spec gen_job_post graph.",
+      "props": {},
+      "react": true,
+      "graph": false,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "",
+      "name": "run_playbook",
+      "description": "Run a saved graph/playbook workflow by matching this task prompt. This uses deterministic graph execution, not an LLM planner; if no graph matches, continue with ReAct once and learn the sequence.",
+      "props": {
+        "task": {
+          "type": "string",
+          "description": "The task prompt to match against graph playbooks."
+        },
+        "cap_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional matched capability ids."
+        }
+      },
+      "required": [
+        "task"
+      ],
+      "domain": "graph",
+      "always_on": true,
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.plan:save_note",
+      "name": "save_note",
+      "description": "Save a note to a workspace file. content MUST be plain text only, under 400 characters. No markdown tables, no bullet lists, no backticks, no quotes. Write a brief plain-text summary only.",
+      "props": {
+        "title": {
+          "type": "string",
+          "description": "Short filename title."
+        },
+        "content": {
+          "type": "string",
+          "description": "Plain text only. Max 400 chars. No markdown."
+        },
+        "folder": {
+          "type": "string",
+          "description": "Subfolder, default: notes"
+        }
+      },
+      "required": [
+        "title",
+        "content"
+      ],
+      "domain": "planning",
+      "always_on": true,
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.workflows.job_hunt.graph:save_single_job_draft",
+      "name": "save_single_job_draft",
+      "description": "Save the most recently drafted job to disk as a Threads draft.",
+      "props": {
+        "auto_post": {
+          "type": "string",
+          "description": "Auto-post flag (false = draft only)."
+        }
+      },
+      "domain": "jobs",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.photography:scan_photo_workspace",
+      "name": "scan_photo_workspace",
+      "description": "Scan a workspace photo inbox for wildlife/nature/astro image files.",
+      "props": {
+        "inbox": {
+          "type": "string",
+          "description": "Workspace-relative inbox path, default photos/inbox."
+        },
+        "limit": {
+          "type": "integer"
+        }
+      },
+      "domain": "photo",
+      "react": true,
+      "graph": false,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.organize:schedule_job",
+      "name": "schedule_job",
+      "description": "Schedule local job/alarm. HH:MM. Frequencies: once,hourly,daily,weekdays,weekly,biweekly,monthly,custom_weekdays. Supports relative_days for today/tomorrow/day-after-tomorrow offsets.",
+      "props": {
+        "title": {
+          "type": "string"
+        },
+        "task": {
+          "type": "string"
+        },
+        "time_of_day": {
+          "type": "string",
+          "description": "24-hour local time, e.g. 06:00"
+        },
+        "frequency": {
+          "type": "string",
+          "enum": [
+            "once",
+            "hourly",
+            "daily",
+            "weekdays",
+            "weekly",
+            "biweekly",
+            "monthly",
+            "custom_weekdays"
+          ]
+        },
+        "timezone": {
+          "type": "string"
+        },
+        "days_of_week": {
+          "type": "string",
+          "description": "Optional weekdays, e.g. Monday Wednesday Friday"
+        },
+        "relative_days": {
+          "type": "string",
+          "description": "Optional day offset/phrase for the first due date, e.g. 0/today, 1/tomorrow, 2/day after tomorrow"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "announce",
+            "agentic",
+            "tool"
+          ],
+          "description": "announce, agentic task, or direct registered tool invocation"
+        },
+        "tool_call": {
+          "type": "object",
+          "description": "Required for action=tool: {name: registered tool name, arguments: object}"
+        },
+        "skill": {
+          "type": "string",
+          "description": "Optional custom SKILL.md-style instructions for an agentic job"
+        }
+      },
+      "required": [
+        "title",
+        "task",
+        "time_of_day"
+      ],
+      "domain": "scheduling",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.organize:schedule_reminder",
+      "name": "schedule_reminder",
+      "description": "Simple once/daily reminder.",
+      "props": {
+        "title": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "time_of_day": {
+          "type": "string"
+        },
+        "repeat": {
+          "type": "string",
+          "enum": [
+            "once",
+            "daily"
+          ]
+        },
+        "timezone": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "message",
+        "time_of_day"
+      ],
+      "domain": "scheduling",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.workflows.job_hunt.toolset:search_jobs",
+      "name": "search_jobs",
+      "description": "Return today's tech job postings from configured RSS feeds only. query, location, max_age_days, and job_type are accepted for compatibility but ignored; use max_results to cap output.",
+      "props": {
+        "query": {
+          "type": "string",
+          "description": "Ignored; RSS feed selection is configured in job_hunt settings."
+        },
+        "location": {
+          "type": "string",
+          "description": "Ignored; RSS feed selection is configured in job_hunt settings."
+        },
+        "max_results": {
+          "type": "integer",
+          "description": "Maximum number of RSS postings to return."
+        },
+        "max_age_days": {
+          "type": "integer",
+          "description": "Ignored; this tool only returns jobs posted today."
+        },
+        "job_type": {
+          "type": "string",
+          "description": "Ignored; keyword filtering comes from job_hunt settings."
+        }
+      },
+      "domain": "jobs",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.skills:search_skillsets_json",
+      "name": "search_skillsets",
+      "description": "Search Aiko's predefined workflow skillsets by task/query.",
+      "props": {
+        "query": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "domain": "skills",
+      "react": true,
+      "graph": false,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.it_ops:service_status",
+      "name": "service_status",
+      "description": "Check systemd service state (read-only systemctl is-active).",
+      "props": {},
+      "domain": "it_ops",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.it_ops:ssl_expiry",
+      "name": "ssl_expiry",
+      "description": "Days until TLS cert expires for host:port (read-only).",
+      "props": {},
+      "domain": "it_ops",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.workflows.common.nodes:store_data",
+      "name": "store_data",
+      "description": "Layer-1 shared node: persist items to TTL JSONL store and prune by retain_days.",
+      "props": {
+        "workflow_id": {
+          "type": "string"
+        },
+        "items_json": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "retain_days": {
+          "type": "string"
+        },
+        "config_json": {
+          "type": "string"
+        }
+      },
+      "domain": "workflow",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.workflows.common.nodes:summarize_emails",
+      "name": "summarize_emails",
+      "description": "Summarize recent emails (requires email MCP/adapter; no mock data).",
+      "props": {},
+      "domain": "email",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.plan:summarize_task_state",
+      "name": "summarize_task_state",
+      "description": "Summarize task state.",
+      "props": {
+        "goal": {
+          "type": "string"
+        },
+        "done": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "risks": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "goal"
+      ],
+      "domain": "planning",
+      "always_on": true,
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.workflows.common.nodes:synthesis_data",
+      "name": "synthesis_data",
+      "description": "Layer-1 shared node: fill template from items (optional LLM enrichment later).",
+      "props": {
+        "items_json": {
+          "type": "string"
+        },
+        "template": {
+          "type": "string"
+        },
+        "llm_enriched": {
+          "type": "string"
+        },
+        "per_item": {
+          "type": "string"
+        },
+        "config_json": {
+          "type": "string"
+        }
+      },
+      "domain": "workflow",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.synthesize:synthesize_report",
+      "name": "synthesize_report",
+      "description": "Produce a synthesized long-form report from combined evidence.",
+      "props": {
+        "evidence": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "style": {
+          "type": "string"
+        },
+        "max_tokens": {
+          "type": "integer"
+        }
+      },
+      "domain": "reports",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.it_ops:sys_health",
+      "name": "sys_health",
+      "description": "Check CPU/RAM/disk health (Jetson-safe, 1s sample).",
+      "props": {},
+      "domain": "it_ops",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.it_ops:text_summarize",
+      "name": "text_summarize",
+      "description": "Condense long text via LLM (heuristic fallback, Jetson-light).",
+      "props": {},
+      "domain": "everyday",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.it_ops:text_translate",
+      "name": "text_translate",
+      "description": "Translate short text via LLM (passthrough fallback).",
+      "props": {},
+      "domain": "everyday",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.it_ops:unit_convert",
+      "name": "unit_convert",
+      "description": "Offline unit conversion (length/mass/temp/data).",
+      "props": {},
+      "domain": "everyday",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.workflows.common.nodes:verify_results",
+      "name": "verify_results",
+      "description": "Layer-1 shared node: HITL gate or auto-pass rules on synthesized results.",
+      "props": {
+        "results_json": {
+          "type": "string"
+        },
+        "human_in_the_loop": {
+          "type": "string"
+        },
+        "llm_verify": {
+          "type": "string"
+        },
+        "auto_pass_json": {
+          "type": "string"
+        },
+        "config_json": {
+          "type": "string"
+        }
+      },
+      "domain": "workflow",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.photography:write_photo_ingestion_report",
+      "name": "write_photo_ingestion_report",
+      "description": "Write a photo workflow report under the workspace reports folder.",
+      "props": {
+        "title": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "report_dir": {
+          "type": "string"
+        }
+      },
+      "domain": "photo",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.reports:write_report",
+      "name": "write_report",
+      "description": "Write (or append a section to) one polished long-form markdown report under the workspace reports folder. Use for a single coherent deliverable — architecture review, paper comparison, improvement proposal — not short scratch notes (save_note) or retrievable knowledge (learn_knowledge). For arxiv_style, call once per section across multiple turns with append=true, using the same title each time.",
+      "props": {
+        "title": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "report_dir": {
+          "type": "string"
+        },
+        "arxiv_style": {
+          "type": "boolean"
+        },
+        "section": {
+          "type": "string",
+          "description": "abstract|introduction|related_work|architecture|discussion|limitations|conclusion|references"
+        },
+        "append": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "domain": "reports",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    }
+  ]
+}

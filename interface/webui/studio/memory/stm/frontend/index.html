@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Aiko STM Studio</title>
+  <script>try{var __t=localStorage.getItem('aiko-theme')||'light';document.documentElement.dataset.theme=(__t==='dark'?'dark':'light');window.addEventListener('storage',function(e){if(e&&e.key==='aiko-theme'){document.documentElement.dataset.theme=(e.newValue==='dark'?'dark':'light');}});}catch(__e){document.documentElement.dataset.theme='light';}</script>
+<link rel="stylesheet" href="shared/css/studio-theme.css" />
+  <link rel="stylesheet" href="static/style.css" />
+  <link rel="stylesheet" href="static/valence.css" />
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <linearGradient id="scoreGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+        <stop offset="0%" stop-color="#a888e8"/>
+        <stop offset="100%" stop-color="#c651a8"/>
+      </linearGradient>
+      <linearGradient id="weakGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+        <stop offset="0%" stop-color="#e8843a"/>
+        <stop offset="100%" stop-color="#f0c14a"/>
+      </linearGradient>
+    </defs>
+  </svg>
+
+  <header class="top">
+    <div class="brand">
+      <a href="#" id="backBtn" class="back" title="Back" aria-label="Back">←</a>
+      <span class="dot" id="brandDot"></span>
+      <h1>STM</h1>
+      <span class="badge" id="modeBadge">live</span>
+    </div>
+    <div class="meta" id="metaBar">—</div>
+    <div class="actions">
+      <button class="btn live-btn is-live" id="btnLive" title="Toggle live feed" aria-pressed="true">
+        <span class="live-indicator" id="liveIndicator" aria-hidden="true"></span>
+        <span class="live-label" id="liveLabel">Live</span>
+      </button>
+      <button class="btn" id="btnRefresh">Refresh</button>
+      <button class="btn danger" id="btnReset">Reset</button>
+    </div>
+  </header>
+
+  <div class="budget">
+    <span class="budget-label">Tokens</span>
+    <div class="budget-track"><div class="budget-fill" id="budgetFill"></div></div>
+    <span class="budget-label" id="budgetText">0</span>
+  </div>
+
+  <div class="stage-wrap">
+    <div class="stage" id="stage">
+      <div class="zone-label zl-in">Incoming → merge</div>
+      <div class="zone-label zl-wm">Working memory (Miller)</div>
+      <div class="zone-label zl-out">Eviction drain</div>
+
+      <div class="merge-zone" id="mergeZone">
+        <div class="merge-arrow" id="mergeArrow">⤵</div>
+      </div>
+
+      <div class="rack" id="rack"></div>
+
+      <div class="miller" id="miller">
+        <span>Miller</span>
+        <div class="miller-dots" id="millerDots"></div>
+        <span id="gmLabel">0/7</span>
+      </div>
+
+      <div class="evict-zone" id="evictZone">
+        <div class="evict-title">Evicted</div>
+        <div id="evictList"></div>
+      </div>
+
+      <div class="legend">
+        <span><b>Size + glow</b> = score (like retain)</span>
+        <span><i class="lg-hi"></i> high focus</span>
+        <span><i class="lg-lo"></i> weak / about to recede</span>
+        <span>rim fill = score · larger = more salient</span>
+      </div>
+      <div class="valence-legend">
+        <span class="pos"><i></i> positive</span>
+        <span class="neu"><i></i> neutral</span>
+        <span class="neg"><i></i> negative</span>
+        <span>hue = valence (same as LTM graph)</span>
+      </div>
+    </div>
+
+    <aside class="side">
+      <nav class="memory-studio-tabs" aria-label="Memory studio sections">
+        <a class="memory-studio-tab active" href="/studio/memory/stm/" aria-current="page">STM</a>
+        <a class="memory-studio-tab" href="/studio/memory/ltm/">LTM</a>
+        <a class="memory-studio-tab" href="/studio/memory/itm/">ITM</a>
+        <a class="memory-studio-tab" href="/studio/memory/kb/">KB</a>
+      </nav>
+
+      <h2>Fill turn</h2>
+      <label for="inUser">User</label>
+      <textarea id="inUser" rows="2" placeholder="user message…"></textarea>
+      <label for="inAsst">Assistant</label>
+      <textarea id="inAsst" rows="2" placeholder="assistant reply…"></textarea>
+      <button class="btn primary block" id="btnFill">Fill into STM</button>
+
+      <h2 class="mt">Factors (selected)</h2>
+      <div id="factorPanel" class="factor-panel muted">Click a node</div>
+
+      <h2 class="mt">Cognitive health</h2>
+      <div id="cognitionPanel" class="factor-panel muted">Loading…</div>
+
+      <div class="demo-panel">
+        <h2>Demo</h2>
+        <p class="demo-hint">Full cycle: seed → fill → recall → eviction. Default stopped; Live is the default source.</p>
+        <div class="demo-controls">
+          <button class="btn icon-btn" id="btnDemoPlay" title="Play demo" aria-label="Play demo">
+            <span class="icon-play" aria-hidden="true"></span>
+          </button>
+          <button class="btn icon-btn" id="btnDemoPause" title="Pause demo" aria-label="Pause demo" disabled>
+            <span class="icon-pause" aria-hidden="true"></span>
+          </button>
+          <button class="btn" id="btnSeed" title="Seed a demo rack">Seed</button>
+          <button class="btn" id="btnTouch" title="Touch / boost recall">Touch</button>
+        </div>
+        <div class="demo-status" id="demoStatus">Demo stopped</div>
+      </div>
+    </aside>
+  </div>
+
+  <script src="shared/graph-bootstrap.js"></script>
+  <script src="static/script.js"></script>
+  <script src="static/valence.js"></script>
+</body>
+</html>

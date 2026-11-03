@@ -1,0 +1,88 @@
+# Social config
+#
+# Non-secret runtime settings for social, messenger, and media adapters.
+# Secrets (tokens, keys, passwords) live in .env / .env.age.
+# Identity handles live in .env only (THREADS_USERNAME, BLUESKY_HANDLE).
+# AI name for "Hi {AI_NAME}" comes from config/system.yaml AI_NAME.
+# Owner display name is read from <USER_SPACE_ROOT>/<user_id>/profile/USER.md.
+
+# -- Weekly workflow (Lane A) --
+WEEKLY_SOCIAL_ENABLED: "1"
+WEEKLY_SOCIAL_AUTODRAFT: "1"
+WEEKLY_SOCIAL_AUTOPOST: "0"
+WEEKLY_SOCIAL_WEEKDAY: "sunday"
+WEEKLY_SOCIAL_TIME: "18:00"
+WEEKLY_SOCIAL_PROVIDERS: "threads"
+WEEKLY_SOCIAL_MAX_CHARS: "260"
+SOCIAL_ROOT: ""
+WEEKLY_SOCIAL_IMAGE_URL: ""
+
+# -- Threads metadata --
+THREADS_ACCESS_TOKEN_EXPIRES_AT: ""
+THREADS_REFRESH_BEFORE_EXPIRY_DAYS: "6"
+THREADS_API_BASE: "https://graph.threads.net/v1.0"
+THREADS_TOPIC_TAG: "AI Threads"
+THREADS_PUBLISH_DELAY_SECONDS: "5"
+THREADS_REPLY_MONITOR_INTERVAL_SECONDS: "180"
+THREADS_REPLY_MONITOR_POST_IDS: ""
+THREADS_REPLY_BEEP_ENABLED: "1"
+THREADS_GLOBAL_MENTIONS_ENABLED: "1"
+THREADS_MEMORY_ENABLED: "1"
+THREADS_INTERACTION_MEMORY_ENABLED: "1"
+THREADS_RECALL_ENABLED: "1"
+THREADS_REPLY_LOG_DIR: "logs/threads"
+THREADS_IMAGEGEN_ENABLED: "1"
+THREADS_IMAGEGEN_TIMEOUT: "300"
+IMGBB_UPLOAD_TIMEOUT: "30"
+
+# -- Bluesky two-way reply monitor --
+BLUESKY_REPLY_MONITOR_INTERVAL_SECONDS: "30"
+BLUESKY_REPLY_BEEP_ENABLED: "1"
+BLUESKY_MEMORY_ENABLED: "1"
+BLUESKY_INTERACTION_MEMORY_ENABLED: "1"
+BLUESKY_RECALL_ENABLED: "1"
+BLUESKY_IMAGEGEN_ENABLED: "1"
+BLUESKY_IMAGEGEN_TIMEOUT: "300"
+BLUESKY_REPLY_LOG_DIR: "logs/bluesky"
+BLUESKY_MONITOR_DAEMON_ENABLED: "1"
+
+# -- Photo social (Lane B — Pixelfed) --
+PHOTO_SOCIAL_AUTODRAFT: "0"
+PHOTO_SOCIAL_AUTOPOST: "0"
+PHOTO_SOCIAL_PROVIDERS: "pixelfed"
+PHOTO_SOCIAL_INBOX: "photos/inbox"
+PHOTO_SOCIAL_MAX_ITEMS: "3"
+PHOTO_SOCIAL_MAX_CHARS: "260"
+PHOTO_SOCIAL_ROOT: ""
+PHOTO_SOCIAL_SCAN_INTERVAL_SECONDS: "21600"
+PIXELFED_MEDIA_ROOTS: ""
+
+# -- Video social (Lane C — YouTube) --
+VIDEO_SOCIAL_AUTODRAFT: "0"
+VIDEO_SOCIAL_AUTOPOST: "0"
+VIDEO_SOCIAL_PROVIDERS: "youtube"
+VIDEO_SOCIAL_INBOX: "videos"
+VIDEO_SOCIAL_ROOT: ""
+VIDEO_SOCIAL_SCAN_INTERVAL_SECONDS: "21600"
+
+# -- Social scheduling metadata --
+WEEKLY_SOCIAL_TIME_OF_DAY: "18:00"
+WEEKLY_SOCIAL_RETRY_INTERVAL_SECONDS: "1800"
+
+# -- Lane A1 Patreon dev-post syndication --
+PATREON_LATEST_POST_URL: ""
+AIKO_DEV_GITHUB_REPO: "OppaAI/aiko-dev"
+AIKO_DEV_GITHUB_BRANCH: "main"
+AIKO_DEV_HUGO_CONTENT_PATH: "content/posts"
+A1_FULL_PROVIDERS: ""
+A1_TEASER_PROVIDERS: "bluesky,discord,threads"  # mastodon paused (suspended) — re-add mastodon when mastodon.bot approved
+
+# -- Social MCP Server --
+SOCIAL_MCP_DB_PATH: ""
+
+# -- Messenger adapters --
+MESSENGER_ADAPTERS: "discord,telegram"
+
+# -- Vision model (photo captioning) --
+VISION_MODEL: "ministral"
+VISION_BASE_URL: ""

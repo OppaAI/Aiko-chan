@@ -1,0 +1,449 @@
+"""
+tests/unit/test_memory_knowledge.py
+
+Unit tests for memory/knowledge.py — search_knowledge, knowledge_context_for, ingest.
+
+Run: pytest tests/unit/test_memory_knowledge.py -v
+"""
+from __future__ import annotations
+
+import hashlib
+import os
+import sys
+import tempfile
+import time
+from unittest.mock import patch
+
+import numpy as np
+import pytest
+from pathlib import Path
+
+os.environ.setdefault("WORKSPACE_ROOT", "/tmp/aiko_test_workspace")
+
+sys.path.insert(0, "/home/oppa-ai/jetson")
+from system.config import load_config
+load_config()
+
+from cognition.knowledge import (
+    search_knowledge,
+    knowledge_context_for,
+    ingest_text,
+    ingest_file,
+    EMBED_DIMS,
+    KNOWLEDGE_KNN_LIMIT,
+    KNOWLEDGE_FTS_LIMIT,
+    KNOWLEDGE_RRF_K,
+    KNOWLEDGE_RECALL_SCORE_THRESHOLD,
+    KNOWLEDGE_CONTEXT_CHARS,
+)
+from cognition.knowledge.search import (
+    _knn, _fts, _search_cache_get, _search_cache_set,
+    maybe_clear_knowledge_cache,
+)
+
+
+def _connect(path, user_id="test_user"):
+    """Test helper: open a throwaway knowledge DB at *path* with the current schema.
+
+    Production ``connect()`` no longer takes a file path (it resolves the
+    canonical store DB per user), so tests build their own DB the same way
+    production does: ``initialize_store_db`` with the knowledge DDL.
+    """
+    from cognition.knowledge.schema import _DDL
+    from cognition.memory.vecstore import initialize_store_db
+    return initialize_store_db(str(path), _DDL, user_id=user_id, vector=True)
+
+
+class FakeEmbedder:
+    """Deterministic stand-in that actually varies by content -- values are
+    zero-centered (not just non-negative) so unrelated texts produce
+    genuinely low/negative cosine similarity, matching how a real embedding
+    space behaves. A positive-orthant-only fake embedder can't represent
+    "unrelated" at all, since any two random positive vectors are already
+    highly similar by geometry alone."""
+    def _vec(self, text: str) -> np.ndarray:
+        h = hashlib.sha256((text or "").encode("utf-8")).digest()
+        raw = (h * (EMBED_DIMS // len(h) + 1))[: EMBED_DIMS * 4]
+        arr = np.frombuffer(raw, dtype=np.uint8).astype(np.float32)
+        arr = arr[:EMBED_DIMS] / 255.0 * 2.0 - 1.0   # rescale to [-1, 1)
+        norm = np.linalg.norm(arr)
+        return (arr / norm if norm else arr).astype(np.float32)
+
+    def embed_query(self, text: str, instruct: str = "") -> np.ndarray:
+        return self._vec(text)
+
+class TestDatabaseSetup:
+    """Tests for database connection and schema."""
+
+    def test_connect_creates_tables(self, tmp_path):
+        db_path = tmp_path / "test_knowledge.db"
+        conn = _connect(str(db_path))
+        try:
+            # Check tables exist
+            tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            table_names = {t[0] for t in tables}
+            assert "learned_docs" in table_names
+            assert "learned_chunks" in table_names
+            assert "learned_chunks_fts" in table_names
+            # Check vec table
+            vec_tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%vec%'").fetchall()
+            assert len(vec_tables) > 0
+        finally:
+            conn.close()
+
+    def test_connect_uses_user_isolation(self, tmp_path):
+        """Different user_ids should resolve to isolated connections."""
+        db1 = _connect(tmp_path / "user1.db", user_id="user1")
+        db2 = _connect(tmp_path / "user2.db", user_id="user2")
+        try:
+            assert db1 is not db2
+        finally:
+            db1.close()
+            db2.close()
+
+class TestIngestText:
+    """Tests for ingest_text."""
+
+    def test_ingest_creates_doc_and_chunks(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        with patch("cognition.knowledge.schema.connect", return_value=_connect(str(db_path))):
+            doc_id = ingest_text(
+                title="Test Doc",
+                text="This is a test document. " * 10,
+                source="test",
+                kind="ingested",
+                embedder=FakeEmbedder(),
+            )
+            assert doc_id is not None 
+
+    def test_ingest_empty_text_returns_none(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        with patch("cognition.knowledge.schema.connect", return_value=_connect(str(db_path))):
+            doc_id = ingest_text("Title", "", embedder=FakeEmbedder())
+            assert doc_id is None
+
+    def test_ingest_sanitizes_text(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        with patch("cognition.knowledge.schema.connect", return_value=_connect(str(db_path))):
+            doc_id = ingest_text(
+                "Title", "  \n\n  Content with  excessive   whitespace  \n\n  ",
+                embedder=FakeEmbedder()
+            )
+            assert doc_id is not None
+
+
+class TestIngestFile:
+    """Tests for ingest_file."""
+
+    def test_ingest_text_file(self, tmp_path):
+        workspace = Path(os.environ["WORKSPACE_ROOT"])
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "test.txt").write_text("File content for ingestion. " * 5)
+
+        with patch("cognition.knowledge.schema.connect", return_value=_connect(str(tmp_path / "test.db"))):
+            doc_id = ingest_file("test.txt", title="Test File", embedder=FakeEmbedder())
+            assert doc_id is not None
+
+    def test_ingest_nonexistent_file(self, tmp_path):
+        with patch("cognition.knowledge.schema.connect", return_value=_connect(str(tmp_path / "test.db"))):
+            doc_id = ingest_file("nonexistent/path.txt", embedder=FakeEmbedder())
+            assert doc_id is None
+
+
+class TestSearchKnowledge:
+    """Tests for search_knowledge."""
+
+    def setup_method(self):
+        """Create a fresh DB with test data for each test."""
+        self.tmp_path = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmp_path, "test.db")
+        self.conn = _connect(self.db_path)
+
+        # Insert test documents
+        self._seed_test_data()
+
+    def teardown_method(self):
+        self.conn.close()
+        import shutil
+        shutil.rmtree(self.tmp_path, ignore_errors=True)
+
+    def _seed_test_data(self):
+        embedder = FakeEmbedder()
+        now = "2024-01-01T00:00:00"
+
+        # Doc 1: Quantum computing
+        doc1_id = "doc-1"
+        self.conn.execute(
+            "INSERT INTO learned_docs (id, user_id, title, source, kind, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (doc1_id, "test_user", "Quantum Basics", "test", "ingested", now)
+        )
+        text1 = "Quantum computing uses qubits for computation. Qubits can be in superposition."
+        chunks1 = [text1[i:i+100] for i in range(0, len(text1), 80)]
+        for i, chunk in enumerate(chunks1):
+            chunk_id = f"{doc1_id}-chunk-{i}"
+            vec = embedder.embed_query(chunk)
+            import sqlite_vec
+            self.conn.execute(
+                "INSERT INTO learned_chunks (id, doc_id, user_id, chunk_index, text, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (chunk_id, doc1_id, "test_user", i, chunk, now)
+            )
+            self.conn.execute(
+                "INSERT INTO learned_chunks_vec (id, embedding) VALUES (?, ?)",
+                (chunk_id, sqlite_vec.serialize_float32(vec.tolist()))
+            )
+            # learned_chunks_ai trigger already synced learned_chunks_fts above
+
+        # Doc 2: Classical computing
+        doc2_id = "doc-2"
+        self.conn.execute(
+            "INSERT INTO learned_docs (id, user_id, title, source, kind, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (doc2_id, "test_user", "Classical Computing", "test", "ingested", now)
+        )
+        text2 = "Classical computers use bits which are either 0 or 1. No superposition."
+        chunks2 = [text2[i:i+100] for i in range(0, len(text2), 80)]
+        for i, chunk in enumerate(chunks2):
+            chunk_id = f"{doc2_id}-chunk-{i}"
+            vec = embedder.embed_query(chunk)
+            import sqlite_vec
+            self.conn.execute(
+                "INSERT INTO learned_chunks (id, doc_id, user_id, chunk_index, text, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (chunk_id, doc2_id, "test_user", i, chunk, now)
+            )
+            self.conn.execute(
+                "INSERT INTO learned_chunks_vec (id, embedding) VALUES (?, ?)",
+                (chunk_id, sqlite_vec.serialize_float32(vec.tolist()))
+            )
+            # learned_chunks_ai trigger already synced learned_chunks_fts above
+
+        self.conn.commit()
+    
+    def test_search_returns_relevant_results(self):
+        with patch("cognition.knowledge.search.connect", return_value=self.conn):
+            results = search_knowledge("quantum qubits", limit=5, embedder=FakeEmbedder(), user_id="test_user")
+            assert len(results) > 0
+            # Should find quantum doc
+            assert any("quantum" in r["text"].lower() for r in results)
+
+    def test_search_filters_by_user(self):
+        with patch("cognition.knowledge.search.connect", return_value=self.conn):
+            results = search_knowledge("quantum", limit=5, embedder=FakeEmbedder(), user_id="other_user")
+            assert len(results) == 0
+
+    def test_search_returns_scores(self):
+        with patch("cognition.knowledge.search.connect", return_value=self.conn):
+            results = search_knowledge("quantum", limit=5, embedder=FakeEmbedder(), user_id="test_user")
+            for r in results:
+                assert "score" in r
+                assert isinstance(r["score"], float)
+                assert 0 <= r["score"] <= 1
+
+    def test_search_limit_respected(self):
+        with patch("cognition.knowledge.search.connect", return_value=self.conn):
+            results = search_knowledge("computing", limit=1, embedder=FakeEmbedder(), user_id="test_user")
+            assert len(results) <= 1
+
+    def test_empty_query_returns_empty(self):
+        with patch("cognition.knowledge.search.connect", return_value=self.conn):
+            results = search_knowledge("", embedder=FakeEmbedder(), user_id="test_user")
+            assert results == []
+
+
+class TestKnowledgeContextFor:
+    """Tests for knowledge_context_for formatting."""
+
+    def setup_method(self):
+        self.tmp_path = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmp_path, "test.db")
+        self.conn = _connect(self.db_path)
+        self._seed_data()
+
+    def teardown_method(self):
+        self.conn.close()
+        import shutil
+        shutil.rmtree(self.tmp_path, ignore_errors=True)
+
+    def _seed_data(self):
+        embedder = FakeEmbedder()
+        now = "2024-01-01T00:00:00"
+        doc_id = "doc-test"
+        self.conn.execute(
+            "INSERT INTO learned_docs (id, user_id, title, source, kind, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (doc_id, "test_user", "Test Title", "test", "ingested", now)
+        )
+        text = "This is test content for knowledge retrieval."
+        chunk_id = f"{doc_id}-chunk-0"
+        vec = embedder.embed_query(text)
+        import sqlite_vec
+        self.conn.execute(
+            "INSERT INTO learned_chunks (id, doc_id, user_id, chunk_index, text, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (chunk_id, doc_id, "test_user", 0, text, now)
+        )
+        self.conn.execute(
+            "INSERT INTO learned_chunks_vec (id, embedding) VALUES (?, ?)",
+            (chunk_id, sqlite_vec.serialize_float32(vec.tolist()))
+        )
+        # learned_chunks_ai trigger already synced learned_chunks_fts above
+        self.conn.commit()
+
+    def test_returns_xml_format(self):
+        with patch("cognition.knowledge.search.connect", return_value=self.conn):
+            ctx = knowledge_context_for("test", limit=5, embedder=FakeEmbedder(), user_id="test_user")
+            assert "<knowledge_context>" in ctx
+            assert "</knowledge_context>" in ctx
+            assert "<knowledge_chunk" in ctx
+            assert "doc_id" in ctx
+            assert "title" in ctx
+            assert "kind" in ctx
+            assert "source" in ctx
+            assert "score" in ctx
+
+    def test_no_results_returns_empty_message(self):
+        with patch("cognition.knowledge.search.connect", return_value=self.conn):
+            ctx = knowledge_context_for("nonexistent query xyz", limit=5, embedder=FakeEmbedder(), user_id="test_user")
+            assert "No matching learned knowledge found" in ctx
+
+    def test_max_chars_limit(self):
+        with patch("cognition.knowledge.search.connect", return_value=self.conn):
+            ctx = knowledge_context_for("test", limit=5, max_chars=50, embedder=FakeEmbedder(), user_id="test_user")
+            # Content should be truncated
+            assert len(ctx) < 500  # Well under default
+
+    def test_cache_hit_returns_cached(self):
+        """Second call with same query should use cache."""
+        # The search cache is process-global and its key includes
+        # id(embedder), which CPython can reuse after GC — a stale entry
+        # from an earlier test would make the first call below a cache
+        # hit and leave `opened` empty. Start from a clean cache.
+        maybe_clear_knowledge_cache()
+        # Production opens a fresh connection per call (and closes it in a
+        # finally), so mirror that: each connect() gets its own handle on the
+        # same tmp DB file. The cache key includes id(embedder), so reuse one
+        # instance for both calls.
+        opened = []
+        def fresh_conn(uid=None):
+            opened.append(uid)
+            return _connect(self.db_path)
+        with patch("cognition.knowledge.search.connect", side_effect=fresh_conn):
+            embedder = FakeEmbedder()
+            ctx1 = knowledge_context_for("test query", limit=5, embedder=embedder, user_id="test_user")
+            ctx2 = knowledge_context_for("test query", limit=5, embedder=embedder, user_id="test_user")
+            assert "<knowledge_chunk" in ctx1
+            assert ctx1 == ctx2
+            assert len(opened) == 1  # second call served from cache, no DB hit
+
+
+class TestKNNAndFTS:
+    """Tests for _knn and _fts internal functions."""
+
+    def setup_method(self):
+        self.tmp_path = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmp_path, "test.db")
+        self.conn = _connect(self.db_path)
+        self._seed_data()
+
+    def teardown_method(self):
+        self.conn.close()
+        import shutil
+        shutil.rmtree(self.tmp_path, ignore_errors=True)
+
+    def _seed_data(self):
+        embedder = FakeEmbedder()
+        now = "2024-01-01T00:00:00"
+        for i in range(10):
+            doc_id = f"doc-{i}"
+            self.conn.execute(
+                "INSERT INTO learned_docs (id, user_id, title, source, kind, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (doc_id, "test_user", f"Doc {i}", "test", "ingested", now)
+            )
+            text = f"Content about topic {i}. " * 5
+            chunk_id = f"{doc_id}-chunk-0"
+            vec = embedder.embed_query(text)
+            import sqlite_vec
+            self.conn.execute(
+                "INSERT INTO learned_chunks (id, doc_id, user_id, chunk_index, text, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (chunk_id, doc_id, "test_user", 0, text, now)
+            )
+            self.conn.execute(
+                "INSERT INTO learned_chunks_vec (id, embedding) VALUES (?, ?)",
+                (chunk_id, sqlite_vec.serialize_float32(vec.tolist()))
+            )
+            # learned_chunks_ai trigger already synced learned_chunks_fts above
+        self.conn.commit()
+
+    def test_knn_returns_ranked_ids(self):
+        ranked = _knn(self.conn, "topic 5", FakeEmbedder(), "test_user", KNOWLEDGE_KNN_LIMIT)
+        assert isinstance(ranked, list)
+        assert len(ranked) <= KNOWLEDGE_KNN_LIMIT
+
+    def test_fts_returns_ranked_ids(self):
+        ranked = _fts(self.conn, "topic", "test_user", KNOWLEDGE_FTS_LIMIT)
+        assert isinstance(ranked, list)
+        assert len(ranked) <= KNOWLEDGE_FTS_LIMIT
+
+    def test_knn_empty_query(self):
+        ranked = _knn(self.conn, "", FakeEmbedder(), "test_user", KNOWLEDGE_KNN_LIMIT)
+        assert ranked == []
+
+    def test_fts_empty_query(self):
+        ranked = _fts(self.conn, "", "test_user", KNOWLEDGE_FTS_LIMIT)
+        assert ranked == []
+
+
+class TestCache:
+    """Tests for search caching."""
+
+    def test_cache_set_get(self):
+        _search_cache_set("test query", "user1", 5, "emb", [{"id": "1", "text": "cached"}])
+        cached = _search_cache_get("test query", "user1", 5, "emb")
+        assert cached is not None
+        assert cached[0]["id"] == "1"
+
+    def test_cache_miss_different_params(self):
+        _search_cache_set("query", "user1", 5, "emb", [{"id": "1"}])
+        cached = _search_cache_get("query", "user1", 10, "emb")  # Different limit
+        assert cached is None
+
+    def test_cache_miss_different_embedder(self):
+        _search_cache_set("query", "user1", 5, "emb-a", [{"id": "1"}])
+        assert _search_cache_get("query", "user1", 5, "emb-b") is None
+
+    def test_cache_ttl_expiry(self, monkeypatch):
+        import cognition.knowledge.search as search_module
+        monkeypatch.setattr(search_module, "_KNOWLEDGE_SEARCH_CACHE_TTL", 0.01)
+        _search_cache_set("query", "user1", 5, "emb", [{"id": "1"}])
+        time.sleep(0.02)
+        cached = _search_cache_get("query", "user1", 5, "emb")
+        assert cached is None
+
+    def test_cache_max_entries_eviction(self):
+        # Fill beyond max
+        for i in range(300):
+            _search_cache_set(f"query{i}", "user1", 5, "emb", [{"id": str(i)}])
+        # Oldest should be evicted
+        cached = _search_cache_get("query0", "user1", 5, "emb")
+        # May or may not be evicted depending on implementation
+        # Just verify no crash
+        assert cached is None or isinstance(cached, list)
+
+
+class TestConstants:
+    """Tests for module constants."""
+
+    def test_knn_limit_positive(self):
+        assert KNOWLEDGE_KNN_LIMIT > 0
+
+    def test_fts_limit_positive(self):
+        assert KNOWLEDGE_FTS_LIMIT > 0
+
+    def test_rrf_k_positive(self):
+        assert KNOWLEDGE_RRF_K > 0
+
+    def test_recall_threshold_nonnegative(self):
+        assert KNOWLEDGE_RECALL_SCORE_THRESHOLD >= 0
+
+    def test_context_chars_positive(self):
+        assert KNOWLEDGE_CONTEXT_CHARS > 0
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

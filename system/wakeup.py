@@ -266,6 +266,26 @@ class AikoWakeup:
             on_done(key)                                                # announce boot step finishes
             return result                                               # return results of boot step function
 
+        memory_attached = threading.Event()
+        disposal_lock = threading.Lock()
+        disposal_started = False
+
+        def dispose_unused_memory(future: Future) -> None:
+            nonlocal disposal_started
+            with disposal_lock:
+                if disposal_started:
+                    return
+                disposal_started = True
+            def dispose() -> None:
+                try:
+                    unused = future.result()
+                    if unused is not None:
+                        mem_cleanup_done.wait()
+                        unused.close()
+                except Exception:
+                    log.exception("[wakeup] Failed to close unused startup memory")
+            threading.Thread(target=dispose, name="aiko-boot-mem-dispose", daemon=True).start()
+
         def init_think(memorize_getter: Callable[[], Any]):
             """memorize_getter is a zero-arg callable so init_think can pull
             the memorize result lazily, after mem_ready_evt fires — avoids needing
@@ -277,6 +297,7 @@ class AikoWakeup:
             selected_memory = None
             if mem_ok:
                 selected_memory = memorize_getter()
+                memory_attached.set()
                 _boot_step('think_inject', lambda: (think.set_memorize(selected_memory), think.start_idle_learner()))
             else:
                 # Memory init hung past the timeout (its finally always sets the
@@ -284,18 +305,7 @@ class AikoWakeup:
                 # must not hang here on an unattended boot — run degraded.
                 on_skip('think_inject')
                 log.warning("[wakeup] mem_ready_evt timed out after %ds — think continuing without memory.", _MEM_BOOT_TIMEOUT_S)
-                def dispose_late_memory(future: Future) -> None:
-                    def dispose() -> None:
-                        try:
-                            late_memory = future.result()
-                            if late_memory is not None:
-                                mem_cleanup_done.wait()
-                                late_memory.close()
-                        except Exception:
-                            log.exception("[wakeup] Failed to close memory that finished after startup timeout")
-                    threading.Thread(target=dispose, name="aiko-boot-mem-dispose", daemon=True).start()
-
-                mem_future.add_done_callback(dispose_late_memory)
+                mem_future.add_done_callback(dispose_unused_memory)
             # NOTE: semantic-cache prewarm moved to system/prepare.run_post_auth() —
             # as guest it couldn't persist per-user npz caches anyway, and post-login
             # it loads the real user's existing disk cache instead of recomputing.
@@ -409,6 +419,8 @@ class AikoWakeup:
             memorize = None
 
         if think_ref is None:                                                                 # if cognitive core initialization failed (returned None)
+            if think_future.done() and not memory_attached.is_set():
+                mem_future.add_done_callback(dispose_unused_memory)
             log.critical(                                                                     # single log point: critical severity + full traceback in one line
                 "[wakeup] AikoThink boot failed — cannot continue without cognition core.",
                 exc_info=think_exc,

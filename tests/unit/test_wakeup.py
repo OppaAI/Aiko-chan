@@ -111,6 +111,9 @@ class FakeMemorize:
     def get_user_id(self):
         return "fake_user"
 
+    def close(self):
+        self.closed = True
+
 
 class FakeMemorizeThatRaises:
     """Simulates AikoMemorize construction failing outright. mem_ready must
@@ -368,6 +371,38 @@ class TestCallbackContract:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestFailurePaths:
+    def test_failure_after_memory_attachment_does_not_close_live_backend(self, monkeypatch):
+        instances = []
+        class Memory(FakeMemorize):
+            def __init__(self, silent=True):
+                super().__init__(silent=silent)
+                instances.append(self)
+        class Think(FakeThink):
+            def start_idle_learner(self):
+                raise RuntimeError("idle worker start failed")
+        _patch_common(monkeypatch, think_cls=Think, memorize_cls=Memory)
+        with pytest.raises(RuntimeError, match="AikoThink boot failed"):
+            AikoWakeup().boot(_noop, _noop, _noop)
+        assert not getattr(instances[0], "closed", False)
+
+    def test_cognition_constructor_failure_closes_unattached_memory(self, monkeypatch):
+        closed = threading.Event()
+        release_memory = threading.Event()
+        class Memory(FakeMemorize):
+            def __init__(self, silent=True):
+                super().__init__(silent=silent)
+                release_memory.wait(3)
+            def close(self):
+                closed.set()
+        _patch_common(monkeypatch, think_cls=FakeThinkThatRaises, memorize_cls=Memory)
+        try:
+            with pytest.raises(RuntimeError, match="AikoThink boot failed"):
+                AikoWakeup().boot(_noop, _noop, _noop)
+            release_memory.set()
+            assert closed.wait(2)
+        finally:
+            release_memory.set()
+
     def test_scheduler_starts_after_backend_configuration(self, monkeypatch):
         _patch_common(monkeypatch)
         events = []

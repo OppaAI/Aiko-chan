@@ -34,6 +34,9 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 - Memory readiness is published after the startup result is available.
 - Thinking and the returned boot result use the same memory startup decision.
 - Memory that finishes after its startup timeout is closed after cleanup.
+- Fatal cognition failure before memory attachment also disposes unused memory
+  after cleanup, using a shared guard against duplicate closes. Attached memory
+  is conservatively retained because workers may already be using it.
 - Fatal cognition startup skips the optional Fly catalog warmup.
 - Fatal cognition startup also bypasses the optional MCP bridge wait, avoiding
   up to 120 seconds of delay before reporting the failure to the supervisor.

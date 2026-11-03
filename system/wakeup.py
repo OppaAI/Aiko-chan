@@ -275,8 +275,10 @@ class AikoWakeup:
             think = _boot_step('think_start', lambda: AikoThink())                            # initiate cognitive core
             _boot_step('think_warmup', lambda: (think.start_warmup(), think.join_warmup()))   # start warmup thread, then block until it finishes
             mem_ok = _boot_step('think_mem_wait', lambda: mem_ready_evt.wait(timeout=_MEM_BOOT_TIMEOUT_S))  # bounded: a wedged memory init must not trap the think thread
+            selected_memory = None
             if mem_ok:
-                _boot_step('think_inject', lambda: (think.set_memorize(memorize_getter()), think.start_idle_learner()))  # inject memory backend + start idle learner (no-ops if memorize is None)
+                selected_memory = memorize_getter()
+                _boot_step('think_inject', lambda: (think.set_memorize(selected_memory), think.start_idle_learner()))
             else:
                 # Memory init hung past the timeout (its finally always sets the
                 # event on return/raise, so a timeout means a true hang). Think
@@ -286,7 +288,7 @@ class AikoWakeup:
             # NOTE: semantic-cache prewarm moved to system/prepare.run_post_auth() —
             # as guest it couldn't persist per-user npz caches anyway, and post-login
             # it loads the real user's existing disk cache instead of recomputing.
-            return think                                                                      # return the live AikoThink object
+            return think, selected_memory
 
         def init_memorize():
             try:
@@ -383,13 +385,9 @@ class AikoWakeup:
         think_ref: AikoThink | None = None                                                # will hold AikoThink reference
         think_exc: Exception | None = None                                                # holds exception from cognitive core initialization for error chaining
         try:                                                                              # retrieve cognitive core initialization result
-            think_ref = think_future.result(timeout=_THINK_BOOT_TIMEOUT_S)                # bounded: a hung think init fails loudly (systemd restarts) instead of wedging boot
+            think_ref, memorize = think_future.result(timeout=_THINK_BOOT_TIMEOUT_S)
         except Exception as exc:                                                          # if error (incl. FuturesTimeoutError),
             think_exc = exc                                                               # logged once and chained into the raise later
-        try:
-            memorize = mem_future.result(timeout=_MEM_BOOT_TIMEOUT_S)                     # bounded: falls back to memorize=None below on timeout
-        except FuturesTimeoutError:
-            log.warning("[wakeup] memory boot timed out after %ds — continuing without persistent memory.", _MEM_BOOT_TIMEOUT_S)
             memorize = None
 
         # ── fly catalog warmup (fire-and-forget) ──────────────────────────────

@@ -215,6 +215,15 @@ def test_memory_ready_callback_stall_does_not_wedge_thinking(monkeypatch):
         release.set()
 
 
+def test_late_memory_does_not_produce_mismatched_boot_result(monkeypatch):
+    _patch_common(monkeypatch, memorize_kwargs={"boot_delay": 0.15})
+    monkeypatch.setattr(wakeup_module, "_MEM_BOOT_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(wakeup_module, "_THINK_BOOT_TIMEOUT_S", 1)
+    result = AikoWakeup().boot(_noop, _noop, _noop, enable_tts=False, enable_asr=False)
+    assert result.memorize is None
+    assert result.think._memorize is None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Tier 1 -- boot label integrity, pure, no mocking needed
 # ─────────────────────────────────────────────────────────────────────────────

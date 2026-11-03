@@ -411,6 +411,13 @@ class AikoWakeup:
             think_exc = exc                                                               # logged once and chained into the raise later
             memorize = None
 
+        if think_ref is None:                                                                 # if cognitive core initialization failed (returned None)
+            log.critical(                                                                     # single log point: critical severity + full traceback in one line
+                "[wakeup] AikoThink boot failed — cannot continue without cognition core.",
+                exc_info=think_exc,
+            )
+            raise RuntimeError("AikoThink boot failed") from think_exc                        # chain from previous error point so callers/tracebacks still see the root cause
+
         # ── fly catalog warmup (fire-and-forget) ──────────────────────────────
         # First evaluation parses ~489MB of connectome JSON; done lazily that
         # stalls a chat turn AND starves the webui (GIL + swap spike) for
@@ -438,13 +445,6 @@ class AikoWakeup:
             mcp_ok = False
         if not mcp_ok:
             log.info("[wakeup] MCP client skipped or unavailable — Aiko will run without social posting tools.")
-
-        if think_ref is None:                                                                 # if cognitive core initialization failed (returned None)
-            log.critical(                                                                     # single log point: critical severity + full traceback in one line
-                "[wakeup] AikoThink boot failed — cannot continue without cognition core.",
-                exc_info=think_exc,
-            )
-            raise RuntimeError("AikoThink boot failed") from think_exc                        # chain from previous error point so callers/tracebacks still see the root cause
 
         # Do not start the potentially large catalog load during a failed boot.
         import os as _os

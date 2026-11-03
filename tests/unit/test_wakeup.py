@@ -368,6 +368,29 @@ class TestCallbackContract:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestFailurePaths:
+    def test_fatal_cognition_failure_does_not_wait_for_optional_mcp(self, monkeypatch):
+        import agentic.mcp_client.bridge as bridge
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        def slow_mcp():
+            started.set()
+            release.wait(3)
+            finished.set()
+            return False
+        def fail_think():
+            assert started.wait(2)
+            raise RuntimeError("cognition unavailable")
+        _patch_common(monkeypatch, think_cls=fail_think)
+        monkeypatch.setattr(bridge, "bootstrap_mcp", slow_mcp)
+        try:
+            with pytest.raises(RuntimeError, match="AikoThink boot failed"):
+                AikoWakeup().boot(_noop, _noop, _noop)
+            assert not finished.is_set()
+        finally:
+            release.set()
+            assert finished.wait(2)
+
     def test_boot_raises_when_think_fails(self, monkeypatch):
         """Think is the cognition core — boot() must fail loudly (not limp
         along degraded) so the supervisor restarts instead of serving a

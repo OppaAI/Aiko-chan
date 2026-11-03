@@ -35,6 +35,8 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 - Thinking and the returned boot result use the same memory startup decision.
 - Memory that finishes after its startup timeout is closed after cleanup.
 - Fatal cognition startup skips the optional Fly catalog warmup.
+- Fatal cognition startup also bypasses the optional MCP bridge wait, avoiding
+  up to 120 seconds of delay before reporting the failure to the supervisor.
 - Transition from startup to chat uses a bounded spinner join so a stalled
   UI spinner cannot prevent the input loop from starting.
 - Shutdown continues remaining cleanup when an individual subsystem fails.
@@ -67,6 +69,15 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
   checks conversion with a 64 KB system page size.
 - Version remains 0.2.0. Jetson Orin Nano 8 GB performance measurements and the
   remaining lifecycle and duplication review are still pending.
+
+Remaining review blocks (not counts of undiscovered bugs):
+
+1. Failures during session setup before the input-loop cleanup guard, and
+   ownership of resources created during failed boot.
+2. Remaining dead code and configuration inconsistencies in the launcher and
+   orchestration paths.
+3. Peak RAM, concurrent model loading, and latency measurements on the actual
+   Jetson Orin Nano 8 GB.
 
 Combined verification at `abee4b82` completed with 2,112 unit tests and 30
 integration tests passing (5 unit tests skipped). These results cover the

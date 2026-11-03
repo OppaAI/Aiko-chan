@@ -6,6 +6,82 @@ import sys
 import pytest
 
 
+@pytest.mark.parametrize("kind", ["system", "user"])
+def test_dispatch_does_not_start_jobs_after_shutdown_during_gate_wait(monkeypatch, kind):
+    import system.schedule as schedule
+    monkeypatch.setattr(schedule.ScheduleRunner, "_missing_reflection_dates", lambda self: [])
+    monkeypatch.setattr(schedule.ScheduleRunner, "_monthly_catchup_needed", lambda self: False)
+    runner = schedule.ScheduleRunner(user_id="github_alice")
+    future = schedule.bioclock.local_now() + timedelta(days=30)
+    for field in ("_next_daily", "_next_monthly", "_next_ledger_prune", "_next_monthly_verify", "_next_fly_replay"):
+        setattr(runner, field, future)
+    if kind == "system":
+        runner._next_daily = schedule.bioclock.local_now() - timedelta(seconds=1)
+    monkeypatch.setattr(schedule, "all_user_ids", lambda: ["github_alice"])
+    monkeypatch.setattr(runner, "_due_user_jobs", lambda uid: kind == "user")
+    monkeypatch.setattr(runner, "_due_schedule_graphs", lambda uid: False)
+    events = []
+    def acquire(**kwargs):
+        events.append("acquire")
+        runner.stop()
+        return True
+    monkeypatch.setattr(schedule, "acquire_busy", acquire)
+    monkeypatch.setattr(schedule, "release_busy", lambda: events.append("release"))
+    monkeypatch.setattr(runner, "set_user", lambda uid: events.append("bind"))
+    monkeypatch.setattr(runner, "_run_daily_reflect_and_dream", lambda: events.append("daily"))
+    monkeypatch.setattr(runner, "_fire_due_user_jobs", lambda uid: events.append("user"))
+    runner._run()
+    assert events == ["acquire", "release"]
+
+
+@pytest.mark.parametrize("stop_while_waiting", [False, True])
+def test_monthly_catchup_skips_unavailable_or_stopped_gate(monkeypatch, stop_while_waiting):
+    from types import SimpleNamespace
+    import system.schedule as schedule
+    monkeypatch.setattr(schedule.ScheduleRunner, "_missing_reflection_dates", lambda self: [])
+    monkeypatch.setattr(schedule.ScheduleRunner, "_monthly_catchup_needed", lambda self: False)
+    events = []
+    runner = schedule.ScheduleRunner(user_id="github_alice", consolidate_fn=lambda *a, **kw: events.append("run"))
+    runner._memorize = SimpleNamespace(switch_user=lambda uid: events.append("switch") or True)
+    def acquire(**kwargs):
+        if stop_while_waiting:
+            runner.stop()
+        return stop_while_waiting
+    monkeypatch.setattr(schedule, "acquire_busy", acquire)
+    monkeypatch.setattr(schedule, "release_busy", lambda: events.append("release"))
+    monkeypatch.setattr(schedule, "_write_last_consolidated_month", lambda *a, **kw: events.append("record"))
+    runner._run_monthly_consolidate()
+    assert events == (["release"] if stop_while_waiting else [])
+
+
+@pytest.mark.parametrize("switch_ok", [True, False])
+def test_monthly_catchup_binds_memory_under_gate(monkeypatch, switch_ok):
+    from types import SimpleNamespace
+    import system.schedule as schedule
+    from system.userspace import current_user_id
+    monkeypatch.setattr(schedule.ScheduleRunner, "_missing_reflection_dates", lambda self: [])
+    monkeypatch.setattr(schedule.ScheduleRunner, "_monthly_catchup_needed", lambda self: False)
+    events = []
+    memory = SimpleNamespace(switch_user=lambda uid: events.append(("switch", uid)) or switch_ok)
+    def consolidate(mem, **kwargs):
+        assert mem is memory
+        assert current_user_id() == "github_alice"
+        events.append("consolidate")
+        return {"ran": True}
+    runner = schedule.ScheduleRunner(user_id="github_alice", consolidate_fn=consolidate)
+    runner._memorize = memory
+    monkeypatch.setattr(schedule, "acquire_busy", lambda **kw: events.append("acquire") or True)
+    monkeypatch.setattr(schedule, "release_busy", lambda: events.append("release"))
+    monkeypatch.setattr(schedule, "_write_last_consolidated_month", lambda *a, **kw: events.append("record"))
+    previous_uid = current_user_id()
+    runner._run_monthly_consolidate()
+    expected = ["acquire", ("switch", "github_alice")]
+    if switch_ok:
+        expected += ["consolidate", "record"]
+    assert events == expected + ["release"]
+    assert current_user_id() == previous_uid
+
+
 def test_catchup_preserves_dates_when_stopped_waiting_for_gate(monkeypatch):
     import system.schedule as schedule
     monkeypatch.setattr(schedule.ScheduleRunner, "_missing_reflection_dates", lambda self: [])

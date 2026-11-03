@@ -2267,12 +2267,16 @@ class ScheduleRunner:
                 key=lambda x: x[0],
             ) if self._owner_promoted.is_set() else []
             for _target, name in system_due:
+                if self._stop.is_set():
+                    return
                 if not acquire_busy(owner=f"scheduler:system-{name}"):
                     log.error(
                         "Scheduler: skipping system job %s — %s",
                         name, holder_desc())
                     continue
                 try:
+                    if self._stop.is_set():
+                        return
                     self.set_user(self._owner_user_id)
                     # _run() executes on its own daemon thread, which starts
                     # with a fresh contextvars context — current_user_id()
@@ -2323,6 +2327,8 @@ class ScheduleRunner:
             # memory/think singletons bound to that user's identity — takes
             # the shared gate.
             for uid in all_user_ids():
+                if self._stop.is_set():
+                    return
                 due_user_jobs = self._due_user_jobs(uid)
                 due_graphs    = self._due_schedule_graphs(uid)
                 if not due_user_jobs and not due_graphs:
@@ -2333,6 +2339,8 @@ class ScheduleRunner:
                         uid, holder_desc())
                     continue
                 try:
+                    if self._stop.is_set():
+                        return
                     self.set_user(uid)
                     uid_token = set_current_user_id(uid)
                     try:
@@ -2575,15 +2583,33 @@ class ScheduleRunner:
         if not self._memorize or not self._consolidate_fn:
             log.warning("monthly_consolidate: memorize or consolidate_fn not set — skipping.")
             return
-
+        if self._stop.is_set():
+            return
+        if not acquire_busy(owner="scheduler:monthly-consolidate"):
+            log.warning("monthly_consolidate: busy gate timed out — skipping.")
+            return
         try:
-            log.info("monthly_consolidate: starting.")
-            now = bioclock.local_now()
-            result = self._consolidate_fn(self._memorize, now=now, user_id=self._owner_user_id)
-            log.info("monthly_consolidate: done — %s", result)
-            _write_last_consolidated_month(now.strftime("%Y-%m"), user_id=self._owner_user_id)
-        except Exception as e:
-            log.error("monthly_consolidate failed: %s", e)
+            if self._stop.is_set():
+                return
+            uid = self._resolve_owner()
+            if not uid or uid == "guest":
+                return
+            token = set_current_user_id(uid)
+            try:
+                if not self._memorize.switch_user(uid):
+                    log.warning("monthly_consolidate: memory switch failed — skipping.")
+                    return
+                log.info("monthly_consolidate: starting.")
+                now = bioclock.local_now()
+                result = self._consolidate_fn(self._memorize, now=now, user_id=uid)
+                log.info("monthly_consolidate: done — %s", result)
+                _write_last_consolidated_month(now.strftime("%Y-%m"), user_id=uid)
+            except Exception as e:
+                log.error("monthly_consolidate failed: %s", e)
+            finally:
+                reset_current_user_id(token)
+        finally:
+            release_busy()
 
     def _run_fly_replay(self) -> bool:
         """Nightly offline MB replay (Phase 8). Not in schedule.json.

@@ -55,6 +55,10 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
   workers after shutdown, including when shutdown arrives during its scan.
 - Daily catch-up checks shutdown after acquiring the turn gate and retains
   pending dates when stopped or when switching memory users fails.
+- Monthly catch-up acquires the shared turn gate, binds the owner's memory
+  and identity, and skips work if the gate times out or shutdown arrives.
+- System and user dispatch recheck shutdown after waiting for the shared
+  turn gate, releasing it without starting queued jobs when stopped.
 - Monthly verification is included in scheduler wakeup timing, so it cannot
   be delayed simply because the next daily or monthly job is later.
 - The RSS fallback no longer opens an unused proc file, and regression coverage

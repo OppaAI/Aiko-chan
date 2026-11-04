@@ -2,8 +2,8 @@
  *
  * Organic neural-field view (reference: graph-explorer hairball):
  * deterministic one-shot force layout (seeded, bounded ticks, no live
- * simulation loop), glossy 3D spheres via one shared radial gradient per
- * type, thin faint connectors whose brightness follows both endpoint sizes.
+ * simulation loop), pastel discs with a quiet outline,
+ * thin faint connectors whose brightness follows both endpoint sizes.
  * Size + brightness track importance.
  */
 const API_BASE = (window.KNOWLEDGE_API_BASE || GraphBoot.apiBase()).replace(/\/+$/, '');
@@ -19,8 +19,8 @@ let liveSim = null;      // live force sim: drag to move, release to spring back
 let currentNodes = [];
 let currentLinks = [];
 
-const COL_CHUNK = '#4ade80';
-const COL_ENTITY = '#a78bfa';
+const COL_CHUNK = '#a1d9b1';
+const COL_ENTITY = '#c8b4e9';
 const EDGE_ABOUT = '#6ee7a8';
 const EDGE_SAMEDOC = '#5b4a6e';
 
@@ -38,12 +38,12 @@ function importanceOf(d) {
 
 function nodeRadius(d) {
   const r = importanceOf(d);
-  if (d.type === 'entity') return 4 + 13 * Math.pow(r, 1.25);
-  return 4 + 19 * Math.pow(r, 1.35);
+  if (d.type === 'entity') return 4 + 8 * Math.pow(r, 1.25);
+  return 4 + 12 * Math.pow(r, 1.35);
 }
 
 function nodeOpacity(d) {
-  return 0.30 + importanceOf(d) * 0.55;
+  return 0.75 + importanceOf(d) * 0.25;
 }
 
 /* Edge brightness follows both endpoint sizes — dim when both ends are small. */
@@ -365,22 +365,6 @@ function showDetails(d) {
 function ensureScene() {
   if (viewport) return;
   const svg = d3.select('#svg');
-  const defs = svg.append('defs');
-  // Translucent glass marbles: soft sheen, feathered edge melting into the
-  // dark background (outer stop fades to transparent).
-  for (const [key, base] of [['chunk', COL_CHUNK], ['entity', COL_ENTITY]]) {
-    const g = defs.append('radialGradient')
-      .attr('id', 'gloss-' + key)
-      .attr('cx', '34%').attr('cy', '28%').attr('r', '78%');
-    g.append('stop').attr('offset', '0%').attr('stop-color', shade(base, 0.38));
-    g.append('stop').attr('offset', '40%').attr('stop-color', shade(base, 0.10));
-    g.append('stop').attr('offset', '72%').attr('stop-color', base);
-    g.append('stop').attr('offset', '100%').attr('stop-color', base).attr('stop-opacity', 0.30);
-  }
-  const glare = defs.append('radialGradient').attr('id', 'kb-glare').attr('cx', '50%').attr('cy', '50%').attr('r', '50%');
-  glare.append('stop').attr('offset', '0%').attr('stop-color', '#ffffff').attr('stop-opacity', 0.85);
-  glare.append('stop').attr('offset', '100%').attr('stop-color', '#ffffff').attr('stop-opacity', 0);
-
   viewport = svg.append('g').attr('id', 'viewport');
   zoomBeh = GraphBoot.makeZoom({ scaleExtent: [0.15, 4], target: viewport });
   svg.call(zoomBeh);
@@ -481,8 +465,7 @@ function update() {
     [...nodes].sort((a, b) => importanceOf(b) - importanceOf(a)).slice(0, 30).map(n => n.id)
   );
 
-  // Nodes: glossy 3D spheres — one shared gradient per type, brightness
-  // from importance.
+  // Pastel nodes retain importance-based sizing and opacity.
   const nodeSel = nodesG.selectAll('g.node').data(nodes, d => d.id);
   const entered = nodeSel.join(
     enter => {
@@ -492,7 +475,6 @@ function update() {
         .call(makeNodeDrag())
         .on('click', (ev, d) => { ev.stopPropagation(); showDetails(d); });
       g.append('circle').attr('class', 'sphere');
-      g.append('ellipse').attr('class', 'glare').attr('fill', 'url(#kb-glare)').attr('pointer-events', 'none');
       g.append('text').attr('class', 'node-label').attr('text-anchor', 'middle');
       g.append('title');
       return g;
@@ -504,17 +486,11 @@ function update() {
     .attr('transform', d => `translate(${d.x},${d.y})`);
   entered.select('circle.sphere')
     .attr('r', nodeRadius)
-    .attr('fill', d => `url(#gloss-${d.type === 'entity' ? 'entity' : 'chunk'})`)
+    .attr('fill', nodeColor)
     .attr('fill-opacity', nodeOpacity)
     .attr('stroke', d => shade(nodeColor(d), -0.25))
     .attr('stroke-width', 1)
     .attr('stroke-opacity', 0.35);
-  entered.select('ellipse.glare')
-    .attr('cx', d => -nodeRadius(d) * 0.28)
-    .attr('cy', d => -nodeRadius(d) * 0.32)
-    .attr('rx', d => nodeRadius(d) * 0.48)
-    .attr('ry', d => nodeRadius(d) * 0.30)
-    .attr('opacity', d => 0.10 + 0.28 * importanceOf(d));
   entered.select('text.node-label')
     .attr('dy', d => -(nodeRadius(d) + 6))
     .style('opacity', d => hotIds.has(d.id) ? 0.85 : 0)

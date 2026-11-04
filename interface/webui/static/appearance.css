@@ -1,0 +1,98 @@
+/* Aidon-inspired parchment and plum surfaces, with Aiko's pastel identity. */
+html[data-theme="light"], html:not([data-theme]) {
+  color-scheme: light;
+  --bg: #d3d1c5; --bg2: #e4e1d6; --bg3: #f0ede3;
+  --surface: #f0ede3; --surface2: #e4e1d6; --panel: #f0ede3; --slot: #f0ede3;
+  --text: #343a2e; --input-fg: #343a2e; --muted: #62695a; --dim: #62695a; --dim-text: #62695a;
+  --border: #b8bbaa; --hairline: #c6c8ba; --line: #c6c8ba;
+  --accent: #a86637; --accent2: #65734f; --moss: #65734f; --sage: #62695a;
+  --cream: #d3d1c5; --parch: #e4e1d6; --soil: #343a2e; --ink: #343a2e;
+  --pink: #a86637; --purple: #65734f; --mauve: #7b826d; --cyan: #64877d;
+  --amber: #a96a43; --violet: #827196; --lavender: #827196; --lilac: #827196;
+  --you: #64877d; --aiko: #65734f; --sys: #62695a;
+  --card-bg: #f0ede3; --card-border: #b8bbaa; --scrollbar: #a7ab98;
+  --glass: #f0ede3; --glass-bg: #f0ede3; --glass-bg-soft: #e4e1d6; --glass-bg-strong: #f0ede3;
+  --glass-border: #b8bbaa; --glass-border-soft: #c6c8ba; --dimmer: #e4e1d6;
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #19161d; --bg2: #211d25; --bg3: #28242e;
+  --surface: #211d25; --surface2: #28242e; --panel: #211d25; --slot: #211d25;
+  --text: #f2f1f4; --input-fg: #f2f1f4; --muted: #aaa5b1; --dim: #aaa5b1; --dim-text: #aaa5b1;
+  --border: #49414f; --hairline: #352f3d; --line: #352f3d;
+  --accent: #c4a5ec; --accent2: #a3b58a; --moss: #a3b58a; --sage: #aaa5b1;
+  --cream: #19161d; --parch: #28242e; --soil: #f2f1f4; --ink: #f2f1f4;
+  --pink: #dcb4ce; --purple: #c4a5ec; --mauve: #cbb9db; --cyan: #a4d8db;
+  --amber: #e8c29a; --violet: #c4a5ec; --lavender: #d4bff0; --lilac: #ab8acb;
+  --you: #a4d8db; --aiko: #d4bff0; --sys: #aaa5b1;
+  --card-bg: #211d25; --card-border: #49414f; --scrollbar: #62596c;
+  --glass: #211d25; --glass-bg: #211d25; --glass-bg-soft: #28242e; --glass-bg-strong: #28242e;
+  --glass-border: #49414f; --glass-border-soft: #352f3d; --dimmer: #28242e;
+}
+html[data-theme] {
+  --font-main: "Avenir Next", Avenir, "Trebuchet MS", system-ui, sans-serif;
+  --font-ui: var(--font-main); --font-display: Georgia, "Times New Roman", serif;
+  --font-serif: Georgia, "Times New Roman", serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+html[data-theme] body { background: var(--bg); color: var(--text); font-family: var(--font-main); }
+html[data-theme] button, html[data-theme] input, html[data-theme] select, html[data-theme] textarea { font-family: inherit; }
+html[data-theme] :is(button, a, input, select, textarea):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) {
+  html[data-theme] *, html[data-theme] *::before, html[data-theme] *::after { animation: none !important; scroll-behavior: auto !important; }
+}
+
+html[data-theme] #panel { background: var(--surface); border-left: 1px solid var(--border); }
+html[data-theme] #panel-header, html[data-theme] #studio-toolbar, html[data-theme] #input-row,
+html[data-theme] #vitals { background: var(--surface); border-color: var(--hairline); backdrop-filter: none; }
+html[data-theme] #panel-title { font-family: var(--font-serif); font-size: 23px; letter-spacing: -.025em; color: var(--text); }
+html[data-theme] #studio-toolbar .studio-btn, html[data-theme] .sbtn { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; color: var(--accent); box-shadow: none; }
+html[data-theme] .msg-bubble { background: var(--surface2); color: var(--text); border: 1px solid var(--hairline); border-radius: 14px; box-shadow: none; backdrop-filter: none; }
+html[data-theme] .msg-bubble.user { border-color: var(--border); }
+html[data-theme] #user-input { background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; }
+html[data-theme] #send-btn { background: var(--accent2); color: var(--surface); border-radius: 10px; box-shadow: none; }
+html[data-theme] #load-overlay { background: var(--bg); }
+html[data-theme] .particle { display: none; }
+/* The companion HUD keeps its layout while inheriting the selected theme. */
+html[data-theme] {
+  --cy-bg: var(--bg); --cy-bg2: var(--bg2); --cy-panel: var(--surface);
+  --cy-panel2: var(--surface2); --cy-line: var(--border); --cy-line-soft: var(--hairline);
+  --cy-text: var(--text); --cy-dim: var(--muted); --cy-cyan: var(--accent);
+  --cy-cyan-dim: var(--accent2); --cy-violet: var(--violet); --cy-magenta: var(--pink);
+  --companion-accent: var(--accent); --companion-hot: var(--pink); --companion-panel: var(--surface);
+}
+html[data-theme], html[data-theme] body { background: var(--bg) !important; color: var(--text) !important; }
+html[data-theme] body::before, html[data-theme] #vrm-side::before, html[data-theme] #vrm-side::after { display: none; }
+html[data-theme] #vrm-side { background: var(--bg) !important; }
+html[data-theme] #panel { background: var(--surface) !important; }
+html[data-theme] #panel-title { font-size: 23px !important; color: var(--text) !important; font-weight: 400; text-transform: none; text-shadow: none; }
+html[data-theme] #user-input, html[data-theme] .companion-select, html[data-theme] .companion-work-input { background: var(--surface2) !important; color: var(--text) !important; border-color: var(--border) !important; border-radius: 10px !important; }
+html[data-theme] #user-input:focus { border-color: var(--accent) !important; box-shadow: none; }
+html[data-theme] #send-btn { background: var(--accent2) !important; color: var(--surface) !important; box-shadow: none; }
+html[data-theme] #chat-panel .bubble { background: var(--surface2) !important; border-color: var(--border) !important; color: var(--text) !important; }
+html[data-theme] .auth-overlay { background: var(--bg) !important; }
+html[data-theme] .auth-panel { background: var(--surface) !important; border-color: var(--border) !important; border-radius: 16px; animation: none; box-shadow: 0 12px 40px #00000018; }
+html[data-theme] .auth-title { color: var(--accent); font-family: var(--font-serif); letter-spacing: -.025em; text-transform: none; text-shadow: none; }
+html[data-theme] :is(.auth-subtitle, .auth-greeting-sub, .auth-legal-links a) { color: var(--muted); }
+html[data-theme] .auth-greeting-title { color: var(--text); }
+html[data-theme] .auth-btn.github { background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 10px; }
+html[data-theme] .auth-btn.patreon { background: var(--accent2); color: var(--surface); border-radius: 10px; }
+html[data-theme] .companion-dialog { background: var(--surface); color: var(--text); border-color: var(--border); }
+html[data-theme] .companion-dialog :is(p, li, label) { color: var(--text); }
+html[data-theme] body.tauri-companion, html[data-theme] body.tauri-companion #vrm-side { background: transparent !important; }
+html[data-theme] #canvas { background: transparent !important; }
+html[data-theme] #caption-scrim { background: linear-gradient(transparent, var(--bg2)); }
+html[data-theme] #stage-chatbox { background: var(--surface) !important; border-color: var(--border) !important; border-radius: 12px; box-shadow: 0 4px 18px #00000012; }
+html[data-theme] #stage-chatbox #user-input { color: var(--text) !important; background: transparent !important; }
+html[data-theme] #stage-chatbox #user-input::placeholder { color: var(--muted) !important; }
+html[data-theme] :is(#caption-text, #caption-name, #stage-clock-top, #stage-status-text) { color: var(--text); text-shadow: none; }
+html[data-theme] :is(#companion-hud, #aiko-status, #grow-panel) { background: var(--surface); border-color: var(--border); border-radius: 12px; box-shadow: none; backdrop-filter: none; }
+html[data-theme] .ry-panel, html[data-theme] #aiko-status { background: var(--surface) !important; border-color: var(--border); border-radius: 12px; box-shadow: none; }
+html[data-theme] :is(.grow-bar, .sg-bar, .growth-bar) { background: var(--surface2); }
+html[data-theme] :is(.grow-fill, .sg-fill, .growth-fill) { box-shadow: none; }
+html[data-theme] #train-stat { background: var(--surface2) !important; color: var(--text) !important; }
+html[data-theme] #talk-frame { background: var(--border); clip-path: none; border-radius: 12px; padding: 1px; }
+html[data-theme] #talk-btn { background: var(--surface2) !important; color: var(--accent) !important; clip-path: none; border-radius: 11px; text-shadow: none; }
+html[data-theme] #talk-btn.on { background: var(--accent2) !important; color: var(--surface) !important; }
+html[data-theme] :is(.companion-wordmark, .grow-name, .sg-name, .dialog-kicker) { color: var(--muted); }
+html[data-theme] input[type=checkbox] { accent-color: var(--accent2); }

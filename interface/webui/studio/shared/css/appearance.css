@@ -1,0 +1,66 @@
+/* Aidon-inspired parchment and plum surfaces, with Aiko's pastel identity. */
+html[data-theme="light"], html:not([data-theme]) {
+  color-scheme: light;
+  --bg: #d3d1c5; --bg2: #e4e1d6; --bg3: #f0ede3;
+  --surface: #f0ede3; --surface2: #e4e1d6; --panel: #f0ede3; --slot: #f0ede3;
+  --text: #343a2e; --input-fg: #343a2e; --muted: #62695a; --dim: #62695a; --dim-text: #62695a;
+  --border: #b8bbaa; --hairline: #c6c8ba; --line: #c6c8ba;
+  --accent: #a86637; --accent2: #65734f; --moss: #65734f; --sage: #62695a;
+  --cream: #d3d1c5; --parch: #e4e1d6; --soil: #343a2e; --ink: #343a2e;
+  --pink: #a86637; --purple: #65734f; --mauve: #7b826d; --cyan: #64877d;
+  --amber: #a96a43; --violet: #827196; --lavender: #827196; --lilac: #827196;
+  --you: #64877d; --aiko: #65734f; --sys: #62695a;
+  --card-bg: #f0ede3; --card-border: #b8bbaa; --scrollbar: #a7ab98;
+  --glass: #f0ede3; --glass-bg: #f0ede3; --glass-bg-soft: #e4e1d6; --glass-bg-strong: #f0ede3;
+  --glass-border: #b8bbaa; --glass-border-soft: #c6c8ba; --dimmer: #e4e1d6;
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #19161d; --bg2: #211d25; --bg3: #28242e;
+  --surface: #211d25; --surface2: #28242e; --panel: #211d25; --slot: #211d25;
+  --text: #f2f1f4; --input-fg: #f2f1f4; --muted: #aaa5b1; --dim: #aaa5b1; --dim-text: #aaa5b1;
+  --border: #49414f; --hairline: #352f3d; --line: #352f3d;
+  --accent: #c4a5ec; --accent2: #a3b58a; --moss: #a3b58a; --sage: #aaa5b1;
+  --cream: #19161d; --parch: #28242e; --soil: #f2f1f4; --ink: #f2f1f4;
+  --pink: #dcb4ce; --purple: #c4a5ec; --mauve: #cbb9db; --cyan: #a4d8db;
+  --amber: #e8c29a; --violet: #c4a5ec; --lavender: #d4bff0; --lilac: #ab8acb;
+  --you: #a4d8db; --aiko: #d4bff0; --sys: #aaa5b1;
+  --card-bg: #211d25; --card-border: #49414f; --scrollbar: #62596c;
+  --glass: #211d25; --glass-bg: #211d25; --glass-bg-soft: #28242e; --glass-bg-strong: #28242e;
+  --glass-border: #49414f; --glass-border-soft: #352f3d; --dimmer: #28242e;
+}
+html[data-theme] {
+  --font-main: "Avenir Next", Avenir, "Trebuchet MS", system-ui, sans-serif;
+  --font-ui: var(--font-main); --font-display: Georgia, "Times New Roman", serif;
+  --font-serif: Georgia, "Times New Roman", serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+html[data-theme] body { background: var(--bg); color: var(--text); font-family: var(--font-main); }
+html[data-theme] button, html[data-theme] input, html[data-theme] select, html[data-theme] textarea { font-family: inherit; }
+html[data-theme] :is(button, a, input, select, textarea):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) {
+  html[data-theme] *, html[data-theme] *::before, html[data-theme] *::after { animation: none !important; scroll-behavior: auto !important; }
+}
+
+/* Compact graph chrome, matching Aidon's rounded graph and detail panels. */
+html[data-theme] header, html[data-theme] .top, html[data-theme] .sidebar { background: var(--surface); border-color: var(--border); }
+html[data-theme] :is(.canvas-area, .content-area) { background: var(--bg); }
+html[data-theme] :is(.btn, select, input[type=text], input[type=number], input[type=date]) { background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 10px; letter-spacing: normal; text-transform: none; }
+html[data-theme] .btn { padding: 7px 12px; }
+html[data-theme] .btn:hover { background: var(--surface2); color: var(--accent); border-color: var(--accent); box-shadow: none; }
+html[data-theme] .btn-primary { background: var(--accent2); color: var(--surface); border-color: var(--accent2); }
+html[data-theme] header h1 { color: var(--text); font: 22px var(--font-serif); letter-spacing: -.025em; text-transform: none; }
+html[data-theme] .sidebar h2 { color: var(--muted); letter-spacing: .06em; }
+html[data-theme] :is(.details, .detail-panel) { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 6px 24px #00000012; backdrop-filter: none; }
+html[data-theme] #back-btn { background: var(--surface2) !important; border-color: var(--border) !important; color: var(--accent) !important; }
+html[data-theme] .legend { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; color: var(--muted); }
+html[data-theme] .sidebar label, html[data-theme] .stat { color: var(--muted); }
+html[data-theme] .memory-studio-tab { border-radius: 8px; }
+html[data-theme] .memory-studio-tab.active { background: var(--surface2); color: var(--accent); }
+html[data-theme] .graph-title { color: var(--muted); letter-spacing: .08em; }
+html[data-theme] .canvas-area svg { border-radius: 12px; }
+html[data-theme] #canvas { background: var(--bg); }
+html[data-theme] .sidebar input[type=number], html[data-theme] .sidebar input[type=text],
+html[data-theme] .sidebar input[type=date], html[data-theme] .sidebar select { background: var(--surface2); color: var(--text); border-color: var(--border); }
+html[data-theme] .memory-studio-tab, html[data-theme] .btn { background: var(--surface2); }
+html[data-theme] input[type=checkbox] { accent-color: var(--accent2); }

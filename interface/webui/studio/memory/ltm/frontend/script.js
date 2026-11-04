@@ -1,7 +1,7 @@
 const API_BASE = GraphBoot.apiBase();
 const ARC_KEYS = ['salience', 'spacing', 'connectivity', 'valence', 'access'];
 /* quiet rim — low opacity, not competing with glass body */
-const ARC_COLORS = ['#ffd27a66', '#6bcf7f66', '#b794f666', '#3de0ff55', '#e8eef855'];
+const ARC_COLORS = ['#ffd27a66', '#6bcf7f66', '#c8b4e966', '#9bd7e755', '#e8eef855'];
 
 let graph = { nodes: [], edges: [], meta: {} };
 let simulation = null;
@@ -118,14 +118,14 @@ function valenceHue(d) {
 }
 
 function hueColor(hue) {
-  if (hue === 'entity') return '#b794f6';
-  if (hue === 'knowledge') return '#4ade80';
-  if (hue === 'experience') return '#fb923c';
-  if (hue === 'episode') return '#51d4c8';
-  if (hue === 'imprint') return '#c651a8';
-  if (hue === 'neg') return '#3de0ff';
-  if (hue === 'pos') return '#f0c14a';
-  return '#8a9bb8';
+  if (hue === 'entity') return '#c8b4e9';
+  if (hue === 'knowledge') return '#a1d9b1';
+  if (hue === 'experience') return '#e8b491';
+  if (hue === 'episode') return '#a0d9d1';
+  if (hue === 'imprint') return '#dca9cc';
+  if (hue === 'neg') return '#9bd7e7';
+  if (hue === 'pos') return '#e5cf99';
+  return '#b5c1d6';
 }
 
 /** Glass fill opacity — steeper retain curve + valence boost for demo-like contrast */
@@ -164,8 +164,8 @@ function nodeRadius(d) {
   // importance score through a smooth curve. No fixed-size tiers, no
   // hot/quiet cutoff: a node with a 0.3 score is visibly smaller than one
   // with 0.5, which is smaller than one with 0.8, for every type alike.
-  if (d.type === 'entity') return 4.5 + 14 * Math.pow(r, 1.15);
-  return 4 + 28 * Math.pow(r, 1.22);
+  if (d.type === 'entity') return 4.5 + 8 * Math.pow(r, 1.15);
+  return 4 + 12 * Math.pow(r, 1.22);
 }
 
 function edgeOpacity(e, nodeById) {
@@ -322,7 +322,7 @@ function render() {
       .attr('cx', Math.random() * w)
       .attr('cy', Math.random() * h)
       .attr('r', Math.random() * 0.9)
-      .attr('fill', '#3de0ff')
+      .attr('fill', '#9bd7e7')
       .attr('opacity', 0.04 + Math.random() * 0.08);
   }
 
@@ -432,20 +432,6 @@ function shade(hex, amt) {
   return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
 }
 
-  // Shared glass gradients, one per hue (KB style): no per-node defs,
-  // no blur filters — per-node opacity moves to fill-opacity on the
-  // element. Same current-colour palette, a fraction of the DOM cost.
-  for (const h of [...new Set(nodes.map(d => valenceHue(d)))]) {
-    const base = hueColor(h);
-    const gr = defs.append('radialGradient')
-      .attr('id', 'gloss-' + h)
-      .attr('cx', '34%').attr('cy', '28%').attr('r', '78%');
-    gr.append('stop').attr('offset', '0%').attr('stop-color', shade(base, 0.38));
-    gr.append('stop').attr('offset', '40%').attr('stop-color', shade(base, 0.10));
-    gr.append('stop').attr('offset', '72%').attr('stop-color', base);
-    gr.append('stop').attr('offset', '100%').attr('stop-color', base).attr('stop-opacity', 0.30);
-  }
-
   defs.append('marker').attr('id','arrow-sup').attr('viewBox','0 0 10 10')
     .attr('refX', 22).attr('refY', 5).attr('markerWidth', 6).attr('markerHeight', 6).attr('orient','auto')
     .append('path').attr('d','M 0 1 L 10 5 L 0 9 Z').attr('fill', 'var(--orange)').attr('opacity', 0.8);
@@ -470,7 +456,7 @@ function shade(hex, amt) {
   }
 
   const link = g.append('g').selectAll('path').data(links).join('path')
-    .attr('stroke', d => d.type === 'supersedes' ? 'var(--orange)' : (d.type === 'distilled_into' ? '#51d4c8' : '#3de0ff'))
+    .attr('stroke', d => d.type === 'supersedes' ? 'var(--orange)' : (d.type === 'distilled_into' ? '#a0d9d1' : '#9bd7e7'))
     .attr('stroke-width', d => {
       if (d.type === 'supersedes') return 1.0;
       if (d.type === 'distilled_into') return 0.8;
@@ -496,29 +482,20 @@ function shade(hex, amt) {
   node.append('circle')
     .attr('r', d => nodeRadius(d) + 3)
     .attr('fill', d => hueColor(valenceHue(d)))
-    .attr('opacity', d => 0.08 + retainOf(d) * 0.18)
+    .attr('opacity', d => 0.03 + retainOf(d) * 0.05)
     .attr('class', 'pulse-glow');
 
-  // glass body with shared glossy gradient (per-hue, not per-node)
+  // Flat pastel body; valence families and retention remain distinct.
   node.append('circle')
     .attr('r', nodeRadius)
-    .attr('fill', d => `url(#gloss-${valenceHue(d)})`)
+    .attr('fill', d => hueColor(valenceHue(d)))
     .attr('fill-opacity', nodeOpacity)
-    .attr('stroke', d => d.pinned ? '#ffffff' : hueColor(valenceHue(d)))
+    .attr('stroke', d => d.pinned ? 'var(--text)' : shade(hueColor(valenceHue(d)), -0.28))
     .attr('stroke-width', d => d.pinned ? 1.8 : 0.9)
     .attr('stroke-opacity', d => d.pinned ? 0.7 : 0.35 + retainOf(d) * 0.4)
     .attr('stroke-dasharray', d =>
               (d.type === 'memory' && (d.status === 'superseded' || d.is_tip === false)) ? '3,2' : null
             );
-
-  // Specular highlight circle (glossy shine) — small white ellipse at top-left
-  node.append('circle')
-    .attr('r', d => nodeRadius(d) * 0.28)
-    .attr('cx', d => -nodeRadius(d) * 0.3)
-    .attr('cy', d => -nodeRadius(d) * 0.35)
-    .attr('fill', '#ffffff')
-    .attr('opacity', d => 0.22 * nodeOpacity(d))
-    .attr('pointer-events', 'none');
 
   // quiet rim arcs (factor scores)
   node.each(function(d) {

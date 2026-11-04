@@ -63,6 +63,13 @@ applies to the proposal actually delivered to the user, and changes to a draft
 outside the proposal cannot change what is confirmed. Invalid conditions and
 nonfinite sensor values do not authorize an action.
 
+"Forget all my memories" and ordinary statements about forgetting are not
+instruction overrides. They still pass through conscience and any memory-tool
+checks. Interaction preference resets clear related learning evidence and
+known durable style rules, so forgotten preferences cannot reappear from those
+paths. Negated reset commands preserve preferences. Both immediate and learned
+tone feedback treat "less formal" and "informal" as casual tone.
+
 Regression coverage includes the reported `Sorry I did something wrong.` and
 outings-versus-coding conversation, appended harmful requests, explicit STOP,
 urgency carryover, identity isolation, judge failures/concurrency, and bounded

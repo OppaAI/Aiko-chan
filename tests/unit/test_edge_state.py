@@ -11,8 +11,11 @@ from cognition.attention import EdgeCognitiveState
 @pytest.fixture(autouse=True)
 def neutral_intent_model(monkeypatch):
     # These tests cover the deterministic attention rules. A locally trained
-    # optional classifier must not change their trigger or expected reason.
+    # optional classifier/detector must not change their trigger or expected
+    # reason, including detector files written by another test process.
     monkeypatch.setattr(attention._intent_classifier, "predict", lambda _: (0.0, 0.5))
+    monkeypatch.setattr(attention, "_DETECTOR_MODELS", {})
+    monkeypatch.setattr(attention, "_maybe_reload_detector_models", lambda: None)
 
 
 def test_attention_module_is_singleton():
@@ -514,3 +517,83 @@ def test_qualified_yes_does_not_confirm_a_policy():
     state._policy_turn("yes but don't activate it yet")
     assert confirmed == []
     assert state._delivered_proposal_id is None
+
+
+@pytest.mark.parametrize('tone', ['less formal', 'informal'])
+def test_casual_tone_feedback_does_not_learn_formal(tone):
+    state = EdgeCognitiveState()
+    state.record(f'Please be {tone}.', '')
+    state.record(f'Please be {tone}.', '')
+    assert state.snapshot()['preferences']['tone'] == 'casual'
+    assert state._preference_counts.get('tone=formal', 0) == 0
+
+
+@pytest.mark.parametrize('tone', ['less formal', 'informal'])
+def test_explicit_casual_tone_applies_immediately(tone):
+    state = EdgeCognitiveState()
+    state.record(f'From now on, be {tone}.', '')
+    assert state.snapshot()['preferences']['tone'] == 'casual'
+
+
+def test_forgetting_style_preferences_also_forgets_learning_counts():
+    state = EdgeCognitiveState()
+    state.record('Please be formal and concise.', '')
+    state.record('Please be formal and concise.', '')
+    state.record('Please forget my formal response style preferences.', '')
+    assert state.snapshot()['preferences'] == {}
+    assert state._preference_counts == {}
+    state.record('Please be formal and concise.', '')
+    assert state.snapshot()['preferences'] == {}
+
+
+def test_forgetting_tool_preferences_keeps_style_preferences():
+    state = EdgeCognitiveState()
+    state.record('From now on be concise and ask before using tools.', '')
+    state.record('Ask before using tools.', '')
+    state.record('Forget my tool action preferences.', '')
+    assert state.snapshot()['preferences'] == {'response_length': 'concise'}
+    assert 'action_confirmation=ask_before_acting' not in state._preference_counts
+    assert state._preference_counts['response_length=concise'] == 1
+
+
+def test_unqualified_forget_clears_all_interaction_preferences():
+    state = EdgeCognitiveState()
+    state.record('From now on be concise and ask before using tools.', '')
+    state.record('Can you please forget all my preferences?', '')
+    assert state.snapshot()['preferences'] == {}
+    assert state._preference_counts == {}
+
+
+@pytest.mark.parametrize('message', [
+    "Don't forget my response style preferences.",
+    'Never forget my response style preferences.',
+    'I forget my response style preferences. What were they?',
+])
+def test_discussing_forgetting_does_not_clear_preferences(message):
+    state = EdgeCognitiveState()
+    state.record('From now on be concise.', '')
+    state.record(message, '')
+    assert state.snapshot()['preferences']['response_length'] == 'concise'
+
+
+@pytest.mark.parametrize('message', [
+    'Forget my response style preferences.',
+    'Forget all my preferences.',
+])
+def test_forgetting_response_preferences_clears_their_durable_lessons(message):
+    state = EdgeCognitiveState()
+    state.record('Explain this.', 'A long answer')
+    state.record('This is too verbose.', 'A shorter answer')
+    state.record('Too long, be concise.', 'Another short answer')
+    assert any('Prefer concise responses.' in lesson for lesson in state._durable_lessons)
+    state._durable_lessons.append('Durable interaction rule: Keep unrelated tool lessons.')
+    state.record(message, '')
+    assert list(state._durable_lessons) == ['Durable interaction rule: Keep unrelated tool lessons.']
+    assert state._lesson_counts.get(' '.join(sorted(attention._tokens(attention._LESSON_CONCISE))), 0) == 0
+
+
+def test_forgetting_preferences_clears_standalone_style_lessons():
+    state = EdgeCognitiveState()
+    state._durable_lessons.append('Durable interaction rule: ' + attention._LESSON_STEPS)
+    state.record('Forget all my preferences.', '')
+    assert not state._durable_lessons

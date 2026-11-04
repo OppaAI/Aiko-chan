@@ -196,6 +196,9 @@ def _flush_persist_pending() -> None:
             state._do_persist()
 EDGE_COGNITION_MAX_IDENTITIES = max(1, env_int("EDGE_COGNITION_MAX_IDENTITIES", 16))
 EDGE_COGNITION_MAX_LESSON_EVIDENCE = 64
+_LESSON_CONCISE = "Prefer concise responses."
+_LESSON_EXPLANATION = "Include a brief explanation, not only the conclusion."
+_LESSON_STEPS = "Present complex tasks as clear sequential steps."
 
 _CRITICAL_TASK_RE = re.compile(
     r"\b("
@@ -786,14 +789,15 @@ class EdgeCognitiveState:
         self._last_user_t = time.time()
         with self._lock:
             self._scrub_style_junk()
-            self._apply_explicit_preferences(user)
-            self._learn_preferences(user)
+            reset_preferences = self._apply_explicit_preferences(user)
+            if not reset_preferences:
+                self._learn_preferences(user)
             self._detect_contradictions(user)
             if _IDENTITY_QUERY_RE.search(user):
                 self._identity_questions.appendleft(user[:220])
-            if self._events and _OUTCOME_FAIL_RE.search(user):
+            if self._events and not reset_preferences and _OUTCOME_FAIL_RE.search(user):
                 self._add_lesson("Avoid repeating the previous approach: ", self._events[-1].assistant, user)
-            elif self._events and _OUTCOME_OK_RE.search(user):
+            elif self._events and not reset_preferences and _OUTCOME_OK_RE.search(user):
                 self._add_lesson("The previous approach appeared useful: ", self._events[-1].assistant, user)
             self._events.append(_Event(user, assistant, _tokens(user + " " + assistant)))
             self._learn_self_from_turn(user, assistant)
@@ -1140,30 +1144,65 @@ class EdgeCognitiveState:
                 break
         return " ".join(ordered)
 
-    def _apply_explicit_preferences(self, feedback: str) -> None:
-        """Hard-set preferences when user says 'always' or 'from now on'. Explicit cognition."""
+    @staticmethod
+    def _preferred_tone(text: str) -> str | None:
+        """Use the same tone classification for explicit and learned feedback."""
+        if re.search(r"\b(?:casual|friendly|informal)\b|\bless\s+formal\b", text):
+            return "casual"
+        if re.search(r"\b(?:formal|professional)\b", text):
+            return "formal"
+        return None
+
+    def _apply_explicit_preferences(self, feedback: str) -> bool:
+        """Apply explicit preferences; return True when a reset consumes feedback."""
         lower = (feedback or "").casefold()
         explicit = "from now on" in lower or "always" in lower or "starting now" in lower
-        if "forget" in lower and "preference" in lower:
+        forget_request = re.match(
+            r"^\s*(?:(?:please|actually)[,\s]+)*"
+            r"(?:(?:can|could|would)\s+you\s+(?:please\s+)?)?forget\b", lower,
+        )
+        if forget_request and re.search(r"\bpreferences?\b", lower):
+            reset_keys = set()
             if "response" in lower or "style" in lower:
-                self._preferences.pop("response_length", None)
-                self._preferences.pop("explanation_depth", None)
-                self._preferences.pop("tone", None)
+                reset_keys.update(("response_length", "explanation_depth", "tone"))
             if "action" in lower or "tool" in lower:
-                self._preferences.pop("action_confirmation", None)
-            return
+                reset_keys.add("action_confirmation")
+            if "tone" in lower:
+                reset_keys.add("tone")
+            if not reset_keys:
+                # An unqualified reset applies to all interaction preferences.
+                reset_keys.update(("response_length", "explanation_depth", "tone", "action_confirmation"))
+                reset_keys.update(self._preferences)
+                reset_keys.update(sig.split("=", 1)[0] for sig in self._preference_counts)
+            for key in reset_keys:
+                self._preferences.pop(key, None)
+            for signature in list(self._preference_counts):
+                if signature.split("=", 1)[0] in reset_keys:
+                    self._preference_counts.pop(signature)
+            reset_lessons = []
+            if "response_length" in reset_keys:
+                reset_lessons.append(_LESSON_CONCISE)
+            if "explanation_depth" in reset_keys:
+                reset_lessons.extend((_LESSON_EXPLANATION, _LESSON_STEPS))
+            for semantic in reset_lessons:
+                self._lesson_counts.pop(" ".join(sorted(_tokens(semantic))), None)
+                durable = "Durable interaction rule: " + semantic
+                if durable in self._durable_lessons:
+                    self._durable_lessons.remove(durable)
+            # A reset is not evidence for learning the preferences it mentions.
+            return True
         if not explicit:
-            return
+            return False
         if any(term in lower for term in ("concise", "short", "brief")):
             self._preferences["response_length"] = "concise"
         elif any(term in lower for term in ("more detail", "detailed", "step by step")):
             self._preferences["explanation_depth"] = "detailed"
         if any(term in lower for term in ("ask before", "ask me first", "with my permission")):
             self._preferences["action_confirmation"] = "ask_before_acting"
-        if "casual" in lower or "friendly" in lower:
-            self._preferences["tone"] = "casual"
-        elif "formal" in lower or "professional" in lower:
-            self._preferences["tone"] = "formal"
+        tone = self._preferred_tone(lower)
+        if tone is not None:
+            self._preferences["tone"] = tone
+        return False
 
     def _learn_preferences(self, feedback: str) -> None:
         """Track implicit preference signals. Evidence-gated at count ≥ 2."""
@@ -1175,10 +1214,9 @@ class EdgeCognitiveState:
             candidates.append(("explanation_depth", "detailed"))
         if any(term in lower for term in ("ask before", "ask me first", "with my permission")):
             candidates.append(("action_confirmation", "ask_before_acting"))
-        if any(term in lower for term in ("casual", "friendly", "less formal")):
-            candidates.append(("tone", "casual"))
-        if any(term in lower for term in ("formal", "professional")):
-            candidates.append(("tone", "formal"))
+        tone = self._preferred_tone(lower)
+        if tone is not None:
+            candidates.append(("tone", tone))
         for key, value in candidates:
             signature = key + "=" + value
             count = self._preference_counts.get(signature, 0) + 1
@@ -1287,13 +1325,13 @@ class EdgeCognitiveState:
         lower_feedback = (feedback or "").casefold()
         semantic = ""
         if any(word in lower_feedback for word in ("concise", "short", "brief", "too long", "verbose")):
-            semantic = "Prefer concise responses."
+            semantic = _LESSON_CONCISE
         elif any(word in lower_feedback for word in ("clarify", "misunderstood", "not what i meant", "wrong")):
             semantic = "Ask a clarifying question when intent is ambiguous."
         elif any(word in lower_feedback for word in ("explain", "why", "more detail")):
-            semantic = "Include a brief explanation, not only the conclusion."
+            semantic = _LESSON_EXPLANATION
         elif any(word in lower_feedback for word in ("step by step", "steps", "walk me through")):
-            semantic = "Present complex tasks as clear sequential steps."
+            semantic = _LESSON_STEPS
         signature = " ".join(sorted(_tokens(semantic or text)))
         if not signature:
             return

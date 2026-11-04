@@ -71,7 +71,12 @@ _INJECTION_PATTERNS = (
     r"ignore\s+(?:all\s+|any\s+|the\s+)*(?:previous|prior|above|earlier|preceding)\s+"
     r"(?:\w+\s+){0,3}?instructions?",
     r"disregard\s+(?:\w+\s+){0,3}?(?:instructions?|rules?|training|prompts?|guidelines?)",
-    r"forget\s+(?:everything|all)\b",
+    # Forgetting personal memories, shopping lists, or steps is a normal
+    # request. Only the instruction/rule override shape belongs in this gate.
+    r"forget\s+(?:everything|all)\s+(?:about\s+)?"
+    r"(?:(?:of\s+)?(?:your|the)\s+)?"
+    r"(?:(?:previous|prior|earlier|system|safety|original)\s+)*"
+    r"(?:instructions?|rules?|training|prompts?|guidelines?)\b",
     r"you\s+must\s+score\s+this\s+situation",
     r"(?:score|rate|classify)\b[^.\n]{0,40}\bas\s+[vh]\s*=",
     r"</?\s*(?:canon|system|assistant)\s*>",

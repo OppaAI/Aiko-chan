@@ -211,3 +211,35 @@ Full combined unit/integration verification: 2,241 passed, 5 skipped,
 13 warnings, and 34 passing subtests. The full run used loopback networking
 for local HTTP test fixtures; the restricted sandbox run could not complete.
 Real deployed-model refusal quality and the physical Jetson remain unverified.
+
+Preference learning/reset and false-refusal follow-up:
+
+- Explicit and learned tone feedback now share one classification. "Less
+  formal" and "informal" select casual tone, rather than also matching and
+  promoting the opposite formal preference.
+- Preference resets remove the associated evidence counters and known durable
+  response-style lessons. The reset message cannot immediately teach the same
+  preference again. Scoped resets preserve unrelated preferences and lessons;
+  an unqualified reset clears all interaction preferences, including style
+  lessons that exist without a corresponding preference entry.
+- "Don't forget my preferences" and questions about forgetting are not reset
+  commands. These deterministic commands do not delete general conversation
+  history or unrelated tool lessons.
+- The injection gate now requires an instruction/rule target for "forget all"
+  or "forget everything". Ordinary memory requests and statements about being
+  forgetful reach normal conscience evaluation instead of automatic refusal.
+  Actual instruction-override patterns remain blocked; memory tools retain
+  their own checks.
+- Deterministic edge-state tests also isolate optional detector models and
+  hot reload, preventing local training artifacts from changing their results.
+
+These fixes were reproduced with regressions before applying the changes. The
+broader Area 3 review remains in progress; outbound approval holds and expiry
+are a remaining review path. Area 2's code pass remains complete, with live
+inference and physical Jetson validation pending rather than additional known
+code fixes in its current checklist.
+
+Final combined unit/integration verification for this follow-up: 2,263 passed,
+5 skipped, 13 warnings, and 34 passing subtests. Local HTTP fixtures used
+loopback networking. This is code-side verification, not live Jetson or model
+validation.

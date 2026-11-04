@@ -1,6 +1,8 @@
 """Knowledge ingestion and source extraction."""
 from __future__ import annotations
 
+from cognition.memory.redaction import redact_text, redact_data
+
 import importlib.util
 import hashlib
 import re
@@ -55,6 +57,7 @@ class KnowledgeIngest:
         kind: str = "ingested",
         embedder: Embedder | None = None,
         user_id: str | None = None,
+        image_caption: str | None = None,
     ) -> str | None:
         return ingest_file(
             relative_path,
@@ -63,7 +66,14 @@ class KnowledgeIngest:
             embedder=embedder if embedder is not None else self.embedder,
             user_id=user_id,
             schema=self.schema,
+            image_caption=image_caption,
         )
+
+    def ingest_image(self, relative_path: str, caption: str, **kwargs):
+        kwargs.setdefault("embedder", self.embedder)
+        kwargs.setdefault("user_id", None)
+        kwargs.setdefault("schema", self.schema)
+        return ingest_image(relative_path, caption, **kwargs)
     
     def ingest_text(
         self,
@@ -347,11 +357,15 @@ def ingest_file(
     embedder: Embedder | None = None,
     user_id: str | None = None,
     schema: KnowledgeSchema | None = None,
+    image_caption: str | None = None,
 ) -> str | None:
     """Canonical implementation that
     :class:`KnowledgeIngest.ingest_file` delegates to (not a shim — this is the live code path). Kept for the historical
     import path. Extract a workspace file and store it in learned knowledge RAG."""
     uid = user_id or current_user_id()
+    if image_caption and Path(relative_path).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+        return ingest_image(relative_path, image_caption, title=title, kind=kind,
+                            embedder=embedder, user_id=uid, schema=schema)
     try:
         path = _safe_workspace_path(relative_path, uid)
         digest, _ = _file_fingerprint(path)
@@ -362,7 +376,56 @@ def ingest_file(
     except (ValueError, OSError) as exc:
         log.warning("Failed to extract knowledge file %s: %s", relative_path, exc)
         return None
-    return ingest_text(title or Path(relative_path).stem.replace("_", " ").title(), text, source=source, kind=kind, embedder=embedder, user_id=uid, schema=schema, _file_version=(digest, path, stamp))
+    return ingest_text(title or Path(relative_path).stem.replace("_", " ").title(), text, source=redact_text(source), kind=kind, embedder=embedder, user_id=uid, schema=schema, _file_version=(digest, path, stamp))
+
+
+def ingest_image(
+    relative_path: str,
+    caption: str,
+    *,
+    title: str | None = None,
+    kind: str = "ingested",
+    embedder: Embedder | None = None,
+    user_id: str | None = None,
+    schema: KnowledgeSchema | None = None,
+) -> str | None:
+    """Index a supplied image caption and keep a workspace-relative asset link.
+
+    This deliberately uses Aiko's existing text embedding model; it does not
+    claim visual understanding. The image itself remains in the user workspace.
+    """
+    uid = user_id or current_user_id()
+    try:
+        path = _safe_workspace_path(relative_path, uid)
+        if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+            raise ValueError("unsupported image type")
+        stamp = _file_stamp(path)
+        if stamp[2] > 20 * 1024 * 1024:
+            raise ValueError("image exceeds 20 MiB limit")
+        digest, checked = _file_fingerprint(path)
+        with path.open("rb") as stream:
+            header = stream.read(16)
+        valid = (header.startswith(b"\x89PNG\r\n\x1a\n") or header.startswith(b"\xff\xd8\xff")
+                 or header.startswith(b"GIF87a") or header.startswith(b"GIF89a")
+                 or (header[:4] == b"RIFF" and header[8:12] == b"WEBP"))
+        if not valid or checked != stamp:
+            raise ValueError("invalid image or image changed while reading")
+    except (ValueError, OSError) as exc:
+        log.warning("Failed to register knowledge image %s: %s", relative_path, exc)
+        return None
+    safe_caption = redact_text(caption or "").strip()[:5000]
+    if not safe_caption:
+        return None
+    suffix = path.suffix.lower()
+    media = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+             ".webp": "image/webp", ".gif": "image/gif"}[suffix]
+    # Caption participates in the source fingerprint, so recaptioning an
+    # unchanged file publishes a new active record as well.
+    version = hashlib.sha256((digest + "\0" + safe_caption).encode()).hexdigest()
+    return ingest_text(title or path.stem.replace("_", " ").title(), safe_caption,
+                       source=relative_path, kind=kind, embedder=embedder, user_id=uid,
+                       schema=schema, _file_version=(version, path, stamp),
+                       _asset=(relative_path, media, digest, safe_caption))
 
 def ingest_text(
     title: str,
@@ -374,13 +437,16 @@ def ingest_text(
     user_id: str | None = None,
     schema: KnowledgeSchema | None = None,
     _file_version: tuple[str, Path, tuple] | None = None,
+    _asset: tuple[str, str, str, str] | None = None,
 ) -> str | None:
     """Canonical implementation that
     :class:`KnowledgeIngest.ingest_text` delegates to (not a shim — this is the live code path). Kept for the historical
     import path. Chunk, embed, and persist durable learned knowledge."""
-    clean = _sanitize_text(text)
+    clean = _sanitize_text(redact_text(text))
     if not clean:
         return None
+    title = redact_text(title)
+    source = redact_text(source or "")
     uid = user_id or current_user_id()
     doc_id = str(uuid.uuid4())
     created_at = now()
@@ -418,6 +484,12 @@ def ingest_text(
             "INSERT INTO learned_docs(id,user_id,title,source,kind,created_at) VALUES(?,?,?,?,?,?)",
             (doc_id, uid, (title or "Untitled knowledge")[:200], source[:500], kind[:50], created_at),
         )
+        if _asset is not None:
+            conn.execute(
+                "INSERT INTO knowledge_assets(doc_id,user_id,relative_path,media_type,file_hash,caption) "
+                "VALUES(?,?,?,?,?,?)",
+                (doc_id, uid, *_asset),
+            )
         written_chunks = 0
         for index, chunk in enumerate(chunks):  # always loop chunks
             ents_json = entities_to_json(extract_entities(chunk))
@@ -548,6 +620,9 @@ def ingest_workspace_knowledge_folder(*, embedder: Embedder | None = None, user_
     doc_ids: list[str] = []
     for path in sorted(p for p in folder.rglob("*") if p.is_file() and not p.name.startswith(".")):
         rel = str(path.relative_to(root))
+        # Images need a caption supplied by the user or an image-capable model.
+        if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+            continue
         try:
             path = _safe_workspace_path(rel, uid)
             rel = str(path.relative_to(root))

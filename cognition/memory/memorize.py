@@ -9,6 +9,8 @@ so the stable public surface is unchanged after the backend split.
 """
 from __future__ import annotations
 
+from cognition.memory.redaction import redact_text, redact_data
+
 import hashlib
 import json
 import os
@@ -427,6 +429,7 @@ class _MemoryBackend:
 
     def _embed(self, text: str, *, query: bool = False) -> list[float]:
         """Embed a single string with HarrierEmbedder. Returns a plain float list."""
+        text = redact_text(text)
         if query:
             # Phase 2: shared module cache; explicit instruct to match
             # embed_query's default exactly. Keeps the list return type.
@@ -478,7 +481,7 @@ class _MemoryBackend:
             return []
 
         clean_messages = [
-            m for m in messages
+            redact_data(m) for m in messages
             if m.get("role") in ("user", "assistant")
             and (m.get("content") or "").strip()
         ]
@@ -671,6 +674,9 @@ class _MemoryBackend:
         to ``now`` (the fact becomes true when written). Both are written
         only when their columns exist.
         """
+        text = redact_text(text)
+        entities = redact_data(entities)
+        source = redact_text(source)
         cols = existing_columns(self._conn)
         kind_val = kind or classify_kind(text, default=KIND_FACT)
         if mem_type is not None:
@@ -852,7 +858,8 @@ class _MemoryBackend:
 
         Returns list of new memory IDs. Empty list if nothing extracted.
         """
-        pairs = self._extract_facts(messages, display_name=display_name)
+        pairs = [(redact_text(fact), score) for fact, score in self._extract_facts(
+            redact_data(messages), display_name=display_name)]
         if not pairs:
             return []
         # Exact-hash short-circuit: drop facts already stored (normalized
@@ -969,7 +976,7 @@ class _MemoryBackend:
         dream()'s merge pass can never delete a pinned memory even as a
         duplicate loser.
         """
-        text = (memory or "").strip()
+        text = redact_text(memory or "").strip()
         if not text:
             return None
         # Exact-hash short-circuit: skip the embedding + KNN round-trip when

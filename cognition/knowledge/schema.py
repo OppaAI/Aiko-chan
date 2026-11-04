@@ -53,6 +53,17 @@ CREATE TABLE IF NOT EXISTS knowledge_file_state (
 )
 """
 
+_ASSET_DDL = """
+CREATE TABLE IF NOT EXISTS knowledge_assets (
+    doc_id TEXT PRIMARY KEY REFERENCES learned_docs(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    file_hash TEXT NOT NULL,
+    caption TEXT NOT NULL
+)
+"""
+
 
 _DDL = """
 PRAGMA journal_mode = WAL;
@@ -136,7 +147,7 @@ CREATE TRIGGER IF NOT EXISTS learned_chunks_au AFTER UPDATE OF text ON learned_c
     VALUES ('delete', old.rowid, old.text, old.id);
     INSERT INTO learned_chunks_fts(rowid, text, id) VALUES (new.rowid, new.text, new.id);
 END;
-""".format(dims=EMBED_DIMS) + _FILE_STATE_DDL + ";"
+""".format(dims=EMBED_DIMS) + _FILE_STATE_DDL + ";" + _ASSET_DDL
 
 
 class KnowledgeSchema:
@@ -171,6 +182,7 @@ def connect(user_id: str | None = None) -> sqlite3.Connection:
 def ensure_knowledge_schema_migrated(conn: sqlite3.Connection, user_id: str | None = None) -> None:
     """Add missing columns and indexes to knowledge tables."""
     conn.execute(_FILE_STATE_DDL)
+    conn.execute(_ASSET_DDL)
     cols = [r[1] for r in conn.execute("PRAGMA table_info(learned_chunks)").fetchall()]
     if "access_count" not in cols:
         conn.execute("ALTER TABLE learned_chunks ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0")

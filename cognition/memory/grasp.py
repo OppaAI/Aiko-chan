@@ -12,6 +12,8 @@ Writes are async (daemon thread) so fill() stays near-zero latency.
 """
 from __future__ import annotations
 
+from cognition.memory.redaction import redact_text, redact_data
+
 import json
 import logging
 import os
@@ -252,7 +254,7 @@ class DailyJournal:
     def append_turn(self, turn: GraspTurn, *, event: str = "fill") -> None:
         if not self.enabled:
             return
-        record = turn.to_journal_record(event=event)
+        record = redact_data(turn.to_journal_record(event=event))
         path = self.path_for(turn.user_ts)
         def _write() -> None:
             try:
@@ -734,8 +736,8 @@ def record_turn(
     """Fill live buffer after a completed conversation turn. No-op if disabled."""
     if not GRASP_LIVE_ENABLED:
         return []
-    user = (user or "").strip()
-    assistant = (assistant or "").strip()
+    user = redact_text(user or "").strip()
+    assistant = redact_text(assistant or "").strip()
     if not user and not assistant:
         return []
     ident = _resolve_identity(identity)

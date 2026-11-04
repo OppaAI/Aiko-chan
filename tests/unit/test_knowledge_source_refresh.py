@@ -55,6 +55,24 @@ def test_hash_skips_unchanged_file_before_extraction_or_embedding(library, monke
     assert len(rows(library, 'SELECT id FROM learned_docs')) == 1
 
 
+def test_image_caption_is_searchable_and_linked_to_workspace_asset(library):
+    image_path = library.roots['owner'] / 'autumn.png'
+    image_path.write_bytes(b'\x89PNG\r\n\x1a\n' + b'\x00' * 24)
+    doc_id = ingest.ingest_image('autumn.png', 'A red maple beside a quiet garden path', user_id='owner')
+    assert doc_id
+    hit = search.search_knowledge('maple garden path', user_id='owner')[0]
+    assert hit['doc_id'] == doc_id
+    assert hit['asset_path'] == 'autumn.png'
+    assert hit['asset_media_type'] == 'image/png'
+    context = search.knowledge_context_for('maple garden path', user_id='owner')
+    assert 'asset_path="autumn.png"' in context
+    image_path.write_bytes(b'\x89PNG\r\n\x1a\n' + b'\x01' * 24)
+    updated = ingest.ingest_image('autumn.png', 'A red maple with golden leaves', user_id='owner')
+    assert updated and updated != doc_id
+    assert not search.search_knowledge('quiet garden path', user_id='owner')
+    assert search.search_knowledge('golden leaves maple', user_id='owner')[0]['doc_id'] == updated
+
+
 def test_changed_source_refreshes_recall_and_retains_history(library):
     library.file.write_text('Jetson winter cedar instructions are obsolete.')
     first = scan()[0]

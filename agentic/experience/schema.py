@@ -9,6 +9,8 @@ and the SQLite DB uses the same optional SQLCipher encryption path as memory.
 """
 from __future__ import annotations
 
+from cognition.memory.redaction import redact_text, redact_data
+
 import os
 import re
 import sqlite3
@@ -217,8 +219,7 @@ def ensure_experience_schema_migrated(conn: sqlite3.Connection) -> None:
 
 def sanitize(text: str, max_chars: int = 500) -> str:
     """Canonical secret-redacting sanitizer used across the experience stack."""
-    t = _SECRET_RE.sub(r"\1\2[redacted]", text or "")
-    t = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[redacted]", t)
+    t = redact_text(text or "")
     return re.sub(r"\s+", " ", t).strip()[:max_chars]
 
 
@@ -249,6 +250,9 @@ def delete_all(user_id: str | None = None) -> dict[str, int]:
     conn = connect(uid)
     try:
         counts = {}
+        from .lessons import _DDL as lessons_ddl
+        conn.execute(lessons_ddl)
+        counts["failure_lessons"] = conn.execute("DELETE FROM failure_lessons WHERE user_id=?", (uid,)).rowcount
         counts["engram_relations"] = conn.execute(
             "DELETE FROM engram_relations WHERE from_engram IN "
             "(SELECT id FROM experiences WHERE user_id=?) OR to_engram IN "

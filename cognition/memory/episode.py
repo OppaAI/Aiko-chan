@@ -28,6 +28,8 @@ Public surface:
 """
 from __future__ import annotations
 
+from cognition.memory.redaction import redact_text, redact_data
+
 import json
 import math
 import os
@@ -635,13 +637,14 @@ class EpisodicStore:
             return -1
         uid = user_id or self._user_id
         ts = (timestamp or "").strip() or _utc_now_iso()
-        content = (trace or "").strip()
+        content = redact_text(trace or "").strip()
         if not content:
             return -1
 
         date = _date_from_ts(ts)
-        ent_json = _entities_json(entities)
-        cognitive_json = json.dumps(cognitive_state, ensure_ascii=False, separators=(",", ":")) if cognitive_state else None
+        ent_json = _entities_json(redact_data(entities))
+        source = redact_text(source)
+        cognitive_json = json.dumps(redact_data(cognitive_state), ensure_ascii=False, separators=(",", ":")) if cognitive_state else None
 
         with self._lock:
             cur = self._conn.execute(
@@ -926,6 +929,18 @@ class EpisodicStore:
             valence_tag, arousal_score, salience_score,
             entities, source, session_id, cognitive_json,
         ) = row
+        trace = redact_text(trace)
+        if cognitive_json:
+            try:
+                cognitive_json = json.dumps(redact_data(json.loads(cognitive_json)), ensure_ascii=False, separators=(",", ":"))
+            except (TypeError, ValueError):
+                cognitive_json = json.dumps(redact_text(cognitive_json), ensure_ascii=False)
+        if entities:
+            try:
+                entities = json.dumps(redact_data(json.loads(entities)), ensure_ascii=False)
+            except (TypeError, ValueError):
+                entities = json.dumps(redact_text(entities), ensure_ascii=False)
+        source = redact_text(source)
 
         cur = self._conn.execute(
             """

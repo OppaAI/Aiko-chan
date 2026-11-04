@@ -5,6 +5,7 @@ import json
 import sqlite3
 import uuid
 
+from cognition.memory.redaction import redact_text, redact_data
 from cognition.memory.memorize import entities_to_json, extract_entities
 from cognition.memory.vecstore import delete_by_id, insert_vector, user_scoped_vec_knn
 from system.log import get_logger
@@ -65,6 +66,8 @@ def record_experience(owner, goal: str, steps: list[dict], final_answer: str, ve
     :class:`ExperienceWriter.record` delegates to this (not a shim —
     this is the live code path)."""
     uid = current_user_id()
+    goal, final_answer = redact_text(goal), redact_text(final_answer)
+    steps = redact_data(steps)
     exp_steps = [
         ExperienceStep(
             tool=str(s.get("tool", "unknown")),
@@ -194,6 +197,11 @@ def record_experience(owner, goal: str, steps: list[dict], final_answer: str, ve
                 log.debug("auto engram relate skipped: %s", rel_exc)
 
         _prune(conn, uid)
+        try:
+            from .lessons import record_run_lessons
+            record_run_lessons(goal, steps, row_id, verified_ok=verified_ok, user_id=uid)
+        except Exception as lesson_exc:
+            log.warning("Failure lesson recording unavailable: %s", lesson_exc)
         return row_id
     except Exception as exc:
         conn.rollback()

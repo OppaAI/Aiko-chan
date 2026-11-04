@@ -22,6 +22,8 @@ Usage:
 """
 from __future__ import annotations
 
+from cognition.memory.redaction import redact_text, redact_data
+
 import hashlib
 import os
 import re
@@ -219,7 +221,7 @@ def ingest_codebase(user_id: str | None = None, repo_root: Path | None = None, f
             except Exception:
                 continue
             # Prefix with file path for context
-            full_text = f"File: {rel}\n\n" + text
+            full_text = f"File: {rel}\n\n" + redact_text(text)
             sha = _sha1(full_text)
             doc_id, old_sha = existing.get(rel, (None, None))
             if not force and doc_id and old_sha == sha:

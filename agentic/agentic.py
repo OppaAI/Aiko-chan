@@ -50,6 +50,8 @@ from agentic.capability import match_capabilities, filtered_tool_schemas, resolv
 from agentic.guardrails import DEFAULT_POST_ANSWER_GUARDRAILS, default_pre_tool_guardrails
 from cognition.knowledge import knowledge_context_for, ingest_text as ingest_knowledge_text, ingest_file as ingest_knowledge_file
 from agentic import experience, skill_learning
+from cognition.memory.redaction import redact_text, redact_data
+from agentic.experience.lessons import failure_lessons_context
 from agentic import graph_engine as schema
 from agentic.needle import NeedleClient, NeedleError, NeedleLowConfidence
 from agentic.needle_orchestrator import NeedleOrchestrator, load_needle_workers
@@ -605,7 +607,7 @@ def _flush_trace_buffer() -> None:
 
 def _append_step_trace(ctx: AgentContext | None, event: str, payload: dict[str, Any]) -> None:
     try:
-        record = {"ts": time.time(), "event": event, "run_id": ctx.run_id if ctx and ctx.run_id else "default", **payload}
+        record = redact_data({"ts": time.time(), "event": event, "run_id": ctx.run_id if ctx and ctx.run_id else "default", **payload})
         if ctx and ctx.user_id:
             record["user_id"] = ctx.user_id
         flush_immediately = event in ("approval", "approval_resume", "approval_wait", "checkpoint")
@@ -897,6 +899,7 @@ class TaskState:
                 "args": result.args,
                 "content": result.content if result.ok else None,
                 "observation": result.content if result.ok else None,
+                "error": redact_text(result.content)[:600] if not result.ok else None,
             })
             if result.ok:
                 self.evidence.append(f"{result.tool}: {result.content[:500]}")
@@ -1151,6 +1154,7 @@ def _dispatch_tool_impl(name: str, args: dict, owner=None) -> str:
                 title=args.get("title") or None,
                 kind=args.get("kind", "ingested"),
                 embedder=_context_embedder(owner),
+                image_caption=args.get("image_caption"),
             )
         else:
             doc_id = ingest_knowledge_text(
@@ -2610,6 +2614,12 @@ def _run_agentic_chat_inner(
         experience_guidance = ""
         task_mode_guidance = ""
         agent_system = WORKER_SYSTEM_PROMPT
+        try:
+            lessons = failure_lessons_context(user_input, user_id=trace_ctx.user_id, max_chars=900)
+            if lessons:
+                agent_system += "\n\n" + lessons
+        except Exception as exc:
+            log.debug("Worker failure lessons unavailable: %s", exc)
         scores = {}
     else:
         if mem_kb_future is not None:
@@ -2636,6 +2646,11 @@ def _run_agentic_chat_inner(
         # Wiki / skill / policy blocks are never injected upfront — the loop
         # pulls them explicitly via retrieve_context / load_skill when needed.
         experience_guidance = _similar_successful_experience(user_input, _embedder)
+        try:
+            lessons = failure_lessons_context(user_input, user_id=trace_ctx.user_id)
+            experience_guidance += ("\n" + lessons) if lessons else ""
+        except Exception as exc:
+            log.debug("Failure lessons unavailable: %s", exc)
         knowledge_block = _blank_empty_context(knowledge_block)
         knowledge_context = knowledge_block
         scores = {}

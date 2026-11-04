@@ -51,6 +51,7 @@ class LearnKnowledgeArgs(BaseModel):
     title: str = Field(min_length=1)
     text: str | None = None
     relative_path: str | None = None
+    image_caption: str | None = None
     source: str = ""
     kind: Literal["ingested", "self_learned", "study_note"] = "ingested"
 

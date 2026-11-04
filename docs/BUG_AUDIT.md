@@ -589,8 +589,16 @@ storage regressions. Combined validation: **2,498 passed, 5 skipped,
 13 warnings, and 34 passing subtests**, covering all unit/integration tests and
 the standalone conscience harness.
 
-Recommended follow-ups from Aidon are credential redaction at memory ingress,
-structured failure/repair lessons using the existing experience database, and
-persistent ingestion status. Image-linked memory needs a hardware benchmark;
-Aiko's existing entity/scene/decay/supersession/budget mechanisms should first be
-validated rather than duplicated. Area 5 remains in progress.
+Implemented this turn: best-effort credential redaction on new memory and
+agent trace writes; recurring failure lessons with ordered edit/check evidence
+in the existing experience database; and caption-indexed image records linked
+to workspace files using the existing text embedding service. Captions and
+links are stored in SQLite, and semantic search remains an index over that
+canonical data. No image model or separate database was added. Remaining Area 5
+work includes persistent ingestion status and Jetson hardware measurements;
+image pixel-level semantic search also needs an image model benchmark before it
+can be considered.
+
+Focused validation after these changes: **119 tests passed** across memory
+redaction, failure lessons, learned-file/image refresh, memory storage, and the
+coding-worker path.

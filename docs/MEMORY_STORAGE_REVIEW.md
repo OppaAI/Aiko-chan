@@ -101,6 +101,39 @@ Validation for this adaptation: **69 focused tests passed**; the complete
 unit/integration and standalone conscience run passed **2,498 tests, 5 skipped,
 and 34 subtests**, with 13 existing deprecation warnings.
 
+### Added memory protections and linked image captions
+
+New memory, episode, knowledge, codebase, experience, trace, and skill-proposal
+writes now pass through a shared pattern-based credential scrubber. It masks
+common credential assignments, bearer strings, recognizable provider tokens,
+and private-key blocks while preserving ordinary email/contact facts. This is
+best-effort redaction: it covers new writes and does not rewrite historical
+databases or guarantee detection of every secret.
+
+Failure lessons live in the existing per-user experience SQLite database.
+Repeated failures are grouped by task, tool, error shape, and argument
+fingerprint. A lesson is marked repaired only when an edit precedes a successful
+coding check in the ordered run trace. Approval and conscience blocks are not
+execution failures. Context is limited to a short, bounded reference block.
+
+Image records use an additive SQLite `knowledge_assets` table linked to their
+learned document. A user-supplied caption is searchable through Aiko's existing
+text embeddings and links back to a workspace-relative PNG/JPEG/WebP/GIF file
+(up to 20 MiB). No image model or image bytes are loaded into the 8 GB Jetson
+process. This gives caption recall and a file link; it does not provide visual
+semantic search over pixels. If the workspace file is moved or deleted, its
+stored link can become stale.
+
+Canonical memories, facts, metadata, and asset links remain in SQLite. The
+SQLite FTS/vector tables are derived retrieval indexes: FTS supports lexical
+search, and sqlite-vec ranks semantic matches. Structured facts and
+relationships should remain queryable SQL rows; embeddings complement those
+rows for fuzzy language queries rather than replacing them.
+
+The new redaction, ordered repair-evidence, image-caption refresh, and asset
+link behavior is covered by focused regression tests. Historical secret
+scrubbing and Jetson RAM/latency measurements remain outside this change.
+
 ## Validation boundary
 
 Cloud checks use temporary SQLite/sqlite-vec databases, controlled embedders,

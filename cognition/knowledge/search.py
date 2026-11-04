@@ -239,9 +239,12 @@ def search_knowledge(
         rows = conn.execute(
             f"""
             SELECT c.id, c.text, c.chunk_index, c.created_at, c.entities, c.status,
-                d.title, d.source, d.kind, d.id AS doc_id
+                d.title, d.source, d.kind, d.id AS doc_id,
+                a.relative_path AS asset_path, a.media_type AS asset_media_type,
+                a.file_hash AS asset_hash
             FROM learned_chunks c
             JOIN learned_docs d ON d.id = c.doc_id
+            LEFT JOIN knowledge_assets a ON a.doc_id=d.id AND a.user_id=c.user_id
             WHERE c.id IN ({placeholders}) AND c.user_id = ? AND d.user_id = ?
                 AND (c.status = 'active' OR c.status IS NULL)
             """,
@@ -459,9 +462,12 @@ def _format_knowledge_context(results: list[dict], max_chars: int) -> str:
         if remaining <= 0:
             break
         body = row["text"][:remaining]
+        asset = (f' asset_path="{_attr(row.get("asset_path", ""))}"'
+                 f' media_type="{_attr(row.get("asset_media_type", ""))}"'
+                 if row.get("asset_path") else "")
         blocks.append(
             f'<knowledge_chunk doc_id="{_attr(row.get("doc_id", ""))}" title="{_attr(row.get("title", ""))}" '
-            f'kind="{_attr(row.get("kind", ""))}" source="{_attr(row.get("source", ""))}" score="{row.get("score", row.get("recall_score", 0)):.4f}">\n'
+            f'kind="{_attr(row.get("kind", ""))}" source="{_attr(row.get("source", ""))}"{asset} score="{row.get("score", row.get("recall_score", 0)):.4f}">\n'
             f'{body}\n</knowledge_chunk>'
         )
         remaining -= len(body)

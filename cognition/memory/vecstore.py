@@ -12,6 +12,8 @@ The HarrierEmbedder class provides HTTP-based text embeddings via llama-server.
 """
 from __future__ import annotations
 
+from cognition.memory.redaction import redact_text, redact_data
+
 import os
 import json
 import tempfile
@@ -238,6 +240,8 @@ class HarrierEmbedder:
                 texts = entry["texts"]
                 if not isinstance(texts, list) or not texts or not all(isinstance(t, str) for t in texts):
                     continue
+                if any(redact_text(text) != text for text in texts):
+                    continue  # old unredacted cache entries must not be reused
                 vec = self._validated_batch(entry["vector"], len(texts))
                 key = self._embedding_key(texts)
                 cache.pop(key, None)
@@ -290,6 +294,7 @@ class HarrierEmbedder:
         """
         if not texts:
             return np.empty((0, self.dims), dtype=np.float32)
+        texts = [redact_text(text) for text in texts]
         now = time.monotonic()
         mode = _flyal_mode()
         mkey = self._embedding_key(texts, mode)

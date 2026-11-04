@@ -122,6 +122,10 @@ def propose_skill_from_run(
     same proposal path so repeated mistakes refine the draft without modifying
     trusted `agentic/skillsets/` files.
     """
+    from cognition.memory.redaction import redact_data, redact_text
+    goal = redact_text(goal or "")
+    final_text = redact_text(final_text or "")
+    steps = redact_data(steps or [])
     if len(steps or []) < 2:
         return None
 

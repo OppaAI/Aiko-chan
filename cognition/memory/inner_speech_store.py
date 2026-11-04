@@ -21,6 +21,8 @@ matters into memory.db before they fade.
 
 from __future__ import annotations
 
+from cognition.memory.redaction import redact_text, redact_data
+
 import logging
 import math
 import os
@@ -148,7 +150,7 @@ class InnerSpeechStore:
         source: str = "turn",
     ) -> str | None:
         """Persist one inner utterance. Returns the row id, or None on failure."""
-        text = (text or "").strip()
+        text = redact_text(text or "").strip()
         if not text:
             return None
         tid = uuid.uuid4().hex[:16]

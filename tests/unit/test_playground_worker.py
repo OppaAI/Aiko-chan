@@ -121,6 +121,20 @@ def test_sandbox_reports_script_failure_even_when_wrapper_exits_zero(playground)
     assert 'failed goal test' in result['stderr']
 
 
+def test_worker_can_fix_script_and_repeat_same_test(playground, monkeypatch):
+    monkeypatch.setattr(ag, '_gate_tool_call', lambda *a, **k: None)
+    state = ag.TaskState('fix script')
+    path = 'work/retry/main.py'
+    calls = [('1', 'repo_write_file', {'relative_path': path, 'content': 'raise ValueError("broken")'}),
+             ('2', 'sandbox_run', {'relative_path': path}),
+             ('3', 'repo_write_file', {'relative_path': path, 'content': 'print("fixed")'}),
+             ('4', 'sandbox_run', {'relative_path': path})]
+    results = list(ag._run_tool_batch(calls, state, context(playground), None, [], set()))
+    assert [r[-1].ok for r in results] == [True, False, True, True]
+    assert payload(results[-1][-1].content)['stdout'] == 'fixed\n'
+    assert not state.failures
+
+
 def test_worker_loop_fits_8k_without_persona_memory_or_chat_history(playground, monkeypatch):
     monkeypatch.setattr(ag, 'LLM_CTX_SIZE', 8192)
     monkeypatch.setattr(ag, 'AGENT_REACT_BACKEND', 'openai')

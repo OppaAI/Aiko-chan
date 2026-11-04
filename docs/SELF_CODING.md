@@ -64,3 +64,29 @@ Experience-promoted workflows retain sequential dependencies. Promotion uses
 atomic file replacement and a shared write lock, preserves invalid existing
 playbooks for repair, and reuses a source experience's existing plan rather
 than creating duplicates on a retried promotion.
+
+Within a model response, writes and executions finish in order; adjacent
+read-only calls may run together. A successful edit permits the same read or
+test to run again. Failed tests remain failures until a successful retest is
+recorded. JSON tool results are checked before their output is shortened.
+Subprocess pipes retain bounded tails while draining both streams; a timeout
+kills the local process group, including children that inherited its pipes.
+For SSH, killing the local connection does not establish whether a remote
+command completed; inspect that outcome before requesting another execution.
+
+Interactive playbooks with approval-required nodes use the normal ReAct
+approval flow before graph execution begins. A failed or interrupted graph
+that may have performed actions returns its partial result instead of
+automatically restarting those actions through ReAct. Saved graph interrupts
+wait for started siblings to finish and checkpoint, and resume checks the
+graph definition. Direct graph execution keeps approval-required nodes blocked;
+`resume_graph` supplies interrupt input and does not grant tool approval.
+
+Graph execution submits at most the configured worker count per wave (two by
+default). Tool-specific subprocess/client timeouts provide cancellation where
+supported. An arbitrary in-process Python/native handler cannot safely be
+force-killed: its deadline is checked on return, its result is marked uncertain
+if late, and automatic fallback is suppressed. Graph cancellation stops later
+waves after started handlers settle. Checkpoints cannot make remote side
+effects and local persistence one transaction; inspect outcomes after a crash
+between execution and checkpointing.

@@ -489,7 +489,7 @@ class PolicyEngine:
                 tool=policy["action"],
                 args=params,
                 depends_on=("check",),
-                run_if={"policy_check.ok": True},
+                run_if={"node": "check", "matches": r'"ok"\s*:\s*true\b'},
                 needs_approval=(
                     _normalize_approval(policy.get("approval")) not in ("autonomous", "notify")
                 ),

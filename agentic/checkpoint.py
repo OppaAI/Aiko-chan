@@ -5,7 +5,8 @@ calling execute_graph again with the same run_id resumes from the last
 completed node instead of restarting the whole graph.
 """
 import json
-import shutil
+import os
+import tempfile
 import sqlite3
 import threading
 from pathlib import Path
@@ -39,22 +40,29 @@ def _get_conn() -> sqlite3.Connection:
     path = _db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     _ensure_migrated()
-    _add_state_column_if_missing()
     conn = _open_db(path)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS node_checkpoints (
-            run_id TEXT NOT NULL,
-            node_id TEXT NOT NULL,
-            tool TEXT NOT NULL,
-            ok INTEGER NOT NULL,
-            content TEXT NOT NULL,
-            args TEXT NOT NULL,
-            error_type TEXT,
-            seq INTEGER NOT NULL,
-            state_json TEXT DEFAULT '{}',
-            PRIMARY KEY (run_id, node_id)
-        )
-    """)
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS node_checkpoints (
+                run_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                tool TEXT NOT NULL,
+                ok INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                args TEXT NOT NULL,
+                error_type TEXT,
+                seq INTEGER NOT NULL,
+                state_json TEXT DEFAULT '{}',
+                PRIMARY KEY (run_id, node_id)
+            )
+        """)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(node_checkpoints)")}
+        if "state_json" not in cols:
+            conn.execute("ALTER TABLE node_checkpoints ADD COLUMN state_json TEXT DEFAULT '{}'")
+            conn.commit()
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -69,43 +77,33 @@ def _ensure_migrated() -> None:
     if new_path.exists():
         return
 
+    from system.userspace import resolve_owner_user_id
+    if current_user_id() != resolve_owner_user_id():
+        return  # a guest must never receive the legacy owner's checkpoints
+    new_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".checkpoint-migrate-", dir=new_path.parent)
+    os.close(fd)
     try:
-        new_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(old_path, new_path)
-        log.info("[checkpoint] Migrated checkpoint DB from %s to %s", old_path, new_path)
-
-        old_path.unlink()
-        log.info("[checkpoint] Removed old checkpoint DB at %s", old_path)
-    except Exception as e:
-        log.error("[checkpoint] Failed to migrate checkpoint DB: %s", e)
-
-
-def _add_state_column_if_missing() -> None:
-    """Idempotent migration for existing DBs that lack state_json."""
-    path = _db_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
-    try:
-        conn = _open_db(path)
-    except Exception as exc:
-        log.warning("state_json migration skipped (open failed): %s", exc)
-        return
-    try:
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(node_checkpoints)").fetchall()]
-        if "state_json" not in cols:
-            conn.execute("ALTER TABLE node_checkpoints ADD COLUMN state_json TEXT DEFAULT '{}'")
-            conn.commit()
-    except Exception as exc:
-        log.warning("state_json migration skipped: %s", exc)
+        source = sqlite3.connect(old_path.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            target = sqlite3.connect(temporary)
+            try:
+                source.backup(target)  # includes committed data still in WAL
+            finally:
+                target.close()
+        finally:
+            source.close()
+        try:
+            os.link(temporary, new_path)  # publish only if nobody created it
+        except FileExistsError:
+            pass
+        log.info("[checkpoint] copied legacy checkpoints; original retained at %s", old_path)
     finally:
-        conn.close()
+        Path(temporary).unlink(missing_ok=True)
 
 
 def save_node_result(run_id: str, seq: int, result, state_json: str = "{}") -> None:
     """Persist one NodeResult and an optional state snapshot."""
-    _add_state_column_if_missing()
     safe_args = {
         k: v for k, v in result.args.items()
         if k not in {"embedder", "client", "model"}
@@ -118,7 +116,7 @@ def save_node_result(run_id: str, seq: int, result, state_json: str = "{}") -> N
                 "(run_id, node_id, tool, ok, content, args, error_type, seq, state_json) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (run_id, result.node_id, result.tool, int(result.ok),
-                 result.content, json.dumps(safe_args), result.error_type, seq, state_json),
+                 result.content, json.dumps(safe_args, default=str), result.error_type, seq, state_json),
             )
             conn.commit()
         finally:
@@ -127,13 +125,12 @@ def save_node_result(run_id: str, seq: int, result, state_json: str = "{}") -> N
 
 def load_checkpoint(run_id: str, node_result_cls) -> list:
     """Returns completed NodeResults for run_id, in original order. Empty if none."""
-    _add_state_column_if_missing()
     with _lock:
         conn = _get_conn()
         try:
             rows = conn.execute(
                 "SELECT node_id, tool, ok, content, args, error_type, state_json "
-                "FROM node_checkpoints WHERE run_id = ? ORDER BY seq", (run_id,)
+                "FROM node_checkpoints WHERE run_id = ? AND node_id != '__graph_state__' ORDER BY seq", (run_id,)
             ).fetchall()
         finally:
             conn.close()
@@ -154,7 +151,6 @@ def save_graph_state(run_id: str, state: dict) -> None:
     run with a ``TypeError: ... is not JSON serializable`` at snapshot time.
     """
     state = state or {}
-    _add_state_column_if_missing()
     with _lock:
         conn = _get_conn()
         try:
@@ -174,7 +170,6 @@ def save_graph_state(run_id: str, state: dict) -> None:
 
 
 def load_graph_state(run_id: str) -> dict:
-    _add_state_column_if_missing()
     with _lock:
         conn = _get_conn()
         try:

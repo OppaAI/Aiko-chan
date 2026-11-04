@@ -8,6 +8,7 @@ continues to validate, approve, and execute every proposed call.
 from __future__ import annotations
 
 import json
+import contextvars
 import math
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -240,7 +241,7 @@ class NeedleOrchestrator:
             pass
         results: dict[str, NeedleWorkerResult] = {}
         with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="needle-worker") as pool:
-            futures = {pool.submit(self._run_one, worker, task, tools): worker for worker in self.workers}
+            futures = {pool.submit(contextvars.copy_context().run, self._run_one, worker, task, tools): worker for worker in self.workers}
             for future in as_completed(futures):
                 worker = futures[future]
                 try:

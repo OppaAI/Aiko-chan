@@ -326,7 +326,6 @@ def _blank_empty_context(block: str) -> str:
     return block
 
 
-_ERROR_PREFIX_RE = re.compile(r"^\[(?P<label>[^:\]]+)(?::\s*(?P<detail>.*))?\]$", re.DOTALL)
 # Tools that can genuinely post to a real public account. When one of these
 # ran and succeeded this turn, an answer describing a real "posted" action
 # is not a hallucinated external action — see _verify_final_answer.
@@ -554,6 +553,13 @@ _trace_last_flush = time.time()
 
 
 def _trim_trace_dir(trace_dir: Path) -> None:
+    files = []
+    for path in trace_dir.glob("*.jsonl"):
+        try:
+            files.append((path.stat().st_mtime, path))
+        except FileNotFoundError:
+            continue
+    files = [path for _, path in sorted(files, reverse=True)]
     for old in files[AGENT_TRACE_MAX_FILES:]:
         try:
             old.unlink()
@@ -572,6 +578,9 @@ def _flush_trace_buffer() -> None:
         for rec in _trace_buffer:
             uid = rec.get("user_id")
             run_id = rec.get("run_id", "default")
+            if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", run_id):
+                log.warning("agentic: ignored unsafe trace run id")
+                continue
             trace_dir = user_state_dir(uid) / "agentic" / "traces"
             trace_dir.mkdir(parents=True, exist_ok=True)
             path = trace_dir / f"{run_id}.jsonl"
@@ -580,12 +589,15 @@ def _flush_trace_buffer() -> None:
         for path, records in by_path.items():
             try:
                 if path.exists() and path.stat().st_size >= AGENT_TRACE_MAX_BYTES:
-                    path.rename(path.parent / f"{path.stem}.{int(time.time())}.jsonl")
+                    path.rename(path.parent / f"{path.stem}.{uuid.uuid4().hex}.jsonl")
                 with path.open("a", encoding="utf-8") as f:
                     for rec in records:
                         f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
             except Exception as exc:
                 log.debug("failed to flush agentic trace batch: %s", exc)
+
+        for trace_dir in {path.parent for path in by_path}:
+            _trim_trace_dir(trace_dir)
 
         _trace_buffer.clear()
         _trace_last_flush = time.time()
@@ -859,6 +871,7 @@ class TaskState:
     steps: list[dict] = field(default_factory=list)
     evidence: list[str] = field(default_factory=list)
     failures: list[ToolResult] = field(default_factory=list)
+    _lock: Any = field(default_factory=threading.RLock, repr=False, compare=False)
 
     def record(self, result: ToolResult) -> None:
         """Record a tool execution result and update agent state."""
@@ -875,38 +888,46 @@ class TaskState:
             state.persist()
         except Exception:
             pass
-        self.steps.append({
-            "tool": result.tool,
-            "ok": result.ok,
-            "attempts": result.attempts,
-            "error_type": result.error_type,
-            "args": result.args,
-            "content": result.content if result.ok else None,
-            "observation": result.content if result.ok else None,
-        })
-        if result.ok:
-            self.evidence.append(f"{result.tool}: {result.content[:500]}")
-        else:
-            self.failures.append(result)
+        with self._lock:
+            self.steps.append({
+                "tool": result.tool,
+                "ok": result.ok,
+                "attempts": result.attempts,
+                "error_type": result.error_type,
+                "args": result.args,
+                "content": result.content if result.ok else None,
+                "observation": result.content if result.ok else None,
+            })
+            if result.ok:
+                self.evidence.append(f"{result.tool}: {result.content[:500]}")
+                if result.tool in _PREFERENCE_READ_ONLY_TOOLS | _CODING_RECHECK_TOOLS | _CODING_MUTATION_TOOLS:
+                    self.failures[:] = [failure for failure in self.failures
+                        if not (failure.tool == result.tool and (
+                            failure.args == result.args or result.tool in _CODING_MUTATION_TOOLS
+                            and result.args.get("relative_path")
+                            and failure.args.get("relative_path") == result.args["relative_path"]))]
+            else:
+                self.failures.append(result)
 
     def summary(self) -> str:
         """Generate a JSON summary of the agentic plan execution."""
-        payload = {
-            "goal": self.goal,
-            "completed_tools": [s for s in self.steps if s["ok"]],
-            "failed_tools": [s for s in self.steps if not s["ok"]],
-            "evidence_count": len(self.evidence),
-            "unresolved_failures": [
-                {
-                    "tool": f.tool,
-                    "error_type": f.error_type,
-                    "content": f.content[:300],
-                    "args": f.args,
-                }
-                for f in self.failures
-            ],
-        }
-        return json.dumps(payload, ensure_ascii=False, indent=2)
+        with self._lock:
+            payload = {
+                "goal": self.goal,
+                "completed_tools": [s for s in self.steps if s["ok"]],
+                "failed_tools": [s for s in self.steps if not s["ok"]],
+                "evidence_count": len(self.evidence),
+                "unresolved_failures": [
+                    {
+                        "tool": f.tool,
+                        "error_type": f.error_type,
+                        "content": f.content[:300],
+                        "args": f.args,
+                    }
+                    for f in self.failures
+                ],
+            }
+            return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 @dataclass
@@ -1078,22 +1099,11 @@ def _validate_args(name: str, args: object) -> ToolResult | None:
 
 def _classify_result(name: str, args: dict, content: str, attempts: int = 1) -> ToolResult:
     """Convert legacy string tool output into a structured result."""
-    text = content or ""
-    stripped = text.strip()
-    if stripped.startswith("[") and stripped.endswith("]"):
-        match = _ERROR_PREFIX_RE.match(stripped)
-        label = (match.group("label") if match else "tool failed").lower()
-        detail = match.group("detail") if match else stripped.strip("[]")
-        retryable = any(marker in label for marker in ("search failed", "fetch failed"))
-        retryable = retryable or any(marker in (detail or "").lower() for marker in ("timeout", "connection", "empty response"))
-        return ToolResult(
-            ok=False, tool=name, args=args, content=stripped,
-            error_type=label.replace(" ", "_"),
-            retryable=retryable,
-            attempts=attempts,
-            metadata={"detail": detail or label},
-        )
-    return ToolResult(ok=True, tool=name, args=args, content=text, attempts=attempts)
+    from agentic.outcomes import tool_outcome
+    outcome = tool_outcome(content)
+    return ToolResult(ok=outcome.ok, tool=name, args=args, content=outcome.content,
+                      error_type=outcome.error_type, retryable=outcome.retryable,
+                      attempts=attempts, metadata={"detail": outcome.detail} if outcome.detail else {})
 
 
 def _dispatch_tool_impl(name: str, args: dict, owner=None) -> str:
@@ -1187,26 +1197,29 @@ def _dispatch_tool_impl(name: str, args: dict, owner=None) -> str:
     if "embedder" in _params and "embedder" not in call_args:
         call_args["embedder"] = _context_embedder(owner)
     try:
+        signature = inspect.signature(handler)
+    except (TypeError, ValueError):
         return handler(**call_args)
+    try:
+        signature.bind(**call_args)
     except TypeError:
+        # Decide legacy dict calling convention before invoking the handler.
+        # A TypeError inside a handler may follow an external side effect.
+        legacy = list(signature.parameters.values())
+        if len(legacy) != 1 or legacy[0].name not in {"args", "arguments", "payload", "params"}:
+            raise
+        signature.bind(args)
         return handler(args)
+    return handler(**call_args)
 
 
 def dispatch_tool(name: str, args: dict, owner=None) -> str:
     """Dispatch a tool and record its bounded outcome in cognitive state."""
     try:
         result = _dispatch_tool_impl(name, args, owner=owner)
-        parsed = result if isinstance(result, dict) else None
-        if parsed is None and isinstance(result, str) and result.lstrip().startswith("{"):
-            try:
-                parsed = json.loads(result)
-            except Exception:
-                parsed = None
-        ok = not (isinstance(result, str) and result.startswith("[unknown tool:"))
-        if isinstance(parsed, dict) and parsed.get("ok") is False:
-            ok = False
-        detail = str(result)[:240]
-        error_type = "tool_error" if not ok else ""
+        from agentic.outcomes import tool_outcome
+        outcome = tool_outcome(result)
+        ok, detail, error_type = outcome.ok, outcome.detail or outcome.content[:240], outcome.error_type or ""
     except Exception as exc:
         result = f"[tool error: {exc}]"
         ok = False
@@ -1299,7 +1312,7 @@ def dispatch_tool_checked(name: str, args: dict, owner=None, *, conscience_check
         )
     except Exception as exc:
         log.debug("[agentic] tool feedback target skipped: %s", exc)
-    return _classify_result(name, args, str(content))
+    return _classify_result(name, args, content)
 
 
 def _max_attempts_for(name: str) -> int:
@@ -1329,6 +1342,51 @@ def _preference_requires_approval(name: str) -> bool:
         return preferences.get("action_confirmation") == "ask_before_acting" and name not in _PREFERENCE_READ_ONLY_TOOLS
     except Exception:
         return False
+
+
+_CODING_MUTATION_TOOLS = frozenset({"repo_write_file", "repo_replace_text", "code_apply_patch", "code_apply_correction"})
+_CODING_RECHECK_TOOLS = frozenset({"sandbox_run", "code_run_tests", "code_lint", "repo_read_file", "repo_file_tree", "repo_search_text"})
+
+
+def _run_tool_batch(calls, state, ctx, owner, guards, seen_calls):
+    """Parallelize adjacent reads; complete every mutation before later calls."""
+    def submit(call):
+        call_id, name, args = call
+        key = (name, json.dumps(args, sort_keys=True))
+        if key in seen_calls:
+            result = ToolResult(ok=False, tool=name, args=args, error_type="repeated_tool_call",
+                                content=f"Repeated tool call skipped for {name}; change the inputs or disclose the limitation.",
+                                retryable=True)
+            state.record(result)
+            future = concurrent.futures.Future()
+            future.set_result(result)
+        else:
+            seen_calls.add(key)
+            future = CONTEXT_POOL.submit(execute_tool_with_policy, name, args, state,
+                                         owner=owner, ctx=ctx, guards=guards)
+        return call_id, name, args, future
+    def collect(item):
+        call_id, name, args, future = item
+        try:
+            result = future.result()
+        except Exception as exc:
+            result = ToolResult(ok=False, tool=name, args=args, content=f"[tool execution error: {exc}]",
+                                error_type="execution_error", retryable=False)
+            state.record(result)
+        if result.ok and name in _CODING_MUTATION_TOOLS:
+            seen_calls.difference_update(key for key in list(seen_calls) if key[0] in _CODING_RECHECK_TOOLS)
+        return call_id, name, result
+    reads = []
+    for call in calls:
+        if call[1] in _PREFERENCE_READ_ONLY_TOOLS:
+            reads.append(submit(call))
+            continue
+        for item in reads:
+            yield collect(item)
+        reads.clear()
+        yield collect(submit(call))
+    for item in reads:
+        yield collect(item)
 
 def execute_tool_with_policy(name: str, args: dict, state: TaskState, owner=None, ctx: AgentContext | None = None, guards=None) -> ToolResult:
     """Validate, guard, run, retry, and ledger one tool call."""
@@ -1632,6 +1690,9 @@ def _verify_final_answer(owner, user_input: str, answer: str, state: TaskState) 
         )
         if think_off is not None:
             create_kwargs["extra_body"] = think_off
+        from cognition.chat_budget import fit_chat_request
+        create_kwargs["messages"], create_kwargs["max_tokens"] = fit_chat_request(
+            create_kwargs["messages"], LLM_CTX_SIZE, create_kwargs["max_tokens"])
         resp = owner._client.chat.completions.create(**create_kwargs)
         raw = (resp.choices[0].message.content or "").strip()
         data = json.loads(raw)
@@ -1654,8 +1715,10 @@ def _verify_final_answer(owner, user_input: str, answer: str, state: TaskState) 
                 feedback = f"Verifier score {score:.2f} below threshold {AGENT_VERIFY_MIN_SCORE:.2f}."
         return VerificationResult(ok=ok, feedback=feedback, score=score)
     except Exception as e:
-        log.warning("Agent verifier failed; falling back to deterministic pass: %s", e)
-        return VerificationResult(ok=True, feedback="Verifier unavailable; deterministic checks passed.", score=0.75)
+        log.warning("Agent verifier unavailable; preserving deterministic verdict: %s", e)
+        return VerificationResult(ok=not issues,
+                                  feedback="\n".join(issues) if issues else "Verifier unavailable; deterministic checks passed.",
+                                  score=0.0 if issues else 0.75)
 
 
 def _rewrite_failed_answer(owner, user_input: str, answer: str, verdict: VerificationResult, state: TaskState) -> str | None:
@@ -1691,6 +1754,9 @@ def _rewrite_failed_answer(owner, user_input: str, answer: str, verdict: Verific
         )
         if think_off is not None:
             create_kwargs["extra_body"] = think_off
+        from cognition.chat_budget import fit_chat_request
+        create_kwargs["messages"], create_kwargs["max_tokens"] = fit_chat_request(
+            create_kwargs["messages"], LLM_CTX_SIZE, create_kwargs["max_tokens"])
         resp = owner._client.chat.completions.create(**create_kwargs)
         rewritten = (resp.choices[0].message.content or "").strip()
         if not rewritten:
@@ -2352,12 +2418,14 @@ def _run_agentic_chat_inner(
     if not worker_mode and AGENT_EXECUTOR_MODE in {"graph", "hybrid"}:
         graph_result = schema.run_schema_agent(
             user_input, cap_ids=_matched_caps, embedder=_embedder,
-            llm_client=owner._client, llm_model=owner._llm_model,
+            llm_client=owner._client, llm_model=owner._llm_model, interactive_approvals=True,
         )
         if graph_result is not None:
             for _node in graph_result.results:
                 _append_step_trace(trace_ctx, "graph_node", {"node_id": getattr(_node, "node_id", ""), "tool": getattr(_node, "tool", ""), "ok": getattr(_node, "ok", False), "error_type": getattr(_node, "error_type", None)})
-            _graph_ok = not any(not r.ok for r in graph_result.results)
+            _graph_ok = (not getattr(graph_result, "interrupted", False)
+                         and any(r.ok and r.error_type != "condition_skipped" for r in graph_result.results)
+                         and all(r.ok for r in graph_result.results))
 
             # DEBUG: Log each node result
             for r in graph_result.results:
@@ -2379,7 +2447,7 @@ def _run_agentic_chat_inner(
                 ))
 
             graph_verdict: VerificationResult | None = None
-            if AGENT_VERIFY_FINAL:
+            if AGENT_VERIFY_FINAL and not getattr(graph_result, "interrupted", False):
                 log.info(f"VERIFY: calling _verify_final_answer, final_answer_len={len(str(graph_result.final_answer)) if graph_result.final_answer else 0}")
                 graph_verdict = _verify_final_answer(owner, user_input, graph_result.final_answer, graph_state)
                 log.info(f"VERIFY: result ok={graph_verdict.ok} score={graph_verdict.score} feedback_len={len(graph_verdict.feedback) if graph_verdict.feedback else 0}")
@@ -2400,7 +2468,7 @@ def _run_agentic_chat_inner(
                         _append_step_trace(trace_ctx, "verify", {"ok": rewrite_verdict.ok, "score": rewrite_verdict.score, "feedback": rewrite_verdict.feedback[:500], "mode": "graph_rewrite"})
                         if rewrite_verdict.ok:
                             graph_verdict = rewrite_verdict
-                            graph_result.final_answer = rewritten
+                            graph_result = replace(graph_result, final_answer=rewritten)
             else:
                 log.info("VERIFY: skipped (AGENT_VERIFY_FINAL=0)")
 
@@ -2468,18 +2536,23 @@ def _run_agentic_chat_inner(
                 "executor_mode=%s",
                 _graph_ok, graph_verdict.ok if graph_verdict else None, AGENT_EXECUTOR_MODE,
             )
-            CONTEXT_POOL.submit(
-                experience.record_experience,
-                owner, user_input, graph_result.steps, graph_result.final_answer,
-                verified_ok=False, score=graph_verdict.score if graph_verdict else 0.0, embedder=_embedder,
-            )
-            CONTEXT_POOL.submit(
-                skill_learning.propose_skill_from_run,
-                user_input, graph_result.steps, graph_result.final_answer,
-                verified_ok=False, score=graph_verdict.score if graph_verdict else 0.0, user_id=trace_ctx.user_id,
-            )
+            if not getattr(graph_result, "interrupted", False):
+                CONTEXT_POOL.submit(
+                    experience.record_experience,
+                    owner, user_input, graph_result.steps, graph_result.final_answer,
+                    verified_ok=False, score=graph_verdict.score if graph_verdict else 0.0, embedder=_embedder,
+                )
+                CONTEXT_POOL.submit(
+                    skill_learning.propose_skill_from_run,
+                    user_input, graph_result.steps, graph_result.final_answer,
+                    verified_ok=False, score=graph_verdict.score if graph_verdict else 0.0, user_id=trace_ctx.user_id,
+                )
 
-            if AGENT_EXECUTOR_MODE == "graph":
+            # A graph may have completed actions before another node failed.
+            # Only all-read-only runs may safely be restarted by ReAct.
+            replay_risk = any(r.tool not in _PREFERENCE_READ_ONLY_TOOLS
+                              and r.error_type != "condition_skipped" for r in graph_result.results)
+            if AGENT_EXECUTOR_MODE == "graph" or getattr(graph_result, "interrupted", False) or replay_risk:
                 # No ReAct fallback allowed in pure graph mode; surface the
                 # graph's own (already failure-disclosing) text as before.
                 final_text = graph_result.final_answer
@@ -2732,25 +2805,6 @@ def _run_agentic_chat_inner(
 
             log.info("[agent] step %s → %s(%s)", step, name, args)
 
-            call_key = (name, json.dumps(args, sort_keys=True))
-            if name != "final_answer" and call_key in seen_calls:
-                result = ToolResult(
-                    ok=False, tool=name, args=args,
-                    content=(
-                        f"Repeated tool call skipped for {name}. Choose a different "
-                        "query/argument/tool, or finalize with a disclosed limitation."
-                    ),
-                    error_type="repeated_tool_call", retryable=True,
-                )
-                state.record(result)
-                messages.append({
-                    "role": "tool", "tool_call_id": call.id,
-                    "name": name, "content": result.observation(),
-                })
-                continue
-
-            if name != "final_answer":
-                seen_calls.add(call_key)
             if token_callback:
                 token_callback(f"__STATUS__:tool:{name}\n")
 
@@ -2763,22 +2817,8 @@ def _run_agentic_chat_inner(
 
         # Phase 2 — execute batch tools in parallel, collect in original order
         if batch_calls:
-            submitted = [
-                (call_id, name, CONTEXT_POOL.submit(
-                    execute_tool_with_policy, name, args, state, owner=owner, ctx=trace_ctx, guards=turn_guards
-                ))
-                for call_id, name, args in batch_calls
-            ]
-            for call_id, name, future in submitted:
-                try:
-                    result = future.result()
-                except Exception as e:
-                    result = ToolResult(
-                        ok=False, tool=name, args={},
-                        content=f"[tool execution error: {e}]",
-                        error_type="execution_error", retryable=False,
-                    )
-                    state.record(result)
+            for call_id, name, result in _run_tool_batch(
+                    batch_calls, state, trace_ctx, owner, turn_guards, seen_calls):
                 messages.append({
                     "role": "tool", "tool_call_id": call_id,
                     "name": name, "content": result.observation(),

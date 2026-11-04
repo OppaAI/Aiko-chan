@@ -63,6 +63,25 @@ def test_orchestrator_fans_out_with_each_workers_tool_intersection():
     assert all("Role:" in call[1] for call in _Client.calls)
 
 
+def test_workers_inherit_calling_identity():
+    from contextvars import ContextVar
+    identity = ContextVar('test_needle_identity', default='guest')
+    seen = []
+    class Client(_Client):
+        def complete(self, prompt, tools):
+            seen.append(identity.get())
+            return super().complete(prompt, tools)
+    workers = load_needle_workers(
+        '[{"id":"a","base_url":"http://mock","allowed_tools":["search"]}]',
+        default_timeout=1, default_confidence_threshold=.8)
+    token = identity.set('owner')
+    try:
+        NeedleOrchestrator(workers, client_factory=Client).complete('search', _tools('search'))
+    finally:
+        identity.reset(token)
+    assert seen == ['owner']
+
+
 def test_orchestrator_reports_ineligible_workers_without_calling_them():
     workers = load_needle_workers(
         '[{"id":"research","role":"researcher","base_url":"http://a","allowed_tools":["search"]}]',

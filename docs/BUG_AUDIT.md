@@ -12,7 +12,7 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 | 1 | Startup, shutdown, and session orchestration | `main.py`, `system/wakeup.py`, `system/orchestrate.py`, `system/schedule.py` | Code review completed; final validation recorded below; physical Jetson checks pending |
 | 2 | Conversation routing, context assembly, and response streaming | `cognition/think.py`, `cognition/deep_think.py`, `cognition/inner_speech.py` | Current code pass completed; combined validation recorded below; real-model/device checks pending |
 | 3 | Conscience, refusal gates, and user preferences | `cognition/conscience/`, `cognition/policy.py`, `cognition/attention.py` | Current code pass completed; final validation below; live-model and physical Jetson checks pending |
-| 4 | Agentic tasks, tools, and self-coding | `agentic/`, `Aiko-Playground` integration | In progress; approval replay and workflow-promotion fixes completed; graph execution and coding subprocess review ongoing |
+| 4 | Agentic tasks, tools, and self-coding | `agentic/`, `Aiko-Playground` integration | Current code pass completed; final validation below; live-model and physical Jetson checks pending |
 | 5 | Memory, retrieval, knowledge, and persistence | `cognition/memory/`, `cognition/knowledge/` | Not started |
 | 6 | Fly-brain circuits and state wiring | `cognition/fly*`, `cognition/centralcomplex/`, `cognition/neural_state.py` | Focused wiring fixes shipped; broad review not started |
 | 7 | Speech, listening, and sensory pathways | `sensory/`, `cognition/flysense/` | Not started |
@@ -391,14 +391,96 @@ loading; dedicated tests can override the seams. Their timeouts and behavioral
 assertions are unchanged. The combined startup/approval/promotion check passed
 all 48 tests after this isolation fix.
 
-Area 4 remains in progress. Follow-up review includes graph checkpoint and
-interrupt/resume behavior, timeout enforcement, structured tool outcomes and
-fallbacks, streamed graph delivery, coding subprocess output/process limits,
-tool-registry ownership, and the remaining agent loop/skill/MCP integration.
-The physical Jetson, real Playground checkout, and live model have not been
-exercised by these scripted cloud tests.
-
-Final combined validation for this Area 4 batch: **2,406 passed, 5 skipped,
+First-batch combined validation: **2,406 passed, 5 skipped,
 13 warnings, and 34 passing subtests**, covering all unit/integration tests
 and the standalone conscience harness. Local HTTP fixtures used loopback
-networking. Area 4 is not yet a completed code pass.
+networking.
+
+The remaining Area 4 code review covers the main ReAct loop, graph execution,
+checkpoint/resume, coding subprocesses, registry/MCP/Needle integration, and
+skill selection and proposals. Fixes from this pass:
+
+- Both executors share result classification for native objects, JSON,
+  titled JSON, and legacy errors. Arrays remain valid data; false `ok`,
+  failure statuses, and failed return codes cannot become successful evidence
+  after output truncation. Graph memoization stores successful results only.
+- Handler signature binding chooses legacy dict arguments before execution;
+  a `TypeError` inside a handler cannot cause a second invocation.
+- Adjacent read-only calls may run concurrently, with writes and executions
+  acting as ordering barriers. Successful edits permit reads/tests to repeat;
+  a passing retest clears its matching local failure. External duplicate
+  protection remains active. Ledger recording and snapshots use a shared lock.
+- Graphs validate dependencies, duplicate nodes, cycles, and control targets
+  before effects. Invalid conditional operators, regexes, and numeric
+  thresholds cannot enable a branch. Implicit dependents of skipped branches
+  also skip; policy-generated DAGs now use a supported condition.
+- Fallbacks reuse normal validation, approval, conscience, argument injection,
+  retries, result parsing, and usage handling. A successful fallback recovers
+  the primary dependency; failed/skipped fallbacks do not. Interrupts on
+  recovered or fallback nodes are honored. Approval/conscience/deadline
+  failures do not launch an alternative operation.
+- Each graph invocation receives a unique ID. Saved resumes verify node/tool
+  identities and the graph definition, preserve newer standalone state and
+  resume input, and reject nonexistent runs. Interrupts checkpoint all started
+  siblings before returning, avoiding replay of their recorded effects.
+  Loop invalidation waits for the worker wave and retains its visit counts.
+- Submission is bounded to one configured worker wave. Streaming uses a bounded
+  queue and delivers nodes before completion; closing the stream stops later
+  waves after started calls settle. State reducers are synchronized, and
+  parallel token usage belongs to the node that incurred it.
+- Checkpoint schema migration uses its existing connection, excludes the
+  graph-state sentinel from node results, and closes failed initialization.
+  Owner-only legacy migration uses SQLite backup to include committed WAL
+  data, publishes without overwriting a new database, and retains the source.
+- Interactive approval-required playbooks defer to durable ReAct approval
+  before graph effects. Hybrid fallback cannot replay a graph that may have
+  performed actions. Interrupted runs do not train successful workflows;
+  skipped nodes do not count as completed evidence. Frozen graph answers are
+  replaced correctly when repaired by verification.
+- An unavailable verifier preserves deterministic problems. Missing/invalid
+  explicit goal verdicts cannot imply `ACHIEVED`. Verifier and repair requests
+  also respect the configured context budget, including 8K configurations.
+- Test, sandbox, lint, shell, and SSH commands drain both pipes with bounded
+  text tails and replace invalid bytes. Timeout cleanup kills the local process
+  group, including descendants retaining pipes after their parent exits.
+  Removed dead pytest command construction. Trace retention is active, accepts
+  safe run IDs, and avoids timestamp collisions during rotation.
+- Graph tools refresh when registrations change, signature caching is
+  bounded, and catalog export supports callable MCP bridge instances. MCP preserves protocol errors and complete text/structured results,
+  cancels timed-out local awaits, avoids retaining obsolete bridges, and owns
+  transport/session context scopes in one persistent task through cleanup.
+  Remote bridge metadata prevents automatic graph retries. Needle workers
+  inherit the calling context and identity.
+- Skill vectors include path, metadata, and embedding geometry/provider in
+  bounded cache keys; query/document instructions match and callers receive
+  copies. Concurrent skill observations use locked atomic replacement.
+  Staged promotion preserves actual arguments and sequential dependencies,
+  shares default argument generation, rejects unsafe slugs/nonfinite scores,
+  and atomically publishes the candidate.
+
+Focused final graph/recovery validation: **141 passed**. Regression coverage
+includes real temporary Playground writes, a failing script followed by an edit
+and identical successful retest, process-group cleanup, concurrent graph usage,
+interrupt/resume, and mocked MCP lifecycle ownership. The existing scripted
+8K worker test continues to verify every request without loading persona,
+memory, knowledge, or previous chat.
+
+## Area 4 completion boundary
+
+Final combined validation: **2,457 passed, 5 skipped, 13 warnings, and
+34 passing subtests** across `tests/unit`, `tests/integration`, and the
+standalone conscience harness. The subsequent callable-bridge catalog fix and
+adjacent registry/MCP/recovery checks passed **59 tests**. The warnings are
+existing multiprocessing/fork and Discord audioop deprecations.
+
+This closes the current Area 4 code pass; it does not
+establish that every possible agent workflow or generated program is correct.
+The physical 8 GB Jetson, its running model, real Playground deployment, and
+optional remote service providers still need operational validation. Check a
+live goal through create/test/fail/edit/retest/checkpoint, resume it in a later
+idle tick, verify the server actually uses an 8192-token context, and measure
+peak RAM with the normal services loaded. No physical-device execution or
+external publishing was performed by these cloud tests.
+
+For graph timeout/cancellation behavior and the boundary between direct graph
+interrupts and interactive approvals, see [SELF_CODING.md](SELF_CODING.md).

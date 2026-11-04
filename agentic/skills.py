@@ -53,7 +53,7 @@ class Embedder(Protocol):
     def embed_queries(self, texts: list[str], instruct: str = "") -> object: ...
 
 
-_skill_embed_cache: dict[tuple[str, float], np.ndarray] = {}
+_skill_embed_cache: dict[tuple, tuple[object, np.ndarray]] = {}
 _skill_embed_cache_lock = threading.RLock()
 _SKILL_EMBED_CACHE_MAX = 256
 
@@ -82,16 +82,19 @@ def _get_skill_embedding(doc: "SkillDoc", embedder: Embedder) -> np.ndarray:
         mtime = doc.path.stat().st_mtime
     except OSError:
         mtime = 0.0
-    cache_key = (doc.skill_id, mtime)
+    from agentic.capability import _embedding_geometry, _validated_trigger_vector
+    geometry = _embedding_geometry(embedder)
+    cache_key = (str(doc.path.resolve()), _embed_source_text(doc), mtime,
+                 geometry if geometry is not None else id(embedder))
     with _skill_embed_cache_lock:
         cached = _skill_embed_cache.get(cache_key)
         if cached is not None:
-            return cached
-    vector = reason.normalize_vec(np.asarray(embedder.embed_query(_embed_source_text(doc)), dtype=np.float32))
+            return cached[1].copy()
+    vector = _validated_trigger_vector(embedder.embed_query(_embed_source_text(doc), instruct=_SKILL_INSTRUCT), embedder)
     with _skill_embed_cache_lock:
         if len(_skill_embed_cache) >= _SKILL_EMBED_CACHE_MAX:
             _skill_embed_cache.pop(next(iter(_skill_embed_cache)))
-        _skill_embed_cache[cache_key] = vector
+        _skill_embed_cache[cache_key] = (embedder if geometry is None else None, vector.copy())
     return vector
 
 

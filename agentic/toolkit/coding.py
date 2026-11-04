@@ -37,6 +37,7 @@ import json
 import locale
 import os
 import selectors
+import signal
 import stat
 import subprocess
 import sys
@@ -289,12 +290,12 @@ def code_run_tests(target: str = "tests/unit/test_agentic_graph_engine.py", extr
         tpath = (REPO_ROOT / target.lstrip("/\\")).resolve()
         if tpath != REPO_ROOT and REPO_ROOT not in tpath.parents:
             return json_block("code_run_tests", {"ok": False, "error": "target escapes repository"})
-        cmd = [sys.executable, "-m", "pytest", target, "-q", "-x", "--timeout=60" if False else "-q"]
+        cmd = [sys.executable, "-m", "pytest", target, "-x", (extra or "").strip() if (extra or "").strip() in {"-q", "-qq", "-v"} else "-q"]
         # Keep flags minimal: caller extra is allowlisted, not raw shell.
         if (extra or "").strip() in {"-q", "-qq", "-v"}:
             pass  # already quiet
         start = time.monotonic()
-        proc = subprocess.run(cmd, cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=TEST_TIMEOUT)
+        proc = _run_bounded(cmd, cwd=REPO_ROOT, timeout=TEST_TIMEOUT, output_chars=TEST_TAIL_CHARS)
         elapsed = round(time.monotonic() - start, 1)
         tail = (proc.stdout[-TEST_TAIL_CHARS:] + "\n" + proc.stderr[-1000:]) if proc.stderr else proc.stdout[-TEST_TAIL_CHARS:]
         return json_block("code_run_tests", {"ok": proc.returncode == 0, "target": target,
@@ -326,8 +327,8 @@ def code_lint(relative_path: str = "") -> str:
             return json_block("code_lint", {"ok": False, "error": "only .py files"})
         if not path.exists():
             return json_block("code_lint", {"ok": False, "error": "file not found"})
-        proc = subprocess.run([sys.executable, "-m", "py_compile", str(path)],
-                              capture_output=True, text=True, timeout=15)
+        proc = _run_bounded([sys.executable, "-m", "py_compile", str(path)],
+                            timeout=15, output_chars=1000)
         if proc.returncode == 0:
             return json_block("code_lint", {"ok": True, "path": relative, "clean": True})
         return json_block("code_lint", {"ok": False, "path": relative, "error": (proc.stderr or "compile failed")[:1000]})
@@ -407,8 +408,8 @@ def sandbox_run(relative_path: str, args: str = "", timeout: int = SANDBOX_TIMEO
         env["PYTHONDONTWRITEBYTECODE"] = "1"
 
         start = time.monotonic()
-        proc = subprocess.run(cmd, cwd=str(cwd), env=env,
-                              capture_output=True, text=True, timeout=timeout + 5 if playground_run else timeout)
+        proc = _run_bounded(cmd, cwd=cwd, env=env, output_chars=65536 if playground_run else SANDBOX_OUTPUT_CHARS,
+                            timeout=timeout + 5 if playground_run else timeout)
         elapsed = round(time.monotonic() - start, 1)
         if playground_run:
             # The Playground runner exits zero even when the script fails.
@@ -500,7 +501,7 @@ def ssh_run(host_id: str = "", command: str = "", timeout: int = SSH_TIMEOUT) ->
         ]
         log.info("ssh_run host=%s cmd=%.120s", host_id, cmd_text)
         start = time.monotonic()
-        proc = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=timeout)
+        proc = _run_bounded(ssh_cmd, timeout=timeout, output_chars=SSH_OUTPUT_CHARS)
         elapsed = round(time.monotonic() - start, 1)
         return json_block("ssh_run", {
             "ok": proc.returncode == 0,
@@ -557,15 +558,16 @@ def _shell_is_readonly(command: str) -> bool:
     return first in _SHELL_READONLY
 
 
-def _drain_shell_output(proc: subprocess.Popen, timeout: int) -> tuple[str, str]:
+def _drain_shell_output(proc: subprocess.Popen, timeout: float, output_chars: int | None = None) -> tuple[str, str]:
     """Drain both pipes with bounded reads and retain only their text tails."""
     tails = {"stdout": "", "stderr": ""}
+    limit = max(1, int(SHELL_OUTPUT_CHARS if output_chars is None else output_chars))
     deadline = time.monotonic() + timeout
     with selectors.DefaultSelector() as selector:
         for name in tails:
             stream = getattr(proc, name)
             decoder = io.IncrementalNewlineDecoder(
-                codecs.getincrementaldecoder(locale.getpreferredencoding(False))(),
+                codecs.getincrementaldecoder(locale.getpreferredencoding(False))(errors="replace"),
                 translate=True,
             )
             selector.register(stream, selectors.EVENT_READ, (name, decoder))
@@ -577,11 +579,30 @@ def _drain_shell_output(proc: subprocess.Popen, timeout: int) -> tuple[str, str]
                 name, decoder = key.data
                 chunk = key.fileobj.read1(4096)
                 text = decoder.decode(chunk, final=not chunk)
-                tails[name] = (tails[name] + text)[-SHELL_OUTPUT_CHARS:]
+                tails[name] = (tails[name] + text)[-limit:]
                 if not chunk:
                     selector.unregister(key.fileobj)
         proc.wait(timeout=max(0, deadline - time.monotonic()))
     return tails["stdout"], tails["stderr"]
+
+
+def _run_bounded(cmd, *, cwd=None, env=None, timeout=30, output_chars=2000, **kwargs):
+    """Drain output as it arrives and kill the owned process group on failure.
+
+    Grandchildren can retain inherited pipes after their parent exits. Killing
+    only the parent leaves them running and can wedge communicate()/shutdown.
+    """
+    with subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, start_new_session=True, **kwargs) as proc:
+        try:
+            stdout, stderr = _drain_shell_output(proc, timeout, output_chars)
+        except BaseException:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            raise
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
 @tool(
@@ -631,15 +652,9 @@ def shell_run(command: str = "", cwd: str = "", timeout: int = SHELL_TIMEOUT) ->
         readonly = _shell_is_readonly(cmd_text)
         log.info("shell_run readonly=%s cwd=%s cmd=%.150s", readonly, workdir, cmd_text)
 
-        with subprocess.Popen(
-            cmd_text, shell=True, cwd=workdir,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, executable="/bin/bash",
-        ) as proc:
-            try:
-                stdout, stderr = _drain_shell_output(proc, timeout)
-            finally:
-                if proc.poll() is None:
-                    proc.kill()
+        proc = _run_bounded(cmd_text, shell=True, cwd=workdir, timeout=timeout,
+                            output_chars=SHELL_OUTPUT_CHARS, executable="/bin/bash")
+        stdout, stderr = proc.stdout, proc.stderr
         return json_block("shell_run", {
             "ok": proc.returncode == 0,
             "returncode": proc.returncode,

@@ -169,6 +169,7 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: Dict[str, ToolSpec] = {}
+        self.revision = 0
 
     def register(
         self,
@@ -206,6 +207,7 @@ class ToolRegistry:
             needs_approval=needs_approval,
         )
         self._tools[name] = spec
+        self.revision += 1
         return spec
 
     def get(self, name: str) -> Optional[ToolSpec]:
@@ -280,7 +282,10 @@ class ToolRegistry:
                 "description": spec.description,
             }
             if spec.handler is not None:
-                entry["handler"] = f"{spec.handler.__module__}:{spec.handler.__name__}"
+                handler = spec.handler
+                module = getattr(handler, "__module__", type(handler).__module__)
+                name = getattr(handler, "__name__", type(handler).__qualname__)
+                entry["handler"] = f"{module}:{name}"
             if spec.props:
                 entry["props"] = spec.props
             if spec.required:

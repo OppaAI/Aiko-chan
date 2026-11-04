@@ -12,6 +12,9 @@ person to review and copy into agentic/skillsets/ by hand (or via CLI).
 from __future__ import annotations
 
 import json
+import io
+import math
+import tempfile
 import os
 import re
 import time
@@ -44,6 +47,23 @@ def _slug(text: str) -> str:
     return _SLUG_RE.sub("-", (text or "skill").lower()).strip("-")[:80] or "skill"
 
 
+def _validate_slug(slug: str) -> None:
+    if not isinstance(slug, str) or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", slug) is None:
+        raise ValueError("invalid skill proposal slug")
+
+
+def _atomic_text(path: Path, text: str) -> None:
+    fd, temporary = tempfile.mkstemp(prefix=".skill-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
 def skill_proposal_dir(user_id: str | None = None) -> Path:
     path = user_workspace_root(user_id) / "skill_proposals"
     path.mkdir(parents=True, exist_ok=True)
@@ -63,7 +83,7 @@ def skillset_staging_dir(user_id: str | None = None) -> Path:
 def _truncated_step(step: dict[str, Any]) -> dict[str, Any]:
     """Copy a step record with its args stringified and capped so a large
     tool-call payload can't blow up the proposal file size."""
-    return {**step, "args": str(step.get("args"))[:_STEP_ARGS_MAX_CHARS]}
+    return {**step, "args": json.dumps(step.get("args"), ensure_ascii=False, default=str)[:_STEP_ARGS_MAX_CHARS]}
 
 
 _OBSERVED_RUN_BLOCK_RE = re.compile(
@@ -110,34 +130,30 @@ def propose_skill_from_run(
     status = "success" if verified_ok and score >= 0.7 else "failure"
     header = f"# Skill Proposal: {goal[:120]}\n\n"
 
-    if not path.exists():
-        path.write_text(header + "Status: draft_review_required\n\n", encoding="utf-8")
+    from agentic.graph_engine import _playbook_write_guard
+    with _playbook_write_guard(path):
+        current = path.read_text(encoding="utf-8") if path.exists() else ""
+        if not current:
+            current = header + "Status: draft_review_required\n\n"
 
-    block = {
-        "ts": time.time(),
-        "status": status,
-        "score": score,
-        "tools": tools,
-        "steps": [_truncated_step(s) for s in steps],
-        "final_preview": (final_text or "")[:1000],
-    }
-    with path.open("a", encoding="utf-8") as f:
-        f.write(f"\n## Observed run ({status})\n\n")
-        if status == "success":
-            f.write("Reusable tool order: " + " -> ".join(tools) + "\n\n")
-        else:
-            f.write("Avoid / failed approach notes: review this trace before promotion.\n\n")
-        f.write("```json\n" + json.dumps(block, ensure_ascii=False, indent=2, default=str) + "\n```\n")
+        block = {
+            "ts": time.time(),
+            "status": status,
+            "score": score,
+            "tools": tools,
+            "steps": [_truncated_step(s) for s in steps],
+            "final_preview": (final_text or "")[:1000],
+        }
+        with io.StringIO() as f:
+            f.write(f"\n## Observed run ({status})\n\n")
+            if status == "success":
+                f.write("Reusable tool order: " + " -> ".join(tools) + "\n\n")
+            else:
+                f.write("Avoid / failed approach notes: review this trace before promotion.\n\n")
+            f.write("```json\n" + json.dumps(block, ensure_ascii=False, indent=2, default=str) + "\n```\n")
 
-    # Rotate: cap the number of observed-run blocks kept on disk so a
-    # recurring goal slug can't grow this file without bound.
-    try:
-        current = path.read_text(encoding="utf-8")
-        trimmed = _trim_observed_runs(current)
-        if trimmed != current:
-            path.write_text(trimmed, encoding="utf-8")
-    except OSError as exc:
-        log.warning("Failed trimming skill proposal %s: %s", path, exc)
+            updated = current + f.getvalue()
+        _atomic_text(path, _trim_observed_runs(updated))
 
     return path
 
@@ -206,6 +222,7 @@ def validate_dag_promotion(slug: str, user_id: str | None = None) -> tuple[bool,
          failure after the last success).
     """
     reasons: list[str] = []
+    _validate_slug(slug)
     proposal_path = skill_proposal_dir(user_id) / f"{slug}.md"
     if not proposal_path.exists():
         return False, [f"no skill proposal found for slug={slug!r}"]
@@ -223,7 +240,8 @@ def validate_dag_promotion(slug: str, user_id: str | None = None) -> tuple[bool,
             f"need >= {_DAG_PROMOTE_MIN_SUCCESSES} for a validated DAG"
         )
     low = [r for r in successes
-           if not isinstance(r["score"], (int, float)) or float(r["score"]) < _DAG_PROMOTE_MIN_SCORE]
+           if (not isinstance(r["score"], (int, float)) or isinstance(r["score"], bool)
+               or not math.isfinite(r["score"]) or not _DAG_PROMOTE_MIN_SCORE <= r["score"] <= 1.0)]
     if low:
         reasons.append(
             f"{len(low)} successful run(s) scored below {_DAG_PROMOTE_MIN_SCORE:.2f}"
@@ -251,37 +269,16 @@ def _latest_success_block(proposal_text: str) -> dict[str, Any] | None:
 
 
 def _promotion_args_for_step(tool: str, step: dict[str, Any]) -> dict[str, Any]:
-    """Best-effort placeholder args for a promoted node — mirrors
-    agentic.graph_engine's promotion helper of the same name. Kept
-    independent (not imported from graph_engine) to avoid a promotion-time
-    dependency on the graph engine module; the shapes are intentionally
-    aligned so a promoted skillset "reads" the same as a promoted playbook.
-    """
-    generic_args_by_tool = {
-        "make_plan": {"goal": "$prompt"},
-        "create_checklist": {"title": "$title", "items": "$heuristic_items"},
-        "save_note": {"title": "$title", "content": "$prompt", "folder": "notes"},
-        "deep_research": {"query": "$prompt"},
-        "adaptive_search": {"query": "$prompt"},
-        "synthesize_report": {"evidence": "$prompt", "prompt": "$prompt", "style": "auto"},
-        "polish_text": {"evidence": "$prompt", "prompt": "$prompt", "style": "auto"},
-        "combine_evidence": {"parts": ["$prompt"], "separator": "\n\n---\n\n"},
-        "condense_text": {"text": "$prompt", "query": "$prompt"},
-        "kb_search": {"query": "$prompt"},
-        "learn_report": {"title": "$title", "text": "$prompt"},
-        "write_report": {"title": "$title", "content": "$prompt"},
-    }
-    if tool in generic_args_by_tool:
-        return generic_args_by_tool[tool]
-    args_str = step.get("args")
-    if isinstance(args_str, str):
+    args = step.get("args")
+    if isinstance(args, str):
         try:
-            parsed = json.loads(args_str)
-            if isinstance(parsed, dict) and parsed:
-                return {str(k): "$prompt" for k in parsed}
-        except json.JSONDecodeError:
-            log.debug("skill_learning: args_str is not JSON, treating as literal")
-    return {}
+            args = json.loads(args)
+        except (TypeError, ValueError):
+            args = None
+    if isinstance(args, dict) and args:
+        return dict(args)
+    from agentic.graph_engine import _promotion_args_for_step as defaults
+    return defaults(tool, {})
 
 
 def promote_skill_proposal(
@@ -312,6 +309,7 @@ def promote_skill_proposal(
     proposal with only failures has nothing safe to promote) or, when
     validated=True, if the promotion rules do not pass.
     """
+    _validate_slug(slug)
     proposal_path = skill_proposal_dir(user_id) / f"{slug}.md"
     if not proposal_path.exists():
         raise FileNotFoundError(f"no skill proposal found for slug={slug!r} at {proposal_path}")
@@ -368,6 +366,6 @@ def promote_skill_proposal(
     if dry_run:
         return staging_path
 
-    staging_path.write_text(json.dumps(candidate, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_text(staging_path, json.dumps(candidate, ensure_ascii=False, indent=2))
     log.info("Promoted skill proposal %r to staging: %s", slug, staging_path)
     return staging_path

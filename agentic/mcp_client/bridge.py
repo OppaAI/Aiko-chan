@@ -48,6 +48,7 @@ def bootstrap_mcp(server_url: str = "") -> bool:
             props=props,
             required=required,
             domain="social",
+            scope="external",  # remote outcomes must never be blindly retried
             always_on=is_email_tool,  # email tools always available, not just social capability
             react=True,
             graph=True,

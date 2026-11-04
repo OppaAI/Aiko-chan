@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import AsyncExitStack
 import json
 import os
 import sys
 import threading
 import warnings
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any
 
 # Suppress pydantic-settings IncompleteFieldDefinitionWarning for the MCP library's
@@ -45,6 +47,10 @@ class MCPClient:
         self._bridges: list[Any] = []
         self._session = None
         self._transport = None
+        self._connection_task = None
+        self._session_ready = None
+        self._session_stop = None
+        self._session_error = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: threading.Thread | None = None
         self._loop_ready = threading.Event()
@@ -64,30 +70,37 @@ class MCPClient:
             if self._loop is not None:
                 return
 
-        def _run() -> None:
-            self._loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self._loop)
-            self._loop_ready.set()
-            try:
-                self._loop.run_forever()
-            finally:
+            def _run() -> None:
+                loop = asyncio.new_event_loop()
+                self._loop = loop
+                asyncio.set_event_loop(loop)
+                self._loop_ready.set()
                 try:
-                    self._loop.run_until_complete(self._loop.shutdown_asyncgens())
-                except Exception:
-                    pass
-                self._loop.close()
+                    loop.run_forever()
+                finally:
+                    try:
+                        loop.run_until_complete(loop.shutdown_asyncgens())
+                    except Exception:
+                        pass
+                    loop.close()
 
-        self._loop_thread = threading.Thread(
-            target=_run, name="aiko-mcp-client", daemon=True
-        )
-        self._loop_thread.start()
-        if not self._loop_ready.wait(timeout=10):
-            raise TimeoutError("mcp client event loop failed to start")
+            self._loop_thread = threading.Thread(
+                target=_run, name="aiko-mcp-client", daemon=True
+            )
+            self._loop_thread.start()
+            if not self._loop_ready.wait(timeout=10):
+                raise TimeoutError("mcp client event loop failed to start")
 
     def _run_coro(self, coro_factory, timeout: float = 60) -> Any:
         self._ensure_loop()
         future = asyncio.run_coroutine_threadsafe(coro_factory(), self._loop)
-        return future.result(timeout=timeout)
+        try:
+            return future.result(timeout=timeout)
+        except FutureTimeoutError:
+            future.cancel()
+            # Cancellation stops local waiting, not a remote side effect which
+            # has already been accepted. Never automatically retry this call.
+            raise
 
     def list_tools_sync(self) -> list[dict[str, Any]]:
         return self._run_coro(self.list_tools)
@@ -96,37 +109,62 @@ class MCPClient:
         return self._run_coro(lambda: self.call_tool(name, arguments))
 
     def close_sync(self) -> None:
+        loop, thread = self._loop, self._loop_thread
+        if loop is None:
+            return
         self._run_coro(self.close)
+        loop.call_soon_threadsafe(loop.stop)
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=5)
+            if thread.is_alive():
+                raise TimeoutError("MCP event loop did not stop")
+        self._loop, self._loop_thread = None, None
+        self._loop_ready.clear()
 
     # ── session / tools ──────────────────────────────────────────────────
 
     async def _ensure_session(self):
         if self._session is not None:
             return self._session
+        if self._connection_task is None or self._connection_task.done():
+            self._session_ready = asyncio.Event()
+            self._session_stop = asyncio.Event()
+            self._session_error = None
+            self._connection_task = asyncio.create_task(self._serve_session())
+        await self._session_ready.wait()
+        if self._session_error is not None:
+            raise RuntimeError("MCP session initialization failed") from self._session_error
+        if self._session is None:
+            raise RuntimeError("MCP session is closed")
+        return self._session
 
-        from mcp import StdioServerParameters
-        from mcp.client.session import ClientSession
-        from mcp.client.stdio import stdio_client
-
-        # Repo root: client.py lives at <repo>/agentic/mcp_client/client.py
-        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        # Pass Aiko's full env explicitly: the SDK's stdio transport only
-        # inherits a safe subset otherwise, which would drop the social
-        # API tokens the server needs (AISA_API_KEY, THREADS_*, ...).
-        params = StdioServerParameters(
-            command=sys.executable,
-            args=["-m", "interface.mcp_server.social.server"],
-            cwd=repo_root,
-            env=dict(os.environ),
-        )
-        self._transport = stdio_client(params)
-        read, write = await self._transport.__aenter__()
-
-        session = ClientSession(read, write)
-        await session.__aenter__()
-        await session.initialize()
-        self._session = session
-        return session
+    async def _serve_session(self):
+        # AnyIO transport/session cancel scopes must be entered and exited by
+        # the same task. Keep that owner alive across individual tool calls.
+        try:
+            from mcp import StdioServerParameters
+            from mcp.client.session import ClientSession
+            from mcp.client.stdio import stdio_client
+            repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            params = StdioServerParameters(
+                command=sys.executable, args=["-m", "interface.mcp_server.social.server"],
+                cwd=repo_root, env=dict(os.environ),
+            )
+            async with AsyncExitStack() as stack:
+                self._transport = stdio_client(params)
+                read, write = await stack.enter_async_context(self._transport)
+                session = await stack.enter_async_context(ClientSession(read, write))
+                await session.initialize()
+                self._session = session
+                self._session_ready.set()
+                await self._session_stop.wait()
+        except Exception as exc:
+            self._session_error = exc
+            log.warning("[mcp] session lifecycle failed: %s", exc)
+        finally:
+            self._session = None
+            self._transport = None
+            self._session_ready.set()
 
     async def list_tools(self) -> list[dict[str, Any]]:
         try:
@@ -159,16 +197,27 @@ class MCPClient:
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         session = await self._ensure_session()
         result = await session.call_tool(name, arguments)
-        if result.content:
-            text = result.content[0].text if hasattr(result.content[0], "text") else str(result.content[0])
+        texts = [block.text for block in (result.content or []) if isinstance(getattr(block, "text", None), str)]
+        text = "\n".join(texts)
+        structured = getattr(result, "structuredContent", None)
+        if structured is None:
+            structured = getattr(result, "structured_content", None)
+        if isinstance(structured, dict):
+            payload = dict(structured)
+        else:
             try:
-                return json.loads(text)
+                parsed = json.loads(text)
             except (json.JSONDecodeError, TypeError):
-                return {"ok": True, "result": text}
-        return {"ok": True}
+                parsed = text
+            payload = dict(parsed) if isinstance(parsed, dict) else {"ok": True, "result": parsed}
+        if getattr(result, "isError", False) or getattr(result, "is_error", False):
+            payload["ok"] = False
+            payload.setdefault("error", text or "MCP tool returned an error")
+        return payload
 
     def get_bridge_tool_defs(self) -> list[tuple[str, str, dict[str, Any], list[str], Any]]:
         defs = []
+        self._bridges.clear()
         for name, info in self._tools.items():
             schema = info.get("inputSchema", {})
             props = schema.get("properties", {})
@@ -179,28 +228,10 @@ class MCPClient:
         return defs
 
     async def close(self):
-        try:
-            if self._session is not None:
-                await self._session.__aexit__(None, None, None)
-        except Exception:
-            log.warning("[mcp] session close failed")
-        try:
-            if self._transport is not None:
-                await self._transport.__aexit__(None, None, None)
-        except Exception:
-            log.warning("[mcp] transport close failed")
-        self._session = None
-        self._transport = None
-        loop, thread = self._loop, self._loop_thread
-        self._loop, self._loop_thread = None, None
-        self._loop_ready.clear()
-        if loop is not None:
-            try:
-                loop.call_soon_threadsafe(loop.stop)
-            except Exception:
-                pass
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=5)
+        if self._connection_task is not None:
+            self._session_stop.set()
+            await self._connection_task
+            self._connection_task = None
 
 
 def get_mcp_client() -> MCPClient | None:

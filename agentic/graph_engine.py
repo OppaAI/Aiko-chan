@@ -36,13 +36,17 @@ import copy
 import hashlib
 import inspect
 import json
+import math
 import os
 import re
 import time
 import tempfile
 import uuid
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
+import queue
+import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
@@ -120,6 +124,8 @@ GRAPH_COST_PER_1M_INPUT = float(os.getenv("GRAPH_COST_PER_1M_INPUT", "0"))
 GRAPH_COST_PER_1M_OUTPUT = float(os.getenv("GRAPH_COST_PER_1M_OUTPUT", "0"))
 
 _TOOL_MAP_CACHE: dict[str, Callable[..., Any]] | None = None
+_TOOL_MAP_BUILT = None
+_TOOL_MAP_REVISION = -1
 _TOOL_MAP_LOCK = threading.Lock()
 _PLAYBOOK_WRITE_LOCK = threading.Lock()
 _SEMANTIC_TRIGGER_CACHE: dict[tuple[int, str], Any] = {}
@@ -264,41 +270,58 @@ class GraphState:
     # "not JSON serializable" crash on the checkpoint path. See _job_index_lock
     # in job_hunt.get_next_job.
     runtime: dict[str, Any] = field(default_factory=dict, repr=False)
+    _lock: Any = field(default_factory=threading.RLock, repr=False)
+    _usage: Any = field(default_factory=threading.local, repr=False)
 
     def get(self, key: str, default: Any = None) -> Any:
         """Get a value from graph state by key."""
-        return self.data.get(key, default)
+        if key == "_usage":
+            return getattr(self._usage, "value", default)
+        with self._lock:
+            return self.data.get(key, default)
 
     def set(self, key: str, value: Any, reducer: str | None = None) -> None:
         """Set a value in graph state using the specified or default reducer strategy."""
-        strategy = reducer or self.reducers.get(key, REDUCER_REPLACE)
-        current = self.data.get(key)
-        self.data[key] = _apply_reducer(current, value, strategy)
+        if key == "_usage":
+            self._usage.value = value
+            return
+        with self._lock:
+            strategy = reducer or self.reducers.get(key, REDUCER_REPLACE)
+            current = self.data.get(key)
+            self.data[key] = _apply_reducer(current, value, strategy)
+
+    def take_usage(self):
+        value = getattr(self._usage, "value", None)
+        self._usage.value = None
+        return value
 
     def inc_visit(self, node_id: str) -> None:
         """Increment the visit count for a node."""
-        visits = self.get("_node_visits", {})
-        visits[node_id] = visits.get(node_id, 0) + 1
-        self.set("_node_visits", visits)
+        with self._lock:
+            visits = self.get("_node_visits", {})
+            visits[node_id] = visits.get(node_id, 0) + 1
+            self.set("_node_visits", visits)
 
     def iteration(self) -> int:
         """Increment and return the current iteration count."""
-        iter_count = self.get("_iteration", 0)
-        self.set("_iteration", iter_count + 1)
-        return iter_count + 1
+        with self._lock:
+            iter_count = self.get("_iteration", 0)
+            self.set("_iteration", iter_count + 1)
+            return iter_count + 1
 
     def record_tool_execution(self, tool_name: str, args: dict, result: Any) -> None:
         """Record tool execution visibility for debugging/adaptive logic"""
-        exec_log = self.get("_tool_executions", [])
-        exec_log.append({
-            "tool": tool_name,
-            "args": args,
-            "result": str(result)[:500],
-            "iteration": self.iteration(),
-        })
-        if GRAPH_TOOL_EXECUTION_LOG_MAX > 0 and len(exec_log) > GRAPH_TOOL_EXECUTION_LOG_MAX:
-            exec_log = exec_log[-GRAPH_TOOL_EXECUTION_LOG_MAX:]
-        self.set("_tool_executions", exec_log)
+        with self._lock:
+            exec_log = self.get("_tool_executions", [])
+            exec_log.append({
+                "tool": tool_name,
+                "args": args,
+                "result": str(result)[:500],
+                "iteration": self.iteration(),
+            })
+            if GRAPH_TOOL_EXECUTION_LOG_MAX > 0 and len(exec_log) > GRAPH_TOOL_EXECUTION_LOG_MAX:
+                exec_log = exec_log[-GRAPH_TOOL_EXECUTION_LOG_MAX:]
+            self.set("_tool_executions", exec_log)
 
     def get_tool_executions(self, tool_name: str | None = None) -> list[dict]:
         """Get tool execution logs, optionally filtered by tool name"""
@@ -321,14 +344,8 @@ def _state_json(state: GraphState) -> str:
 
 def _safe_state_dict(state: GraphState) -> dict[str, Any]:
     """Return a checkpoint-safe copy of state.data (values coerced to str)."""
-    out: dict[str, Any] = {}
-    for k, v in state.data.items():
-        try:
-            json.dumps(v)
-            out[k] = v
-        except TypeError:
-            out[k] = str(v)
-    return out
+    with state._lock:
+        return json.loads(json.dumps(state.data, default=str))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1570,13 +1587,17 @@ def run_subgraph(graph_json: str = "{}", goal: str = "",
 
 
 def _tool_map() -> dict[str, Callable[..., Any]]:
-    global _TOOL_MAP_CACHE
-    if _TOOL_MAP_CACHE is not None:
-        return _TOOL_MAP_CACHE
+    global _TOOL_MAP_CACHE, _TOOL_MAP_BUILT, _TOOL_MAP_REVISION
+    from agentic.registry import registry
     with _TOOL_MAP_LOCK:
-        if _TOOL_MAP_CACHE is not None:
-            return _TOOL_MAP_CACHE
-        _TOOL_MAP_CACHE = _build_tool_map()
+        if _TOOL_MAP_CACHE is None:
+            _TOOL_MAP_CACHE = _build_tool_map()
+            _TOOL_MAP_BUILT = _TOOL_MAP_CACHE
+            _TOOL_MAP_REVISION = registry.revision
+        elif _TOOL_MAP_CACHE is _TOOL_MAP_BUILT and _TOOL_MAP_REVISION != registry.revision:
+            _TOOL_MAP_CACHE = _build_tool_map()
+            _TOOL_MAP_BUILT = _TOOL_MAP_CACHE
+            _TOOL_MAP_REVISION = registry.revision
         return _TOOL_MAP_CACHE
 
 
@@ -1724,25 +1745,21 @@ def _build_tool_map() -> dict[str, Callable[..., Any]]:
 # via its own parameter list" model LangGraph's bind_tools()/ToolNode use.
 # Wiring a brand-new graph tool that needs client/model/embedder/state
 # never requires touching this module again; it just declares the param.
-_TOOL_PARAM_CACHE: dict[Callable[..., Any], frozenset[str]] = {}
-
-
+@lru_cache(maxsize=256)
 def _tool_params(fn: Callable[..., Any]) -> frozenset[str]:
-    cached = _TOOL_PARAM_CACHE.get(fn)
-    if cached is not None:
-        return cached
     try:
-        params = frozenset(inspect.signature(fn).parameters.keys())
+        return frozenset(inspect.signature(fn).parameters.keys())
     except (TypeError, ValueError):
-        params = frozenset()
-    _TOOL_PARAM_CACHE[fn] = params
-    return params
+        return frozenset()
 
 
 def _run_node(node: PlanNode, prompt: str, results: dict[str, NodeResult],
                embedder=None, llm_client=None, llm_model: str | None = None,
                extras: dict[str, Any] | None = None, state: GraphState | None = None,
                run_id: str | None = None) -> NodeResult:
+    if not _run_if_satisfied(node, results, state):
+        return NodeResult(node.id, node.tool, True, "skipped: run_if condition not met",
+                          error_type="condition_skipped")
     tools = _tool_map()
     fn = tools.get(node.tool)
     args = _substitute(node.args, prompt, results, extras)
@@ -1756,6 +1773,16 @@ def _run_node(node: PlanNode, prompt: str, results: dict[str, NodeResult],
         return NodeResult(node.id, node.tool, False, content, args=args, error_type="needs_approval")
     if fn is None:
         return NodeResult(node.id, node.tool, False, f"unknown graph tool: {node.tool}", args=args, error_type="unknown_tool")
+    if spec is not None and (getattr(spec, "react", False) or getattr(spec, "scope", None) in {"external", "network", "public"} or getattr(spec, "reversible", None) is False):
+        from agentic.agentic import _gate_tool_call, _tool_gate_result, _validate_args, AgentContext
+        validation = _validate_args(node.tool, args)
+        if validation is not None:
+            return NodeResult(node.id, node.tool, False, validation.content, args=args, error_type=validation.error_type)
+        blocked = _gate_tool_call(node.tool, args, AgentContext(client=llm_client, llm_model=llm_model,
+                                                              embedder=embedder, user_id=current_user_id()))
+        if blocked is not None:
+            outcome = _tool_gate_result(node.tool, args, blocked)
+            return NodeResult(node.id, node.tool, False, outcome.content, args=args, error_type=outcome.error_type)
     if node.tool == "save_note":
         args["content"] = str(args.get("content", ""))[:AGENT_NOTE_MAX_CHARS]
 
@@ -1790,20 +1817,37 @@ def _run_node(node: PlanNode, prompt: str, results: dict[str, NodeResult],
         call_args["user_id"] = current_user_id()
 
     last_exc = None
-    for attempt in range(node.max_retries + 1):
+    max_retries = max(0, min(node.max_retries, 3))
+    if spec is not None and (getattr(spec, "reversible", None) is False or getattr(spec, "scope", None) in {"external", "public"}):
+        max_retries = 0
+    started = time.monotonic()
+    if state:
+        state.take_usage()
+    if node.timeout_seconds is not None and "timeout" in params and "timeout" not in call_args:
+        call_args["timeout"] = node.timeout_seconds
+    for attempt in range(max_retries + 1):
         try:
             if attempt > 0:
                 wait = node.retry_backoff_seconds * (2 ** (attempt - 1))
                 log.info("Retry node %s, attempt %d/%d, waiting %.1fs", node.id, attempt + 1, node.max_retries + 1, wait)
                 time.sleep(wait)
             out = fn(**call_args)
-            usage = state.data.pop("_usage", None) if state else None
-            content = _trim_node_content(out)
-            if memo_key is not None:
+            usage = state.take_usage() if state else None
+            from agentic.outcomes import tool_outcome
+            outcome = tool_outcome(out)
+            content = _trim_node_content(outcome.content)
+            if node.timeout_seconds is not None and time.monotonic() - started > node.timeout_seconds:
+                return NodeResult(node.id, node.tool, False, "tool completed after its deadline; outcome requires review",
+                                  args=args, error_type="timeout", usage=usage)
+            if memo_key is not None and outcome.ok:
                 # Cache hit path skips the call, so no _usage is recorded —
                 # usage stays None, which is honest (no tokens were spent).
                 graph_memo._memo_put(memo_key, node.tool, content)
-            return NodeResult(node.id, node.tool, True, content, args=args, usage=usage)
+            return NodeResult(node.id, node.tool, outcome.ok, content, args=args, usage=usage,
+                              error_type=outcome.error_type)
+        except (TimeoutError, subprocess.TimeoutExpired) as e:
+            return NodeResult(node.id, node.tool, False, str(e), args=args, error_type="timeout",
+                              usage=state.take_usage() if state else None)
         except Exception as e:
             last_exc = e
             log.warning("Node %s retry %d/%d raised: %s", node.id, attempt + 1, node.max_retries + 1, str(e))
@@ -1819,7 +1863,7 @@ def _run_node(node: PlanNode, prompt: str, results: dict[str, NodeResult],
             content=_trim_node_content(last_exc),
             args=args,
             error_type="exception_after_retries",
-            usage=state.data.pop("_usage", None) if state else None,
+            usage=state.take_usage() if state else None,
         )
     return NodeResult(
         node.id, node.tool,
@@ -1827,7 +1871,7 @@ def _run_node(node: PlanNode, prompt: str, results: dict[str, NodeResult],
         content="",
         args=args,
         error_type=None,
-        usage=state.data.pop("_usage", None) if state else None,
+        usage=state.take_usage() if state else None,
     )
 
 
@@ -1841,6 +1885,8 @@ def _run_if_satisfied(node: PlanNode, results: dict[str, NodeResult], state: Gra
     for cond in (node.run_if, node.when):
         if not cond:
             continue
+        if not _valid_condition(cond):
+            return False
         actual = _condition_actual(cond, results, state)
         if actual is None or not _check_condition(cond, actual):
             return False
@@ -1869,7 +1915,49 @@ def _condition_actual(cond: dict[str, Any], results: dict[str, NodeResult], stat
     return ""
 
 
-def _check_condition(cond: dict[str, Any], actual: str) -> bool:
+def _valid_condition(cond, depth=0, actual=None):
+    if not isinstance(cond, dict) or not cond or depth > 32:
+        return False
+    selectors = {"node", "state", "env_truthy"}
+    ops = set(cond) - selectors
+    if len(set(cond) & selectors) > 1:
+        return False
+    if not ops:
+        return "env_truthy" in cond
+    if len(ops) != 1:
+        return False
+    op = next(iter(ops))
+    if op == "not":
+        return _valid_condition(cond[op], depth + 1, actual)
+    if op in {"and", "or"}:
+        return isinstance(cond[op], list) and bool(cond[op]) and all(_valid_condition(c, depth + 1, actual) for c in cond[op])
+    if op in {"gt", "gte", "lt", "lte", "len_gt", "len_lt"}:
+        try:
+            value = float(cond[op])
+            return (not isinstance(cond[op], bool) and math.isfinite(value)
+                    and (not op.startswith("len_") or value.is_integer())
+                    and (actual is None or op.startswith("len_") or math.isfinite(float(actual))))
+        except (TypeError, ValueError, OverflowError):
+            return False
+    if op == "matches":
+        try:
+            re.compile(str(cond[op]))
+            return True
+        except re.error:
+            return False
+    return op in {"equals", "contains"}
+
+
+def _check_condition(cond, actual):
+    if not _valid_condition(cond, actual=actual):
+        return False
+    try:
+        return _check_condition_impl(cond, actual)
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _check_condition_impl(cond: dict[str, Any], actual: str) -> bool:
     actual_lower = actual.lower()
     if "not" in cond:
         return not _check_condition(cond["not"], actual)
@@ -1877,8 +1965,7 @@ def _check_condition(cond: dict[str, Any], actual: str) -> bool:
         return all(_check_condition(c, actual) for c in cond["and"])
     if "or" in cond:
         return any(_check_condition(c, actual) for c in cond["or"])
-    if "env_truthy" in cond:
-        # Check if environment variable is truthy
+    if set(cond) == {"env_truthy"}:
         return actual_lower in {"1", "true", "yes", "on"}
     if "equals" in cond:
         return actual_lower == str(cond["equals"]).strip().lower()
@@ -1886,7 +1973,7 @@ def _check_condition(cond: dict[str, Any], actual: str) -> bool:
         return str(cond["contains"]).strip().lower() in actual_lower
     if "matches" in cond:
         try:
-            return bool(re.search(str(cond["matches"]), actual_lower))
+            return bool(re.search(str(cond["matches"]), actual, re.IGNORECASE))
         except re.error:
             return False
     if "gt" in cond:
@@ -1945,7 +2032,7 @@ def _downstream_of(node_id: str, nodes_by_id: dict[str, PlanNode]) -> set[str]:
 
 def _execute_graph_inner(graph: PlanGraph, embedder=None, llm_client=None,
                           llm_model: str | None = None, run_id: str | None = None,
-                          _yield=None) -> GraphRunResult:
+                          _yield=None, _cancel_event=None) -> GraphRunResult:
     """Shared internals for execute_graph and execute_graph_stream.
 
     When ``_yield`` is a callable (e.g. ``yield`` in a generator context)
@@ -1953,6 +2040,21 @@ def _execute_graph_inner(graph: PlanGraph, embedder=None, llm_client=None,
     allowing a streaming caller to observe results as they land.
     """
     nodes_by_id = {node.id: node for node in graph.nodes}
+    invalid = len(nodes_by_id) != len(graph.nodes) or any(
+        dep not in nodes_by_id for node in graph.nodes for dep in node.depends_on) or any(
+        target and target not in nodes_by_id for node in graph.nodes
+        for target in (node.fallback_to, node.loop_to))
+    visited = set()
+    while not invalid:
+        ready_ids = {node.id for node in graph.nodes if node.id not in visited and set(node.depends_on) <= visited}
+        if not ready_ids:
+            invalid = len(visited) != len(nodes_by_id)
+            break
+        visited.update(ready_ids)
+    if invalid:
+        error = NodeResult("graph", "graph_executor", False, "invalid graph: duplicate nodes, missing dependency, or dependency cycle",
+                           error_type="dependency_error")
+        return GraphRunResult(graph, (error,), error.content)
     pending = dict(nodes_by_id)
     results: dict[str, NodeResult] = {}
     ordered: list[NodeResult] = []
@@ -1983,8 +2085,10 @@ def _execute_graph_inner(graph: PlanGraph, embedder=None, llm_client=None,
         for prior in checkpoint_results:
             if prior.node_id == "__graph_state__":
                 continue
+            if prior.node_id not in nodes_by_id or nodes_by_id[prior.node_id].tool != prior.tool:
+                raise ValueError("checkpoint does not match this graph")
             restored_state = getattr(prior, "checkpoint_state", "{}")
-            if restored_state and restored_state != "{}":
+            if not checkpoint_state and restored_state and restored_state != "{}":
                 try:
                     state.data.update(json.loads(restored_state))
                 except Exception:
@@ -1993,9 +2097,19 @@ def _execute_graph_inner(graph: PlanGraph, embedder=None, llm_client=None,
             ordered.append(prior)
             pending.pop(prior.node_id, None)
 
+    signature = hashlib.sha256(json.dumps({"id": graph.id, "goal": graph.goal,
+        "nodes": [asdict(node) for node in graph.nodes], "reducers": graph.reducers},
+        sort_keys=True, default=str).encode()).hexdigest()
+    if state.get("_graph_signature") not in (None, signature):
+        raise ValueError("checkpoint belongs to a different graph definition")
+    state.set("_graph_signature", signature)
+    visit_counts = dict(state.get("_loop_visits", {}))
     seq = len(ordered)
 
-    graph_max_workers = int(extras.get("max_workers") or GRAPH_MAX_WORKERS)
+    try:
+        graph_max_workers = max(1, min(int(extras.get("max_workers") or GRAPH_MAX_WORKERS), GRAPH_MAX_WORKERS))
+    except (TypeError, ValueError):
+        graph_max_workers = max(1, GRAPH_MAX_WORKERS)
 
     with ThreadPoolExecutor(max_workers=graph_max_workers) as pool:
         while pending:
@@ -2019,7 +2133,8 @@ def _execute_graph_inner(graph: PlanGraph, embedder=None, llm_client=None,
             for node in ready:
                 if not all(results[dep].ok for dep in node.depends_on):
                     blocked.append(node)
-                elif not _run_if_satisfied(node, results, state):
+                elif (any(results[dep].error_type == "condition_skipped" for dep in node.depends_on)
+                      and not node.run_if and not node.when) or not _run_if_satisfied(node, results, state):
                     skipped.append(node)
                 else:
                     runnable.append(node)
@@ -2033,7 +2148,7 @@ def _execute_graph_inner(graph: PlanGraph, embedder=None, llm_client=None,
                 if _yield:
                     _yield(nr)
             for node in skipped:
-                nr = NodeResult(node.id, node.tool, True, "skipped: run_if condition not met", error_type=None)
+                nr = NodeResult(node.id, node.tool, True, "skipped: run_if condition not met", error_type="condition_skipped")
                 results[node.id] = nr
                 ordered.append(nr)
                 pending.pop(node.id, None)
@@ -2051,19 +2166,17 @@ def _execute_graph_inner(graph: PlanGraph, embedder=None, llm_client=None,
             # across parallel submissions fails with "cannot enter context:
             # already entered" on every node after the first.
             future_map = {}
-            for node in runnable:
+            # Submit at most one worker wave. Queuing all independent nodes
+            # defeats interrupt/cancellation and retains unbounded futures.
+            for node in runnable[:graph_max_workers]:
                 node_ctx = contextvars.copy_context()
                 future_map[pool.submit(node_ctx.run, _run_node, node, graph.goal, results, embedder, llm_client, llm_model, extras, state, run_id)] = node
+            pause_result = None
+            resets = set()
             for fut in as_completed(future_map):
                 node = future_map[fut]
                 try:
-                    if node.timeout_seconds is not None:
-                        result = fut.result(timeout=node.timeout_seconds)
-                    else:
-                        result = fut.result()
-                except FutureTimeoutError:
-                    result = NodeResult(node.id, node.tool, False, f"timed out after {node.timeout_seconds}s", error_type="timeout")
-                    fut.cancel()
+                    result = fut.result()
                 except Exception as exc:
                     result = NodeResult(node.id, node.tool, False, str(exc), error_type="execution_error")
                 results[node.id] = result
@@ -2079,116 +2192,66 @@ def _execute_graph_inner(graph: PlanGraph, embedder=None, llm_client=None,
                 state.inc_visit(node.id)
                 state.record_tool_execution(node.tool, dict(result.args), str(result.content))
 
-                # Handle fallback logic
-                if not result.ok and node.fallback_to:
+                # Fallbacks use exactly the normal invocation path: arguments,
+                # approval, policy, retries, output classification and usage.
+                if (not result.ok and node.fallback_to and result.error_type not in {
+                        "needs_approval", "conscience_refuse", "conscience_unavailable", "conscience_skip", "conscience_caution", "timeout"}):
                     fallback_node = nodes_by_id.get(node.fallback_to)
-                    if fallback_node:
-                        if all(dep in results for dep in fallback_node.depends_on) and all(results[dep].ok for dep in fallback_node.depends_on):
-                            log.info("Node %s failed (fallback to %s)", node.id, node.fallback_to)
-                            
-                            # Try fallback node execution with access to current state
-                            fallback_tools = _tool_map()
-                            fallback_fn = fallback_tools.get(fallback_node.tool)
-                            if fallback_fn:
-                                # Build arguments using the same logic as normal execution
-                                fallback_args = _substitute(fallback_node.args, graph.goal, results, extras)
-
-                                # Approval gate (mirrors _run_node): a fallback
-                                # must not bypass human approval for gated tools.
-                                try:
-                                    from agentic.registry import registry as _fb_registry
-                                    _fb_spec = _fb_registry.get(fallback_node.tool)
-                                except Exception:
-                                    _fb_spec = None
-                                if fallback_node.needs_approval or (
-                                        _fb_spec is not None and getattr(_fb_spec, "needs_approval", False)):
-                                    _fb_content = json.dumps(
-                                        {"status": "waiting_for_approval", "run_id": run_id,
-                                         "node_id": fallback_node.id, "tool": fallback_node.tool},
-                                        ensure_ascii=False)
-                                    _fb_result = NodeResult(
-                                        fallback_node.id, fallback_node.tool, False,
-                                        _fb_content, args=fallback_args, error_type="needs_approval")
-                                    results[fallback_node.id] = _fb_result
-                                    ordered.append(_fb_result)
-                                    pending.pop(fallback_node.id, None)
-                                    log.info("Fallback node %s needs approval; not executed",
-                                             fallback_node.id)
-                                else:
-                                    # Build call kwargs with injected dependencies
-                                    call_args = dict(fallback_args)
-                                    params = _tool_params(fallback_fn)
-                                    if "embedder" in params and "embedder" not in call_args:
-                                        call_args["embedder"] = embedder
-                                    if "client" in params and "client" not in call_args:
-                                        call_args["client"] = llm_client
-                                    if "llm_model" in params and "llm_model" not in call_args:
-                                        call_args["llm_model"] = llm_model
-                                    if "model" in params and "model" not in call_args:
-                                        call_args["model"] = llm_model
-                                    if "state" in params and "state" not in call_args:
-                                        call_args["state"] = state
-                                
-                                    try:
-                                        fallback_out = fallback_fn(**call_args)
-                                        fallback_usage = state.data.pop("_usage", None) if state else None
-                                        fallback_result = NodeResult(fallback_node.id, fallback_node.tool, True, _trim_node_content(fallback_out),
-                                                                  args=fallback_args, usage=fallback_usage)
-                                        results[fallback_node.id] = fallback_result
-                                        ordered.append(fallback_result)
-                                        pending.pop(fallback_node.id, None)
-                                        if run_id:
-                                            save_node_result(run_id, seq, fallback_result, state_json=_state_json(state)); seq += 1
-                                            save_graph_state(run_id, _safe_state_dict(state))
-                                        if _yield:
-                                            _yield(fallback_result)
-                                        log.info("Fallback node %s succeeded", fallback_node.id)
-                                        # The fallback stands in for the failed node so its
-                                        # dependants can proceed instead of being marked
-                                        # dependency_failed. The run history (ordered) keeps
-                                        # both the failed primary and the successful
-                                        # fallback for an honest run panel.
-                                        results[node.id] = NodeResult(
-                                            node.id, node.tool, True,
-                                            fallback_result.content,
-                                            args=dict(result.args),
-                                            usage=fallback_result.usage,
-                                        )
-                                    except Exception as exc:
-                                        log.exception("Fallback node %s failed", fallback_node.id)
-                            else:
-                                log.warning("Fallback node %s tool %s not found", fallback_node.id, fallback_node.tool)
-                        else:
-                            log.debug("Fallback node %s has unmet dependencies or failed dependencies", fallback_node.id)
-                    else:
-                        log.debug("Fallback target node %s not found", node.fallback_to)
+                    if fallback_node and all(dep in results and results[dep].ok for dep in fallback_node.depends_on):
+                        fallback_result = _run_node(fallback_node, graph.goal, results, embedder,
+                                                    llm_client, llm_model, extras, state, run_id)
+                        results[fallback_node.id] = fallback_result
+                        ordered.append(fallback_result)
+                        pending.pop(fallback_node.id, None)
+                        if run_id:
+                            save_node_result(run_id, seq, fallback_result, state_json=_state_json(state)); seq += 1
+                        if _yield:
+                            _yield(fallback_result)
+                        if fallback_result.ok and fallback_result.error_type != "condition_skipped":
+                            state.inc_visit(fallback_node.id)
+                            state.record_tool_execution(fallback_node.tool, dict(fallback_result.args), fallback_result.content)
+                            if fallback_node.interrupt:
+                                pause_result = fallback_result
+                            recovered = NodeResult(node.id, node.tool, True, fallback_result.content,
+                                                   args=dict(result.args), error_type="recovered_by_fallback",
+                                                   usage=fallback_result.usage)
+                            results[node.id] = recovered
+                            ordered = [recovered if item is result else item for item in ordered]
+                            if run_id:
+                                save_node_result(run_id, seq, recovered, state_json=_state_json(state)); seq += 1
 
                 # Interrupt: stop and return partial results.
                 # NOTE: the checkpoint is intentionally KEPT here (unlike the
                 # normal-completion path below which clears it) so
                 # resume_graph(run_id) can continue from the saved node
                 # results instead of re-executing side-effecting nodes.
+                result = results[node.id]
                 if node.interrupt and result.ok:
-                    final_answer = _synthesize_without_llm(graph, tuple(ordered))
-                    return GraphRunResult(
-                        graph=graph, results=tuple(ordered), final_answer=final_answer,
-                        final_state=dict(state.data), interrupted=True,
-                        interrupted_at=node.id,
-                        interrupted_question=str(result.content[:2000]),
-                    )
+                    pause_result = result
 
-                # Bounded loop-back with proper checkpoint invalidation.
                 if node.loop_to and node.loop_to in nodes_by_id and _check_loop_condition(node, result):
                     visit_counts[node.id] = visit_counts.get(node.id, 0) + 1
                     if visit_counts[node.id] < node.max_visits:
-                        target_id = node.loop_to
-                        to_reset = _downstream_of(target_id, nodes_by_id) | {target_id}
-                        for reset_id in to_reset:
-                            results.pop(reset_id, None)
-                            pending[reset_id] = nodes_by_id[reset_id]
-                            if run_id:
-                                delete_node_checkpoint(run_id, reset_id)
-                        ordered = [r for r in ordered if r.node_id not in to_reset]
+                        resets.update(_downstream_of(node.loop_to, nodes_by_id) | {node.loop_to})
+            # Every submitted sibling must be recorded before returning or
+            # invalidating a loop. Otherwise resume could replay its effects.
+            for reset_id in resets:
+                results.pop(reset_id, None)
+                pending[reset_id] = nodes_by_id[reset_id]
+                if run_id:
+                    delete_node_checkpoint(run_id, reset_id)
+            ordered = [r for r in ordered if r.node_id not in resets]
+            state.set("_loop_visits", dict(visit_counts))
+            if run_id:
+                save_graph_state(run_id, _safe_state_dict(state))
+            if pause_result is not None or (_cancel_event is not None and _cancel_event.is_set()):
+                return GraphRunResult(
+                    graph=graph, results=tuple(ordered),
+                    final_answer=_synthesize_without_llm(graph, tuple(ordered)),
+                    final_state=dict(state.data), interrupted=True,
+                    interrupted_at=pause_result.node_id if pause_result else None,
+                    interrupted_question=pause_result.content[:2000] if pause_result else None,
+                )
 
     try:
         final_answer = _synthesize_without_llm(graph, tuple(ordered))
@@ -2223,10 +2286,10 @@ def _verify_goal(goal: str, results: tuple[NodeResult, ...],
 
     if GRAPH_VERIFY_LLM and llm_client is not None and llm_model:
         try:
-            evidence = "\n".join(r.content for r in results if r.ok)[:3000]
+            evidence = "\n".join(r.content for r in results if r.ok and r.error_type != "condition_skipped")[:3000]
             out = goal_verification(evidence=evidence, goal=goal,
                                      client=llm_client, model=llm_model)
-            if "ACHIEVED" in out.upper():
+            if out.strip().upper() == "ACHIEVED":
                 score = max(score, 0.8)
                 reasons.append("llm:achieved")
             elif "PARTIAL" in out.upper():
@@ -2246,6 +2309,8 @@ def execute_graph(graph: PlanGraph, embedder=None, llm_client=None,
     """Execute a graph workflow and return the complete result with goal verification."""
     result = _execute_graph_inner(graph, embedder=embedder, llm_client=llm_client,
                                    llm_model=llm_model, run_id=run_id)
+    if result.interrupted:
+        return result
     score, reasons = _verify_goal(graph.goal, result.results, embedder=embedder,
                                    llm_client=llm_client, llm_model=llm_model)
     return replace(result, goal_score=score, goal_reasons=reasons)
@@ -2254,18 +2319,44 @@ def execute_graph(graph: PlanGraph, embedder=None, llm_client=None,
 def execute_graph_stream(graph: PlanGraph, embedder=None, llm_client=None,
                           llm_model: str | None = None, run_id: str | None = None):
     """Generator variant: yields each NodeResult as it completes."""
-    results: list[NodeResult] = []
-
-    def _capture(nr: NodeResult) -> None:
-        results.append(nr)
-
-    final = _execute_graph_inner(graph, embedder=embedder, llm_client=llm_client,
-                                  llm_model=llm_model, run_id=run_id, _yield=_capture)
-    score, reasons = _verify_goal(graph.goal, final.results, embedder=embedder,
-                                   llm_client=llm_client, llm_model=llm_model)
-    final = replace(final, goal_score=score, goal_reasons=reasons)
-    yield from results
-    yield final
+    events = queue.Queue(maxsize=32)
+    cancelled = threading.Event()
+    def send(kind, value):
+        while not cancelled.is_set():
+            try:
+                events.put((kind, value), timeout=.1)
+                return
+            except queue.Full:
+                continue
+    def run():
+        try:
+            final = _execute_graph_inner(graph, embedder=embedder, llm_client=llm_client,
+                llm_model=llm_model, run_id=run_id, _yield=lambda result: send("node", result),
+                _cancel_event=cancelled)
+            if cancelled.is_set():
+                return
+            if final.interrupted:
+                send("final", final)
+                return
+            score, reasons = _verify_goal(graph.goal, final.results, embedder=embedder,
+                                         llm_client=llm_client, llm_model=llm_model)
+            send("final", replace(final, goal_score=score, goal_reasons=reasons))
+        except BaseException as exc:
+            send("error", exc)
+    worker = threading.Thread(target=contextvars.copy_context().run, args=(run,),
+                              name="aiko-graph-stream", daemon=True)
+    worker.start()
+    try:
+        while True:
+            kind, value = events.get()
+            if kind == "error":
+                raise value
+            yield value
+            if kind == "final":
+                return
+    finally:
+        cancelled.set()
+        worker.join(timeout=.1)
 
 
 def resume_graph(graph: PlanGraph, run_id: str, resume_input: str = "",
@@ -2277,6 +2368,8 @@ def resume_graph(graph: PlanGraph, run_id: str, resume_input: str = "",
     the user's response.
     """
     state_data = dict(load_graph_state(run_id) or {})
+    if not state_data and not load_checkpoint(run_id, NodeResult):
+        raise ValueError("no saved graph run to resume")
     if resume_input:
         state_data["_resume"] = resume_input
     save_graph_state(run_id, state_data)
@@ -2300,7 +2393,7 @@ def _score_goal_achievement(goal: str, results: tuple[NodeResult, ...],
     """
     reasons: list[str] = []
     scores: list[float] = []
-    final_content = " ".join(r.content for r in results if r.ok)
+    final_content = " ".join(r.content for r in results if r.ok and r.error_type != "condition_skipped")
 
     # 1. Output must exist and be non-trivial
     if len(final_content.strip()) < 50:
@@ -2363,7 +2456,7 @@ def goal_verification(evidence: str = "", goal: str = "",
     if not evidence or not evidence.strip():
         return "FAILED: no evidence to verify"
     if client is None or not model:
-        return "ACHIEVED"  # can't verify without LLM — assume success
+        return "PARTIAL: verifier unavailable"
     from agentic.toolkit.synthesize import synthesize_report
     prompt = (
         f"Goal: {goal}\n\n"
@@ -2373,14 +2466,16 @@ def goal_verification(evidence: str = "", goal: str = "",
     )
     out = synthesize_report(evidence=evidence, prompt=prompt, style="plain",
                              client=client, model=model)
-    for tag in ("ACHIEVED", "PARTIAL", "FAILED"):
-        if tag in str(out).upper():
-            return str(out)[:200].strip()
-    return "ACHIEVED"  # conservative default
+    verdict = str(out).strip()
+    if verdict.upper() == "ACHIEVED":
+        return "ACHIEVED"
+    if re.match(r"^(PARTIAL|FAILED):", verdict, re.I):
+        return verdict[:200]
+    return "PARTIAL: verifier returned an invalid verdict"
 
 
 def _synthesize_without_llm(graph: PlanGraph, results: tuple[NodeResult, ...]) -> str:
-    ok = [r for r in results if r.ok]
+    ok = [r for r in results if r.ok and r.error_type != "condition_skipped"]
     failed = [r for r in results if not r.ok]
     lines = [f"I ran the saved workflow '{graph.name}' without an LLM planning step."]
     if ok:
@@ -2408,16 +2503,26 @@ def _record_goal_engram(goal: str, score: float, reasons: list[str],
 
 def run_schema_agent(user_input: str, cap_ids: list[str] | None = None, embedder=None,
                      llm_client=None, llm_model: str | None = None,
-                     run_id: str | None = None) -> GraphRunResult | None:
+                     run_id: str | None = None, interactive_approvals: bool = False) -> GraphRunResult | None:
     """Plan and execute a graph workflow from user input, returning the result or None."""
     graph = plan_from_master(user_input, cap_ids=cap_ids, embedder=embedder)
     if graph is None:
         return None
+    if interactive_approvals:
+        # Interactive approval is durable in the ReAct executor. Select that
+        # executor before any graph side effects, rather than returning a
+        # graph pause which the normal chat approval handler cannot resume.
+        from agentic.registry import registry
+        if any(n.needs_approval or bool(getattr(registry.get(n.tool), "needs_approval", False))
+               for n in graph.nodes):
+            return None
     if run_id is None:
-        run_id = hashlib.sha256(f"{graph.id}|{user_input}".encode()).hexdigest()[:16]
+        run_id = uuid.uuid4().hex
     result = execute_graph(graph, embedder=embedder, llm_client=llm_client,
                             llm_model=llm_model, run_id=run_id)
-    if result is not None and all(r.ok for r in result.results):
+    if (result is not None and not getattr(result, "interrupted", False)
+            and any(r.ok and getattr(r, "error_type", None) != "condition_skipped" for r in result.results)
+            and all(r.ok for r in result.results)):
         # Practice loop: a successful playbook run counts as a "use" of the
         # experience it was promoted from. Frequently used workflows earn
         # auto-promotion into playbook DAGs (maybe_autopromote_experiences).
@@ -2491,7 +2596,7 @@ def _promotion_args_for_step(tool: str, step: dict[str, Any]) -> dict[str, Any]:
         return {"title": "$title", "items": "$heuristic_items"}
     if tool == "save_note":
         return {"title": "$title", "content": "$prompt", "folder": "notes"}
-    if tool == "deep_research":
+    if tool in {"deep_research", "adaptive_search"}:
         return {"query": "$prompt"}
     if tool in {"synthesize_report", "polish_text"}:
         return {"evidence": "$prompt", "prompt": "$prompt", "style": "auto"}

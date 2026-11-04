@@ -164,7 +164,7 @@ def test_compile_dag_structure(engine):
     assert ids == ["sense", "check", "act", "verify", "notify"]
     act = [n for n in dag.nodes if n.id == "act"][0]
     assert act.tool == "rest_heavy_jobs"
-    assert act.run_if == {"policy_check.ok": True}
+    assert act.run_if == {"node": "check", "matches": r'"ok"\s*:\s*true\b'}
     assert act.needs_approval is False
     ask_p = dict(p, approval="ask")
     dag2 = engine.compile_dag(ask_p)

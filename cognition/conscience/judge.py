@@ -22,11 +22,13 @@ shown is sure about nothing.
 from __future__ import annotations
 
 import json
+import math
 import re
 import threading
 from typing import Any
 
 from system.log import get_logger
+from system.config import env_int
 
 from .schema import (
     AXIS_HORIZONTAL,
@@ -423,12 +425,14 @@ def deliberate(
         deliberate_tokens = DELIBERATE_MAX_TOKENS
     prompt = _build_situation_prompt(situation, canon_block, parties)
     try:
+        from cognition.chat_budget import fit_chat_request
+        messages, deliberate_tokens = fit_chat_request([
+            {"role": "system", "content": _DELIBERATE_SYSTEM},
+            {"role": "user", "content": prompt},
+        ], env_int("LLM_CTX_SIZE", 8192), deliberate_tokens)
         resp = client.chat.completions.create(
             model=model or DELIBERATE_MODEL,
-            messages=[
-                {"role": "system", "content": _DELIBERATE_SYSTEM},
-                {"role": "user", "content": prompt},
-            ],
+            messages=messages,
             stream=False,
             max_tokens=deliberate_tokens,
             temperature=0.0,
@@ -466,7 +470,7 @@ def _build_situation_prompt(situation: str, canon_block: str, parties: list[Part
     )
 
 
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_THINK_RE = re.compile(r"<think(?:ing)?>.*?(?:</think(?:ing)?>|$)", re.DOTALL | re.IGNORECASE)
 _FENCE_RE = re.compile(r"^```(?:json)?|```$", re.MULTILINE)
 
 
@@ -494,17 +498,24 @@ def _parse_verdict_json(raw: str) -> tuple[float, float, float, str, list[str]] 
     if not isinstance(data, dict):
         return None
 
-    def _num(key: str, default: float, lo: float, hi: float) -> float:
-        try:
-            return max(lo, min(hi, float(data.get(key, default))))
-        except (TypeError, ValueError):
-            return default
-
-    vertical = _num("v", 0.0, -1.0, 1.0)
-    horizontal = _num("h", 0.0, -1.0, 1.0)
-    confidence = _num("c", 0.5, 0.0, 1.0)
+    # Missing/nonfinite scores are a failed judgment, not neutral permission
+    # or maximal confidence. JSON permits NaN in Python's permissive decoder.
+    try:
+        values = [data[key] for key in ("v", "h", "c")]
+        if any(isinstance(value, bool) for value in values):
+            return None
+        vertical, horizontal, confidence = map(float, values)
+        if not all(math.isfinite(value) for value in (vertical, horizontal, confidence)):
+            return None
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if not (-1.0 <= vertical <= 1.0 and -1.0 <= horizontal <= 1.0 and 0.0 <= confidence <= 1.0):
+        return None
     reason = " ".join(str(data.get("r") or "").split())[:160]
-    cited = [str(p).strip() for p in (data.get("p") or []) if str(p).strip()][:8]
+    raw_cited = data.get("p") or []
+    if not isinstance(raw_cited, list):
+        return None
+    cited = [p.strip() for p in raw_cited if isinstance(p, str) and p.strip()][:8]
     return vertical, horizontal, confidence, reason, cited
 
 

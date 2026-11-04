@@ -27,6 +27,7 @@ Three deliberate choices:
 from __future__ import annotations
 
 import json
+import math
 import re
 import threading
 import time
@@ -112,7 +113,8 @@ class CanonStore:
         self._mtime: float = 0.0
         # Semantic index, built lazily on first semantic retrieval.
         self._vectors = None          # np.ndarray (N, dim) or None
-        self._vector_lock = threading.Lock()
+        self._vector_geometry = None
+        self._vector_embedder = None  # retain identity while its matrix is cached
         self._verse_text: dict[str, str] = {}
         self.load()
 
@@ -121,16 +123,19 @@ class CanonStore:
     def load(self, force: bool = False) -> int:
         """(Re)read the seed file. Cheap mtime check unless `force`."""
         with self._lock:
+            self._loaded_at = time.monotonic()
             try:
                 mtime = self._path.stat().st_mtime
             except OSError:
                 log.warning("[ccc] canon file not found: %s — circuit runs guardrails only", self._path)
                 self._norms, self._by_id, self._tokens = [], {}, []
+                self._vectors = self._vector_geometry = self._vector_embedder = None
                 return 0
             if not force and self._norms and mtime == self._mtime:
                 return len(self._norms)
 
             norms: list[Norm] = []
+            seen_ids: set[str] = set()
             for lineno, raw in enumerate(self._path.read_text(encoding="utf-8").splitlines(), 1):
                 line = raw.strip()
                 if not line or line.startswith("//"):
@@ -142,7 +147,11 @@ class CanonStore:
                     continue
                 norm = self._coerce(data, lineno)
                 if norm is not None:
+                    if norm.id in seen_ids:
+                        log.warning("[ccc] duplicate canon id %s skipped", norm.id)
+                        continue
                     norms.append(norm)
+                    seen_ids.add(norm.id)
 
             self._norms = norms
             self._by_id = {n.id: n for n in norms}
@@ -150,6 +159,7 @@ class CanonStore:
             self._mtime = mtime
             self._loaded_at = time.monotonic()
             self._vectors = None  # invalidate the semantic index
+            self._vector_geometry = self._vector_embedder = None
             log.info(
                 "[ccc] canon loaded: %d norms (%d vertical, %d horizontal) from %s",
                 len(norms),
@@ -162,6 +172,15 @@ class CanonStore:
     @staticmethod
     def _coerce(data: dict, lineno: int) -> Norm | None:
         try:
+            if not isinstance(data, dict):
+                raise ValueError("norm must be an object")
+            if not str(data.get("id") or "").strip():
+                raise ValueError("norm id is required")
+            if any(not isinstance(data.get(key, []), list) for key in ("tags", "triggers")):
+                raise ValueError("tags and triggers must be arrays")
+            weight = float(data.get("weight", 1.0))
+            if not math.isfinite(weight):
+                raise ValueError("norm weight must be finite")
             axis = str(data["axis"]).strip().lower()
             if axis not in (AXIS_VERTICAL, AXIS_HORIZONTAL):
                 raise ValueError(f"unknown axis {axis!r}")
@@ -177,7 +196,7 @@ class CanonStore:
                 polarity=polarity,
                 statement=statement,
                 ref=str(data.get("ref") or "").strip(),
-                weight=max(0.0, min(1.0, float(data.get("weight", 1.0)))),
+                weight=max(0.0, min(1.0, weight)),
                 tags=tuple(str(t).strip() for t in data.get("tags", []) if str(t).strip()),
                 triggers=tuple(str(t).strip().lower() for t in data.get("triggers", []) if str(t).strip()),
             )
@@ -222,59 +241,61 @@ class CanonStore:
         was supplied AND CCC_CANON_SEMANTIC is on, so the common case costs no
         network call.
         """
-        k = top_k or CANON_TOP_K
+        # Keep norm identities, vectors, and root selection on one snapshot.
         with self._lock:
-            norms, norm_tokens = self._norms, self._tokens
-        if not norms:
-            return []
+            k = top_k or CANON_TOP_K
+            with self._lock:
+                norms, norm_tokens = self._norms, self._tokens
+            if not norms:
+                return []
 
-        lowered = (query or "").lower()
-        q_tokens = _tokens(query)
-        scored: list[tuple[float, Norm]] = []
+            lowered = (query or "").lower()
+            q_tokens = _tokens(query)
+            scored: list[tuple[float, Norm]] = []
 
-        for norm, tok in zip(norms, norm_tokens):
-            if "root" in norm.tags:
-                continue  # roots are appended unconditionally below
-            score = 0.0
-            for trigger in norm.triggers:
-                if trigger and _trigger_hit(trigger, lowered):
-                    # Triggers are hand-curated exact phrases, not fuzzy hints:
-                    # a literal hit on "in confidence" or "as if i were" is a
-                    # near-certain match on the norm it belongs to. Weighted so
-                    # a single trigger on a full-weight prohibition clears
-                    # REFUSE_AT on its own, and no amount of incidental token
-                    # overlap ever can.
-                    score += 0.70
-            if q_tokens and tok:
-                overlap = len(q_tokens & tok)
-                # Ramps from zero at a single shared token: one word in common
-                # is coincidence, not relevance. Capped well below a trigger
-                # hit so lexical drift can never outvote a literal match.
-                if overlap >= 2:
-                    score += 0.30 * min(1.0, (overlap - 1) / 3.0)
-            final = min(1.0, score) * max(0.35, norm.weight)
-            if final >= _MIN_NORM_SCORE:
-                scored.append((final, norm))
+            for norm, tok in zip(norms, norm_tokens):
+                if "root" in norm.tags:
+                    continue  # roots are appended unconditionally below
+                score = 0.0
+                for trigger in norm.triggers:
+                    if trigger and _trigger_hit(trigger, lowered):
+                        # Triggers are hand-curated exact phrases, not fuzzy hints:
+                        # a literal hit on "in confidence" or "as if i were" is a
+                        # near-certain match on the norm it belongs to. Weighted so
+                        # a single trigger on a full-weight prohibition clears
+                        # REFUSE_AT on its own, and no amount of incidental token
+                        # overlap ever can.
+                        score += 0.70
+                if q_tokens and tok:
+                    overlap = len(q_tokens & tok)
+                    # Ramps from zero at a single shared token: one word in common
+                    # is coincidence, not relevance. Capped well below a trigger
+                    # hit so lexical drift can never outvote a literal match.
+                    if overlap >= 2:
+                        score += 0.30 * min(1.0, (overlap - 1) / 3.0)
+                final = min(1.0, score) * max(0.35, norm.weight)
+                if final >= _MIN_NORM_SCORE:
+                    scored.append((final, norm))
 
-        if CANON_SEMANTIC and embedder is not None and len(scored) < max(2, k // 2):
-            try:
-                scored = self._merge_semantic(query, scored, embedder, k)
-            except Exception as exc:
-                log.debug("[ccc] semantic canon retrieval skipped: %s", exc)
+            if CANON_SEMANTIC and embedder is not None and len(scored) < max(2, k // 2):
+                try:
+                    scored = self._merge_semantic(query, scored, embedder, k)
+                except Exception as exc:
+                    log.debug("[ccc] semantic canon retrieval skipped: %s", exc)
 
-        scored.sort(key=lambda pair: pair[0], reverse=True)
-        picked = scored[:k]
+            scored.sort(key=lambda pair: pair[0], reverse=True)
+            picked = scored[:k]
 
-        # Roots are always in scope; they are the frame, not a match.
-        picked.extend((0.0, n) for n in self.roots())
-        seen: set[str] = set()
-        out: list[tuple[float, Norm]] = []
-        for score, norm in picked:
-            if norm.id in seen:
-                continue
-            seen.add(norm.id)
-            out.append((score, norm))
-        return out
+            # Roots are always in scope; they are the frame, not a match.
+            picked.extend((0.0, n) for n in self.roots())
+            seen: set[str] = set()
+            out: list[tuple[float, Norm]] = []
+            for score, norm in picked:
+                if norm.id in seen:
+                    continue
+                seen.add(norm.id)
+                out.append((score, norm))
+            return out
 
     def _merge_semantic(self, query: str, scored, embedder, k: int):
         """Fold KNN results into the lexical list. Requires numpy + embedder."""
@@ -312,11 +333,13 @@ class CanonStore:
         return scored
 
     def _ensure_vectors(self, embedder, np):
-        with self._vector_lock:
-            if self._vectors is not None:
+        from cognition import reason
+        geometry = reason._cache_key("", "", embedder)[-1]
+        with self._lock:
+            if self._vectors is not None and self._vector_geometry == geometry:
                 return self._vectors
-            with self._lock:
-                texts = [f"{n.statement} {' '.join(n.tags)}" for n in self._norms]
+            norms = self._norms
+            texts = [f"{n.statement} {' '.join(n.tags)}" for n in norms]
             if not texts:
                 return None
             try:
@@ -324,7 +347,13 @@ class CanonStore:
             except Exception as exc:
                 log.debug("[ccc] canon embedding failed: %s", exc)
                 return None
-            self._vectors = np.asarray(raw, dtype=np.float32)
+            vectors = np.asarray(raw, dtype=np.float32)
+            if (self._norms is not norms or vectors.ndim != 2 or vectors.shape[0] != len(texts)
+                    or not vectors.shape[1] or not np.isfinite(vectors).all()):
+                return None
+            self._vectors = vectors
+            self._vector_geometry = geometry
+            self._vector_embedder = embedder
             log.info("[ccc] canon semantic index built (%d norms)", len(texts))
             return self._vectors
 

@@ -83,6 +83,26 @@ An administrative approval preserves the held user's identity for memory.
 If accepted history succeeds but memory writing fails, the confirmation states
 that distinction.
 
+Final Area 3 contracts:
+
+- Short turns still run deterministic safeguards. Ordinary distress takes
+  the care path; a separate hard-blocked request cannot bypass safeguards by
+  mentioning distress.
+- Proactive check-ins stay silent on refusal, unresolved escalation, conscience
+  circuit failure, or model error text. They do not create an unusable approval flow.
+- Both approval entry points share authorization and standalone-command
+  parsing. Persisted high-stakes classes cannot be downgraded through trust.
+- Judge responses must contain finite, complete, in-range scores. Truncated
+  thinking is not a final judgment. Deliberation fits the configured main-model
+  context budget using the same estimator as normal chat.
+- Self-pattern detectors require explicit boundaries/bargains. Ordinary "no"
+  or "if you" clauses do not become refusal habits. The version-2 snapshot
+  migration removes legacy broad-keyword pushback inferences and preserves
+  unrelated grounded patterns.
+- Deferred auditing uses a bounded buffer during storage failures
+  (`CCC_LEDGER_MAX_PENDING`, default 512); lost diagnostics are logged.
+  This buffer does not grant permission when an approval cannot be resolved.
+
 Regression coverage includes the reported `Sorry I did something wrong.` and
 outings-versus-coding conversation, appended harmful requests, explicit STOP,
 urgency carryover, identity isolation, judge failures/concurrency, and bounded

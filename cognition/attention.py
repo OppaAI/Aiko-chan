@@ -243,19 +243,15 @@ _ENERGY_HIGH_RE = re.compile(r"\b(excited|energized|motivated|let\x27s go|can\x2
 # Self-agency cues in Aiko's own replies (not user text). Used only to
 # evidence-gate self-regarding preferences — never as hard identity facts.
 _SELF_REFUSE_RE = re.compile(
-    r"\b("
-    r"no\b|not doing that|not going to|won't|will not|pass on that|"
-    r"ask properly|make me|earn it|try again|not unless|"
-    r"i(?:'|')m not|i refuse|i decline|i(?:'|')d rather not"
-    r")\b",
-    re.I,
+    r"\b(?:i (?:refuse|decline)|i(?:'d| would) rather not|"
+    r"i(?:'m| am) not (?:doing that|going to do that)|"
+    r"i (?:won't|will not) (?:do|help with|answer|run|participate in|take on|carry out)\b|"
+    r"ask (?:properly|nicely) first)\b", re.I,
 )
 _SELF_BARGAIN_RE = re.compile(
-    r"\b("
-    r"if you|only if|in exchange|first you|then i(?:'|')ll|"
-    r"compliment|sweets?|offering|ask nicely|say please"
-    r")\b",
-    re.I,
+    r"\b(?:(?:only if you|first you|in exchange for) "
+    r"(?:say please|ask nicely|give me|bring me|offer me|compliment me)|"
+    r"(?:say please|ask nicely) (?:first|and (?:then )?i(?:'ll| will)))\b", re.I,
 )
 _SELF_INITIATE_RE = re.compile(
     r"\b("
@@ -722,11 +718,11 @@ class EdgeCognitiveState:
         # sensors later) match versioned policies; Oppa teaches via chat.
         try:
             from cognition.policy import PolicyEngine, trigger_bus
-            self._policy = PolicyEngine(user_id=self._identity or None)
+            uid = self._identity or "default"
+            self._policy = PolicyEngine(user_id=uid)
             # Bus handlers are scoped to this identity: another user's
             # sensor event can never fire this state's policies.
             _bus = trigger_bus()
-            uid = self._identity or None
             self._policy_bus_fns = {
                 "event": lambda r, c="", _s=self: _s._policy_trigger("event", r, c),
                 "sensor": lambda r, c="", _s=self: _s._policy_trigger("sensor", r, c),
@@ -738,6 +734,7 @@ class EdgeCognitiveState:
             self._policy = None
             self._policy_bus_fns = {}
         self._policy_echo = ""          # pending confirmation text (peeked, not popped)
+        self._policy_extracting = False
         self._policy_echo_prop = None   # proposal id the pending echo belongs to
         self._peeked_prop = None        # proposal id actually injected into the prompt
         self._delivered_proposal_id = None  # echo confirmed delivered this turn
@@ -976,12 +973,21 @@ class EdgeCognitiveState:
             return
         if looks_like_teaching(user_text or ""):
             import threading as _threading
-
-            _threading.Thread(
-                target=self._extract_teaching_async,
-                args=(user_text,), daemon=True,
-                name="policy-extract",
-            ).start()
+            import contextvars as _contextvars
+            with self._lock:
+                if self._policy_extracting:
+                    return
+                self._policy_extracting = True
+            try:
+                _threading.Thread(
+                    target=_contextvars.copy_context().run,
+                    args=(self._extract_teaching_async, user_text), daemon=True,
+                    name="policy-extract",
+                ).start()
+            except Exception:
+                with self._lock:
+                    self._policy_extracting = False
+                log.debug("policy extraction worker failed to start", exc_info=True)
 
     def _extract_teaching_async(self, user_text: str) -> None:
         try:
@@ -995,6 +1001,9 @@ class EdgeCognitiveState:
                     self._policy_echo_prop = prop_id
         except Exception:
             pass
+        finally:
+            with self._lock:
+                self._policy_extracting = False
 
     def peek_policy_echo(self) -> str:
         """Read the pending policy confirmation WITHOUT clearing it.
@@ -1145,18 +1154,78 @@ class EdgeCognitiveState:
         return " ".join(ordered)
 
     @staticmethod
-    def _preferred_tone(text: str) -> str | None:
-        """Use the same tone classification for explicit and learned feedback."""
-        if re.search(r"\b(?:casual|friendly|informal)\b|\bless\s+formal\b", text):
+    def _unquoted_preference_text(text: str) -> str:
+        return re.sub(r"```[\s\S]*?```|`[^`]*`|\"[^\"]*\"|(?<!\w)'[^'\n]+'(?!\w)", "", text)
+
+    _NEGATED_PREFERENCE_RE = re.compile(
+        r"\b(?:do not|don't|don’t|never|avoid|stop|not|no)\s+"
+        r"(?:(?:always|be|being|sound|sounding|use|using|so|too|a|an|more|less|give|giving|me|need|to)\s+){0,6}"
+        r"(?P<term>concise|short|brief|detailed|formal|casual|professional|friendly|informal|explain|step by step|walk me through|ask before|ask me first)\b"
+    )
+
+    @classmethod
+    def _positive_preference_text(cls, text: str) -> str:
+        return cls._NEGATED_PREFERENCE_RE.sub("", cls._unquoted_preference_text(text))
+
+    @classmethod
+    def _preferred_tone(cls, text: str) -> str | None:
+        """Interpret directed tone feedback, including common negated forms."""
+        text = cls._unquoted_preference_text(text)
+        if not re.search(r"\b(?:tone|style|answers?|responses?|replies|be|sound|speak|talk|respond|reply)\b"
+                         r"|\b(?:more|less|too)\s+(?:formal|casual)\b", text):
+            return None
+        positive = cls._positive_preference_text(text)
+        if re.search(r"\b(?:less|too)\s+(?:casual|friendly|informal)\b", positive):
+            return "formal"
+        if re.search(r"\b(?:casual|friendly|informal)\b|\b(?:less|too)\s+(?:formal|professional)\b", positive):
             return "casual"
-        if re.search(r"\b(?:formal|professional)\b", text):
+        if re.search(r"\b(?:formal|professional)\b", positive):
+            return "formal"
+        negated = [m['term'] for m in cls._NEGATED_PREFERENCE_RE.finditer(text)]
+        if any(term in ('formal', 'professional') for term in negated):
+            return "casual"
+        if any(term in ('casual', 'friendly', 'informal') for term in negated):
             return "formal"
         return None
+
+    @classmethod
+    def _preference_signals(cls, text: str) -> list[tuple[str, str]]:
+        positive = cls._positive_preference_text(text)
+        candidates = []
+        directed = re.search(r"\b(?:answers?|responses?|replies|explanations?|be|keep|make|reply|respond)\b", positive)
+        if (re.search(r"\b(?:concise|too long|too verbose|less verbose)\b", positive)
+                or directed and re.search(r"\b(?:short|brief)\b", positive)):
+            candidates.append(("response_length", "concise"))
+        if re.search(r"\b(?:more detail|detailed|explain|step by step|walk me through)\b", positive):
+            candidates.append(("explanation_depth", "detailed"))
+        if re.search(r"\b(?:ask before|ask me first|with my permission)\b", positive):
+            candidates.append(("action_confirmation", "ask_before_acting"))
+        tone = cls._preferred_tone(text)
+        if tone is not None:
+            candidates.append(("tone", tone))
+        return candidates
+
+    def _forget_preference_keys(self, reset_keys: set[str]) -> None:
+        for key in reset_keys:
+            self._preferences.pop(key, None)
+        for signature in list(self._preference_counts):
+            if signature.split("=", 1)[0] in reset_keys:
+                self._preference_counts.pop(signature)
+        reset_lessons = []
+        if "response_length" in reset_keys:
+            reset_lessons.append(_LESSON_CONCISE)
+        if "explanation_depth" in reset_keys:
+            reset_lessons.extend((_LESSON_EXPLANATION, _LESSON_STEPS))
+        for semantic in reset_lessons:
+            self._lesson_counts.pop(" ".join(sorted(_tokens(semantic))), None)
+            durable = "Durable interaction rule: " + semantic
+            if durable in self._durable_lessons:
+                self._durable_lessons.remove(durable)
 
     def _apply_explicit_preferences(self, feedback: str) -> bool:
         """Apply explicit preferences; return True when a reset consumes feedback."""
         lower = (feedback or "").casefold()
-        explicit = "from now on" in lower or "always" in lower or "starting now" in lower
+        explicit = bool(re.search(r"\b(?:from now on|always|starting now|never)\b", self._unquoted_preference_text(lower)))
         forget_request = re.match(
             r"^\s*(?:(?:please|actually)[,\s]+)*"
             r"(?:(?:can|could|would)\s+you\s+(?:please\s+)?)?forget\b", lower,
@@ -1174,50 +1243,29 @@ class EdgeCognitiveState:
                 reset_keys.update(("response_length", "explanation_depth", "tone", "action_confirmation"))
                 reset_keys.update(self._preferences)
                 reset_keys.update(sig.split("=", 1)[0] for sig in self._preference_counts)
-            for key in reset_keys:
-                self._preferences.pop(key, None)
-            for signature in list(self._preference_counts):
-                if signature.split("=", 1)[0] in reset_keys:
-                    self._preference_counts.pop(signature)
-            reset_lessons = []
-            if "response_length" in reset_keys:
-                reset_lessons.append(_LESSON_CONCISE)
-            if "explanation_depth" in reset_keys:
-                reset_lessons.extend((_LESSON_EXPLANATION, _LESSON_STEPS))
-            for semantic in reset_lessons:
-                self._lesson_counts.pop(" ".join(sorted(_tokens(semantic))), None)
-                durable = "Durable interaction rule: " + semantic
-                if durable in self._durable_lessons:
-                    self._durable_lessons.remove(durable)
+            self._forget_preference_keys(reset_keys)
             # A reset is not evidence for learning the preferences it mentions.
             return True
         if not explicit:
             return False
-        if any(term in lower for term in ("concise", "short", "brief")):
-            self._preferences["response_length"] = "concise"
-        elif any(term in lower for term in ("more detail", "detailed", "step by step")):
-            self._preferences["explanation_depth"] = "detailed"
-        if any(term in lower for term in ("ask before", "ask me first", "with my permission")):
-            self._preferences["action_confirmation"] = "ask_before_acting"
-        tone = self._preferred_tone(lower)
-        if tone is not None:
-            self._preferences["tone"] = tone
+        negated = {m['term'] for m in self._NEGATED_PREFERENCE_RE.finditer(self._unquoted_preference_text(lower))}
+        reset_keys = set()
+        if negated & {'concise', 'short', 'brief'}:
+            reset_keys.add('response_length')
+        if negated & {'detailed', 'explain', 'step by step', 'walk me through'}:
+            reset_keys.add('explanation_depth')
+        if negated & {'ask before', 'ask me first'}:
+            reset_keys.add('action_confirmation')
+        self._forget_preference_keys(reset_keys)
+        for key, value in self._preference_signals(lower):
+            # An explicit change starts fresh evidence for this preference.
+            self._forget_preference_keys({key})
+            self._preferences[key] = value
         return False
 
     def _learn_preferences(self, feedback: str) -> None:
-        """Track implicit preference signals. Evidence-gated at count ≥ 2."""
-        lower = (feedback or "").casefold()
-        candidates = []
-        if any(term in lower for term in ("concise", "short", "brief", "too long", "verbose")):
-            candidates.append(("response_length", "concise"))
-        if any(term in lower for term in ("more detail", "explain", "step by step", "walk me through")):
-            candidates.append(("explanation_depth", "detailed"))
-        if any(term in lower for term in ("ask before", "ask me first", "with my permission")):
-            candidates.append(("action_confirmation", "ask_before_acting"))
-        tone = self._preferred_tone(lower)
-        if tone is not None:
-            candidates.append(("tone", tone))
-        for key, value in candidates:
+        """Track directed positive feedback, with repeated evidence."""
+        for key, value in self._preference_signals((feedback or "").casefold()):
             signature = key + "=" + value
             count = self._preference_counts.get(signature, 0) + 1
             self._preference_counts[signature] = min(count, 3)
@@ -1255,7 +1303,7 @@ class EdgeCognitiveState:
         # Map observed agency into candidate self-preferences.
         candidates: list[tuple[str, str]] = []
         if "refuse" in kinds:
-            candidates.append(("pushback", "will_refuse_lazy_or_rude_requests"))
+            candidates.append(("pushback", "maintains_explicit_boundaries"))
         if "bargain" in kinds:
             candidates.append(("pushback", "bargains_before_discretionary_work"))
         if "initiate" in kinds:
@@ -1296,7 +1344,7 @@ class EdgeCognitiveState:
                 "explicit": True,
             })
             key_map = {
-                "refuse": ("pushback", "will_refuse_lazy_or_rude_requests"),
+                "refuse": ("pushback", "maintains_explicit_boundaries"),
                 "bargain": ("pushback", "bargains_before_discretionary_work"),
                 "initiate": ("initiative", "initiates_when_context_allows"),
                 "stance": ("agency", "expresses_own_preferences"),
@@ -1322,9 +1370,9 @@ class EdgeCognitiveState:
             return
         lesson = prefix + text
         self._lessons.appendleft(lesson)
-        lower_feedback = (feedback or "").casefold()
+        lower_feedback = self._positive_preference_text((feedback or "").casefold())
         semantic = ""
-        if any(word in lower_feedback for word in ("concise", "short", "brief", "too long", "verbose")):
+        if ("response_length", "concise") in self._preference_signals(lower_feedback):
             semantic = _LESSON_CONCISE
         elif any(word in lower_feedback for word in ("clarify", "misunderstood", "not what i meant", "wrong")):
             semantic = "Ask a clarifying question when intent is ambiguous."
@@ -1664,7 +1712,7 @@ class EdgeCognitiveState:
         if self_prefs:
             rendered = []
             labels = {
-                "will_refuse_lazy_or_rude_requests": "pushes back on lazy or rude requests",
+                "maintains_explicit_boundaries": "maintains explicitly expressed boundaries",
                 "bargains_before_discretionary_work": "may bargain before discretionary work",
                 "initiates_when_context_allows": "initiates when context allows",
                 "expresses_own_preferences": "expresses her own preferences",
@@ -1919,6 +1967,28 @@ class EdgeCognitiveState:
                 self._self_notes = deque([str(n) for n in (data.get("self_notes") or []) if n][:5], maxlen=5)
                 loaded_decisions = [d for d in (data.get("self_decisions") or []) if isinstance(d, dict)][:8]
                 self._self_decisions = deque(loaded_decisions, maxlen=8)
+                if data.get("self_pattern_version", 1) < 2:
+                    # Old broad keywords inferred pushback from ordinary
+                    # "no" and "if you" replies. Relearn those traits from
+                    # explicit acts while retaining other grounded patterns.
+                    self._self_preferences.pop("pushback", None)
+                    for signature in list(self._self_preference_counts):
+                        if signature.startswith("pushback="):
+                            self._self_preference_counts.pop(signature)
+                    self._self_notes = deque((note for note in self._self_notes
+                        if not note.startswith("Observed pattern (pushback):")), maxlen=5)
+                    corrected = []
+                    for decision in self._self_decisions:
+                        if decision.get("explicit"):
+                            corrected.append(decision)
+                            continue
+                        summary = str(decision.get("summary") or "")
+                        kinds = [kind for kind in decision.get("kinds", [])
+                                 if (kind != "refuse" or _SELF_REFUSE_RE.search(summary))
+                                 and (kind != "bargain" or _SELF_BARGAIN_RE.search(summary))]
+                        if kinds:
+                            corrected.append({**decision, "kinds": kinds})
+                    self._self_decisions = deque(corrected, maxlen=8)
                 self._activity = str(data.get("activity") or "")
                 self._affect = float(data.get("affect") or 0.0)
                 self._energy = float(data.get("energy") or 0.5)
@@ -1953,7 +2023,7 @@ class EdgeCognitiveState:
         try:
             from cognition.memory.vecstore import connect_sqlite_db
             with self._lock:
-                data = {"open_loops": list(self._open_loops), "goals": [g.text for g in self._goals if g.progress == "active"], "lessons": list(self._lessons), "tool_outcomes": list(self._tool_outcomes), "contradictions": list(self._contradictions), "durable_lessons": list(self._durable_lessons), "lesson_evidence": dict(self._lesson_counts), "preferences": dict(self._preferences), "activity": self._activity, "affect": self._affect, "energy": self._energy, "uncertainty": self._uncertainty, "attention": self._attention, "self_preferences": dict(self._self_preferences), "self_preference_evidence": dict(self._self_preference_counts), "self_notes": list(self._self_notes), "self_decisions": list(self._self_decisions)[:6],
+                data = {"open_loops": list(self._open_loops), "goals": [g.text for g in self._goals if g.progress == "active"], "lessons": list(self._lessons), "tool_outcomes": list(self._tool_outcomes), "contradictions": list(self._contradictions), "durable_lessons": list(self._durable_lessons), "lesson_evidence": dict(self._lesson_counts), "preferences": dict(self._preferences), "activity": self._activity, "affect": self._affect, "energy": self._energy, "uncertainty": self._uncertainty, "attention": self._attention, "self_pattern_version": 2, "self_preferences": dict(self._self_preferences), "self_preference_evidence": dict(self._self_preference_counts), "self_notes": list(self._self_notes), "self_decisions": list(self._self_decisions)[:6],
                         "inner_speech": self._inner_speech.snapshot() if self._inner_speech is not None else {},
                         "subliminal": self._subliminal.snapshot_extra() if self._subliminal is not None else {}}
             conn = connect_sqlite_db("memory/memory.db", user_id=self._identity)

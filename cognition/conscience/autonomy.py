@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -64,6 +65,20 @@ class TrustRecord:
     @classmethod
     def from_json(cls, d: dict) -> "TrustRecord":
         known = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
+        known["stakes"] = known.get("stakes", STAKES_HIGH)
+        if known["stakes"] not in _STAKES_ORDER:
+            raise ValueError("invalid stakes tier")
+        for key in ("approvals", "refusals"):
+            value = known.get(key, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("invalid trust count")
+        if not isinstance(known.get("revoked", False), bool):
+            raise ValueError("invalid revocation state")
+        granted = known.get("granted_at", 0.0)
+        if isinstance(granted, bool) or not isinstance(granted, (float, int)) or not math.isfinite(granted):
+            raise ValueError("invalid trust timestamp")
+        if not isinstance(known.get("history", []), list):
+            raise ValueError("invalid trust history")
         return cls(**known)
 
 
@@ -110,6 +125,8 @@ class AutonomyPolicy:
             tier = (stakes or (rec.stakes if rec else STAKES_HIGH)).lower()
             if tier not in _STAKES_ORDER:
                 tier = STAKES_HIGH
+            if rec is not None and _STAKES_ORDER.get(rec.stakes, 2) > _STAKES_ORDER[tier]:
+                tier = rec.stakes if rec.stakes in _STAKES_ORDER else STAKES_HIGH
             if tier == STAKES_HIGH:
                 return self._verdict("ask", action_class, "high-stakes class never graduates")
             if tier == STAKES_LOW:
@@ -186,6 +203,8 @@ class AutonomyPolicy:
 
     def snapshot(self) -> dict:
         with self._lock:
+            for rec in self._records.values():
+                self._apply_decay(rec)
             return {
                 "user_id": self._user_id,
                 "threshold": self._threshold,
@@ -212,12 +231,12 @@ class AutonomyPolicy:
             self._records[action_class] = rec
         elif stakes:
             tier = stakes.lower()
-            if tier in _STAKES_ORDER:
+            if tier in _STAKES_ORDER and _STAKES_ORDER[tier] > _STAKES_ORDER.get(rec.stakes, 2):
                 rec.stakes = tier
         return rec
 
     def _apply_decay(self, rec: TrustRecord) -> None:
-        if not rec.granted_at:
+        if not rec.approvals:
             return
         if self._decay <= 0:
             return
@@ -261,7 +280,12 @@ class AutonomyPolicy:
             if isinstance(raw, dict):
                 for k, v in raw.items():
                     if isinstance(v, dict):
-                        self._records[k] = TrustRecord.from_json({**v, "action_class": k})
+                        try:
+                            record = TrustRecord.from_json({**v, "action_class": k})
+                            self._trim(record)
+                            self._records[k] = record
+                        except (TypeError, ValueError, OverflowError):
+                            log.warning("[ccc] malformed trust record skipped: %s", k)
         except Exception as e:  # noqa: BLE001 - corrupt file must not block startup
             log.warning("[ccc] autonomy load failed (%s); starting empty", type(e).__name__)
 

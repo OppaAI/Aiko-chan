@@ -201,9 +201,11 @@ class PolicyEngine:
 
     def __init__(self, user_id: str | None = None, embedder=None) -> None:
         self._lock = threading.RLock()
-        self._user_id = user_id or "oppa"
+        from system.userspace import current_user_id
+        self._user_id = user_id or current_user_id()
         self._embedder = embedder
         self._conn: sqlite3.Connection | None = None
+        self._closed = False
         self._action_handlers: dict[str, Callable[[dict], None]] = {
             "log": self._handle_log,
             "notify": self._handle_notify,
@@ -214,6 +216,8 @@ class PolicyEngine:
     # ── storage ──
 
     def _connect(self) -> sqlite3.Connection:
+        if getattr(self, "_closed", False):
+            raise RuntimeError("policy engine is closed")
         if self._conn is not None:
             return self._conn
         from agentic.experience.schema import _db_path
@@ -223,17 +227,26 @@ class PolicyEngine:
         self._conn = conn
         return conn
 
-    def _embed(self, text: str) -> list[float] | None:
+    def _embed(self, text: str, *, query: bool = False) -> list[float] | None:
         try:
             if self._embedder is None:
                 from cognition.memory.vecstore import HarrierEmbedder
 
                 self._embedder = HarrierEmbedder()
-            vec = self._embedder.embed([text])
+            if query and callable(getattr(self._embedder, "embed_query", None)):
+                vec = [self._embedder.embed_query(text)]
+            elif callable(getattr(self._embedder, "embed_batch", None)):
+                vec = self._embedder.embed_batch([text])
+            else:
+                # Harrier's legacy embed() surface yields a generator. Do not
+                # feed the generator object itself to NumPy as a scalar.
+                vec = list(self._embedder.embed([text]))
             import numpy as _np
 
-            arr = _np.asarray(vec[0] if hasattr(vec, "__len__") else vec)
-            return [float(x) for x in arr.ravel().tolist()]
+            arr = _np.asarray(vec, dtype=_np.float32)
+            if arr.ndim != 2 or arr.shape[0] != 1 or not arr.shape[1] or not _np.isfinite(arr).all():
+                return None
+            return arr[0].tolist()
         except Exception as e:
             log.debug("policy: embed failed: %s", e)
             return None
@@ -254,61 +267,63 @@ class PolicyEngine:
     ) -> dict:
         """Store a new policy version; supersede the previous active one."""
         now = datetime.now(timezone.utc).isoformat()
+        if condition is not None and not isinstance(condition, dict):
+            raise ValueError("policy condition must be an object")
         pid = uuid.uuid4().hex[:16]
         with self._lock:
             conn = self._connect()
-            prev = conn.execute(
-                "SELECT id, version FROM learned_policies"
-                " WHERE user_id = ? AND name = ? AND status = 'active'"
-                " ORDER BY version DESC LIMIT 1",
-                (self._user_id, name),
-            ).fetchone()
-            version = 1
-            supersedes = None
-            if prev:
-                version = int(prev["version"]) + 1
-                supersedes = prev["id"]
+            with conn:
+                prev = conn.execute(
+                    "SELECT id, version FROM learned_policies"
+                    " WHERE user_id = ? AND name = ? AND status = 'active'"
+                    " ORDER BY version DESC LIMIT 1",
+                    (self._user_id, name),
+                ).fetchone()
+                version = 1
+                supersedes = None
+                if prev:
+                    version = int(prev["version"]) + 1
+                    supersedes = prev["id"]
+                    conn.execute(
+                        "UPDATE learned_policies SET status = 'superseded', updated_at = ?"
+                        " WHERE id = ?",
+                        (now, prev["id"]),
+                    )
+                    # Keep the vec table in sync: dead vectors would otherwise
+                    # fill the KNN overscan slots and push active rows out.
+                    conn.execute(
+                        "DELETE FROM learned_policies_vec WHERE id = ?", (prev["id"],)
+                    )
+                row = {
+                    "id": pid, "user_id": self._user_id, "name": name,
+                    "situation": situation, "trigger_kind": trigger_kind,
+                    "condition_json": json.dumps(condition or {}),
+                    "action": action,
+                    "action_params_json": json.dumps(action_params or {}),
+                    "approval": _normalize_approval(approval), "teacher": teacher,
+                    "version": version, "supersedes_id": supersedes,
+                    "status": "active", "created_at": now, "updated_at": now,
+                }
+                cols = ", ".join(row.keys())
                 conn.execute(
-                    "UPDATE learned_policies SET status = 'superseded', updated_at = ?"
-                    " WHERE id = ?",
-                    (now, prev["id"]),
+                    f"INSERT INTO learned_policies({cols}) VALUES ({', '.join('?' * len(row))})",
+                    tuple(row.values()),
                 )
-                # Keep the vec table in sync: dead vectors would otherwise
-                # fill the KNN overscan slots and push active rows out.
-                conn.execute(
-                    "DELETE FROM learned_policies_vec WHERE id = ?", (prev["id"],)
-                )
-            row = {
-                "id": pid, "user_id": self._user_id, "name": name,
-                "situation": situation, "trigger_kind": trigger_kind,
-                "condition_json": json.dumps(condition or {}),
-                "action": action,
-                "action_params_json": json.dumps(action_params or {}),
-                "approval": _normalize_approval(approval), "teacher": teacher,
-                "version": version, "supersedes_id": supersedes,
-                "status": "active", "created_at": now, "updated_at": now,
-            }
-            cols = ", ".join(row.keys())
-            conn.execute(
-                f"INSERT INTO learned_policies({cols}) VALUES ({', '.join('?' * len(row))})",
-                tuple(row.values()),
-            )
-            vec = self._embed(f"{name}\n{situation}")
-            if vec:
-                import sqlite_vec  # type: ignore
+                vec = self._embed(f"{name}\n{situation}")
+                if vec:
+                    import sqlite_vec  # type: ignore
 
-                conn.execute(
-                    "INSERT INTO learned_policies_vec(id, embedding) VALUES (?, ?)",
-                    (pid, sqlite_vec.serialize_float32(vec)),
-                )
-            conn.commit()
+                    conn.execute(
+                        "INSERT INTO learned_policies_vec(id, embedding) VALUES (?, ?)",
+                        (pid, sqlite_vec.serialize_float32(vec)),
+                    )
         log.info("policy: taught %s v%d (approval=%s)", name, version, approval)
         return self.get(pid)
 
     def get(self, pid: str) -> dict | None:
         with self._lock:
             row = self._connect().execute(
-                "SELECT * FROM learned_policies WHERE id = ?", (pid,)
+                "SELECT * FROM learned_policies WHERE id = ? AND user_id = ?", (pid, self._user_id)
             ).fetchone()
         return self._row_to_dict(row) if row else None
 
@@ -327,9 +342,13 @@ class PolicyEngine:
         d = dict(r)
         for k in ("condition_json", "action_params_json"):
             try:
-                d[k.replace("_json", "")] = json.loads(d.pop(k) or "{}")
+                value = json.loads(d.pop(k))
+                if not isinstance(value, dict):
+                    raise ValueError("policy fields must be objects")
+                d[k.replace("_json", "")] = value
             except (TypeError, ValueError):
                 d[k.replace("_json", "")] = {}
+                d["condition"] = {"invalid": True}
         return d
 
     # ── lookup ──
@@ -344,7 +363,7 @@ class PolicyEngine:
         if not candidates:
             return None
         query = situation_hint or json.dumps(readings, sort_keys=True)[:500]
-        vec = self._embed(query)
+        vec = self._embed(query, query=True)
         ranked = candidates
         if vec:
             try:
@@ -377,8 +396,8 @@ class PolicyEngine:
             with self._lock, self._connect() as conn:
                 conn.execute(
                     "UPDATE learned_policies SET use_count = use_count + 1,"
-                    " success_count = success_count + ?, updated_at = ? WHERE id = ?",
-                    (1 if success else 0, datetime.now(timezone.utc).isoformat(), pid),
+                    " success_count = success_count + ?, updated_at = ? WHERE id = ? AND user_id = ?",
+                    (1 if success else 0, datetime.now(timezone.utc).isoformat(), pid, self._user_id),
                 )
         except Exception as e:
             log.debug("policy: record_outcome failed: %s", e)
@@ -415,7 +434,7 @@ class PolicyEngine:
         approval_txt = _normalize_approval(draft.get("approval", "notify"))
         if prev:
             text = (f"Got it — updating '{draft['name']}' to v{prev + 1}: "
-                    f"{draft['action']} when {cond_txt}. Say yes to confirm.")
+                    f"{draft['action']} when {cond_txt} ({approval_txt}). Say yes to confirm.")
         else:
             text = (f"Got it — new policy '{draft['name']}': {draft['action']} "
                     f"when {cond_txt} ({approval_txt}). Say yes to confirm.")
@@ -509,6 +528,14 @@ class PolicyEngine:
         including an unrecognized approval value smuggled in via LLM
         extraction — is treated as "ask".
         """
+        with self._lock:
+            if getattr(self, "_closed", False):
+                return
+        if policy.get("user_id", self._user_id) != self._user_id:
+            log.warning("policy: dispatch ignored for another user's policy")
+            return
+        if not evaluate_condition(policy.get("condition", {}), readings):
+            return
         approval = _normalize_approval(policy.get("approval", "notify"))
         if approval == "ask":
             log.info("policy: '%s' needs approval — queuing ask", policy["name"])
@@ -542,11 +569,13 @@ class PolicyEngine:
         log.info("policy: ASK Oppa — '%s' wants to fire on %s", policy["name"], readings)
 
     def close(self) -> None:
-        try:
+        with self._lock:
+            self._closed = True
             if self._conn is not None:
-                self._conn.close()
-        except Exception:
-            pass
+                try:
+                    self._conn.close()
+                finally:
+                    self._conn = None
 
 
 # ── chat teaching extraction ───────────────────────────────────────────
@@ -576,6 +605,7 @@ def extract_teaching(user_text: str, llm_client=None) -> dict | None:
     """LLM extraction of a taught policy. Returns draft dict or None."""
     if not looks_like_teaching(user_text):
         return None
+    owned_client = llm_client is None
     try:
         if llm_client is None:
             from openai import OpenAI
@@ -597,17 +627,23 @@ def extract_teaching(user_text: str, llm_client=None) -> dict | None:
         )
         raw = (resp.choices[0].message.content or "").strip()
         data = json.loads(raw[raw.find("{"): raw.rfind("}") + 1])
-        if not data.get("is_teaching"):
+        if not isinstance(data, dict) or data.get("is_teaching") is not True:
             return None
         cond = data.get("condition") or {}
+        if not isinstance(cond, dict):
+            return None
+        value = float(cond.get("value", 0))
+        op = cond.get("op", ">")
+        if not math.isfinite(value) or op not in _OPS:
+            return None
         return {
             "name": str(data.get("name", "unnamed_policy"))[:64],
             "situation": str(data.get("situation", user_text[:200]))[:500],
             "trigger_kind": data.get("trigger_kind", "event"),
             "condition": {
                 "metric": cond.get("metric", ""),
-                "op": cond.get("op", ">"),
-                "value": float(cond.get("value", 0)),
+                "op": op,
+                "value": value,
             },
             "action": str(data.get("action", "notify"))[:64],
             "approval": _normalize_approval(data.get("approval", "notify")),
@@ -616,3 +652,9 @@ def extract_teaching(user_text: str, llm_client=None) -> dict | None:
     except Exception as e:
         log.debug("policy: extract_teaching failed: %s", e)
         return None
+    finally:
+        if owned_client and llm_client is not None:
+            try:
+                llm_client.close()
+            except Exception:
+                log.debug("policy: extraction client close failed", exc_info=True)

@@ -183,15 +183,19 @@ class ConscienceCircuitCore:
     def _run(self, act, content, ctx, ceiling, llm_client, embedder) -> Verdict:
         text = (content or "").strip()
 
-        # ── salience floor ────────────────────────────────────────────────
-        if self._below_floor(act, text):
-            return Verdict(decision=ALLOW, gate=GATE_FLOOR, confidence=1.0,
-                           layers_run=["floor"])
-
         # ── L0 reflex ─────────────────────────────────────────────────────
         base = self._layer0(act, text, ctx)
         if base.decision == REFUSE or ceiling < 1:
             return base
+        if base.decision == CAUTION and any(rid.startswith("SG-SELF-") for rid in base.rule_ids):
+            # A care response is already the appropriate act. A triage model
+            # must not turn the user's distress into a refusal to listen.
+            return base
+
+        # Cheap/greeting requests may skip models, never deterministic rules.
+        if self._below_floor(act, text):
+            return fuse(base, Verdict(decision=ALLOW, gate=GATE_FLOOR, confidence=1.0,
+                                      layers_run=["floor"]))
 
         # ── L1a known-safe allowlist ──────────────────────────────────────
         # Runs AFTER L0 so a harmful request is refused before it can ever be
@@ -457,7 +461,7 @@ class ConscienceCircuitCore:
         # Distress is not a policy violation. A person in crisis must never
         # receive a refusal message, so this branch exits before any of the
         # blocking logic below and hands think.py a care constraint instead.
-        if gr.wellbeing_hit(hits):
+        if gr.wellbeing_hit(hits) and gr.severity_of(hits) != gr.SEV_BLOCK:
             return Verdict(
                 decision=CAUTION, gate=GATE_GUARDRAIL, confidence=1.0,
                 vertical=0.0, horizontal=-0.1,
@@ -476,7 +480,11 @@ class ConscienceCircuitCore:
                 decision=REFUSE, gate=GATE_GUARDRAIL, confidence=1.0,
                 vertical=-1.0, horizontal=-1.0,
                 reasons=reasons, rule_ids=rule_ids, layers_run=["reflex"],
-                pastoral_note="This is outside what I'll do, and that isn't a judgement about you.",
+                pastoral_note=(
+                    "I want to help you stay safe, but I can't help with harming someone."
+                    if gr.wellbeing_hit(hits) else
+                    "This is outside what I'll do, and that isn't a judgement about you."
+                ),
             )
         if severity == gr.SEV_REVIEW:
             decision = ESCALATE if gr.GUARDRAIL_EGRESS_STRICT and gr.is_egress(act, ctx) else CAUTION
@@ -839,34 +847,11 @@ def conscience_for(user_id: str | None = None) -> ConscienceCircuitCore:
         return core
 
 
-# ── approval command parsing (mirrors agentic._maybe_resume_approval) ─────────
-
-_APPROVE_RE = re.compile(r"\b(approve|deny|reject)\s+ccc-([0-9a-f]{6,16})\b", re.IGNORECASE)
-
-
+# Compatibility entry point: one approval parser and authorization path.
 def maybe_resolve_approval(user_input: str, user_id: str | None = None) -> str | None:
-    """Handle 'approve ccc-<id>' / 'deny ccc-<id>' before intent routing.
-
-    Returns a short confirmation string when the input was an approval command,
-    or None when it wasn't. Call this from think.route() in the same place the
-    agentic approval pre-check already runs — terse commands like these get
-    misrouted by the intent classifier, which would leave the escalation stuck
-    open forever.
-    """
-    match = _APPROVE_RE.search(user_input or "")
-    if not match:
-        return None
-    verb, escalation_id = match.group(1).lower(), match.group(2)
-    approved = verb == "approve"
-    core = conscience_for(user_id)
-    ok = core.resolve_escalation(escalation_id, approved, note=f"via chat: {verb}")
-    if not ok:
-        return f"I don't have an open question with id {escalation_id}."
-    return (
-        f"Alright — going ahead with {escalation_id}."
-        if approved else
-        f"Understood. Leaving {escalation_id} alone."
-    )
+    """Resolve a standalone approval through the shared authorized handler."""
+    from .hooks import resolve_ccc_approval
+    return resolve_ccc_approval(user_input, user_id=user_id)
 
 
 __all__ = ["ConscienceCircuitCore", "conscience_for", "maybe_resolve_approval"]

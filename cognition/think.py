@@ -2749,7 +2749,9 @@ class AikoThink:
                 ),
             }]
             response = self._stream_response(messages, system=system, token_callback=None, emit=False)
-            response = self._finalize_response(prompt_hint, response, None)
+            if (response or "").startswith("[LLM error]"):
+                return ""
+            response = self._finalize_response(prompt_hint, response, None, interactive=False)
             return response
         finally:
             with self._active_users_lock:
@@ -4187,7 +4189,8 @@ class AikoThink:
         return sanitized
 
     def _finalize_response(self, user_input: str, draft: str, token_callback=None, *, already_emitted: bool = False, _spoken_prefix: str = "",
-                           sentences_gated: bool = False, ask_flags: list | None = None, _ask_out: dict | None = None) -> str:
+                           sentences_gated: bool = False, ask_flags: list | None = None, _ask_out: dict | None = None,
+                           interactive: bool = True) -> str:
         # sentences_gated: True when the sentence-streaming sink gated every
         # spoken sentence before TTS. The final gate then fails closed for
         # the persistent record (history/memory) on evaluation outage.
@@ -4231,6 +4234,7 @@ class AikoThink:
         try:
             from cognition.conscience.hooks import gate_speak
             from cognition.conscience import ESCALATE as _ESCALATE, REFUSE as _REFUSE
+            from cognition.conscience.schema import GATE_ERROR as _GATE_ERROR
             memorize = self._get_memorize()
             mem_inner = getattr(memorize, "_mem", None) if memorize is not None else None
             embedder = getattr(mem_inner, "_embedder", None)
@@ -4245,7 +4249,7 @@ class AikoThink:
                 # before TTS. A gate outage here must fail closed for the
                 # record — an unevaluated draft must never persist into
                 # history/memory. Non-streamed path keeps fail-open.
-                fail_closed=sentences_gated,
+                fail_closed=sentences_gated or not interactive,
                 return_verdict=True,
                 # Per-sentence asks were quiet; the turn-level ask below
                 # aggregates them into one owner notice.
@@ -4276,6 +4280,15 @@ class AikoThink:
             _ask_flags = list(ask_flags or [])
             _final_escalated = _fverdict is not None and _fverdict.decision == _ESCALATE
             _was_refused = _fverdict is not None and _fverdict.decision == _REFUSE
+            if not interactive and (_was_refused or _final_escalated or _fverdict is None
+                                    or _fverdict.gate == _GATE_ERROR):
+                from cognition.conscience.hooks import discard_output_questions
+                ids = [f["escalation_id"] for f in _ask_flags if f.get("escalation_id")]
+                if _fverdict is not None and _fverdict.escalation_id:
+                    ids.append(_fverdict.escalation_id)
+                discard_output_questions(ids, user_id=current_user_id(),
+                                         note="noninteractive output has no approval continuation")
+                return ""
             if _was_refused and _ask_flags:
                 from cognition.conscience.hooks import discard_output_questions
                 discard_output_questions(
@@ -4315,6 +4328,9 @@ class AikoThink:
                     })
                     log.info("[finalize] turn held for human accept/decline: %s", _turn_id)
         except Exception as exc:
+            if not interactive:
+                log.warning("[finalize] noninteractive conscience check failed; skipping output: %s", exc)
+                return ""
             if sentences_gated:
                 # Fail closed for the persistent record: the draft was
                 # spoken sentence-by-sentence but the final full-text check

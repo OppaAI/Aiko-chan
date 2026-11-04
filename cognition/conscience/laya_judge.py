@@ -273,7 +273,7 @@ def apply_band(p: float | None, lo: float = BAND_LO, hi: float = BAND_HI) -> str
     `ask-needs-probs` and must never nag the owner -- a missing signal is not
     uncertainty.
     """
-    if p is None:
+    if p is None or isinstance(p, bool) or not math.isfinite(p) or not 0.0 <= p <= 1.0:
         return "ask-needs-probs"
     if p >= hi:
         return "refuse"
@@ -314,13 +314,13 @@ def _band_confidence(answer: dict) -> float:
     reported Shannon confidence runs low, so we take whichever is more
     informative rather than trusting one field.
     """
-    conf = answer.get("confidence")
-    if isinstance(conf, (int, float)):
-        probs = answer.get("probabilities") or {}
-        top = max(probs.values()) if probs else 0.0
-        return max(0.0, min(1.0, float(max(float(conf), top))))
     probs = answer.get("probabilities") or {}
-    return float(max(probs.values())) if probs else 0.0
+    candidates = list(probs.values()) if isinstance(probs, dict) else []
+    candidates.append(answer.get("confidence"))
+    valid = [float(value) for value in candidates
+             if isinstance(value, (int, float)) and not isinstance(value, bool)
+             and math.isfinite(value) and 0.0 <= value <= 1.0]
+    return max(valid, default=0.0)
 
 
 class LayaJudge:
@@ -382,7 +382,13 @@ class LayaJudge:
         parties: list[Party] | None = None,
     ) -> tuple[float, float, float, list[str], list[str]] | None:
         with self._score_lock:
-            return self._score(situation, canon_block, parties)
+            try:
+                return self._score(situation, canon_block, parties)
+            except (TypeError, ValueError, AttributeError, OverflowError) as exc:
+                self._clear_call_metadata()
+                self._trip()
+                log.warning("[ccc] malformed Laya judgment: %s", exc)
+                return None
 
     def score_with_metadata(self, situation: str, canon_block: str = "", parties=None):
         """Capture the bands belonging to this call, not another user's call."""
@@ -395,6 +401,15 @@ class LayaJudge:
                     value = getattr(self, name)
                     metadata[name] = dict(value) if isinstance(value, dict) else value
             return result, metadata
+
+    def _clear_call_metadata(self) -> None:
+        self.last_uncertain = False
+        self.last_bands = {}
+        self.last_negative = {}
+        self.last_confidence = {}
+        self.last_scheme = "legacy"
+        self.last_p_violation = None
+        self.last_band_decision = ""
 
     def _score(
         self,
@@ -410,13 +425,7 @@ class LayaJudge:
         # Per-call state is reset up front: every early return below must
         # leave clean attributes, otherwise a failed call would leak the
         # previous turn's band decision / uncertainty into this verdict.
-        self.last_uncertain = False
-        self.last_bands = {}
-        self.last_negative = {}
-        self.last_confidence = {}
-        self.last_scheme = "legacy"
-        self.last_p_violation = None
-        self.last_band_decision = ""
+        self._clear_call_metadata()
         if not self.available:
             return None
         canon_block = filter_canon_block(canon_block, situation, canon=self._canon)
@@ -523,7 +532,8 @@ class LayaJudge:
         c_choice = c.get("choice")
         probs = t.get("probabilities") or {}
         raw = probs.get("violation")
-        p = float(raw) if isinstance(raw, (int, float)) else None
+        p = (float(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool)
+             and math.isfinite(raw) and 0.0 <= raw <= 1.0 else None)
         conf = _band_confidence(t)
         self.last_scheme = "triage"
         self.last_bands = {"triage": t_choice, "category": c_choice}

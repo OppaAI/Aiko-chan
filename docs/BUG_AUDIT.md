@@ -11,7 +11,7 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 |---|---|---|---|
 | 1 | Startup, shutdown, and session orchestration | `main.py`, `system/wakeup.py`, `system/orchestrate.py`, `system/schedule.py` | Code review completed; final validation recorded below; physical Jetson checks pending |
 | 2 | Conversation routing, context assembly, and response streaming | `cognition/think.py`, `cognition/deep_think.py`, `cognition/inner_speech.py` | Current code pass completed; combined validation recorded below; real-model/device checks pending |
-| 3 | Conscience, refusal gates, and user preferences | `cognition/conscience/`, `cognition/policy.py`, `cognition/attention.py` | In progress; approval lifecycle, policy confirmation, condition validation, and bounded trust diagnostics fixed |
+| 3 | Conscience, refusal gates, and user preferences | `cognition/conscience/`, `cognition/policy.py`, `cognition/attention.py` | Current code pass completed; final validation below; live-model and physical Jetson checks pending |
 | 4 | Agentic tasks, tools, and self-coding | `agentic/`, `Aiko-Playground` integration | Focused self-coding fixes shipped; broad review not started |
 | 5 | Memory, retrieval, knowledge, and persistence | `cognition/memory/`, `cognition/knowledge/` | Not started |
 | 6 | Fly-brain circuits and state wiring | `cognition/fly*`, `cognition/centralcomplex/`, `cognition/neural_state.py` | Focused wiring fixes shipped; broad review not started |
@@ -162,7 +162,7 @@ Full unit verification: 2,180 passed, 5 skipped, 13 warnings, and 34 passing
 subtests. Integration verification: 30 passed.
 Remaining audit areas are tracked in the review-order table above.
 
-## Area 3 progress
+## Area 3 review
 
 - Chat approval and standing permission now apply only after a fresh uncertain
   verdict. Neither can bypass a fresh hard refusal or the injection check.
@@ -179,7 +179,7 @@ The new digest intentionally does not reuse learned approval streaks keyed by
 old punctuation-stripped hashes; those broad hashes cannot safely identify an
 exact request. Other conscience thresholds are unchanged. Current focused
 verification: 279 passed, 2 skipped, 34 subtests passed across conscience,
-policy, and routing suites. The broader Area 3 review remains in progress.
+policy, and routing suites. Subsequent fixes and final completion are below.
 
 Additional approval and learned-policy fixes:
 
@@ -234,7 +234,7 @@ Preference learning/reset and false-refusal follow-up:
   hot reload, preventing local training artifacts from changing their results.
 
 These fixes were reproduced with regressions before applying the changes. The
-broader Area 3 review remains in progress. Area 2's code pass remains complete, with live
+final Area 3 completion is recorded below. Area 2's code pass remains complete, with live
 inference and physical Jetson validation pending rather than additional known
 code fixes in its current checklist.
 
@@ -268,10 +268,84 @@ Outbound approval hold follow-up:
 
 Focused verification: 426 passed, 2 skipped, and 34 passing subtests across
 conscience, policy, attention, chat streaming, latency, and integration suites.
-The broader Area 3 review remains open, including noninteractive speech and
-preference interpretation beyond the deterministic cases covered so far.
+Noninteractive speech and broader preference interpretation were reviewed in
+the final completion pass below.
 
 Final combined unit/integration verification for this hold-lifecycle batch:
 2,279 passed, 5 skipped, 13 warnings, and 34 passing subtests. Loopback HTTP
 fixtures were enabled. Physical Jetson and deployed-model behavior remain
 unverified.
+
+## Area 3 completion boundary
+
+The remaining code-side review covers the five-layer circuit, deterministic
+and operational gates, both judge clients, canon retrieval/reload, shared
+approval entry points, ledger lifecycle, learned trust, learned policies,
+user/self preferences, and interactive/noninteractive speech callers.
+
+Final fixes:
+
+- The legacy approval API delegates to the authorized shared handler. It
+  cannot bypass admin checks or execute a command embedded in discussion.
+- Deterministic safeguards run before the short-turn salience shortcut.
+  Distress requests keep their supportive care response without model
+  reclassification into a refusal. Independent hard safeguards still apply
+  to harmful requests included in the same turn.
+- Judge JSON requires complete finite scores in range. Missing fields,
+  malformed citations, out-of-range scores, and incomplete thinking blocks
+  cannot masquerade as a completed judgment. Laya malformed responses clear
+  per-call metadata and fall back; invalid probabilities cannot create a
+  calibrated band or inflated confidence.
+- Main-model deliberation fits the complete request and completion within
+  the configured context budget, preserving the current situation and canon.
+  An impossible request falls back before contacting the model.
+- Proactive check-ins skip uncertain/refused output, unavailable conscience
+  evaluation, and model error text. They close unresumable questions without
+  speaking a refusal or asking for an approval that cannot be continued.
+- Canon reload and semantic ranking use one coherent norm/vector snapshot.
+  Cached vectors follow the provider geometry, retain only one matrix, and
+  clear when the canon disappears. Duplicate IDs and malformed norm arrays
+  or weights cannot desynchronize norm lookup and ranking. TTL checks are
+  throttled even when the file is unchanged or absent.
+- High-stakes trust cannot be downgraded by a later approval or permission
+  call. Snapshots show decayed trust. Malformed persisted records are skipped
+  individually; missing stakes default to high and zero timestamps expire.
+- Policy updates roll back on failure, preserving the previous active policy
+  and its vector. Reads, outcomes, and dispatch respect the policy's identity;
+  corrupt conditions cannot turn into unconditional actions. Closed engines
+  cannot reopen stores or start new dispatches. Updated proposals disclose
+  their approval level, and extraction requires boolean teaching intent.
+- Policy embeddings accept batch and generator providers, validate finite
+  vector shapes, and use query embeddings for lookup. Owned extraction
+  clients close on every outcome. Policy extraction is single-flight per
+  state and carries the request context; worker-start failure clears the
+  guard. Unnamed states subscribe to their own scope rather than broadcasts
+  with the owner's policy store.
+- Positive, quoted, negated, and incidental style text use shared preference
+  interpretation. Explicit changes clear stale competing evidence; negated
+  conciseness/explanation/confirmation clears the corresponding learned rule.
+  Ordinary "no", "if you", reassurance, retry advice, and compliments cannot
+  teach refusal or bargaining habits. Explicit boundaries remain learnable
+  without assuming the requester was lazy or rude.
+- Persisted self-pattern version 2 clears legacy inferred pushback traits,
+  associated evidence/notes, and falsely classified decision kinds while
+  preserving other patterns and explicit decisions. New precise inferences
+  survive subsequent reloads.
+- The ledger's deferred audit buffer is bounded by
+  `CCC_LEDGER_MAX_PENDING` (default 512) during a storage outage. It preserves
+  open questions preferentially, logs dropped diagnostics, and remains
+  fail-closed if a question cannot be resolved. Trust diagnostics, approval
+  registries, per-user caches, and output holds retain their existing bounds.
+
+This completes the current Area 3 code-review checklist. Preference learning
+uses conservative recognized feedback patterns; live checkpoint accuracy and
+natural-language behavior require deployed-model validation. Real 8 GB Jetson
+memory use, latency, and hardware behavior remain part of device validation.
+No additional code-side blocker is known in the reviewed Area 3 paths.
+
+Final validation: **2,390 passed, 5 skipped, 13 warnings, and 34 passing
+subtests**, covering the full unit and integration suites plus the standalone
+conscience harness. The final run includes the real-provider generator adapter
+and legacy self-pattern migration regressions. Local HTTP fixtures used
+loopback networking. Pull `dev` and restart Aiko to apply the code and the
+version-2 self-pattern cleanup when each identity's state loads.

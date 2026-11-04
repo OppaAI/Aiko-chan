@@ -41,6 +41,7 @@ from .schema import (
     LEDGER_DB_PATH,
     LEDGER_DDL,
     LEDGER_ENABLED,
+    LEDGER_MAX_PENDING,
     LEDGER_RETAIN_DAYS,
     LEDGER_STORE_CONTENT,
     Verdict,
@@ -80,6 +81,7 @@ class ConscienceLedger:
         # Phase 2: record() buffers rows here; flush() writes them in one
         # executemany + single commit at the turn boundary (think.py).
         self._pending: list[tuple] = []
+        self._dropped_pending = 0
 
     # ── connection ────────────────────────────────────────────────────────
 
@@ -213,6 +215,16 @@ class ConscienceLedger:
                         row["p_violation"], row["suggested_category"],
                     )
                 )
+                if len(self._pending) > LEDGER_MAX_PENDING:
+                    # Preserve open questions over routine diagnostics during
+                    # a storage outage, with a hard RAM bound on the Jetson.
+                    drop = next((i for i, row in enumerate(self._pending)
+                                 if row[7] != ESCALATE), 0)  # decision column
+                    self._pending.pop(drop)
+                    self._dropped_pending += 1
+                    if self._dropped_pending == 1 or self._dropped_pending % LEDGER_MAX_PENDING == 0:
+                        log.warning("[ccc] pending audit buffer full; %d verdict(s) dropped",
+                                    self._dropped_pending)
         except Exception as exc:
             log.warning("[ccc] ledger buffer failed: %s", exc)
         return row_id

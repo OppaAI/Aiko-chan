@@ -382,3 +382,103 @@ def test_proposal_preserves_the_reviewed_draft(engine):
     result = engine.confirm_proposal(pid)
     assert result['approval'] == 'ask'
     assert result['action_params']['text'] == 'reviewed text'
+
+
+def test_failed_new_version_rolls_back_previous_policy(engine, monkeypatch):
+    original = engine.teach(name='stable', situation='idle', action='log')
+    monkeypatch.setattr(engine, '_embed', lambda text: [1., 2.])  # wrong dimension
+    with pytest.raises(sqlite3.OperationalError):
+        engine.teach(name='stable', situation='changed', action='notify')
+    assert engine.active_policies()[0]['id'] == original['id']
+    assert engine.get(original['id'])['status'] == 'active'
+    assert not engine._conn.in_transaction
+
+
+def test_policy_access_and_outcomes_are_user_scoped(engine):
+    policy = engine.teach(name='private', situation='idle', action='log')
+    engine._conn.execute('UPDATE learned_policies SET user_id = ? WHERE id = ?', ('another-user', policy['id']))
+    engine._conn.commit()
+    assert engine.get(policy['id']) is None
+    engine.record_outcome(policy['id'], True)
+    assert engine._conn.execute('SELECT use_count FROM learned_policies WHERE id = ?', (policy['id'],)).fetchone()[0] == 0
+    seen = []
+    engine.register_action('log', lambda ctx: seen.append(ctx))
+    engine.dispatch({**policy, 'user_id': 'another-user'}, {})
+    assert seen == []
+
+
+@pytest.mark.parametrize('condition_json', ['bad json', '[]', '', 'null'])
+def test_corrupt_policy_condition_cannot_become_unconditional(engine, condition_json):
+    policy = engine.teach(name='conditional', situation='idle', action='log')
+    engine._conn.execute('UPDATE learned_policies SET condition_json = ? WHERE id = ?', (condition_json, policy['id']))
+    engine._conn.commit()
+    assert engine.lookup('event', {}) is None
+    seen = []
+    engine.register_action('log', lambda ctx: seen.append(ctx))
+    engine.dispatch(engine.get(policy['id']), {})
+    assert seen == []
+
+
+def test_updated_proposal_discloses_approval_level(engine):
+    engine.teach(name='p', situation='idle', action='log', approval='ask')
+    _, text = engine.propose({'name': 'p', 'situation': 'idle', 'action': 'log', 'approval': 'autonomous'})
+    assert '(autonomous)' in text
+
+
+def test_closed_policy_engine_cannot_restart_or_dispatch(engine):
+    policy = engine.teach(name='p', situation='idle', action='log')
+    seen = []
+    engine.register_action('log', lambda ctx: seen.append(ctx))
+    engine.close()
+    engine.dispatch(policy, {})
+    assert seen == []
+    with pytest.raises(RuntimeError, match='closed'):
+        engine.active_policies()
+
+
+@pytest.mark.parametrize('is_teaching', ['false', 'true', 1, []])
+def test_extraction_requires_boolean_teaching_consent(is_teaching):
+    from types import SimpleNamespace
+    payload = json.dumps({'is_teaching': is_teaching})
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **kw:
+        SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=payload))]))))
+    assert extract_teaching('from now on when hot then rest', llm_client=client) is None
+
+
+def test_extraction_closes_its_own_client(monkeypatch):
+    from types import SimpleNamespace
+    closed = []
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **kw:
+        SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"is_teaching":false}'))]))),
+        close=lambda: closed.append(True))
+    monkeypatch.setattr('openai.OpenAI', lambda **kw: client)
+    assert extract_teaching('from now on when hot then rest') is None
+    assert closed == [True]
+
+
+def test_default_policy_engine_uses_request_identity():
+    from system.userspace import set_current_user_id, reset_current_user_id
+    token = set_current_user_id('guest-alice')
+    try:
+        policy = PolicyEngine()
+        assert policy._user_id == 'guest-alice'
+        policy.close()
+    finally:
+        reset_current_user_id(token)
+
+
+def test_policy_embeddings_support_generator_providers(engine):
+    from types import SimpleNamespace
+    engine._embedder = SimpleNamespace(embed=lambda texts: (row for row in [[1.] * 8]))
+    assert engine._embed('a policy') == [1.] * 8
+
+
+def test_policy_lookup_uses_query_embeddings(engine):
+    from types import SimpleNamespace
+    seen = []
+    engine._embedder = SimpleNamespace(
+        embed_batch=lambda texts: [[0.] * 8],
+        embed_query=lambda text: seen.append(text) or [1.] * 8)
+    assert engine._embed('a document') == [0.] * 8
+    assert engine._embed('a request', query=True) == [1.] * 8
+    assert seen == ['a request']

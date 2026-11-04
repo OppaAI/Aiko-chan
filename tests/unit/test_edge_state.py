@@ -597,3 +597,141 @@ def test_forgetting_preferences_clears_standalone_style_lessons():
     state._durable_lessons.append('Durable interaction rule: ' + attention._LESSON_STEPS)
     state.record('Forget all my preferences.', '')
     assert not state._durable_lessons
+
+
+@pytest.mark.parametrize('message, tone', [
+    ("From now on don't be formal.", 'casual'),
+    ('Never be casual.', 'formal'),
+    ('From now on, your tone is too formal.', 'casual'),
+    ('From now on, your tone is too casual.', 'formal'),
+])
+def test_tone_feedback_respects_direction_and_negation(message, tone):
+    state = EdgeCognitiveState()
+    state.record(message, '')
+    assert state.snapshot()['preferences']['tone'] == tone
+
+
+def test_negated_conciseness_clears_previous_preference_and_evidence():
+    state = EdgeCognitiveState()
+    state.record('From now on be concise.', 'An answer')
+    state.record("From now on, don't always be concise.", 'Another answer')
+    assert 'response_length' not in state.snapshot()['preferences']
+    assert 'response_length=concise' not in state._preference_counts
+    assert not any('Prefer concise responses.' in lesson for lesson in state._durable_lessons)
+
+
+@pytest.mark.parametrize('message', [
+    'Explain why this short circuit occurs.',
+    'We always use formal verification for this code.',
+    'This docstring says "Always be formal and concise".',
+    'Please debug `Always be formal and concise` in this snippet.',
+])
+def test_topic_words_and_quoted_directions_do_not_teach_style(message):
+    state = EdgeCognitiveState()
+    state.record(message, '')
+    state.record(message, '')
+    assert 'response_length' not in state.snapshot()['preferences']
+    assert 'tone' not in state.snapshot()['preferences']
+
+
+def test_policy_extraction_is_single_flight_and_preserves_identity(monkeypatch):
+    import threading
+    from types import SimpleNamespace
+    from system.userspace import set_current_user_id, reset_current_user_id, current_user_id
+    state = EdgeCognitiveState()
+    state._policy = SimpleNamespace(pending_proposals=lambda: [], propose=lambda draft: ('p1', 'confirm it'))
+    entered, release, done = threading.Event(), threading.Event(), threading.Event()
+    observed = []
+    def extract(text):
+        observed.append(current_user_id())
+        entered.set()
+        assert release.wait(3)
+        return {'name': 'p'}
+    monkeypatch.setattr('cognition.policy.extract_teaching', extract)
+    original = state._extract_teaching_async
+    def run(text):
+        try:
+            original(text)
+        finally:
+            done.set()
+    monkeypatch.setattr(state, '_extract_teaching_async', run)
+    token = set_current_user_id('alice')
+    try:
+        state._policy_turn('from now on when hot then rest')
+        assert entered.wait(3)
+        state._policy_turn('from now on when idle then notify')
+        assert observed == ['alice']
+    finally:
+        release.set()
+        assert done.wait(3)
+        reset_current_user_id(token)
+    assert state._policy_extracting is False
+    assert state.peek_policy_echo() == 'confirm it'
+
+
+def test_policy_extraction_start_failure_clears_single_flight(monkeypatch):
+    from types import SimpleNamespace
+    state = EdgeCognitiveState()
+    state._policy = SimpleNamespace(pending_proposals=lambda: [])
+    def fail_start():
+        raise RuntimeError('cannot start thread')
+    monkeypatch.setattr('threading.Thread', lambda **kw: SimpleNamespace(start=fail_start))
+    state._policy_turn('from now on when hot then rest')
+    assert state._policy_extracting is False
+
+
+def test_unnamed_policy_state_is_not_a_broadcast_owner_subscription(monkeypatch):
+    from types import SimpleNamespace
+    observed = []
+    monkeypatch.setattr('cognition.policy.PolicyEngine', lambda user_id: observed.append(('engine', user_id)))
+    monkeypatch.setattr('cognition.policy.trigger_bus', lambda: SimpleNamespace(
+        register=lambda kind, fn, user_id: observed.append((kind, user_id))))
+    monkeypatch.setattr(attention, '_ensure_idle_poller', lambda: None)
+    EdgeCognitiveState()
+    assert observed == [('engine', 'default'), ('event', 'default'), ('sensor', 'default')]
+
+
+@pytest.mark.parametrize('reply', [
+    'There is no problem with this code.',
+    'If you want, we can go see the autumn leaves tomorrow.',
+    "I won't judge you for that mistake.",
+    'Try again after the server restarts.',
+    'That was a sweet thing to say.',
+])
+def test_ordinary_replies_do_not_teach_refusal_or_bargaining(reply):
+    state = EdgeCognitiveState()
+    state.record('A normal conversation.', reply)
+    state.record('Another normal conversation.', reply)
+    assert 'pushback' not in state.snapshot()['self_preferences']
+
+
+def test_explicit_boundaries_and_bargaining_are_still_detected():
+    state = EdgeCognitiveState()
+    state.record('A request.', 'I refuse to participate in that.')
+    state.record('A request.', 'I refuse to participate in that.')
+    assert state.snapshot()['self_preferences']['pushback'] == 'maintains_explicit_boundaries'
+    state.record('A discretionary request.', "Only if you say please.")
+    state.record('A discretionary request.', "Only if you say please.")
+    assert state.snapshot()['self_preferences']['pushback'] == 'bargains_before_discretionary_work'
+
+
+def test_legacy_keyword_pushback_is_cleared_on_restore(tmp_path, monkeypatch):
+    database = tmp_path / 'memory.db'
+    conn = sqlite3.connect(database)
+    conn.execute('CREATE TABLE cognitive_state (user_id TEXT PRIMARY KEY, state_json TEXT NOT NULL)')
+    conn.execute('INSERT INTO cognitive_state VALUES (?, ?)', ('person', json.dumps({
+        'self_preferences': {'pushback': 'will_refuse_lazy_or_rude_requests', 'agency': 'expresses_own_preferences'},
+        'self_preference_evidence': {'pushback=will_refuse_lazy_or_rude_requests': 3},
+        'self_notes': ['Observed pattern (pushback): will refuse lazy or rude requests.'],
+        'self_decisions': [{'kinds': ['refuse'], 'summary': 'There is no problem with this code.'}],
+    })))
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr('cognition.memory.vecstore.connect_sqlite_db', lambda *a, **kw: sqlite3.connect(database))
+    state = EdgeCognitiveState('person')
+    state.load_persistent()
+    assert state._self_preferences == {'agency': 'expresses_own_preferences'}
+    assert not state._self_preference_counts
+    assert not state._self_notes
+    assert not state._self_decisions
+    state._on_evict()

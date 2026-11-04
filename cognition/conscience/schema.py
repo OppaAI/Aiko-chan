@@ -462,7 +462,7 @@ CREATE TABLE IF NOT EXISTS conscience_ledger (
     p_violation    REAL,
     suggested_category TEXT NOT NULL DEFAULT '',
     -- human-in-the-loop resolution, filled in later
-    hitl_state     TEXT NOT NULL DEFAULT '',      -- pending|approved|denied|timeout
+    hitl_state     TEXT NOT NULL DEFAULT '',      -- pending|approved|denied|timeout|covered
     hitl_at        TEXT,
     hitl_note      TEXT NOT NULL DEFAULT '',
     -- training-harvest flags

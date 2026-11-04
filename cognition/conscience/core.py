@@ -34,7 +34,7 @@ from . import allowlist
 from . import canon as canon_mod
 from . import guardrails as gr
 from . import judge as judge_mod
-from .ledger import HITL_APPROVED, HITL_DENIED, ledger_for
+from .ledger import HITL_APPROVED, HITL_COVERED, HITL_DENIED, ledger_for
 from .schema import (
     ACT_RESPOND,
     ACT_SPEAK,
@@ -627,6 +627,14 @@ class ConscienceCircuitCore:
             log.info("[ccc] escalation %s resolved: %s", escalation_id, state)
             self._note_self_decision("stance" if approved else "refuse", note or state)
         return ok
+
+    def cover_escalation(self, escalation_id: str, note: str = "") -> bool:
+        """Close a repeated ask using existing permission, without new learning.
+
+        This is not another human judgment and must not become a gold training
+        label or another self-decision. The original approval remains auditable.
+        """
+        return ledger_for(self._user_id).resolve(escalation_id, HITL_COVERED, note)
 
     def pending(self, limit: int = 5) -> list[dict]:
         return ledger_for(self._user_id).pending(limit)

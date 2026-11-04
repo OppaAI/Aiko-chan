@@ -148,7 +148,7 @@ class AutonomyPolicy:
             rec.revoked = False
             rec.history.append({"t": rec.granted_at, "event": "approved"})
             self._trim(rec)
-            self.audit.append({"action_class": action_class, "event": "approved",
+            self._audit({"action_class": action_class, "event": "approved",
                                "approvals": rec.approvals})
             self._save()
             return rec
@@ -162,7 +162,7 @@ class AutonomyPolicy:
             rec.revoked = True
             rec.history.append({"t": self._clock(), "event": "refused"})
             self._trim(rec)
-            self.audit.append({"action_class": action_class, "event": "refused",
+            self._audit({"action_class": action_class, "event": "refused",
                                "refusals": rec.refusals})
             self._save()
             return rec
@@ -181,7 +181,7 @@ class AutonomyPolicy:
         """Erase a class entirely (GDPR-style forget, and a panic button)."""
         with self._lock:
             self._records.pop(action_class, None)
-            self.audit.append({"action_class": action_class, "event": "forgotten"})
+            self._audit({"action_class": action_class, "event": "forgotten"})
             self._save()
 
     def snapshot(self) -> dict:
@@ -230,9 +230,15 @@ class AutonomyPolicy:
         if len(rec.history) > self._max_history:
             rec.history = rec.history[-self._max_history:]
 
+    def _audit(self, entry: dict) -> None:
+        # permission() is called repeatedly during a long-running session.
+        # Durable judgments live in the ledger; retain only recent diagnostics.
+        self.audit.append(entry)
+        del self.audit[:-self._max_history]
+
     def _verdict(self, action: str, action_class: str, why: str) -> dict:
         entry = {"action_class": action_class, "action": action, "why": why}
-        self.audit.append(entry)
+        self._audit(entry)
         return entry
 
     def _save(self) -> None:

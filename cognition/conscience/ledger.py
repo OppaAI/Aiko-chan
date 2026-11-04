@@ -52,6 +52,7 @@ HITL_PENDING = "pending"
 HITL_APPROVED = "approved"
 HITL_DENIED = "denied"
 HITL_TIMEOUT = "timeout"
+HITL_COVERED = "covered"  # existing permission, not a new human training label
 
 
 def _utc_now() -> str:
@@ -218,8 +219,8 @@ class ConscienceLedger:
     # ── human-in-the-loop ─────────────────────────────────────────────────
 
     def resolve(self, escalation_id: str, state: str, note: str = "") -> bool:
-        """Record a human decision on a pending escalation."""
-        if state not in (HITL_APPROVED, HITL_DENIED, HITL_TIMEOUT):
+        """Close a pending escalation with its human or policy disposition."""
+        if state not in (HITL_APPROVED, HITL_DENIED, HITL_TIMEOUT, HITL_COVERED):
             raise ValueError(f"unknown hitl state: {state!r}")
         try:
             with self._lock:
@@ -515,5 +516,5 @@ def close_all() -> None:
 
 __all__ = [
     "ConscienceLedger", "HITL_APPROVED", "HITL_DENIED", "HITL_PENDING",
-    "HITL_TIMEOUT", "close_all", "content_digest", "ledger_for",
+    "HITL_TIMEOUT", "HITL_COVERED", "close_all", "content_digest", "ledger_for",
 ]

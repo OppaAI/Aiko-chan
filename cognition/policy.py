@@ -20,6 +20,7 @@ later; conversation-derived triggers (idle, events) work now.
 from __future__ import annotations
 
 import json
+import math
 import logging
 import os
 import re
@@ -27,6 +28,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -108,18 +110,25 @@ _OPS: dict[str, Callable[[float, float], bool]] = {
 }
 
 
-def evaluate_condition(condition: dict, readings: dict) -> bool:
+def evaluate_condition(condition: dict, readings: dict, *, _depth: int = 0) -> bool:
     """Evaluate a policy condition against sensor/readings.
 
     Condition: {"metric": "gpu_temp_c", "op": ">", "value": 85}
     or {"all": [cond, cond]} / {"any": [cond, cond]}.
     """
+    if not isinstance(condition, dict) or not isinstance(readings, dict) or _depth > 32:
+        return False
     if not condition:
         return True
-    if "all" in condition:
-        return all(evaluate_condition(c, readings) for c in condition["all"])
-    if "any" in condition:
-        return any(evaluate_condition(c, readings) for c in condition["any"])
+    if "all" in condition or "any" in condition:
+        if len(condition) != 1:
+            return False
+        key = "all" if "all" in condition else "any"
+        children = condition[key]
+        if not isinstance(children, list) or not children:
+            return False
+        combine = all if key == "all" else any
+        return combine(evaluate_condition(c, readings, _depth=_depth + 1) for c in children)
     try:
         metric = condition["metric"]
         op = _OPS[condition["op"]]
@@ -127,8 +136,11 @@ def evaluate_condition(condition: dict, readings: dict) -> bool:
         reading = readings.get(metric)
         if reading is None:
             return False
-        return bool(op(float(reading), value))
-    except (KeyError, TypeError, ValueError):
+        reading = float(reading)
+        if not math.isfinite(reading) or not math.isfinite(value):
+            return False
+        return bool(op(reading, value))
+    except (KeyError, TypeError, ValueError, OverflowError):
         return False
 
 
@@ -197,7 +209,7 @@ class PolicyEngine:
             "notify": self._handle_notify,
         }
         # Pending proposals awaiting Oppa's confirmation (id -> draft).
-        self._proposals: dict[str, dict] = {}
+        self._proposals: dict[str, tuple[float, dict]] = {}
 
     # ── storage ──
 
@@ -383,6 +395,7 @@ class PolicyEngine:
         generation succeed, so a DB exception can't leave an orphan proposal
         that a later "yes" would confirm blind.
         """
+        draft = deepcopy(draft)
         prop_id = uuid.uuid4().hex[:8]
         prev = None
         with self._lock:
@@ -407,7 +420,7 @@ class PolicyEngine:
             text = (f"Got it — new policy '{draft['name']}': {draft['action']} "
                     f"when {cond_txt} ({approval_txt}). Say yes to confirm.")
         with self._lock:
-            self._proposals[prop_id] = (time.time(), draft)
+            self._proposals[prop_id] = (time.monotonic(), draft)
         return prop_id, text
 
     def confirm_proposal(self, prop_id: str) -> dict | None:
@@ -415,18 +428,20 @@ class PolicyEngine:
             item = self._proposals.pop(prop_id, None)
         if not item:
             return None
-        _, draft = item
+        ts, draft = item
+        if time.monotonic() - ts >= self.PROPOSAL_TTL_S:
+            return None
         return self.teach(**draft)
 
     def pending_proposals(self) -> list[tuple[str, dict]]:
-        now = time.time()
+        now = time.monotonic()
         with self._lock:
             live = {
                 pid: (ts, d) for pid, (ts, d) in self._proposals.items()
                 if now - ts < self.PROPOSAL_TTL_S
             }
             self._proposals = live
-            return [(pid, d) for pid, (_, d) in live.items()]
+            return [(pid, deepcopy(d)) for pid, (_, d) in live.items()]
 
     # ── DAG compilation ──
 

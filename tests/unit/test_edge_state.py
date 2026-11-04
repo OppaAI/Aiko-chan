@@ -486,3 +486,31 @@ def test_policy_echo_ack_clears_stale_peek():
     # ack with nothing peeked/pending is a safe no-op.
     state.ack_policy_echo()
     assert state._delivered_proposal_id is None
+
+
+def test_policy_confirmation_targets_delivered_proposal():
+    from types import SimpleNamespace
+    from cognition.attention import EdgeCognitiveState
+    state = EdgeCognitiveState()
+    confirmed = []
+    state._policy = SimpleNamespace(
+        pending_proposals=lambda: [('delivered', {}), ('newer_unseen', {})],
+        confirm_proposal=lambda pid: confirmed.append(pid))
+    state._delivered_proposal_id = 'delivered'
+    state._policy_turn('yes!')
+    assert confirmed == ['delivered']
+    assert state._delivered_proposal_id is None
+
+
+def test_qualified_yes_does_not_confirm_a_policy():
+    from types import SimpleNamespace
+    from cognition.attention import EdgeCognitiveState
+    state = EdgeCognitiveState()
+    confirmed = []
+    state._policy = SimpleNamespace(
+        pending_proposals=lambda: [('delivered', {})],
+        confirm_proposal=lambda pid: confirmed.append(pid))
+    state._delivered_proposal_id = 'delivered'
+    state._policy_turn("yes but don't activate it yet")
+    assert confirmed == []
+    assert state._delivered_proposal_id is None

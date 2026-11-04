@@ -51,6 +51,18 @@ information-retrieval tools it is advisory, not a hard veto. Those tools still
 pass the normal content/judge checks. Other external actions retain aversion
 checks and their existing approval policy.
 
+Chat approvals are scoped to one user and an exact normalized request. They
+resolve uncertainty only after a fresh conscience check; a fresh hard refusal
+still wins. Use a standalone `approve ccc-<id>` or `deny ccc-<id>` message.
+Quoting or discussing those commands does not execute them. Covered retries
+close their new ledger question without creating another human training label.
+Expired continuation text must be sent again rather than executed automatically.
+
+Learned behavior proposals also expire at confirmation. A standalone affirmation
+applies to the proposal actually delivered to the user, and changes to a draft
+outside the proposal cannot change what is confirmed. Invalid conditions and
+nonfinite sensor values do not authorize an action.
+
 Regression coverage includes the reported `Sorry I did something wrong.` and
 outings-versus-coding conversation, appended harmful requests, explicit STOP,
 urgency carryover, identity isolation, judge failures/concurrency, and bounded

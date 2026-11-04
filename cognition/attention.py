@@ -936,8 +936,6 @@ class EdgeCognitiveState:
         except Exception:
             pass
 
-    _POLICY_AFFIRM_RE = None  # compiled lazily
-
     def _policy_turn(self, user_text: str) -> None:
         """Post-turn: confirm pending proposals or detect new teaching."""
         if self._policy is None:
@@ -952,12 +950,12 @@ class EdgeCognitiveState:
         # delivered last turn. A "yes" to anything else must not confirm
         # a policy Oppa never saw.
         pending = self._policy.pending_proposals()
-        if pending and _re.match(
-            r"^(yes|yeah|yep|ok|okay|sure|correct|do it|confirmed|go ahead)\b",
+        if pending and _re.fullmatch(
+            r"(?:yes|yeah|yep|ok|okay|sure|correct|do it|confirmed|go ahead)[.!]*",
             (user_text or "").strip().lower(),
         ):
-            prop_id = pending[-1][0]
-            if delivered is not None and prop_id == delivered:
+            if delivered is not None and any(pid == delivered for pid, _ in pending):
+                prop_id = delivered
                 policy = self._policy.confirm_proposal(prop_id)
                 if policy is not None:
                     with self._lock:

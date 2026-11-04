@@ -11,7 +11,7 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 |---|---|---|---|
 | 1 | Startup, shutdown, and session orchestration | `main.py`, `system/wakeup.py`, `system/orchestrate.py`, `system/schedule.py` | Code review completed; final validation recorded below; physical Jetson checks pending |
 | 2 | Conversation routing, context assembly, and response streaming | `cognition/think.py`, `cognition/deep_think.py`, `cognition/inner_speech.py` | Current code pass completed; combined validation recorded below; real-model/device checks pending |
-| 3 | Conscience, refusal gates, and user preferences | `cognition/conscience/`, `cognition/policy.py`, `cognition/attention.py` | In progress; approval identity/digest/continuation wiring fixed |
+| 3 | Conscience, refusal gates, and user preferences | `cognition/conscience/`, `cognition/policy.py`, `cognition/attention.py` | In progress; approval lifecycle, policy confirmation, condition validation, and bounded trust diagnostics fixed |
 | 4 | Agentic tasks, tools, and self-coding | `agentic/`, `Aiko-Playground` integration | Focused self-coding fixes shipped; broad review not started |
 | 5 | Memory, retrieval, knowledge, and persistence | `cognition/memory/`, `cognition/knowledge/` | Not started |
 | 6 | Fly-brain circuits and state wiring | `cognition/fly*`, `cognition/centralcomplex/`, `cognition/neural_state.py` | Focused wiring fixes shipped; broad review not started |
@@ -180,3 +180,34 @@ old punctuation-stripped hashes; those broad hashes cannot safely identify an
 exact request. Other conscience thresholds are unchanged. Current focused
 verification: 279 passed, 2 skipped, 34 subtests passed across conscience,
 policy, and routing suites. The broader Area 3 review remains in progress.
+
+Additional approval and learned-policy fixes:
+
+- CCC approval/denial commands must occupy the whole message. Quoted commands,
+  negations, explanations, and multiple commands cannot execute a decision.
+  Hexadecimal IDs are normalized consistently, including uppercase input.
+- An uncertain retry covered by existing permission closes its new ledger ask
+  as `covered`. This is not another human judgment or a gold training label.
+  Chat uses its inline ask instead of also queuing a stale duplicate notice.
+- Expired chat continuations cannot execute or increase learned trust. When
+  there is no resumable request, the reply asks the user to send it again
+  instead of claiming execution occurred.
+- Policy confirmation enforces expiry directly, using a monotonic clock.
+  Staged and listed drafts are copied so reviewed actions cannot be mutated
+  before confirmation.
+- A standalone affirmation confirms the proposal delivered to the user even
+  if a newer proposal arrived meanwhile. Qualified statements such as
+  "yes but don't activate it yet" cannot confirm a policy.
+- Malformed compound conditions and nonfinite readings/thresholds cannot
+  trigger actions. Condition nesting is bounded; `{}` remains unconditional.
+- Trust policy construction is synchronized to avoid competing per-user
+  instances. Recent diagnostic history is bounded without reducing approval
+  counts or deleting the durable conscience ledger, limiting session RAM use.
+- Removed an unused confirmation-regex placeholder and duplicate test import.
+
+Focused verification after these changes: 363 passed, 2 skipped, and 34 passing
+subtests across conscience, policies, attention, edge state, and integration.
+Full combined unit/integration verification: 2,241 passed, 5 skipped,
+13 warnings, and 34 passing subtests. The full run used loopback networking
+for local HTTP test fixtures; the restricted sandbox run could not complete.
+Real deployed-model refusal quality and the physical Jetson remain unverified.

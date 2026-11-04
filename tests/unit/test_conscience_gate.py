@@ -560,3 +560,15 @@ class TestGateExceptionVisibility:
             )
         assert out.decision == ALLOW  # no propagation, verdict intact
         assert any("mb-valence" in r.message for r in caplog.records)
+
+
+def test_autonomy_diagnostics_are_bounded_without_losing_trust():
+    from cognition.conscience.autonomy import AutonomyPolicy, STAKES_MEDIUM
+    policy = AutonomyPolicy('test', max_history=3)
+    for _ in range(10):
+        policy.record_approval('same', stakes=STAKES_MEDIUM)
+        policy.permission('same', stakes=STAKES_MEDIUM)
+    assert len(policy.audit) == 3
+    assert policy.audit[-1]['action'] == 'act_and_notify'
+    assert policy._records['same'].approvals == 10
+    assert len(policy._records['same'].history) == 3

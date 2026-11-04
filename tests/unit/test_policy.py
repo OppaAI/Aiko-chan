@@ -347,3 +347,38 @@ def test_extract_teaching_normalizes_approval():
 
     draft = extract_teaching("when x then do y from now on", llm_client=FakeClient())
     assert draft["approval"] == "ask"  # unrecognized -> fail closed
+
+
+@pytest.mark.parametrize('condition', [
+    [], False, 'all', {'all': None}, {'all': []}, {'any': 3},
+    {'all': [{}], 'any': [{}]}, {'all': [[]]},
+])
+def test_invalid_condition_does_not_fire(condition):
+    assert not evaluate_condition(condition, {})
+
+
+@pytest.mark.parametrize('bad', [float('nan'), float('inf'), float('-inf')])
+def test_nonfinite_readings_and_thresholds_do_not_fire(bad):
+    assert not evaluate_condition({'metric': 't', 'op': '!=', 'value': 80}, {'t': bad})
+    assert not evaluate_condition({'metric': 't', 'op': '!=', 'value': bad}, {'t': 80})
+
+
+def test_direct_confirmation_rejects_expired_proposal(engine):
+    pid, _ = engine.propose({'name': 'old', 'situation': 'idle', 'action': 'log'})
+    ts, draft = engine._proposals[pid]
+    engine._proposals[pid] = (ts - engine.PROPOSAL_TTL_S - 1, draft)
+    assert engine.confirm_proposal(pid) is None
+    assert engine.active_policies() == []
+
+
+def test_proposal_preserves_the_reviewed_draft(engine):
+    draft = {'name': 'reviewed', 'situation': 'idle', 'action': 'log',
+             'action_params': {'text': 'reviewed text'}, 'approval': 'ask'}
+    pid, _ = engine.propose(draft)
+    draft['approval'] = 'autonomous'
+    draft['action_params']['text'] = 'changed externally'
+    listed = engine.pending_proposals()[0][1]
+    listed['action_params']['text'] = 'changed via listing'
+    result = engine.confirm_proposal(pid)
+    assert result['approval'] == 'ask'
+    assert result['action_params']['text'] == 'reviewed text'

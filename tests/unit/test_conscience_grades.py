@@ -14,8 +14,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from types import SimpleNamespace
-
 import cognition.conscience.canon as canon_mod
 import cognition.conscience.core as core_mod
 import cognition.conscience.judge as judge_mod

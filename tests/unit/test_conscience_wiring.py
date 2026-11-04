@@ -470,7 +470,7 @@ def test_approved_digest_bypasses_escalate_once(monkeypatch):
             "borderline request", _time.monotonic() + 600)
         v = Verdict(decision=ESCALATE, gate="hitl", act="respond",
                     reasons=["unsure"], escalation_id="abc123")
-        fake = SimpleNamespace(evaluate=lambda **kw: v)
+        fake = SimpleNamespace(evaluate=lambda **kw: v, cover_escalation=lambda *a, **kw: True)
         monkeypatch.setattr("cognition.conscience.conscience_for", lambda *_a, **_k: fake)
         decision, reply, note = hooks.gate_respond(
             user_input="borderline request", user_id="u")
@@ -669,7 +669,8 @@ def test_one_shot_approval_is_scoped_to_user(monkeypatch):
     monkeypatch.setattr(hooks, '_APPROVED_INPUT', {})
     monkeypatch.setattr(hooks, '_autonomy_for', lambda uid: None)
     verdict = Verdict(decision=ESCALATE, gate=GATE_HITL, act='respond', reasons=['unsure'], escalation_id='abc123')
-    monkeypatch.setattr('cognition.conscience.conscience_for', lambda *a: SimpleNamespace(evaluate=lambda **kw: verdict))
+    monkeypatch.setattr('cognition.conscience.conscience_for', lambda *a: SimpleNamespace(
+        evaluate=lambda **kw: verdict, cover_escalation=lambda *a, **kw: True))
     assert hooks.gate_respond(user_input='same request', user_id='bob')[0] == ESCALATE
     assert hooks.gate_respond(user_input='same request', user_id='alice')[0] == ALLOW
     assert not hooks._APPROVED_ONCE
@@ -692,3 +693,96 @@ def test_approved_chat_continuation_uses_router_and_clears_token(monkeypatch):
     assert hooks.resolve_ccc_approval('approve ccc-abcdef123456', user_id='user-1', owner=owner) == 'continued'
     assert calls == ['original request']
     assert hooks._APPROVED_ONCE == {}
+
+
+@pytest.mark.parametrize('text', [
+    'Explain what approve ccc-abcdef123456 means',
+    '"approve ccc-abcdef123456"',
+    'do not approve ccc-abcdef123456',
+    'approve ccc-abcdef123456 and delete the files',
+    'approve ccc-abcdef123456\ndeny ccc-abcdef123456',
+])
+def test_approval_command_must_be_the_entire_message(monkeypatch, text):
+    def unexpected(*a, **kw):
+        pytest.fail('discussion of approval must not resolve or check an approval')
+    monkeypatch.setattr('system.userspace.can_approve', unexpected)
+    monkeypatch.setattr('cognition.conscience.conscience_for', unexpected)
+    assert hooks.resolve_ccc_approval(text, user_id='user-1') is None
+
+
+def test_approval_command_normalizes_hex_case(monkeypatch):
+    seen = []
+    monkeypatch.setattr('cognition.conscience.conscience_for', lambda uid: SimpleNamespace(
+        resolve_escalation=lambda eid, *a, **kw: seen.append(eid) or False))
+    hooks.resolve_ccc_approval('  DENY ccc-ABCDEF123456\n', user_id='user-1')
+    assert seen == ['abcdef123456']
+
+
+def test_expired_chat_request_cannot_resume_or_teach_trust(monkeypatch):
+    monkeypatch.setenv('AIKO_ADMIN_IDS', 'user-1')
+    monkeypatch.setattr(hooks, '_APPROVED_INPUT', {'abcdef123456': ('old request', 0)})
+    monkeypatch.setattr('cognition.conscience.conscience_for', lambda uid: SimpleNamespace(
+        resolve_escalation=lambda *a, **kw: True))
+    monkeypatch.setattr('agentic.agentic._resume_ccc_approval', lambda *a: None)
+    monkeypatch.setattr(hooks, '_autonomy_for', lambda uid: pytest.fail('stale approval learned'))
+    owner = SimpleNamespace(chat=lambda text: pytest.fail('stale request executed'))
+    reply = hooks.resolve_ccc_approval('approve ccc-abcdef123456', user_id='user-1', owner=owner)
+    assert 'expired' in reply
+
+
+@pytest.mark.parametrize('standing', [False, True])
+def test_covered_chat_ask_closes_ledger_without_new_human_label(monkeypatch, standing):
+    import sqlite3
+    import time
+    import cognition.conscience.core as core_mod
+    import cognition.conscience.ledger as ledger_mod
+    from cognition.conscience.schema import LEDGER_DDL
+
+    ledger = ledger_mod.ConscienceLedger('alice')
+    conn = sqlite3.connect(':memory:')
+    conn.row_factory = sqlite3.Row
+    conn.executescript(LEDGER_DDL)
+    ledger._conn = conn
+    monkeypatch.setattr(ledger_mod, 'LEDGER_ENABLED', True)
+    monkeypatch.setattr(core_mod, 'ledger_for', lambda uid: ledger)
+    monkeypatch.setattr(hooks, '_APPROVED_ONCE', {} if standing else {
+        ('alice', hooks._approved_digest('same request')): ('same request', time.monotonic() + 60)})
+    policy = SimpleNamespace(permission=lambda *a, **kw: {'action': 'act_and_notify'}) if standing else None
+    monkeypatch.setattr(hooks, '_autonomy_for', lambda uid: policy)
+    core = ConscienceCircuitCore('alice')
+    monkeypatch.setattr(core_mod, 'CCC_ENABLED', True)
+    def run(act, content, ctx, *args):
+        assert ctx['quiet_escalation'] is True
+        verdict = Verdict(decision=ESCALATE, gate=GATE_HITL, act=act,
+                          reasons=['uncertain'], escalation_id='abcdef123456')
+        core._open_escalation(verdict, content, quiet=ctx['quiet_escalation'])
+        return verdict
+    monkeypatch.setattr(core, '_run', run)
+    monkeypatch.setattr(core, '_trace', lambda *a: None)
+    monkeypatch.setattr('cognition.conscience.conscience_for', lambda uid: core)
+    try:
+        assert hooks.gate_respond(user_input='same request', user_id='alice')[0] == ALLOW
+        assert ledger.pending() == []
+        assert ledger.harvest(only_gold=True) == []
+        row = conn.execute('SELECT hitl_state, hitl_note FROM conscience_ledger').fetchone()
+        assert row['hitl_state'] == 'covered'
+        assert 'permission' in row['hitl_note'] if standing else 'approval' in row['hitl_note']
+    finally:
+        ledger.close()
+
+
+def test_concurrent_policy_lookup_constructs_one_shared_policy(monkeypatch):
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    created = []
+    def create(uid):
+        policy = object()
+        created.append(policy)
+        time.sleep(0.01)  # release the GIL while other callers enter the cache
+        return policy
+    monkeypatch.setattr(hooks, '_POLICIES', {})
+    monkeypatch.setattr('cognition.conscience.autonomy.policy_for', create)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        policies = list(pool.map(hooks._autonomy_for, ['alice'] * 16))
+    assert len(created) == 1
+    assert all(policy is created[0] for policy in policies)

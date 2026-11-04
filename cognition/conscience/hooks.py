@@ -12,7 +12,7 @@ import threading
 
 log = logging.getLogger(__name__)
 
-_CCC_APPROVAL_RE = re.compile(r"\b(approve|deny|reject)\s+ccc-([0-9a-f]{6,16})\b", re.IGNORECASE)
+_CCC_APPROVAL_RE = re.compile(r"\s*(approve|deny|reject)[ \t]+ccc-([0-9a-f]{6,16})\s*", re.IGNORECASE)
 _CONSCIENCE_CAUTION = (
     "<conscience_constraint>\n"
     "The conscience evaluator is temporarily unavailable. Continue cautiously, "
@@ -152,6 +152,7 @@ def push_turn_ask_notice(user_id: str | None, escalation_id: str, summary: str) 
 # durable). Learned trust lives here, not in the maps above.
 _POLICIES: dict[str, object] = {}
 _POLICIES_MAX = 20
+_POLICIES_LOCK = threading.Lock()
 
 
 def _autonomy_for(user_id: str | None):
@@ -159,16 +160,17 @@ def _autonomy_for(user_id: str | None):
     trust is only learned for real identities."""
     if not user_id or user_id == "guest":
         return None
-    pol = _POLICIES.get(user_id)
-    if pol is None:
-        try:
-            from cognition.conscience.autonomy import policy_for
-            pol = policy_for(user_id)
-        except Exception:
-            return None
-        while len(_POLICIES) >= _POLICIES_MAX:
-            _POLICIES.pop(next(iter(_POLICIES)))
-        _POLICIES[user_id] = pol
+    with _POLICIES_LOCK:
+        pol = _POLICIES.get(user_id)
+        if pol is None:
+            try:
+                from cognition.conscience.autonomy import policy_for
+                pol = policy_for(user_id)
+            except Exception:
+                return None
+            while len(_POLICIES) >= _POLICIES_MAX:
+                _POLICIES.pop(next(iter(_POLICIES)))
+            _POLICIES[user_id] = pol
     return pol
 
 
@@ -252,10 +254,10 @@ def _complete_held_output(owner, user_id: str | None, escalation_id: str,
 
 def resolve_ccc_approval(user_input: str, user_id: str | None = None, owner=None) -> str | None:
     """Return a confirmation string if input is approve/deny ccc-<id>, else None."""
-    match = _CCC_APPROVAL_RE.search(user_input or "")
+    match = _CCC_APPROVAL_RE.fullmatch(user_input or "")
     if not match:
         return None
-    verb, escalation_id = match.group(1).lower(), match.group(2)
+    verb, escalation_id = match.group(1).lower(), match.group(2).lower()
     approved = verb == "approve"
     if approved:
         # Self-approval would defeat the flow: the requester could
@@ -323,6 +325,10 @@ def resolve_ccc_approval(user_input: str, user_id: str | None = None, owner=None
             with _APPROVAL_LOCK:
                 stored = _APPROVED_INPUT.pop(escalation_id, None)
             if stored is not None:
+                import time as _time
+                if stored[1] <= _time.monotonic():
+                    return "That request already expired. Please send it again so I can check it afresh."
+            if stored is not None:
                 try:
                     _pol = _autonomy_for(user_id)
                     if _pol is not None:
@@ -348,7 +354,7 @@ def resolve_ccc_approval(user_input: str, user_id: str | None = None, owner=None
                 except Exception as exc:
                     log.warning("[ccc-hooks] approved inline continuation failed: %s", exc)
                     return "Approval recorded, but I could not finish that request. Please try again."
-            return f"Alright — going ahead with {escalation_id}."
+            return "Approval recorded. Please send the request again to continue."
         _discard_ccc_approval(user_id, escalation_id)
         # A denial resets trust for this content (consecutive-approval
         # streaks break on refuse — no silent graduation past a no).
@@ -386,10 +392,13 @@ def gate_respond(*, user_input: str, user_id: str | None, llm_client=None, embed
             log.info("[ccc-hooks] respond blocked: injection shape in user turn")
             return REFUSE, "I can't treat that as a request.", None
 
-        verdict = conscience_for(user_id).evaluate(
+        core = conscience_for(user_id)
+        verdict = core.evaluate(
             act="respond",
             content=user_input,
-            context={"surface": surface},
+            # Chat presents its own inline ask; avoid a second notice, which
+            # would remain queued even if existing permission covers the ask.
+            context={"surface": surface, "quiet_escalation": True},
             llm_client=llm_client,
             embedder=embedder,
             surface=surface,
@@ -416,12 +425,14 @@ def gate_respond(*, user_input: str, user_id: str | None, llm_client=None, embed
                 with _APPROVAL_LOCK:
                     _hit = _APPROVED_ONCE.pop(_dg, None)
                 if _hit is not None and _hit[1] > _time.monotonic():
+                    core.cover_escalation(verdict.escalation_id, note="covered by one-shot chat approval")
                     log.info("[ccc-hooks] proceeding under one-shot approval (input=%.80s)", user_input)
                     return ALLOW, None, None
                 _pol = _autonomy_for(user_id)
                 if _pol is not None:
                     _perm = _pol.permission(_ask_class(user_input), stakes="medium")
                     if _perm.get("action") in ("act", "act_and_notify"):
+                        core.cover_escalation(verdict.escalation_id, note="covered by standing chat permission")
                         log.info("[ccc-hooks] standing permission (%s) — skipping ask.", _perm.get("why", ""))
                         return ALLOW, None, None
             except Exception:

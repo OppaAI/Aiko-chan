@@ -556,6 +556,41 @@ connection cleanup adjustment and adjacent real storage/knowledge checks passed
 Area 5 is still in progress. Further review includes consolidation/dream and
 retention policy, temporal reconciliation and lineage edge cases, working
 memory/journal persistence, embedding-version migration and reindexing strategy,
-and retrieval-quality evaluation. The Aidon comparison requires its source
-link. Live-model retrieval quality and physical Jetson RAM/latency measurements
+and retrieval-quality evaluation. The Aidon comparison and its first adaptation
+are recorded below. Live-model retrieval quality and physical Jetson RAM/latency measurements
 remain pending; no existing personal database was modified by these tests.
+
+
+### Area 5: Aidon comparison and learned-file refresh
+
+Reviewed `OppaAI/Aidon` at `5ecbbdec4765f4775032c3decb111ad6cf5ea4c3`.
+[MEMORY_STORAGE_REVIEW.md](MEMORY_STORAGE_REVIEW.md) now records implementation
+links, existing Aiko equivalents, suitable follow-ups, and device costs. Aidon
+also supports SQLite and SQLite+FAISS; this does not establish a need to replace
+Aiko's SQLite/sqlite-vec backend.
+
+Implemented the clearest observed gap: learned-library file freshness. The old
+scan remembered a source path indefinitely and skipped later edits. A new
+SQLite source-state table tracks per-user file hashes and the current document.
+Unchanged bytes avoid extraction/embedding; changed files publish a complete
+version atomically with their fingerprint. Failed or concurrently modified
+sources retain the last accepted version. Old text is superseded rather than
+erased, and obsolete source vectors are removed from active recall so many
+older versions cannot hide the latest version in the KNN candidate window.
+
+Metadata migration, concurrent import idempotency, cross-user isolation,
+extraction/embedding changes, rollback, cache invalidation, and repeated-version
+recall are covered by 10 new regression tests. Removed source files retain
+learned history, preserving the existing explicit forgetting/retention boundary.
+No new model, service, database backend, or dependency was added.
+
+Focused validation: **69 tests passed** across source-refresh, knowledge, and
+storage regressions. Combined validation: **2,498 passed, 5 skipped,
+13 warnings, and 34 passing subtests**, covering all unit/integration tests and
+the standalone conscience harness.
+
+Recommended follow-ups from Aidon are credential redaction at memory ingress,
+structured failure/repair lessons using the existing experience database, and
+persistent ingestion status. Image-linked memory needs a hardware benchmark;
+Aiko's existing entity/scene/decay/supersession/budget mechanisms should first be
+validated rather than duplicated. Area 5 remains in progress.

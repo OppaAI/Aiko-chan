@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import re
 import sqlite3
 import uuid
@@ -321,6 +322,23 @@ def extract_text_from_file(relative_path: str, *, user_id: str | None = None, ma
     raise ValueError(f"unsupported knowledge file type: {suffix or 'no extension'}")
 
 
+def _file_stamp(path: Path) -> tuple:
+    stat = path.stat()
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+def _file_fingerprint(path: Path) -> tuple[str, tuple]:
+    before = _file_stamp(path)
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while block := stream.read(65536):
+            digest.update(block)
+    after = _file_stamp(path)
+    if before != after:
+        raise ValueError("knowledge source changed while hashing; retry next scan")
+    return digest.hexdigest(), after
+
+
 def ingest_file(
     relative_path: str,
     *,
@@ -333,12 +351,18 @@ def ingest_file(
     """Canonical implementation that
     :class:`KnowledgeIngest.ingest_file` delegates to (not a shim — this is the live code path). Kept for the historical
     import path. Extract a workspace file and store it in learned knowledge RAG."""
+    uid = user_id or current_user_id()
     try:
-        text, source = extract_text_from_file(relative_path, user_id=user_id)
-    except ValueError as exc:
+        path = _safe_workspace_path(relative_path, uid)
+        digest, _ = _file_fingerprint(path)
+        text, source = extract_text_from_file(relative_path, user_id=uid)
+        after_digest, stamp = _file_fingerprint(path)
+        if after_digest != digest:
+            raise ValueError("knowledge source changed during extraction; retry next scan")
+    except (ValueError, OSError) as exc:
         log.warning("Failed to extract knowledge file %s: %s", relative_path, exc)
         return None
-    return ingest_text(title or Path(relative_path).stem.replace("_", " ").title(), text, source=source, kind=kind, embedder=embedder, user_id=user_id, schema=schema,)
+    return ingest_text(title or Path(relative_path).stem.replace("_", " ").title(), text, source=source, kind=kind, embedder=embedder, user_id=uid, schema=schema, _file_version=(digest, path, stamp))
 
 def ingest_text(
     title: str,
@@ -349,6 +373,7 @@ def ingest_text(
     embedder: Embedder | None = None,
     user_id: str | None = None,
     schema: KnowledgeSchema | None = None,
+    _file_version: tuple[str, Path, tuple] | None = None,
 ) -> str | None:
     """Canonical implementation that
     :class:`KnowledgeIngest.ingest_text` delegates to (not a shim — this is the live code path). Kept for the historical
@@ -377,6 +402,18 @@ def ingest_text(
     store = schema or KnowledgeSchema()
     conn = store.connect(uid)
     try:
+        if _file_version is not None:
+            conn.execute("BEGIN IMMEDIATE")
+            digest, path, stamp = _file_version
+            if _file_stamp(path) != stamp:
+                raise ValueError("knowledge source changed during embedding; retry next scan")
+            prior = conn.execute(
+                "SELECT source_hash FROM knowledge_file_state WHERE user_id=? AND source=?",
+                (uid, source),
+            ).fetchone()
+            if prior is not None and prior["source_hash"] == digest:
+                conn.rollback()
+                return None
         conn.execute(
             "INSERT INTO learned_docs(id,user_id,title,source,kind,created_at) VALUES(?,?,?,?,?,?)",
             (doc_id, uid, (title or "Untitled knowledge")[:200], source[:500], kind[:50], created_at),
@@ -387,7 +424,9 @@ def ingest_text(
             vec = vectors[index] if index < len(vectors) else None
 
             supersedes_id = None
-            if KNOWLEDGE_WRITE_DEDUP_THRESHOLD > 0 and vec is not None:
+            # A file version owns its complete chunk set and provenance.
+            # Global semantic dedup must not omit a changed file's chunks.
+            if _file_version is None and KNOWLEDGE_WRITE_DEDUP_THRESHOLD > 0 and vec is not None:
                 try:
                     neighbors = user_scoped_vec_knn(
                         conn,
@@ -449,6 +488,30 @@ def ingest_text(
             conn.rollback()
             return None
 
+        if _file_version is not None:
+            # Preserve old document/chunk history. Only active recall changes,
+            # in the same transaction that publishes the new source hash.
+            conn.execute(
+                "UPDATE learned_chunks SET status='superseded' WHERE user_id=? AND doc_id != ? "
+                "AND (status='active' OR status IS NULL) AND (doc_id IN "
+                "(SELECT doc_id FROM knowledge_file_state WHERE user_id=? AND source=?) "
+                "OR doc_id IN (SELECT id FROM learned_docs WHERE user_id=? AND source=? AND ?))",
+                (uid, doc_id, uid, source, uid, source, len(source) <= 500),
+            )
+            if _file_stamp(_file_version[1]) != _file_version[2]:
+                raise ValueError("knowledge source changed during indexing; retry next scan")
+            conn.execute(
+                "DELETE FROM learned_chunks_vec WHERE id IN (SELECT c.id FROM learned_chunks c "
+                "JOIN learned_docs d ON d.id=c.doc_id WHERE c.user_id=? AND c.status='superseded' "
+                "AND (d.source=? OR d.id IN "
+                "(SELECT doc_id FROM knowledge_file_state WHERE user_id=? AND source=?)))",
+                (uid, source, uid, source),
+            )
+            conn.execute(
+                "INSERT INTO knowledge_file_state(user_id,source,source_hash,doc_id) VALUES(?,?,?,?) "
+                "ON CONFLICT(user_id,source) DO UPDATE SET source_hash=excluded.source_hash, doc_id=excluded.doc_id",
+                (uid, source, _file_version[0], doc_id),
+            )
         conn.commit()
         maybe_clear_knowledge_cache()
         return doc_id
@@ -461,20 +524,21 @@ def ingest_text(
 
 
 
-def _knowledge_sources(conn: sqlite3.Connection, uid: str) -> set[str]:
-    rows = conn.execute("SELECT source FROM learned_docs WHERE user_id=?", (uid,)).fetchall()
-    return {str(row["source"]) for row in rows if row["source"]}
+def _knowledge_sources(conn: sqlite3.Connection, uid: str) -> dict[str, str]:
+    rows = conn.execute("SELECT source, source_hash FROM knowledge_file_state WHERE user_id=?", (uid,)).fetchall()
+    return {str(row["source"]): str(row["source_hash"]) for row in rows}
 
 
 def ingest_workspace_knowledge_folder(*, embedder: Embedder | None = None, user_id: str | None = None) -> list[str]:
     """Ingest new files dropped under <workspace>/knowledge into the KB DB.
 
-    The scan is idempotent by source path: files already present in learned_docs.source
-    are skipped. Unsupported files are logged and left in place for a future run.
+    Unchanged bytes are skipped; changed files publish a complete new version
+    atomically. Failed or concurrently modified sources leave prior recall intact.
+    Legacy documents acquire fingerprints on their first successful refresh.
     """
     uid = user_id or current_user_id()
-    root = user_workspace_root(uid)
-    folder = (root / KNOWLEDGE_WORKSPACE_DIR).resolve()
+    root = user_workspace_root(uid).resolve()
+    folder = _safe_workspace_path(KNOWLEDGE_WORKSPACE_DIR, uid)
     folder.mkdir(parents=True, exist_ok=True)
     conn = connect(uid)
     try:
@@ -484,15 +548,18 @@ def ingest_workspace_knowledge_folder(*, embedder: Embedder | None = None, user_
     doc_ids: list[str] = []
     for path in sorted(p for p in folder.rglob("*") if p.is_file() and not p.name.startswith(".")):
         rel = str(path.relative_to(root))
-        if rel in known:
-            continue
         try:
+            path = _safe_workspace_path(rel, uid)
+            rel = str(path.relative_to(root))
+            digest, _ = _file_fingerprint(path)
+            if known.get(rel) == digest:
+                continue
             doc_id = ingest_file(rel, kind="workspace_drop", embedder=embedder, user_id=uid)
         except Exception as exc:
             log.warning("skipping workspace knowledge file %s: %s", rel, exc)
             continue
         if doc_id:
-            known.add(rel)
+            known[rel] = digest
             doc_ids.append(doc_id)
             log.info("ingested workspace knowledge file %s as %s", rel, doc_id)
     return doc_ids

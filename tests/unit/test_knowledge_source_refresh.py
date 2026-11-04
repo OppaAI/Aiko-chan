@@ -1,0 +1,180 @@
+"""Changed library files refresh atomically, inspired by Aidon's KB manifest."""
+from __future__ import annotations
+
+import hashlib
+import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace as NS
+from unittest.mock import Mock
+
+import numpy as np
+import pytest
+
+from cognition.knowledge import ingest, schema, search
+from cognition.memory.vecstore import initialize_store_db
+
+
+@pytest.fixture
+def library(tmp_path, monkeypatch):
+    roots = {uid: tmp_path / uid for uid in ('owner', 'other')}
+    for root in roots.values():
+        (root / 'library').mkdir(parents=True)
+    monkeypatch.setattr(ingest, 'user_workspace_root', lambda uid=None: roots[uid or 'owner'])
+    monkeypatch.setattr(ingest, 'KNOWLEDGE_WORKSPACE_DIR', 'library')
+    path = tmp_path / 'knowledge.db'  # shared to exercise explicit user scoping
+    def connect(uid=None):
+        return initialize_store_db(path, schema._DDL, user_id=uid, vector=True)
+    monkeypatch.setattr(ingest, 'connect', connect)
+    monkeypatch.setattr(schema, 'connect', connect)
+    monkeypatch.setattr(search, 'connect', connect)
+    search.maybe_clear_knowledge_cache()
+    yield NS(roots=roots, path=path, connect=connect, file=roots['owner'] / 'library/guide.txt')
+    search.maybe_clear_knowledge_cache()
+
+
+def rows(library, sql, args=()):
+    conn = library.connect()
+    try:
+        return [dict(row) for row in conn.execute(sql, args)]
+    finally:
+        conn.close()
+
+
+def scan(uid='owner', embedder=None):
+    return ingest.ingest_workspace_knowledge_folder(user_id=uid, embedder=embedder)
+
+
+def test_hash_skips_unchanged_file_before_extraction_or_embedding(library, monkeypatch):
+    library.file.write_text('Jetson startup instructions before the autumn update.')
+    assert len(scan()) == 1
+    extract = Mock(side_effect=AssertionError('unchanged source was reparsed'))
+    monkeypatch.setattr(ingest, 'extract_text_from_file', extract)
+    assert scan(embedder=Mock()) == []
+    extract.assert_not_called()
+    assert len(rows(library, 'SELECT id FROM learned_docs')) == 1
+
+
+def test_changed_source_refreshes_recall_and_retains_history(library):
+    library.file.write_text('Jetson winter cedar instructions are obsolete.')
+    first = scan()[0]
+    assert search.search_knowledge('winter cedar', user_id='owner')
+    # The cached context must be invalidated after replacement too.
+    search.knowledge_context_for('winter cedar', user_id='owner')
+    library.file.write_text('Jetson autumn maple instructions are current.')
+    second = scan()[0]
+    assert first != second
+    assert not search.search_knowledge('winter cedar', user_id='owner')
+    assert search.search_knowledge('autumn maple', user_id='owner')[0]['doc_id'] == second
+    assert all(row['status'] == 'superseded' for row in rows(
+        library, 'SELECT status FROM learned_chunks WHERE doc_id=?', (first,)))
+    state = rows(library, 'SELECT * FROM knowledge_file_state')[0]
+    assert state['doc_id'] == second
+    assert state['source_hash'] == hashlib.sha256(library.file.read_bytes()).hexdigest()
+    assert scan() == []
+    search.flush_access_counts('owner')
+
+
+def test_failed_update_keeps_prior_chunks_and_fingerprint(library, monkeypatch):
+    library.file.write_text('Reliable Jetson winter instructions.')
+    first = scan()[0]
+    original = rows(library, 'SELECT * FROM knowledge_file_state')
+    library.file.write_text('Updated Jetson autumn instructions.')
+    monkeypatch.setattr(ingest, 'extract_entities', Mock(side_effect=ValueError('simulated insertion failure')))
+    assert scan() == []
+    assert rows(library, 'SELECT * FROM knowledge_file_state') == original
+    assert rows(library, 'SELECT DISTINCT doc_id,status FROM learned_chunks') == [
+        {'doc_id': first, 'status': 'active'}]
+    assert len(rows(library, 'SELECT id FROM learned_docs')) == 1
+
+
+def test_modification_during_extraction_keeps_prior_version(library, monkeypatch):
+    library.file.write_text('Reliable Jetson winter instructions.')
+    scan()
+    original = rows(library, 'SELECT * FROM knowledge_file_state')
+    library.file.write_text('Intermediate instructions.')
+    real = ingest.extract_text_from_file
+    def extract(*args, **kwargs):
+        output = real(*args, **kwargs)
+        library.file.write_text('Changed while parsing.')
+        return output
+    monkeypatch.setattr(ingest, 'extract_text_from_file', extract)
+    assert scan() == []
+    assert rows(library, 'SELECT * FROM knowledge_file_state') == original
+
+
+def test_modification_during_embedding_does_not_publish_stale_text(library):
+    library.file.write_text('Reliable Jetson winter instructions.')
+    scan()
+    original = rows(library, 'SELECT * FROM knowledge_file_state')
+    library.file.write_text('Intermediate instructions.')
+    class Provider:
+        def embed_queries(self, texts):
+            library.file.write_text('Changed while embedding.')
+            return np.ones((len(texts), schema.EMBED_DIMS), dtype=np.float32)
+    assert scan(embedder=Provider()) == []
+    assert rows(library, 'SELECT * FROM knowledge_file_state') == original
+
+
+def test_concurrent_imports_publish_only_one_version(library):
+    library.file.write_text('Concurrent Jetson autumn instructions.')
+    barrier = threading.Barrier(2)
+    class Provider:
+        def embed_queries(self, texts):
+            barrier.wait(timeout=5)
+            return np.ones((len(texts), schema.EMBED_DIMS), dtype=np.float32)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: ingest.ingest_file(
+            'library/guide.txt', user_id='owner', embedder=Provider()), range(2)))
+    assert sum(value is not None for value in results) == 1
+    assert len(rows(library, 'SELECT id FROM learned_docs')) == 1
+    assert len(rows(library, 'SELECT * FROM knowledge_file_state')) == 1
+
+
+def test_same_relative_path_cannot_replace_another_users_document(library):
+    library.file.write_text('Owner Jetson winter instructions.')
+    (library.roots['other'] / 'library/guide.txt').write_text('Other user instructions.')
+    first = scan()[0]
+    other = scan('other')[0]
+    library.file.write_text('Owner Jetson autumn update.')
+    scan()
+    assert rows(library, 'SELECT DISTINCT status FROM learned_chunks WHERE doc_id=?', (other,)) == [{'status': 'active'}]
+    assert rows(library, 'SELECT DISTINCT status FROM learned_chunks WHERE doc_id=?', (first,)) == [{'status': 'superseded'}]
+
+
+def test_legacy_source_gets_a_fingerprint_and_rollback_remains_safe(library):
+    conn = library.connect()
+    conn.execute('DROP TABLE knowledge_file_state')
+    conn.commit()
+    schema.ensure_knowledge_schema_migrated(conn, 'owner')
+    conn.close()
+    first = ingest.ingest_text('old import', 'Legacy winter instructions.',
+        source='library/guide.txt', user_id='owner')
+    library.file.write_text('Current autumn instructions.')
+    assert len(scan()) == 1
+    assert rows(library, 'SELECT DISTINCT status FROM learned_chunks WHERE doc_id=?', (first,)) == [{'status': 'superseded'}]
+    assert len(rows(library, 'SELECT * FROM knowledge_file_state')) == 1
+
+
+def test_retired_versions_do_not_crowd_out_current_vector_recall(library):
+    class Provider:
+        def embed_queries(self, texts):
+            return np.ones((len(texts), schema.EMBED_DIMS), dtype=np.float32)
+        def embed_query(self, text, instruct=''):
+            return np.ones(schema.EMBED_DIMS, dtype=np.float32)
+    provider = Provider()
+    for version in range(22):
+        library.file.write_text(f'Version {version}: Jetson autumn instructions.')
+        latest = scan(embedder=provider)[0]
+    matches = search.search_knowledge('unmatched lexical query', embedder=provider, user_id='owner')
+    assert [row['doc_id'] for row in matches] == [latest]
+    assert len(rows(library, 'SELECT id FROM learned_chunks_vec')) == 1
+    assert len(rows(library, 'SELECT id FROM learned_docs')) == 22
+
+
+def test_deleting_a_source_file_does_not_implicitly_forget_learned_history(library):
+    library.file.write_text('Durable Jetson autumn instructions.')
+    original = scan()[0]
+    library.file.unlink()
+    assert scan() == []
+    assert search.search_knowledge('autumn instructions', user_id='owner')[0]['doc_id'] == original

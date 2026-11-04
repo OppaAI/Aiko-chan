@@ -615,26 +615,52 @@ def ingest_workspace_knowledge_folder(*, embedder: Embedder | None = None, user_
     conn = connect(uid)
     try:
         known = _knowledge_sources(conn, uid)
+        assets = {row['source']: row['file_hash'] for row in conn.execute(
+            "SELECT s.source,a.file_hash FROM knowledge_file_state s "
+            "JOIN knowledge_assets a ON a.doc_id=s.doc_id AND a.user_id=s.user_id WHERE s.user_id=?",
+            (uid,))}
     finally:
         conn.close()
     doc_ids: list[str] = []
+    outcomes = []
     for path in sorted(p for p in folder.rglob("*") if p.is_file() and not p.name.startswith(".")):
         rel = str(path.relative_to(root))
         # Images need a caption supplied by the user or an image-capable model.
         if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+            try:
+                digest, _ = _file_fingerprint(_safe_workspace_path(rel, uid))
+                outcomes.append((rel, "ready" if assets.get(rel) == digest else "needs_caption"))
+            except (OSError, ValueError):
+                outcomes.append((rel, "failed"))
             continue
         try:
             path = _safe_workspace_path(rel, uid)
             rel = str(path.relative_to(root))
             digest, _ = _file_fingerprint(path)
             if known.get(rel) == digest:
+                outcomes.append((rel, "ready"))
                 continue
             doc_id = ingest_file(rel, kind="workspace_drop", embedder=embedder, user_id=uid)
         except Exception as exc:
             log.warning("skipping workspace knowledge file %s: %s", rel, exc)
+            outcomes.append((rel, "failed"))
             continue
         if doc_id:
             known[rel] = digest
             doc_ids.append(doc_id)
             log.info("ingested workspace knowledge file %s as %s", rel, doc_id)
+            outcomes.append((rel, "ready"))
+        else:
+            # Another importer may already have accepted these same bytes.
+            conn = connect(uid)
+            try:
+                current = _knowledge_sources(conn, uid)
+            finally:
+                conn.close()
+            outcomes.append((rel, "ready" if current.get(rel) == digest else "failed"))
+    try:
+        from .status import record_ingestion_statuses
+        record_ingestion_statuses(outcomes, user_id=uid)
+    except Exception:
+        log.exception("knowledge ingestion status recording failed")
     return doc_ids

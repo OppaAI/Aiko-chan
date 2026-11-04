@@ -64,6 +64,17 @@ CREATE TABLE IF NOT EXISTS knowledge_assets (
 )
 """
 
+_INGEST_STATUS_DDL = """
+CREATE TABLE IF NOT EXISTS knowledge_ingestion_status (
+    user_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    state TEXT NOT NULL,
+    doc_id TEXT REFERENCES learned_docs(id) ON DELETE SET NULL,
+    last_attempt TEXT NOT NULL,
+    PRIMARY KEY(user_id, source)
+)
+"""
+
 
 _DDL = """
 PRAGMA journal_mode = WAL;
@@ -147,7 +158,7 @@ CREATE TRIGGER IF NOT EXISTS learned_chunks_au AFTER UPDATE OF text ON learned_c
     VALUES ('delete', old.rowid, old.text, old.id);
     INSERT INTO learned_chunks_fts(rowid, text, id) VALUES (new.rowid, new.text, new.id);
 END;
-""".format(dims=EMBED_DIMS) + _FILE_STATE_DDL + ";" + _ASSET_DDL
+""".format(dims=EMBED_DIMS) + _FILE_STATE_DDL + ";" + _ASSET_DDL + ";" + _INGEST_STATUS_DDL
 
 
 class KnowledgeSchema:
@@ -183,6 +194,7 @@ def ensure_knowledge_schema_migrated(conn: sqlite3.Connection, user_id: str | No
     """Add missing columns and indexes to knowledge tables."""
     conn.execute(_FILE_STATE_DDL)
     conn.execute(_ASSET_DDL)
+    conn.execute(_INGEST_STATUS_DDL)
     cols = [r[1] for r in conn.execute("PRAGMA table_info(learned_chunks)").fetchall()]
     if "access_count" not in cols:
         conn.execute("ALTER TABLE learned_chunks ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0")
@@ -250,6 +262,8 @@ def delete_all(user_id: str | None = None) -> dict[str, int]:
     conn = connect(uid)
     try:
         counts = {}
+        counts['knowledge_ingestion_status'] = conn.execute(
+            'DELETE FROM knowledge_ingestion_status WHERE user_id=?', (uid,)).rowcount
         counts["learned_chunks"] = conn.execute(
             "DELETE FROM learned_chunks WHERE user_id=?", (uid,)).rowcount
         counts["learned_docs"] = conn.execute(

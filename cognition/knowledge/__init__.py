@@ -55,6 +55,7 @@ from .lifecycle import (
     KnowledgeLifecycle,
     prune_knowledge,
 )
+from .status import ingestion_status
 
 
 class KnowledgeStore:
@@ -83,6 +84,10 @@ class KnowledgeStore:
     def ingest_workspace_knowledge_folder(self, **kwargs):
         kwargs.setdefault("user_id", self.user_id)
         return self.ingest.ingest_workspace_knowledge_folder(**kwargs)
+
+    def ingestion_status(self, **kwargs):
+        kwargs.setdefault("user_id", self.user_id)
+        return ingestion_status(**kwargs)
 
     def search_knowledge(self, query: str, limit: int = 5, **kwargs):
         kwargs.setdefault("user_id", self.user_id)
@@ -131,6 +136,7 @@ __all__ = [
     "KnowledgeSchema",
     "KnowledgeSearch",
     "KnowledgeStore",
+    "ingestion_status",
     "maybe_clear_knowledge_cache",
     "now",   
     "prune_knowledge",

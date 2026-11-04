@@ -28,7 +28,13 @@ _IN_CLOEXEC = 0o2000000
 _IN_CREATE = 0x00000100
 _IN_CLOSE_WRITE = 0x00000008
 _IN_MOVED_TO = 0x00000080
-_WATCH_MASK = _IN_CREATE | _IN_CLOSE_WRITE | _IN_MOVED_TO
+_IN_MOVED_FROM = 0x00000040
+_IN_DELETE_SELF = 0x00000400
+_IN_MOVE_SELF = 0x00000800
+_IN_Q_OVERFLOW = 0x00004000
+_IN_IGNORED = 0x00008000
+_IN_ISDIR = 0x40000000
+_WATCH_MASK = _IN_CREATE | _IN_CLOSE_WRITE | _IN_MOVED_TO | _IN_MOVED_FROM | _IN_DELETE_SELF | _IN_MOVE_SELF
 
 _INOTIFY_EVENT = struct.Struct("iIII")  # wd, mask, cookie, len
 
@@ -52,10 +58,33 @@ class KnowledgeFolderWatcher:
         self._thread: threading.Thread | None = None
         self._fd: int | None = None
         self._wd: int | None = None
+        self._watches: dict[int, Path] = {}
 
     @property
     def folder(self) -> Path:
-        return (user_workspace_root(self.user_id) / self._knowledge_dir).resolve()
+        root = user_workspace_root(self.user_id).resolve()
+        folder = (root / self._knowledge_dir).resolve()
+        if folder != root and root not in folder.parents:
+            raise ValueError("knowledge folder must stay inside the user workspace")
+        return folder
+
+    def _sync_watches(self) -> None:
+        """Follow directory changes without following directory symlinks."""
+        root = self.folder
+        folders = {root}
+        for parent, dirs, _files in os.walk(root, followlinks=False):
+            dirs[:] = [name for name in dirs if not name.startswith('.')
+                       and not (Path(parent) / name).is_symlink()]
+            folders.update(Path(parent) / name for name in dirs)
+        for wd, path in list(self._watches.items()):
+            if path not in folders:
+                _inotify_remove_watch(self._fd, wd)
+                self._watches.pop(wd, None)
+        watched = set(self._watches.values())
+        for path in sorted(folders - watched):
+            wd = _inotify_add_watch(self._fd, str(path), _WATCH_MASK)
+            self._watches[wd] = path
+        self._wd = next((wd for wd, path in self._watches.items() if path == root), None)
 
     def start(self) -> bool:
         """Start the watcher thread. Returns False when inotify is unavailable."""
@@ -69,11 +98,13 @@ class KnowledgeFolderWatcher:
         try:
             folder = self.folder
             folder.mkdir(parents=True, exist_ok=True)
-            self._wd = _inotify_add_watch(self._fd, str(folder), _WATCH_MASK)
+            self._watches.clear()
+            self._sync_watches()
             log.info("knowledge watcher: watching %s", folder)
         except Exception as exc:
             _inotify_close(self._fd)
             self._fd = None
+            self._watches.clear()
             log.warning("knowledge watcher: failed to add watch: %s", exc)
             return False
         self._stop.clear()
@@ -90,6 +121,7 @@ class KnowledgeFolderWatcher:
         if self._fd is not None:
             _inotify_close(self._fd)
             self._fd = None
+        self._watches.clear()
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -109,7 +141,12 @@ class KnowledgeFolderWatcher:
                     break
                 if not data:
                     break
-                pending.extend(_parse_events(data, self.folder))
+                pending.extend(_parse_events(data, self._watches, overflow_root=self.folder))
+                if _needs_watch_refresh(data):
+                    try:
+                        self._sync_watches()
+                    except OSError:
+                        log.exception("knowledge watcher: recursive watch refresh failed; interval scan remains available")
 
             # Debounce: wait for the copy to settle, then fire once.
             if self._stop.wait(self._debounce):
@@ -117,7 +154,18 @@ class KnowledgeFolderWatcher:
             if not pending:
                 continue
 
-            new_files = [p for p in pending if p.is_file() and not p.name.startswith(".")]
+            # A populated directory may arrive in a single rename event. Its
+            # existing files have no individual close-write events here.
+            candidates = set()
+            for path in pending:
+                if path.is_dir() and not path.is_symlink():
+                    candidates.update(p for p in path.rglob('*') if p.is_file())
+                else:
+                    candidates.add(path)
+            root = self.folder
+            new_files = sorted(p for p in candidates if p.is_file()
+                               and root in p.resolve().parents
+                               and not any(part.startswith('.') for part in p.relative_to(root).parts))
             if not new_files:
                 continue
             log.info("knowledge watcher: %d new file(s) detected", len(new_files))
@@ -152,7 +200,12 @@ def _inotify_close(fd: int) -> None:
         pass
 
 
-def _parse_events(data: bytes, folder: Path) -> list[Path]:
+def _inotify_remove_watch(fd: int, wd: int) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.inotify_rm_watch(ctypes.c_int(fd), ctypes.c_int(wd))
+
+
+def _parse_events(data: bytes, folder: Path | dict[int, Path], *, overflow_root: Path | None = None) -> list[Path]:
     paths: list[Path] = []
     offset = 0
     while offset + _INOTIFY_EVENT.size <= len(data):
@@ -162,6 +215,27 @@ def _parse_events(data: bytes, folder: Path) -> list[Path]:
             break
         name = data[offset : offset + name_len].rstrip(b"\x00").decode("utf-8", errors="replace")
         offset += name_len
+        if mask & _IN_Q_OVERFLOW and overflow_root is not None:
+            paths.append(overflow_root)
+            continue
+        parent = folder.get(wd) if isinstance(folder, dict) else folder
+        if mask & _IN_IGNORED and isinstance(folder, dict):
+            folder.pop(wd, None)
+        if parent is None:
+            continue
         if mask & _WATCH_MASK and name:
-            paths.append(folder / name)
+            paths.append(parent / name)
     return paths
+
+
+def _needs_watch_refresh(data: bytes) -> bool:
+    offset = 0
+    while offset + _INOTIFY_EVENT.size <= len(data):
+        _wd, mask, _cookie, length = _INOTIFY_EVENT.unpack_from(data, offset)
+        offset += _INOTIFY_EVENT.size
+        if length > len(data) - offset:
+            break
+        if mask & (_IN_ISDIR | _IN_IGNORED | _IN_Q_OVERFLOW | _IN_DELETE_SELF | _IN_MOVE_SELF):
+            return True
+        offset += length
+    return False

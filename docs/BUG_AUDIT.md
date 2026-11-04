@@ -595,10 +595,26 @@ in the existing experience database; and caption-indexed image records linked
 to workspace files using the existing text embedding service. Captions and
 links are stored in SQLite, and semantic search remains an index over that
 canonical data. No image model or separate database was added. Remaining Area 5
-work includes persistent ingestion status and Jetson hardware measurements;
+work includes Jetson hardware measurements;
 image pixel-level semantic search also needs an image model benchmark before it
 can be considered.
 
 Focused validation after these changes: **119 tests passed** across memory
 redaction, failure lessons, learned-file/image refresh, memory storage, and the
 coding-worker path.
+
+
+### Area 5: recursive library watching and persistent import outcomes
+
+Fixed nested edits missing event-driven ingestion. Watches now cover nested
+directories, register new/moved directories, and deliver populated directory
+imports. Kernel event overflow triggers a library rescan; ordinary file events
+avoid rewalking the directory tree. Workspace confinement excludes external
+links from delivery. Added persistent per-user ready/failed/needs-caption scan
+outcomes in SQLite, with a 2,000-source bound and explicit-deletion cleanup.
+A failed refresh retains its prior accepted knowledge and document link.
+
+Validation: 75 focused tests passed, including real Linux filesystem events,
+failed refresh persistence, user isolation, and existing ingestion regressions.
+Jetson resource measurements and unchanged-large-file hashing optimization
+remain pending. Area 5 remains in progress.

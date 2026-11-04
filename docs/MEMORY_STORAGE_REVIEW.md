@@ -90,12 +90,20 @@ the library do not automatically erase learned history; forgetting remains an
 explicit memory/retention operation. These choices preserve Aiko's existing
 history and retention behavior while adopting Aidon's freshness tracking.
 
-Scan/watch coverage remains an Area 5 follow-up: the recursive scan handles
-nested sources, but the current inotify watcher watches the root directory.
-Nested edits need an explicit/periodic scan until recursive watch coverage is
-implemented. File hashes are streamed, but avoiding repeated reads of unchanged
-large files through validated source stamps is another device-optimization
-candidate. No claim of immediate recursive watch delivery is made here.
+Library watches now cover existing nested directories and register new or moved
+subdirectories. A populated directory moved into the library triggers a scan of
+its files; kernel queue overflow requests a complete library rescan. Directory
+symlinks are excluded from recursive watches and callbacks reject external file
+links. Periodic scans remain the fallback when inotify is unavailable or a watch
+cannot be registered. File hashes remain streamed; avoiding repeated reads of
+unchanged large files is still an optimization candidate.
+
+The per-user `knowledge_ingestion_status` SQLite table records bounded library
+scan outcomes: `ready`, `failed`, or `needs_caption`. Read them through
+`KnowledgeStore.ingestion_status()` or the module-level function. Failed refreshes
+retain the prior accepted document link. Status survives process restart, is
+capped at 2,000 sources per user, and is cleared by explicit knowledge deletion.
+It describes the last scan outcome, not current filesystem availability.
 
 Validation for this adaptation: **69 focused tests passed**; the complete
 unit/integration and standalone conscience run passed **2,498 tests, 5 skipped,

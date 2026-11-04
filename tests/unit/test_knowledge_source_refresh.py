@@ -55,6 +55,21 @@ def test_hash_skips_unchanged_file_before_extraction_or_embedding(library, monke
     assert len(rows(library, 'SELECT id FROM learned_docs')) == 1
 
 
+def test_import_status_survives_reopen_and_failed_refresh_keeps_document(library, monkeypatch):
+    from cognition.knowledge.status import ingestion_status
+    library.file.write_text('Stable library knowledge about maple trees.')
+    first = scan()[0]
+    assert ingestion_status(user_id='owner')[0]['state'] == 'ready'
+    library.file.write_text('Updated maple tree knowledge.')
+    monkeypatch.setattr(ingest, 'extract_text_from_file', Mock(side_effect=ValueError('parse failure')))
+    assert scan() == []
+    status = ingestion_status(user_id='owner')[0]
+    assert status['state'] == 'failed'
+    assert status['doc_id'] == first
+    assert not ingestion_status(user_id='other')
+    assert search.search_knowledge('Stable maple trees', user_id='owner')
+
+
 def test_image_caption_is_searchable_and_linked_to_workspace_asset(library):
     image_path = library.roots['owner'] / 'autumn.png'
     image_path.write_bytes(b'\x89PNG\r\n\x1a\n' + b'\x00' * 24)

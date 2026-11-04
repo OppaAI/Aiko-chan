@@ -11,7 +11,7 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 |---|---|---|---|
 | 1 | Startup, shutdown, and session orchestration | `main.py`, `system/wakeup.py`, `system/orchestrate.py`, `system/schedule.py` | Code review completed; final validation recorded below; physical Jetson checks pending |
 | 2 | Conversation routing, context assembly, and response streaming | `cognition/think.py`, `cognition/deep_think.py`, `cognition/inner_speech.py` | Current code pass completed; combined validation recorded below; real-model/device checks pending |
-| 3 | Conscience, refusal gates, and user preferences | `cognition/conscience/`, `cognition/policy.py`, `cognition/attention.py` | Focused false-refusal fixes shipped; broad review not started |
+| 3 | Conscience, refusal gates, and user preferences | `cognition/conscience/`, `cognition/policy.py`, `cognition/attention.py` | In progress; approval identity/digest/continuation wiring fixed |
 | 4 | Agentic tasks, tools, and self-coding | `agentic/`, `Aiko-Playground` integration | Focused self-coding fixes shipped; broad review not started |
 | 5 | Memory, retrieval, knowledge, and persistence | `cognition/memory/`, `cognition/knowledge/` | Not started |
 | 6 | Fly-brain circuits and state wiring | `cognition/fly*`, `cognition/centralcomplex/`, `cognition/neural_state.py` | Focused wiring fixes shipped; broad review not started |
@@ -160,4 +160,23 @@ Jetson and real inference endpoints have not been exercised in this cloud pass.
 
 Full unit verification: 2,180 passed, 5 skipped, 13 warnings, and 34 passing
 subtests. Integration verification: 30 passed.
-The remaining audit areas are paused at the user's request after this batch.
+Remaining audit areas are tracked in the review-order table above.
+
+## Area 3 progress
+
+- Chat approval and standing permission now apply only after a fresh uncertain
+  verdict. Neither can bypass a fresh hard refusal or the injection check.
+- One-shot chat approvals are scoped to the user and exact request digest.
+- Digests preserve Unicode, case, punctuation, and internal whitespace, avoiding
+  collisions between different Japanese requests, file paths, or expressions.
+  NFC normalization and CRLF normalization preserve equivalent encodings.
+- Approved chat continuation uses the normal router when available and clears
+  the temporary one-shot permission afterward, including on failure. Failed
+  continuation reports failure rather than claiming the task went ahead.
+- Approval registry pruning and one-shot consumption are synchronized.
+
+The new digest intentionally does not reuse learned approval streaks keyed by
+old punctuation-stripped hashes; those broad hashes cannot safely identify an
+exact request. Other conscience thresholds are unchanged. Current focused
+verification: 279 passed, 2 skipped, 34 subtests passed across conscience,
+policy, and routing suites. The broader Area 3 review remains in progress.

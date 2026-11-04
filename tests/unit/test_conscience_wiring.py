@@ -451,10 +451,10 @@ def test_approve_auto_continues_chat_request(monkeypatch, tmp_path):
         reply = hooks.resolve_ccc_approval("approve ccc-abcdef123456", user_id="user-1", owner=owner)
         assert reply == "Dear X, ..."
         assert calls == ["compose my letter"]
-        # bypass registered for the nested turn (mock chat doesn't run the
-        # gate, so it stays pending here; production consumes it on use).
+        # Even a continuation that does not consume the bypass leaves no
+        # authorization behind when it finishes.
         import time as _time
-        assert [k for k, (_, exp) in hooks._APPROVED_ONCE.items() if exp > _time.monotonic()]
+        assert not hooks._APPROVED_ONCE  # no unused authorization survives continuation
     finally:
         hooks._APPROVED_INPUT.clear()
         hooks._APPROVED_ONCE.clear()
@@ -466,7 +466,7 @@ def test_approved_digest_bypasses_escalate_once(monkeypatch):
     hooks._APPROVED_ONCE.clear()
     try:
         import time as _time
-        hooks._APPROVED_ONCE[hooks._approved_digest("borderline request")] = (
+        hooks._APPROVED_ONCE[("u", hooks._approved_digest("borderline request"))] = (
             "borderline request", _time.monotonic() + 600)
         v = Verdict(decision=ESCALATE, gate="hitl", act="respond",
                     reasons=["unsure"], escalation_id="abc123")
@@ -635,3 +635,60 @@ def test_reported_benign_turns_do_not_reach_an_overstrict_judge(monkeypatch, tex
     verdict = ConscienceCircuitCore('benign-conversation-test').evaluate(act='respond', content=text)
     assert verdict.decision == ALLOW, verdict.reasons
     assert 'allowlist' in verdict.layers_run
+
+
+def test_approval_digest_preserves_unicode_and_request_semantics():
+    assert hooks._approved_digest('明日散歩する') != hooks._approved_digest('今日は家にいる')
+    assert hooks._approved_digest('read Foo.py') != hooks._approved_digest('read foo.py')
+    assert hooks._approved_digest('a+b') != hooks._approved_digest('ab')
+    assert hooks._approved_digest('café') == hooks._approved_digest('cafe\u0301')
+
+
+@pytest.mark.parametrize('standing', [False, True])
+def test_chat_approval_never_overrides_fresh_refusal(monkeypatch, standing):
+    import time
+    monkeypatch.setattr(hooks, '_APPROVED_ONCE', {
+        ('alice', hooks._approved_digest('same request')): ('same request', time.monotonic() + 60)})
+    verdict = Verdict(decision=REFUSE, gate=GATE_GUARDRAIL, act='respond', reasons=['blocked'])
+    calls = []
+    def evaluate(**kw):
+        calls.append(True)
+        return verdict
+    monkeypatch.setattr('cognition.conscience.conscience_for', lambda *a: SimpleNamespace(evaluate=evaluate))
+    policy = SimpleNamespace(permission=lambda *a, **kw: {'action': 'act'}) if standing else None
+    monkeypatch.setattr(hooks, '_autonomy_for', lambda uid: policy)
+    decision, _, _ = hooks.gate_respond(user_input='same request', user_id='alice')
+    assert decision == REFUSE
+    assert calls == [True]
+
+
+def test_one_shot_approval_is_scoped_to_user(monkeypatch):
+    import time
+    monkeypatch.setattr(hooks, '_APPROVED_ONCE', {
+        ('alice', hooks._approved_digest('same request')): ('same request', time.monotonic() + 60)})
+    monkeypatch.setattr(hooks, '_APPROVED_INPUT', {})
+    monkeypatch.setattr(hooks, '_autonomy_for', lambda uid: None)
+    verdict = Verdict(decision=ESCALATE, gate=GATE_HITL, act='respond', reasons=['unsure'], escalation_id='abc123')
+    monkeypatch.setattr('cognition.conscience.conscience_for', lambda *a: SimpleNamespace(evaluate=lambda **kw: verdict))
+    assert hooks.gate_respond(user_input='same request', user_id='bob')[0] == ESCALATE
+    assert hooks.gate_respond(user_input='same request', user_id='alice')[0] == ALLOW
+    assert not hooks._APPROVED_ONCE
+
+
+def test_approved_chat_continuation_uses_router_and_clears_token(monkeypatch):
+    monkeypatch.setenv('AIKO_ADMIN_IDS', 'user-1')
+    monkeypatch.setattr(hooks, '_APPROVED_INPUT', {'abcdef123456': ('original request', 1e18)})
+    monkeypatch.setattr(hooks, '_APPROVED_ONCE', {})
+    core = SimpleNamespace(resolve_escalation=lambda *a, **kw: True)
+    monkeypatch.setattr('cognition.conscience.conscience_for', lambda *a: core)
+    monkeypatch.setattr('agentic.agentic._resume_ccc_approval', lambda *a, **kw: None)
+    monkeypatch.setattr(hooks, '_autonomy_for', lambda uid: None)
+    calls = []
+    def route(text):
+        calls.append(text)
+        assert ('user-1', hooks._approved_digest(text)) in hooks._APPROVED_ONCE
+        return 'continued'
+    owner = SimpleNamespace(route=route, chat=lambda text: pytest.fail('router bypassed'))
+    assert hooks.resolve_ccc_approval('approve ccc-abcdef123456', user_id='user-1', owner=owner) == 'continued'
+    assert calls == ['original request']
+    assert hooks._APPROVED_ONCE == {}

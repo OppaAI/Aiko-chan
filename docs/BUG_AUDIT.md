@@ -618,3 +618,23 @@ Validation: 75 focused tests passed, including real Linux filesystem events,
 failed refresh persistence, user isolation, and existing ingestion regressions.
 Jetson resource measurements and unchanged-large-file hashing optimization
 remain pending. Area 5 remains in progress.
+
+
+### Area 5: bounded scan hashing and private-directory exclusion
+
+Repeated scans previously reread every unchanged source. A scan-only LRU now
+reuses SHA-256 fingerprints while the complete device/inode/size/mtime/ctime
+stamp matches. It is bounded to 1,024 paths, guarded across scan threads, and
+starts empty on restart. Ingestion still independently hashes and validates
+source bytes before committing a document. Failed extraction remains retryable.
+
+Replaced the materialized recursive file list with streaming directory traversal.
+Hidden directories (including .git) and directory symlinks are excluded, matching
+the watcher's intended scope. Oversized images are rejected before hashing
+rather than repeatedly reading assets that image ingestion cannot accept.
+
+Validation: **78 focused tests passed**, including unchanged-file hash reuse,
+same-size/mtime atomic replacement, bounded cache eviction, hidden-directory
+exclusion, failed-refresh retries, and existing watcher/storage regressions.
+Consolidation/retention, lineage, embedding-version migration, retrieval quality,
+and live Jetson measurements remain under the Area 5 review.

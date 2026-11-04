@@ -5,10 +5,13 @@ from cognition.memory.redaction import redact_text, redact_data
 
 import importlib.util
 import hashlib
+import os
 import re
 import sqlite3
+import threading
 import uuid
 import zipfile
+from collections import OrderedDict
 from pathlib import Path
 from typing import Iterable
 
@@ -349,6 +352,41 @@ def _file_fingerprint(path: Path) -> tuple[str, tuple]:
     return digest.hexdigest(), after
 
 
+# Scan-only optimization. Actual ingestion still verifies bytes independently
+# before publication. A restart deliberately starts with an empty cache.
+_SCAN_HASH_CACHE: OrderedDict[Path, tuple[str, tuple]] = OrderedDict()
+_SCAN_HASH_LOCK = threading.Lock()
+_SCAN_HASH_LIMIT = 1024
+
+
+def _scan_fingerprint(path: Path) -> tuple[str, tuple]:
+    stamp = _file_stamp(path)
+    with _SCAN_HASH_LOCK:
+        cached = _SCAN_HASH_CACHE.get(path)
+        if cached is not None and cached[1] == stamp:
+            _SCAN_HASH_CACHE.move_to_end(path)
+            return cached
+    result = _file_fingerprint(path)
+    with _SCAN_HASH_LOCK:
+        _SCAN_HASH_CACHE[path] = result
+        _SCAN_HASH_CACHE.move_to_end(path)
+        while len(_SCAN_HASH_CACHE) > _SCAN_HASH_LIMIT:
+            _SCAN_HASH_CACHE.popitem(last=False)
+    return result
+
+
+def _library_files(folder: Path):
+    """Walk incrementally, excluding hidden directories and directory links."""
+    for parent, dirs, files in os.walk(folder, followlinks=False):
+        dirs[:] = sorted(name for name in dirs if not name.startswith('.')
+                         and not (Path(parent) / name).is_symlink())
+        for name in sorted(files):
+            if not name.startswith('.'):
+                path = Path(parent) / name
+                if path.is_file():
+                    yield path
+
+
 def ingest_file(
     relative_path: str,
     *,
@@ -623,12 +661,15 @@ def ingest_workspace_knowledge_folder(*, embedder: Embedder | None = None, user_
         conn.close()
     doc_ids: list[str] = []
     outcomes = []
-    for path in sorted(p for p in folder.rglob("*") if p.is_file() and not p.name.startswith(".")):
+    for path in _library_files(folder):
         rel = str(path.relative_to(root))
         # Images need a caption supplied by the user or an image-capable model.
         if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
             try:
-                digest, _ = _file_fingerprint(_safe_workspace_path(rel, uid))
+                safe_path = _safe_workspace_path(rel, uid)
+                if _file_stamp(safe_path)[2] > 20 * 1024 * 1024:
+                    raise ValueError('image exceeds 20 MiB limit')
+                digest, _ = _scan_fingerprint(safe_path)
                 outcomes.append((rel, "ready" if assets.get(rel) == digest else "needs_caption"))
             except (OSError, ValueError):
                 outcomes.append((rel, "failed"))
@@ -636,7 +677,7 @@ def ingest_workspace_knowledge_folder(*, embedder: Embedder | None = None, user_
         try:
             path = _safe_workspace_path(rel, uid)
             rel = str(path.relative_to(root))
-            digest, _ = _file_fingerprint(path)
+            digest, _ = _scan_fingerprint(path)
             if known.get(rel) == digest:
                 outcomes.append((rel, "ready"))
                 continue

@@ -95,8 +95,11 @@ subdirectories. A populated directory moved into the library triggers a scan of
 its files; kernel queue overflow requests a complete library rescan. Directory
 symlinks are excluded from recursive watches and callbacks reject external file
 links. Periodic scans remain the fallback when inotify is unavailable or a watch
-cannot be registered. File hashes remain streamed; avoiding repeated reads of
-unchanged large files is still an optimization candidate.
+cannot be registered. File hashes remain streamed. Repeated scans reuse a bounded, in-process cache
+only when device, inode, size, mtime, and ctime still match. The cache holds at
+most 1,024 paths and starts empty after restart. Actual ingestion independently
+checks file bytes before publication. Library traversal streams each directory
+and excludes hidden directories and directory symlinks.
 
 The per-user `knowledge_ingestion_status` SQLite table records bounded library
 scan outcomes: `ready`, `failed`, or `needs_caption`. Read them through

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -53,6 +54,50 @@ def test_hash_skips_unchanged_file_before_extraction_or_embedding(library, monke
     assert scan(embedder=Mock()) == []
     extract.assert_not_called()
     assert len(rows(library, 'SELECT id FROM learned_docs')) == 1
+
+
+def test_scan_reuses_hash_but_detects_same_size_atomic_replacement(library, monkeypatch):
+    library.file.write_text('First maple instructions.')
+    assert scan()
+    old_stamp = library.file.stat()
+    real_hash = ingest._file_fingerprint
+    hashing = Mock(wraps=real_hash)
+    monkeypatch.setattr(ingest, '_file_fingerprint', hashing)
+    assert scan() == []
+    hashing.assert_not_called()
+    replacement = library.file.with_name('replacement.tmp')
+    replacement.write_text('Other maple instructions.')
+    os.utime(replacement, ns=(old_stamp.st_atime_ns, old_stamp.st_mtime_ns))
+    replacement.replace(library.file)
+    assert scan()
+    assert hashing.call_count > 0
+    assert search.search_knowledge('Other maple instructions', user_id='owner')
+
+
+def test_library_scan_excludes_hidden_directories_and_directory_links(library):
+    folder = library.roots['owner'] / 'library'
+    hidden = folder / '.private'
+    hidden.mkdir()
+    (hidden / 'credentials.txt').write_text('Private directory must not be indexed.')
+    outside_library = library.roots['owner'] / 'unshared'
+    outside_library.mkdir()
+    (outside_library / 'notes.txt').write_text('Unshared directory must not be indexed.')
+    (folder / 'alias').symlink_to(outside_library, target_is_directory=True)
+    library.file.write_text('Public maple instructions.')
+    assert len(scan()) == 1
+    assert [row['source'] for row in rows(library, 'SELECT source FROM learned_docs')] == ['library/guide.txt']
+
+
+def test_scan_hash_cache_is_bounded_and_recovers_after_eviction(tmp_path, monkeypatch):
+    monkeypatch.setattr(ingest, '_SCAN_HASH_LIMIT', 2)
+    monkeypatch.setattr(ingest, '_SCAN_HASH_CACHE', ingest.OrderedDict())
+    paths = [tmp_path / str(i) for i in range(3)]
+    for path in paths:
+        path.write_text('Maple')
+        ingest._scan_fingerprint(path)
+    assert len(ingest._SCAN_HASH_CACHE) == 2
+    assert paths[0] not in ingest._SCAN_HASH_CACHE
+    assert ingest._scan_fingerprint(paths[0])[0] == hashlib.sha256(b'Maple').hexdigest()
 
 
 def test_import_status_survives_reopen_and_failed_refresh_keeps_document(library, monkeypatch):

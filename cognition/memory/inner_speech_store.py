@@ -319,6 +319,10 @@ class InnerSpeechStore:
 
     def close(self) -> None:
         try:
-            self._conn.close()
+            # All reads/writes take this lock. Closing concurrently with a
+            # SQLite extension operation can crash the process, not just
+            # raise ProgrammingError in the late writer.
+            with self._lock:
+                self._conn.close()
         except Exception:
             pass

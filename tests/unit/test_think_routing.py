@@ -531,3 +531,37 @@ def test_worker_entry_skips_memory_and_capability_embedding(monkeypatch):
     think._get_memorize.assert_not_called()
     assert runner.call_args.kwargs['worker_mode'] is True
     assert runner.call_args.kwargs['cap_vec'] is None
+
+
+def test_route_setup_failure_always_clears_active_tracking(monkeypatch):
+    import pytest
+    think = _bare_think()
+    monkeypatch.setattr(think_module, 'current_user_id', lambda: 'alice')
+    def fail():
+        raise RuntimeError('activity setup failed')
+    monkeypatch.setattr(think, '_note_user_activity', fail)
+    with pytest.raises(RuntimeError, match='activity setup failed'):
+        think.route('hello')
+    assert think._active_user_ids == set()
+
+
+def test_route_does_not_reuse_classifier_embedding_for_memory(monkeypatch):
+    from cognition.attention import EdgeCognitiveState
+    from cognition.conscience import hooks
+    think = _bare_think()
+    route_vector = np.array([1.0, 0.0], dtype=np.float32)
+    retrieval_vector = np.array([0.0, 1.0], dtype=np.float32)
+    instructions = []
+    monkeypatch.setattr(EdgeCognitiveState, 'should_attempt', lambda *a, **kw: (True, 'test', 'proceed'))
+    monkeypatch.setattr(hooks, 'gate_respond', lambda **kw: ('allow', '', ''))
+    monkeypatch.setattr(think, '_route_intent', lambda text: ('localchat', route_vector))
+    def embed(embedder, text, instruct=''):
+        instructions.append(instruct)
+        return retrieval_vector
+    monkeypatch.setattr(think_module.reason, 'cached_embed_query', embed)
+    def chat(text, **kwargs):
+        assert kwargs['query_vec'] is retrieval_vector
+        return 'answer'
+    monkeypatch.setattr(think, 'chat', chat)
+    assert think.route('tell me about my project') == 'answer'
+    assert instructions == [think_module._QUERY_INSTRUCT]

@@ -86,3 +86,41 @@ def test_no_sink_passes_token_callback_through(monkeypatch):
     assert result == "canned reply"
     assert captured["token_callback"] is cb
     assert captured["sentence_sink"] is None
+
+
+def test_no_history_still_sends_current_request(monkeypatch):
+    think = _stream_think(monkeypatch, None)
+    think._history = [{'role': 'user', 'content': 'Old question'}, {'role': 'assistant', 'content': 'Old answer'}]
+    captured = []
+    def stream(messages, **kwargs):
+        captured.extend(messages)
+        return 'answer'
+    monkeypatch.setattr(think, '_stream_response', stream)
+    think.chat('Current task', skip_memory=True, store_turn=False, include_history=False)
+    assert captured == [{'role': 'user', 'content': 'Current task'}]
+
+
+def test_request_style_reaches_model_without_polluting_history(monkeypatch):
+    from cognition.attention import soft_user_prompt
+    think = _stream_think(monkeypatch, None)
+    captured = []
+    def stream(messages, **kwargs):
+        captured.extend(messages)
+        return 'answer'
+    monkeypatch.setattr(think, '_stream_response', stream)
+    prompt = soft_user_prompt('Original request', 'clarify', 'test reason')
+    think.chat(prompt, skip_memory=True, store_turn=False)
+    assert captured[-1]['content'] == prompt
+    assert think._history[0]['content'] == 'Original request'
+
+
+def test_llm_failure_is_not_stored_as_conversation_or_memory(monkeypatch):
+    think = _stream_think(monkeypatch, None)
+    stores = []
+    monkeypatch.setattr(think, '_stream_response', lambda *a, **kw: '[LLM error] unavailable')
+    monkeypatch.setattr(think, '_store_async', lambda *a: stores.append(a))
+    displayed = []
+    assert think.chat('Question', token_callback=displayed.append, skip_memory=True) == '[LLM error] unavailable'
+    assert think._history == []
+    assert stores == []
+    assert displayed == ['[LLM error] unavailable']

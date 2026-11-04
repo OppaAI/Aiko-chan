@@ -181,7 +181,7 @@ def test_stream_response_sentence_sink_end_to_end(monkeypatch):
     state = {"aborted": False, "streaming": False, "spoken": []}
     sink = _SentenceSink(think._make_sentence_sink("hi", speak, None, state))
 
-    text = think._stream_response([], system="", sentence_sink=sink)
+    text = think._stream_response([{"role": "user", "content": "hi"}], system="", sentence_sink=sink)
 
     assert text == "Hello world. How are you?"
     assert speak.fed == ["Hello world.", "How are you?"]
@@ -199,7 +199,7 @@ def test_stream_response_sink_ignored_when_flag_off(monkeypatch):
     calls = []
     sink = _SentenceSink(lambda s: calls.append(s) or True)
 
-    text = think._stream_response([], system="", sentence_sink=sink)
+    text = think._stream_response([{"role": "user", "content": "hi"}], system="", sentence_sink=sink)
 
     assert text == "Hello world. How are you?"
     assert calls == []
@@ -303,7 +303,7 @@ def test_drain_counts_only_accepted_sentences(monkeypatch):
     state = {"aborted": False, "streaming": False, "spoken": []}
     sink = _SentenceSink(think._make_sentence_sink("hi", speak, None, state))
 
-    text = think._stream_response([], system="", sentence_sink=sink)
+    text = think._stream_response([{"role": "user", "content": "hi"}], system="", sentence_sink=sink)
 
     assert text == "Hello world. Bad news here. All good."
     # Only the accepted sentence was spoken...
@@ -329,7 +329,7 @@ def test_drain_rejected_first_sentence_counts_nothing(monkeypatch):
     state = {"aborted": False, "streaming": False, "spoken": []}
     sink = _SentenceSink(think._make_sentence_sink("hi", speak, None, state))
 
-    think._stream_response([], system="", sentence_sink=sink)
+    think._stream_response([{"role": "user", "content": "hi"}], system="", sentence_sink=sink)
 
     assert speak.fed == []
     assert sink.consumed_chars == 0

@@ -10,7 +10,7 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 | # | Area | Main code | Status |
 |---|---|---|---|
 | 1 | Startup, shutdown, and session orchestration | `main.py`, `system/wakeup.py`, `system/orchestrate.py`, `system/schedule.py` | Code review completed; final validation recorded below; physical Jetson checks pending |
-| 2 | Conversation routing, context assembly, and response streaming | `cognition/think.py`, `cognition/deep_think.py`, `cognition/inner_speech.py` | Not started |
+| 2 | Conversation routing, context assembly, and response streaming | `cognition/think.py`, `cognition/deep_think.py`, `cognition/inner_speech.py` | Current code pass completed; combined validation recorded below; real-model/device checks pending |
 | 3 | Conscience, refusal gates, and user preferences | `cognition/conscience/`, `cognition/policy.py`, `cognition/attention.py` | Focused false-refusal fixes shipped; broad review not started |
 | 4 | Agentic tasks, tools, and self-coding | `agentic/`, `Aiko-Playground` integration | Focused self-coding fixes shipped; broad review not started |
 | 5 | Memory, retrieval, knowledge, and persistence | `cognition/memory/`, `cognition/knowledge/` | Not started |
@@ -125,3 +125,39 @@ and 34 passing subtests. One existing web-fetch test used a fragile 50 ms
 wall-clock assertion; it now verifies concurrency using a four-worker barrier.
 These results are not a claim that the repository has no remaining bugs or
 that the physical Jetson has been validated.
+
+## Area 2 review
+
+The code pass covers normal/greeting/web/task routing, context assembly, the
+no-history and soft-gate paths, deep-think guidance, shared context workers,
+primary/retry/fallback streams, and inner-speech single-flight/persistence.
+See [conversation context](CONVERSATION_CONTEXT.md) for the request-fitting and
+recovery contracts.
+
+Confirmed issues fixed:
+
+- No-history requests retain the current task; style directives reach the model
+  without becoming recall/history text.
+- The fully assembled normal-chat request is fitted to LLM_CTX_SIZE, preserving
+  the latest request and required instructions. Optional evidence omissions are
+  explicit, and impossible requests fail before the network call.
+- Context workers carry each request's identity and mode flags. Nested work in
+  the bounded pool cannot starve waiting parent workers.
+- Retrieval uses retrieval-instructed embeddings rather than classifier vectors.
+- Early route exceptions release active-user tracking.
+- Failed model requests do not become conversation history or durable memories.
+- Failed streams cancel pending early audio, retries filter private thinking,
+  and both stream resources are closed. Thinking-only flags are request-local.
+- Inner speech remains single-flight through persistence and snapshot updates.
+- Inner-speech SQLite close shares the operation lock, preventing concurrent
+  close/write from crashing the interpreter.
+- Removed unreachable response-review code left after the correction pass was
+  removed. Updated sentence-stream test fixtures to supply a valid current user
+  request while preserving their existing assertions.
+
+Token fitting is estimated, not exact model tokenization. The physical 8 GB
+Jetson and real inference endpoints have not been exercised in this cloud pass.
+
+Full unit verification: 2,180 passed, 5 skipped, 13 warnings, and 34 passing
+subtests. Integration verification: 30 passed.
+The remaining audit areas are paused at the user's request after this batch.

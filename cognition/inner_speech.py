@@ -307,7 +307,6 @@ class InnerSpeech:
                         self._thread.append(t)
                 self._thread = self._thread[-self._THREAD_KEEP:]
                 self._last_think_ts = time.time()
-                self._think_in_flight = False
             # Persist genuine thoughts for future recall + midnight consolidation.
             if thoughts:
                 try:
@@ -321,6 +320,7 @@ class InnerSpeech:
                                   thought=thoughts[0] if thoughts else None)
         except Exception as e:
             log.debug("inner_speech: _think_async failed: %s", e)
+        finally:
             with self._lock:
                 self._think_in_flight = False
 

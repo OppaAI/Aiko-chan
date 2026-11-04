@@ -505,7 +505,7 @@ def _avoid_system_role() -> bool:
 # result is a burned think budget, NOT a message-shape rejection, so the
 # no-system retry would just burn another full budget thinking. The
 # fallback consumes (resets) it when deciding to skip that retry.
-_LAST_STREAM_REASONED = False
+_stream_reasoned_ctx = contextvars.ContextVar("aiko_stream_reasoned", default=False)
 
 
 def _note_thinker_detected() -> None:
@@ -519,19 +519,14 @@ def _note_thinker_detected() -> None:
 
 
 def _note_stream_reasoned(reasoned_without_content: bool) -> None:
-    """Record whether the last stream thought without answering."""
-    global _LAST_STREAM_REASONED
-    with _THINKER_LOCK:
-        _LAST_STREAM_REASONED = bool(reasoned_without_content)
+    """Record thinking-only output in the current request context."""
+    _stream_reasoned_ctx.set(bool(reasoned_without_content))
 
 
 def _take_stream_reasoned() -> bool:
-    """Consume the flag (reset to False), returning its previous value."""
-    global _LAST_STREAM_REASONED
-    with _THINKER_LOCK:
-        val = _LAST_STREAM_REASONED
-        _LAST_STREAM_REASONED = False
-        return val
+    value = _stream_reasoned_ctx.get()
+    _stream_reasoned_ctx.set(False)
+    return value
 
 
 def _effective_max_tokens(base: int) -> int:
@@ -1372,266 +1367,263 @@ class AikoThink:
                 if not self._active_user_ids:
                     self._last_chat_time = time.time()
 
-        self._note_user_activity()
-        _route_t0 = time.monotonic()
-        # Piece 3 (latency): new typed turn — reset the per-turn tracker and
-        # mark input receipt. Scheduler/agentic jobs that bypass route() get
-        # their marks from chat() onward; stages before recall stay absent.
-        _latency.reset()
-        _latency.mark("input_received")
-        # Phase 5: outcome → teach. Praise/correction on this turn teaches the
-        # MB about the *last* recorded action (route decision or tool call),
-        # closing the loop: state → bias → action → outcome → update.
         try:
-            from cognition.fly_behavior.action_select import detect_feedback, note_feedback
-            _fb = detect_feedback(user_input)
-            if _fb:
-                note_feedback(user_id, _fb)
-        except Exception as exc:
-            log.debug("[route] feedback teach skipped: %s", exc)
-        # Approval commands ("approve run-<id>", "yes") must be handled
-        # BEFORE intent classification — the quaternary intent LLM labels
-        # terse commands like "Approve run-…" as chat, which would skip
-        # run_agentic_chat and leave the pending tool permanently stuck.
-        try:
-            from agentic.agentic import _maybe_resume_approval
-            resumed = _maybe_resume_approval(self, user_input, token_callback=token_callback)
-            if resumed is not None:
-                try:
-                    from cognition.attention import for_identity
-                    for_identity(user_id).record_turn_latency(time.monotonic() - _route_t0)
-                except Exception:
-                    pass
-                _finish_route_tracking()
-                return resumed
-        except Exception as exc:
-            log.debug("[route] approval resume pre-check skipped: %s", exc)
+            self._note_user_activity()
+            _route_t0 = time.monotonic()
+            # Piece 3 (latency): new typed turn — reset the per-turn tracker and
+            # mark input receipt. Scheduler/agentic jobs that bypass route() get
+            # their marks from chat() onward; stages before recall stay absent.
+            _latency.reset()
+            _latency.mark("input_received")
+            # Phase 5: outcome → teach. Praise/correction on this turn teaches the
+            # MB about the *last* recorded action (route decision or tool call),
+            # closing the loop: state → bias → action → outcome → update.
+            try:
+                from cognition.fly_behavior.action_select import detect_feedback, note_feedback
+                _fb = detect_feedback(user_input)
+                if _fb:
+                    note_feedback(user_id, _fb)
+            except Exception as exc:
+                log.debug("[route] feedback teach skipped: %s", exc)
+            # Approval commands ("approve run-<id>", "yes") must be handled
+            # BEFORE intent classification — the quaternary intent LLM labels
+            # terse commands like "Approve run-…" as chat, which would skip
+            # run_agentic_chat and leave the pending tool permanently stuck.
+            try:
+                from agentic.agentic import _maybe_resume_approval
+                resumed = _maybe_resume_approval(self, user_input, token_callback=token_callback)
+                if resumed is not None:
+                    try:
+                        from cognition.attention import for_identity
+                        for_identity(user_id).record_turn_latency(time.monotonic() - _route_t0)
+                    except Exception:
+                        pass
+                    return resumed
+            except Exception as exc:
+                log.debug("[route] approval resume pre-check skipped: %s", exc)
 
-        # Expired held outputs (streamed turns nobody answered): purge with
-        # a withheld marker at their recorded history positions. A new turn
-        # supersedes a pending hold — the held text never enters the record.
-        try:
-            from cognition.conscience.hooks import sweep_held_outputs
-            for _expired in sweep_held_outputs():
-                self._purge_held_output(
-                    _expired, "[withheld: turn did not pass the final conscience check]")
-        except Exception as exc:
-            log.debug("[route] held-output sweep skipped: %s", exc)
+            # Expired held outputs (streamed turns nobody answered): purge with
+            # a withheld marker at their recorded history positions. A new turn
+            # supersedes a pending hold — the held text never enters the record.
+            try:
+                from cognition.conscience.hooks import sweep_held_outputs
+                for _expired in sweep_held_outputs():
+                    self._purge_held_output(
+                        _expired, "[withheld: turn did not pass the final conscience check]")
+            except Exception as exc:
+                log.debug("[route] held-output sweep skipped: %s", exc)
 
-        # Conscience HITL: "approve ccc-<id>" / "deny ccc-<id>"
-        try:
-            from cognition.conscience.hooks import resolve_ccc_approval
-            ccc_reply = resolve_ccc_approval(user_input, user_id=user_id, owner=self)
-            if ccc_reply is not None:
-                self._emit(ccc_reply, token_callback=token_callback)
-                try:
-                    from cognition.attention import for_identity
-                    for_identity(user_id).record_turn_latency(time.monotonic() - _route_t0)
-                except Exception:
-                    pass
-                _finish_route_tracking()
-                return ccc_reply
-        except Exception as exc:
-            log.warning("[route] conscience approval pre-check failed: %s", exc)
-            if re.search(r"\b(?:approve|deny|reject)\s+ccc-[0-9a-f]{6,16}\b", user_input or "", re.I):
-                ccc_reply = "I couldn't safely resolve that approval just now, so nothing was executed."
-                self._emit(ccc_reply, token_callback=token_callback)
-                _finish_route_tracking()
-                return ccc_reply
+            # Conscience HITL: "approve ccc-<id>" / "deny ccc-<id>"
+            try:
+                from cognition.conscience.hooks import resolve_ccc_approval
+                ccc_reply = resolve_ccc_approval(user_input, user_id=user_id, owner=self)
+                if ccc_reply is not None:
+                    self._emit(ccc_reply, token_callback=token_callback)
+                    try:
+                        from cognition.attention import for_identity
+                        for_identity(user_id).record_turn_latency(time.monotonic() - _route_t0)
+                    except Exception:
+                        pass
+                    return ccc_reply
+            except Exception as exc:
+                log.warning("[route] conscience approval pre-check failed: %s", exc)
+                if re.search(r"\b(?:approve|deny|reject)\s+ccc-[0-9a-f]{6,16}\b", user_input or "", re.I):
+                    ccc_reply = "I couldn't safely resolve that approval just now, so nothing was executed."
+                    self._emit(ccc_reply, token_callback=token_callback)
+                    return ccc_reply
 
-        # Self-assessment *before* quaternary routing so localchat/webchat
-        # also get executable soft outcomes (defer / clarify / degrade_chat).
-        try:
-            from cognition.attention import for_identity
-            state = for_identity(user_id)
-            ok, gate_reason, gate_action = state.should_attempt(user_input, mode="route")
-            gate_result = (ok, gate_reason, gate_action)
-            snap = state.snapshot()
-            _brain_trace.record_step(
-                "attention.should_attempt",
-                layer="gate",
-                inputs={"user_input": user_input, "mode": "route", "user_id": user_id},
-                outputs={"ok": ok, "reason": gate_reason, "action": gate_action},
-                factors=[
-                    f"energy={snap.get('energy')}",
-                    f"uncertainty={snap.get('uncertainty')}",
-                    f"recent_tool_failures={sum(1 for o in snap.get('tool_outcomes', []) if not o.get('ok'))}",
-                    f"contradictions={len(snap.get('contradictions', []))}",
-                    f"response_review_flags={snap.get('response_reviews', [{}])[0].get('flags', []) if snap.get('response_reviews') else []}",
-                    "time_sensitivity=checked in attention",
-                    "answer_completeness=checked from latest response review",
-                    "self_consistency=checked from latest response review",
-                ],
-            )
-            if not ok:
-                log.info("[route] should_attempt action=%s reason=%s", gate_action, gate_reason)
-                reply = self._soft_gate_reply(
-                    user_input, gate_action, gate_reason, token_callback=token_callback,
-                )
-                _finish_route_tracking()
-                return reply
-        except Exception as exc:
-            log.debug("[route] should_attempt skipped: %s", exc)
-            gate_result = (True, "gate unavailable", "proceed")
-
-        # ── Conscience Circuit Core (inbound gate) ─────────────────────────
-        # Overlapped with intent classification below: both are independent
-        # reads of user_input (gate: SLM/Laya/deliberate chain; intent: LLM
-        # classify). The gate future is collected right after intent returns,
-        # so a turn pays max(gate, intent) instead of gate + intent.
-        from cognition.conscience import hooks as _ccc_hooks
-        _mem_for_gate = self._get_memorize()
-        _mem_inner_gate = getattr(_mem_for_gate, "_mem", None) if _mem_for_gate is not None else None
-        try:
-            _gate_future = CONTEXT_POOL.submit(
-                _ccc_hooks.gate_respond,
-                user_input=user_input,
-                user_id=user_id,
-                llm_client=getattr(self, "_client", None),
-                embedder=getattr(_mem_inner_gate, "_embedder", None),
-                surface="chat",
-            )
-        except Exception as exc:
-            log.warning("[route] conscience gate submit failed; continuing with caution: %s", exc)
-            _gate_future = None
-        # Gate result is collected after intent classification below — or
-        # right here on the deep-think fast path, which bypasses intent.
-        # No route reaches chat() without a gate verdict applied
-        # (see _collect_inbound_gate) — a failed submit degrades to the
-        # same caution fallback at collect time.
-
-        try:
-            # ── deep-think fast path ────────────────────────────────────────
-            # Checked before quaternary intent classification: an explicit
-            # "think this through carefully" style ask is a request about HOW
-            # to answer, not WHAT kind of task this is, so it bypasses
-            # agentic/webchat/localchat classification entirely rather than
-            # competing with them. See module docstring "Deep-think mode".
-            if _is_deep_think_request(user_input):
+            # Self-assessment *before* quaternary routing so localchat/webchat
+            # also get executable soft outcomes (defer / clarify / degrade_chat).
+            try:
+                from cognition.attention import for_identity
+                state = for_identity(user_id)
+                ok, gate_reason, gate_action = state.should_attempt(user_input, mode="route")
+                gate_result = (ok, gate_reason, gate_action)
+                snap = state.snapshot()
                 _brain_trace.record_step(
-                    "think.route",
-                    layer="route",
-                    inputs={"user_input": user_input},
-                    outputs={"intent": "think_chat", "handler": "chat(deep_think=True)"},
+                    "attention.should_attempt",
+                    layer="gate",
+                    inputs={"user_input": user_input, "mode": "route", "user_id": user_id},
+                    outputs={"ok": ok, "reason": gate_reason, "action": gate_action},
                     factors=[
-                        "explicit deep-think phrase matched _DEEP_THINK_RE",
-                        "bypasses quaternary intent routing — same mechanism as /think",
+                        f"energy={snap.get('energy')}",
+                        f"uncertainty={snap.get('uncertainty')}",
+                        f"recent_tool_failures={sum(1 for o in snap.get('tool_outcomes', []) if not o.get('ok'))}",
+                        f"contradictions={len(snap.get('contradictions', []))}",
+                        f"response_review_flags={snap.get('response_reviews', [{}])[0].get('flags', []) if snap.get('response_reviews') else []}",
+                        "time_sensitivity=checked in attention",
+                        "answer_completeness=checked from latest response review",
+                        "self_consistency=checked from latest response review",
                     ],
                 )
-                # Same gate verdict as the post-intent path: the fast path
-                # must not skip conscience.
+                if not ok:
+                    log.info("[route] should_attempt action=%s reason=%s", gate_action, gate_reason)
+                    reply = self._soft_gate_reply(
+                        user_input, gate_action, gate_reason, token_callback=token_callback,
+                    )
+                    return reply
+            except Exception as exc:
+                log.debug("[route] should_attempt skipped: %s", exc)
+                gate_result = (True, "gate unavailable", "proceed")
+
+            # ── Conscience Circuit Core (inbound gate) ─────────────────────────
+            # Overlapped with intent classification below: both are independent
+            # reads of user_input (gate: SLM/Laya/deliberate chain; intent: LLM
+            # classify). The gate future is collected right after intent returns,
+            # so a turn pays max(gate, intent) instead of gate + intent.
+            from cognition.conscience import hooks as _ccc_hooks
+            _mem_for_gate = self._get_memorize()
+            _mem_inner_gate = getattr(_mem_for_gate, "_mem", None) if _mem_for_gate is not None else None
+            try:
+                _gate_future = CONTEXT_POOL.submit(
+                    _ccc_hooks.gate_respond,
+                    user_input=user_input,
+                    user_id=user_id,
+                    llm_client=getattr(self, "_client", None),
+                    embedder=getattr(_mem_inner_gate, "_embedder", None),
+                    surface="chat",
+                )
+            except Exception as exc:
+                log.warning("[route] conscience gate submit failed; continuing with caution: %s", exc)
+                _gate_future = None
+            # Gate result is collected after intent classification below — or
+            # right here on the deep-think fast path, which bypasses intent.
+            # No route reaches chat() without a gate verdict applied
+            # (see _collect_inbound_gate) — a failed submit degrades to the
+            # same caution fallback at collect time.
+
+            try:
+                # ── deep-think fast path ────────────────────────────────────────
+                # Checked before quaternary intent classification: an explicit
+                # "think this through carefully" style ask is a request about HOW
+                # to answer, not WHAT kind of task this is, so it bypasses
+                # agentic/webchat/localchat classification entirely rather than
+                # competing with them. See module docstring "Deep-think mode".
+                if _is_deep_think_request(user_input):
+                    _brain_trace.record_step(
+                        "think.route",
+                        layer="route",
+                        inputs={"user_input": user_input},
+                        outputs={"intent": "think_chat", "handler": "chat(deep_think=True)"},
+                        factors=[
+                            "explicit deep-think phrase matched _DEEP_THINK_RE",
+                            "bypasses quaternary intent routing — same mechanism as /think",
+                        ],
+                    )
+                    # Same gate verdict as the post-intent path: the fast path
+                    # must not skip conscience.
+                    _verdict, _text = self._apply_gate_verdict(
+                        *self._collect_inbound_gate(_gate_future, user_input, user_id),
+                        user_input=user_input, user_id=user_id, token_callback=token_callback,
+                        system_note=system_note, route_t0=_route_t0)
+                    if _verdict == "return":
+                        return _text
+                    system_note = _text
+                    return self.chat(
+                        user_input,
+                        token_callback=token_callback,
+                        deep_think=True,
+                        system_note=system_note,
+                    )
+
+                intent, route_vec = self._route_intent(user_input)
+                log.info("[route] intent=%s", intent)
+                _latency.mark("intent_embedded")
+
+                # Collect the inbound gate overlapped above: a turn pays
+                # max(gate, intent) instead of gate + intent.
                 _verdict, _text = self._apply_gate_verdict(
                     *self._collect_inbound_gate(_gate_future, user_input, user_id),
                     user_input=user_input, user_id=user_id, token_callback=token_callback,
                     system_note=system_note, route_t0=_route_t0)
                 if _verdict == "return":
-                    _finish_route_tracking()
                     return _text
                 system_note = _text
-                return self.chat(
-                    user_input,
-                    token_callback=token_callback,
-                    deep_think=True,
-                    system_note=system_note,
-                )
 
-            intent, route_vec = self._route_intent(user_input)
-            log.info("[route] intent=%s", intent)
-            _latency.mark("intent_embedded")
+                if intent == "greeting":
+                    from cognition.conscience.ledger import ledger_for
+                    ledger_for(user_id).flush()
+                    _brain_trace.record_step(
+                        "think.route",
+                        layer="route",
+                        inputs={"user_input": user_input},
+                        outputs={"intent": "greeting", "handler": "chat(skip_memory=True)"},
+                        factors=["greeting-only regex match OR threshold + gap on greeting label"],
+                    )
+                    return self.chat(
+                        user_input,
+                        token_callback=token_callback,
+                        skip_memory=True,
+                        store_turn=False,
+                        system_note=system_note,
+                    )
 
-            # Collect the inbound gate overlapped above: a turn pays
-            # max(gate, intent) instead of gate + intent.
-            _verdict, _text = self._apply_gate_verdict(
-                *self._collect_inbound_gate(_gate_future, user_input, user_id),
-                user_input=user_input, user_id=user_id, token_callback=token_callback,
-                system_note=system_note, route_t0=_route_t0)
-            if _verdict == "return":
-                _finish_route_tracking()
-                return _text
-            system_note = _text
-
-            if intent == "greeting":
-                from cognition.conscience.ledger import ledger_for
-                ledger_for(user_id).flush()
-                _brain_trace.record_step(
-                    "think.route",
-                    layer="route",
-                    inputs={"user_input": user_input},
-                    outputs={"intent": "greeting", "handler": "chat(skip_memory=True)"},
-                    factors=["greeting-only regex match OR threshold + gap on greeting label"],
-                )
-                return self.chat(
-                    user_input,
-                    token_callback=token_callback,
-                    skip_memory=True,
-                    store_turn=False,
-                    system_note=system_note,
-                )
-
-            # Reuse the embedding computed during intent routing as the memory
-            # query vector instead of embedding the same text a second time
-            # with _QUERY_INSTRUCT. This drops one HTTP embed call per turn.
-            query_vec = route_vec
-            if query_vec is None:
+                # Routing and retrieval use different embedding instructions.
+                # Cache the retrieval query under its own instruction instead of
+                # treating the classifier vector as a memory-search vector.
+                query_vec = None
+                if query_vec is None:
+                    try:
+                        mem = self._get_memorize()
+                        embedder = getattr(getattr(mem, "_mem", None), "_embedder", None) if mem else None
+                        if embedder is not None and hasattr(embedder, "embed_query"):
+                            # Phase 2: shared module cache; explicit instruct to
+                            # match embed_query's default exactly.
+                            query_vec = reason.cached_embed_query(
+                                embedder, user_input, instruct=_QUERY_INSTRUCT)
+                    except Exception:
+                        query_vec = None
+                mem_kb_future = None
+                # Live giant-fiber interrupt: never escalate to agentic/web tools.
+                # Checked BEFORE the agentic recall future is started so a
+                # forced-localchat turn never pays for the memory+KB fetch.
                 try:
-                    mem = self._get_memorize()
-                    embedder = getattr(getattr(mem, "_mem", None), "_embedder", None) if mem else None
-                    if embedder is not None and hasattr(embedder, "embed_query"):
-                        # Phase 2: shared module cache; explicit instruct to
-                        # match embed_query's default exactly.
-                        query_vec = reason.cached_embed_query(
-                            embedder, user_input, instruct=_QUERY_INSTRUCT)
+                    from cognition.neural_state import get_neural_state
+                    if get_neural_state(user_id).interrupt:
+                        log.info("[route] fly_interrupt → force localchat (was intent=%s)", intent)
+                        intent = "localchat"
                 except Exception:
-                    query_vec = None
-            mem_kb_future = None
-            # Live giant-fiber interrupt: never escalate to agentic/web tools.
-            # Checked BEFORE the agentic recall future is started so a
-            # forced-localchat turn never pays for the memory+KB fetch.
-            try:
-                from cognition.neural_state import get_neural_state
-                if get_neural_state(user_id).interrupt:
-                    log.info("[route] fly_interrupt → force localchat (was intent=%s)", intent)
-                    intent = "localchat"
-            except Exception:
-                pass
+                    pass
 
-            if intent == "agentic":
-                # Agentic keeps the shared memory+KB future (reworked in
-                # piece 2); chat paths recall sequentially inside chat().
-                mem_kb_future = CONTEXT_POOL.submit(
-                    self._fetch_memory_and_knowledge, user_input, query_vec
-                )
+                if intent == "agentic":
+                    # Agentic keeps the shared memory+KB future (reworked in
+                    # piece 2); chat paths recall sequentially inside chat().
+                    mem_kb_future = CONTEXT_POOL.submit(
+                        self._fetch_memory_and_knowledge, user_input, query_vec
+                    )
+                    _brain_trace.record_step(
+                        "think.route",
+                        layer="route",
+                        inputs={"user_input": user_input, "intent": "agentic"},
+                        outputs={"handler": "agentic_chat", "retrieval_vector": query_vec is not None},
+                        factors=["agentic_score >= 0.78 and gap >= min_gap"],
+                    )
+                    return self.agentic_chat(user_input, token_callback=token_callback, mem_kb_future=mem_kb_future, query_vec=query_vec, _from_route=True, system_note=system_note, gate_result=gate_result)
+                if intent == "webchat":
+                    _brain_trace.record_step(
+                        "think.route",
+                        layer="route",
+                        inputs={"user_input": user_input, "intent": "webchat"},
+                        outputs={"handler": "webchat → chat(web_search=True)", "retrieval_vector": query_vec is not None},
+                        factors=["webchat_score >= 0.72 and gap >= min_gap"],
+                    )
+                    return self.webchat(user_input, token_callback=token_callback, query_vec=query_vec, system_note=system_note)
                 _brain_trace.record_step(
                     "think.route",
                     layer="route",
-                    inputs={"user_input": user_input, "intent": "agentic"},
-                    outputs={"handler": "agentic_chat", "vector_reused": route_vec is not None},
-                    factors=["agentic_score >= 0.78 and gap >= min_gap"],
+                    inputs={"user_input": user_input, "intent": "localchat"},
+                    outputs={"handler": "chat", "retrieval_vector": query_vec is not None, "recall": "chained inside chat()"},
+                    factors=["no label cleared greeting/agentic/webchat thresholds"],
                 )
-                return self.agentic_chat(user_input, token_callback=token_callback, mem_kb_future=mem_kb_future, query_vec=query_vec, _from_route=True, system_note=system_note, gate_result=gate_result)
-            if intent == "webchat":
-                _brain_trace.record_step(
-                    "think.route",
-                    layer="route",
-                    inputs={"user_input": user_input, "intent": "webchat"},
-                    outputs={"handler": "webchat → chat(web_search=True)", "vector_reused": route_vec is not None},
-                    factors=["webchat_score >= 0.72 and gap >= min_gap"],
-                )
-                return self.webchat(user_input, token_callback=token_callback, query_vec=query_vec, system_note=system_note)
-            _brain_trace.record_step(
-                "think.route",
-                layer="route",
-                inputs={"user_input": user_input, "intent": "localchat"},
-                outputs={"handler": "chat", "vector_reused": route_vec is not None, "recall": "chained inside chat()"},
-                factors=["no label cleared greeting/agentic/webchat thresholds"],
-            )
-            return self.chat(user_input, token_callback=token_callback, query_vec=query_vec, system_note=system_note)
+                return self.chat(user_input, token_callback=token_callback, query_vec=query_vec, system_note=system_note)
+            finally:
+                try:
+                    from cognition.attention import for_identity
+                    for_identity(user_id).record_turn_latency(time.monotonic() - _route_t0)
+                except Exception:
+                    pass
+
         finally:
-            try:
-                from cognition.attention import for_identity
-                for_identity(user_id).record_turn_latency(time.monotonic() - _route_t0)
-            except Exception:
-                pass
             _finish_route_tracking()
 
     def _recall_query(self, user_input: str) -> str:
@@ -3145,16 +3137,17 @@ class AikoThink:
                 llm_prompt = f"{user_input}\n\nThink through this carefully."
 
             with self._history_lock:
-                self._history.append({"role": "user", "content": raw_input})
+                _current_turn = {"role": "user", "content": raw_input}
+                self._history.append(_current_turn)
                 if len(self._history) > CONTEXT_WINDOW_TURNS * 10:
                     self._history = self._history[-(CONTEXT_WINDOW_TURNS * 10):]
                 # include_history=False (scheduled jobs): the turn is still
                 # stored, but prior history is not sent — ticks resume from
                 # checkpoint files, not chat.
-                trimmed = self._history[-(CONTEXT_WINDOW_TURNS * 2):] if include_history else []
+                trimmed = self._history[-max(1, CONTEXT_WINDOW_TURNS * 2):] if include_history else [{"role": "user", "content": raw_input}]
 
             trimmed = self._sanitize_history(trimmed)
-            if trimmed and trimmed[-1]["role"] == "user" and llm_prompt != user_input:
+            if trimmed and trimmed[-1]["role"] == "user":
                 trimmed = trimmed[:-1] + [{"role": "user", "content": llm_prompt}]
 
             self.last_prompt_debug = {
@@ -3198,7 +3191,12 @@ class AikoThink:
             stream_state: dict = {"aborted": False, "streaming": False, "spoken": []}
             sink = None
             if _SENTENCE_STREAM and speak is not None and not self._reasoning and not deep_think:
-                sink = _SentenceSink(self._make_sentence_sink(raw_input, speak, token_callback, stream_state))
+                def abort_early_audio():
+                    stream_state["aborted"] = True
+                    if stream_state.get("streaming"):
+                        speak.stop_speech_stream(cancel=True)
+                sink = _SentenceSink(self._make_sentence_sink(raw_input, speak, token_callback, stream_state),
+                                     on_abort=abort_early_audio)
             stream_kwargs: dict = {}
             if sink is not None:
                 # Sentence-stream mode: token_callback is driven by the
@@ -3212,6 +3210,16 @@ class AikoThink:
                 emit=False,
                 **stream_kwargs,
             )
+            if (raw_response or "").startswith("[LLM error]"):
+                if stream_state.get("streaming"):
+                    speak.stop_speech_stream(cancel=True)
+                with self._history_lock:
+                    self._history = [m for m in self._history if m is not _current_turn]
+                _thinking_text_ctx.set("")
+                if token_callback:
+                    token_callback(raw_response)
+                return (raw_response, deep_think_summary) if return_deep_think_summary else raw_response
+
             spoken_prefix = raw_response[: sink.consumed_chars] if sink is not None else ""
             if sink is not None and stream_state.get("streaming"):
                 try:
@@ -3802,6 +3810,16 @@ class AikoThink:
             all_messages = all_messages[:-1] + [{"role": "system", "content": system_tail}, all_messages[-1]]
         elif system_tail:
             all_messages = all_messages + [{"role": "system", "content": system_tail}]
+        from cognition.chat_budget import ContextBudgetError, fit_chat_request
+        _thinking_text_ctx.set("")
+        _note_stream_reasoned(False)
+        try:
+            all_messages, max_tokens = fit_chat_request(
+                all_messages, env_int("LLM_CTX_SIZE", 8192), max_tokens)
+        except ContextBudgetError as exc:
+            self.last_usage = {"prompt_messages": [], "completion_text": "", "context_error": str(exc)}
+            return f"[LLM error] {exc}"
+
         # Backend rejects `system` (latched or LLM_NO_SYSTEM=1): merge upfront
         # instead of paying a doomed first attempt on every turn.
         if _avoid_system_role() and any(m.get("role") == "system" for m in all_messages):
@@ -3873,6 +3891,7 @@ class AikoThink:
                     if hasattr(sentence_sink, "aborted"):
                         sentence_sink.aborted = True
 
+        stream = stream2 = None
         try:
             stream = self._client.chat.completions.create(
                 model=self._llm_model, messages=all_messages, stream=True,
@@ -3983,6 +4002,14 @@ class AikoThink:
                 self.last_usage["completion_text"] = text
                 stream_success = True
         except Exception as e:
+            if sentence_sink is not None:
+                abort = getattr(sentence_sink, "abort", None)
+                if callable(abort):
+                    try:
+                        abort()
+                    except Exception:
+                        log.warning("Could not cancel early sentence audio", exc_info=True)
+                sink_active = False
             if self._is_system_role_error(e):
                 log.warning(f"LLM stream system-role rejected (will retry without system): {e}")
             else:
@@ -4005,10 +4032,13 @@ class AikoThink:
                         extra_body=_llm_extra_body(),
                     )
                     full_response = []
+                    retry_filter = _ThinkingTokenFilter()
                     for chunk in stream2:
                         delta = chunk.choices[0].delta if chunk.choices else None
                         token = (delta.content or "") if delta else ""
-                        full_response.append(token)
+                        full_response.append(retry_filter.feed(token))
+                    full_response.append(retry_filter.feed("", final=True))
+                    _thinking_text_ctx.set(retry_filter.thinking)
                     text2 = "".join(full_response).strip()
                     if text2:
                         self.last_usage["completion_text"] = text2
@@ -4018,11 +4048,19 @@ class AikoThink:
                         log.info("LLM stream retry without system role succeeded")
                 except Exception as e2:
                     log.error(f"LLM stream retry without system also failed: {e2}")
+        finally:
+            for active_stream in (stream, stream2):
+                close = getattr(active_stream, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        log.debug("LLM stream close failed", exc_info=True)
         if stream_success:
             return text
 
-        # Stream failed: no partial output exists.  The fallback is also held
-        # for final review and conscience gating by the caller.
+        # The stream failed; pending early audio was cancelled above. The
+        # fallback is held for final review and conscience gating by the caller.
         fallback_text = self._fallback_completion(
             all_messages,
             max_tokens,
@@ -4184,8 +4222,6 @@ class AikoThink:
         # for observability, but the rewrite was the same model fixing its own
         # output — unproven value for ~1-3s TTFT. Accept the draft.
         response = draft
-        if response != draft:
-            self._review_response(user_input, response)
         try:
             from cognition.conscience.hooks import gate_speak
             from cognition.conscience import ESCALATE as _ESCALATE, REFUSE as _REFUSE
@@ -4517,10 +4553,17 @@ class _SentenceSink:
     stopped; the full draft still goes through the normal finalize path.
     """
 
-    def __init__(self, fn) -> None:
+    def __init__(self, fn, on_abort=None) -> None:
         self._fn = fn
+        self._on_abort = on_abort
         self.consumed_chars = 0
         self.aborted = False
+
+    def abort(self) -> None:
+        self.aborted = True
+        self.consumed_chars = 0
+        if self._on_abort is not None:
+            self._on_abort()
 
     def __call__(self, sentence: str) -> bool:
         return bool(self._fn(sentence))

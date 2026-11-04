@@ -295,3 +295,55 @@ def test_capture_thinking_ignores_trivia(speech, store):
     rows = store.unconsolidated_since("2000-01-01T00:00:00")
     assert len(rows) == 1
     assert rows[0]["source"] == "thinking-box"
+
+
+def test_observe_keeps_single_flight_until_persistence_finishes(speech, store, monkeypatch):
+    import threading
+    writing = threading.Event()
+    release = threading.Event()
+    calls = []
+    def think(*args, **kwargs):
+        calls.append(True)
+        return ['one thought']
+    def persist(*args, **kwargs):
+        writing.set()
+        release.wait(3)
+    monkeypatch.setattr(speech, 'think', think)
+    monkeypatch.setattr(store, 'write', persist)
+    try:
+        speech.observe('urgent first?', '', cues={'urgency': 1.0, 'question': 1.0})
+        assert writing.wait(2)
+        speech.observe('urgent second?', '', cues={'urgency': 1.0, 'question': 1.0})
+        assert len(calls) == 1
+        assert speech._think_in_flight
+    finally:
+        release.set()
+        assert _wait_for(lambda: not speech._think_in_flight)
+
+
+def test_store_close_waits_for_active_database_operation():
+    import threading
+    from types import SimpleNamespace
+    locked = threading.Event()
+    release = threading.Event()
+    closed = threading.Event()
+    st = InnerSpeechStore.__new__(InnerSpeechStore)
+    st._lock = threading.RLock()
+    st._conn = SimpleNamespace(close=closed.set)
+    def active_operation():
+        with st._lock:
+            locked.set()
+            release.wait(3)
+    worker = threading.Thread(target=active_operation)
+    closer = threading.Thread(target=st.close)
+    worker.start()
+    try:
+        assert locked.wait(2)
+        closer.start()
+        assert not closed.wait(0.05)
+    finally:
+        release.set()
+        worker.join(2)
+        if closer.ident is not None:
+            closer.join(2)
+    assert closed.is_set()

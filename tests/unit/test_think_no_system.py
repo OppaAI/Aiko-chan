@@ -124,3 +124,74 @@ def test_agentic_message_uses_latch_without_think_import(monkeypatch):
     assert len(calls) == 2
     assert think_mod._SYSTEM_ROLE_REJECTED is True
     assert "system" not in [m.get("role") for m in calls[1]]
+
+
+def test_retry_filters_private_thinking_like_primary_stream(monkeypatch):
+    calls = []
+    def create(**kwargs):
+        calls.append(kwargs['messages'])
+        if len(calls) == 1:
+            raise Exception(SYSTEM_ROLE_500)
+        return iter([_chunk('<thinking>private thought</thinking>Public answer')])
+    monkeypatch.setattr(think_mod, '_SYSTEM_ROLE_REJECTED', False)
+    monkeypatch.setattr(think_mod, '_LLM_NO_SYSTEM_ENV', False)
+    think = _think_with_client(create)
+    assert think._stream_response([{'role': 'user', 'content': 'hi'}], system='SYS') == 'Public answer'
+    assert think_mod._thinking_text_ctx.get() == 'private thought'
+
+
+def test_failed_stream_cancels_early_audio_and_closes_connection(monkeypatch):
+    events = []
+    class BrokenStream:
+        def __iter__(self):
+            yield _chunk('One complete sentence. ')
+            raise RuntimeError('connection lost')
+        def close(self):
+            events.append('close')
+    think = _think_with_client(lambda **kwargs: BrokenStream())
+    monkeypatch.setattr(think, '_fallback_completion', lambda *args: 'Recovered answer')
+    monkeypatch.setattr(think_mod, '_SENTENCE_STREAM', True)
+    sink = think_mod._SentenceSink(lambda sentence: True, on_abort=lambda: events.append('abort'))
+    result = think._stream_response([{'role': 'user', 'content': 'hi'}], sentence_sink=sink)
+    assert result == 'Recovered answer'
+    assert events == ['abort', 'close']
+    assert sink.aborted and sink.consumed_chars == 0
+
+
+def test_reasoning_only_flag_is_request_local():
+    from contextvars import copy_context
+    think_mod._note_stream_reasoned(False)
+    first, second = copy_context(), copy_context()
+    first.run(think_mod._note_stream_reasoned, True)
+    assert second.run(think_mod._take_stream_reasoned) is False
+    assert first.run(think_mod._take_stream_reasoned) is True
+
+
+def test_oversized_current_request_is_not_sent_to_model(monkeypatch):
+    calls = []
+    think = _think_with_client(lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setenv('LLM_CTX_SIZE', '1024')
+    reply = think._stream_response([{'role': 'user', 'content': 'request ' * 5000}], system='Instructions')
+    assert reply.startswith('[LLM error]')
+    assert calls == []
+
+
+def test_assembled_chat_budget_keeps_current_request_and_reserves_output(monkeypatch):
+    from cognition.chat_budget import estimate_messages
+    captured = []
+    def create(**kwargs):
+        captured.append(kwargs)
+        return iter([_chunk('answer')])
+    think = _think_with_client(create)
+    monkeypatch.setenv('LLM_CTX_SIZE', '1024')
+    monkeypatch.setattr(think_mod, '_LLM_NO_SYSTEM_ENV', False)
+    monkeypatch.setattr(think_mod, '_SYSTEM_ROLE_REJECTED', False)
+    messages = [{'role': 'user', 'content': 'old history ' * 1000},
+                {'role': 'assistant', 'content': 'old answer'},
+                {'role': 'user', 'content': 'Current question'}]
+    assert think._stream_response(messages, system='Required instructions') == 'answer'
+    sent = captured[0]
+    assert 'Current question' in sent['messages'][-1]['content']
+    assert all('old history' not in m['content'] for m in sent['messages'])
+    assert estimate_messages(sent['messages']) + sent['max_tokens'] <= 1024 * 0.9 + 8
+    assert len(messages) == 3

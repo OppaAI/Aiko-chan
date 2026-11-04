@@ -49,16 +49,22 @@ def _held_content_hash(text: str) -> str:
 
 def hold_output_for_approval(escalation_id: str, *, held_text: str, sentence_indices: list[int],
                              categories: list[str], user_id: str | None, history_len: int,
-                             hold_token: str | None, user_input: str, store_turn: bool) -> None:
+                             hold_token: str | None, user_input: str, store_turn: bool,
+                             related_escalation_ids: list[str] | None = None) -> None:
     """Register a streamed turn's completed text as held for accept/decline."""
     import time as _time
+    from system.userspace import current_display_name, current_user_id
+    evicted = []
     with _HELD_LOCK:
         _HELD_OUTPUTS[escalation_id] = {
+            "escalation_id": escalation_id,
+            "related_escalation_ids": list(dict.fromkeys(related_escalation_ids or [])),
             "held_text": held_text,
             "content_hash": _held_content_hash(held_text),
             "sentence_indices": list(sentence_indices),
             "categories": list(categories),
             "user_id": user_id,
+            "display_name": current_display_name() if current_user_id() == user_id else None,
             "history_len": history_len,
             "hold_token": hold_token,
             "user_input": user_input,
@@ -66,7 +72,11 @@ def hold_output_for_approval(escalation_id: str, *, held_text: str, sentence_ind
             "created_at": _time.monotonic(),
         }
         while len(_HELD_OUTPUTS) > _APPROVED_MAX:
-            _HELD_OUTPUTS.pop(next(iter(_HELD_OUTPUTS)))
+            eid = next(iter(_HELD_OUTPUTS))
+            evicted.append(_HELD_OUTPUTS.pop(eid))
+            _EXPIRED_HOLD_IDS[eid] = _time.monotonic() + _EXPIRED_TTL_S
+    for held in evicted:
+        _close_held_questions(held, "discard_escalation", "held-output capacity exceeded")
     log.info("[ccc-hooks] output held for approval: %s (%d chars, sentences %s)",
              escalation_id, len(held_text or ""), sentence_indices)
 
@@ -79,11 +89,13 @@ def pop_held_output(escalation_id: str) -> dict | None:
     with _HELD_LOCK:
         held = _HELD_OUTPUTS.pop(escalation_id, None)
         if held is not None and \
-                _time.monotonic() - held["created_at"] > HELD_OUTPUT_TTL_S:
+                _time.monotonic() - held["created_at"] >= HELD_OUTPUT_TTL_S:
             held["expired"] = True
             _EXPIRED_HOLD_IDS[escalation_id] = _time.monotonic() + _EXPIRED_TTL_S
             log.info("[ccc-hooks] held output %s expired; late decision cannot commit it",
                      escalation_id)
+    if held is not None and held.get("expired"):
+        _close_held_questions(held, "expire_escalation", "held output expired before consumption")
     return held
 
 
@@ -112,7 +124,25 @@ def is_expired_hold(escalation_id: str) -> bool:
         return True
 
 
-def sweep_held_outputs() -> list[dict]:
+def _close_held_questions(held: dict, method: str, note: str, *, related_only: bool = False) -> None:
+    """Close all questions belonging to one output, never another user's ledger."""
+    try:
+        from cognition.conscience import conscience_for
+        core = conscience_for(held.get("user_id"))
+        ids = list(held.get("related_escalation_ids") or [])
+        if not related_only:
+            ids.append(held.get("escalation_id"))
+        for eid in dict.fromkeys(ids):
+            if eid and (not related_only or eid != held.get("escalation_id")):
+                try:
+                    getattr(core, method)(eid, note=note)
+                except Exception as exc:
+                    log.warning("[ccc-hooks] closing output question %s failed: %s", eid, exc)
+    except Exception as exc:
+        log.warning("[ccc-hooks] output question cleanup failed: %s", exc)
+
+
+def sweep_held_outputs(*, user_id: str | None = None) -> list[dict]:
     """Drop expired holds. Returns the expired records so the caller can
     append withheld markers at their recorded history positions. Expired
     IDs are tombstoned so a late approval gets an honest "already expired"
@@ -122,7 +152,8 @@ def sweep_held_outputs() -> list[dict]:
     with _HELD_LOCK:
         now = _time.monotonic()
         for eid in [e for e, h in _HELD_OUTPUTS.items()
-                    if now - h["created_at"] > HELD_OUTPUT_TTL_S]:
+                    if (user_id is None or h.get("user_id") == user_id)
+                    and now - h["created_at"] >= HELD_OUTPUT_TTL_S]:
             expired.append((eid, _HELD_OUTPUTS.pop(eid)))
         for eid, _h in expired:
             _EXPIRED_HOLD_IDS[eid] = now + _EXPIRED_TTL_S
@@ -130,8 +161,18 @@ def sweep_held_outputs() -> list[dict]:
         for eid in [e for e, exp in _EXPIRED_HOLD_IDS.items() if exp < now]:
             del _EXPIRED_HOLD_IDS[eid]
     for _eid, h in expired:
+        h["expired"] = True
+        _close_held_questions(h, "expire_escalation", "held output expired without a decision")
         log.info("[ccc-hooks] held output expired without decision; purged")
     return [h for _eid, h in expired]
+
+
+def discard_output_questions(escalation_ids: list[str], *, user_id: str | None, note: str) -> None:
+    """Close sentence questions when no resumable output survives the turn."""
+    _close_held_questions(
+        {"user_id": user_id, "related_escalation_ids": escalation_ids},
+        "discard_escalation", note, related_only=True,
+    )
 
 
 def push_turn_ask_notice(user_id: str | None, escalation_id: str, summary: str) -> None:
@@ -237,13 +278,27 @@ def _complete_held_output(owner, user_id: str | None, escalation_id: str,
             return "Noted — I've left that out of the record." if not commit else "Noted."
         if commit:
             try:
-                owner._commit_held_output(held)
+                from system.userspace import (
+                    set_current_user_id, reset_current_user_id,
+                    set_current_display_name, reset_current_display_name,
+                )
+                uid_token = set_current_user_id(held.get("user_id"))
+                try:
+                    name_token = set_current_display_name(held.get("display_name"))
+                    try:
+                        memory_confirmed = owner._commit_held_output(held)
+                    finally:
+                        reset_current_display_name(name_token)
+                finally:
+                    reset_current_user_id(uid_token)
             except ValueError as exc:
                 # Anchor trimmed away: the turn's context is gone; the
                 # approved text has nowhere safe to land. Fail closed.
                 log.info("[ccc-hooks] held output %s superseded (%s); purged", escalation_id, exc)
                 return ("That one's already moved on — I've left it out of "
                         "the record.")
+            if memory_confirmed is False:
+                return "That's in the conversation record, but I couldn't confirm the memory write."
             return "Alright — that's in the record now."
         owner._purge_held_output(held, WITHHELD)
         return f"Noted — {reason}."
@@ -277,27 +332,35 @@ def resolve_ccc_approval(user_input: str, user_id: str | None = None, owner=None
         # opened on their turn, so the approver's own ledger won't have it.
         # An admin may approve another user's held turn (oversight); the
         # commit preserves the held user's identity for history/memory.
-        held_peek = peek_held_output(escalation_id)
-        if held_peek is not None or is_expired_hold(escalation_id):
-            if is_expired_hold(escalation_id):
-                # Swept before the decision arrived: the marker is already in
-                # history; answer honestly instead of "going ahead".
-                log.info("[ccc-hooks] late decision for expired hold %s", escalation_id)
-                return ("That question already expired, so I left it out of "
-                        "the record.")
-            held_uid = held_peek.get("user_id")
-            resolved = conscience_for(held_uid).resolve_escalation(
-                escalation_id,
-                approved,
-                note=f"via chat: {verb} (approver {user_id})",
-            )
-            if not resolved:
-                return f"I don't have an open question with id {escalation_id}."
-            # One-shot: pop here so a replayed approval finds nothing to commit.
-            held = pop_held_output(escalation_id)
+        import time as _time
+        # Claim, validate, resolve, and consume atomically with respect to
+        # expiry sweeps and competing decisions. Check expiry/hash BEFORE
+        # recording a human label: an expired draft must not train as approved.
+        with _HELD_LOCK:
+            held = _HELD_OUTPUTS.get(escalation_id)
             if held is not None:
-                return _complete_held_output(owner, user_id, escalation_id, approved, held)
-            return "Noted."
+                if _time.monotonic() - held["created_at"] >= HELD_OUTPUT_TTL_S:
+                    held["expired"] = True
+                    _EXPIRED_HOLD_IDS[escalation_id] = _time.monotonic() + _EXPIRED_TTL_S
+                    _close_held_questions(held, "expire_escalation", "held output expired before decision")
+                elif _held_content_hash(held.get("held_text") or "") != held.get("content_hash"):
+                    _close_held_questions(held, "discard_escalation", "held output content hash changed")
+                else:
+                    resolved = conscience_for(held.get("user_id")).resolve_escalation(
+                        escalation_id, approved,
+                        note=f"via chat: {verb} (approver {user_id})",
+                    )
+                    if not resolved:
+                        return f"I don't have an open question with id {escalation_id}."
+                    _close_held_questions(
+                        held, "cover_escalation",
+                        f"covered by turn {escalation_id}: {verb}", related_only=True,
+                    )
+                _HELD_OUTPUTS.pop(escalation_id)
+            elif _EXPIRED_HOLD_IDS.get(escalation_id, 0) > _time.monotonic():
+                return "That question already expired, so I left it out of the record."
+        if held is not None:
+            return _complete_held_output(owner, user_id, escalation_id, approved, held)
 
         resolved = conscience_for(user_id).resolve_escalation(
             escalation_id,

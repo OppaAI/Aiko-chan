@@ -70,6 +70,19 @@ known durable style rules, so forgotten preferences cannot reappear from those
 paths. Negated reset commands preserve preferences. Both immediate and learned
 tone feedback treat "less formal" and "informal" as casual tone.
 
+Outbound turn holds group all sentence questions under one turn decision.
+Expiry/hash checks precede human labeling; expired questions close as `timeout`
+and invalid/superseded questions as `discarded`. A whole-turn decision closes
+duplicate sentence questions as `covered`, rather than inventing extra human
+judgments. Stream/final-check failures and capacity eviction also close their
+unresumable questions. These dispositions do not create gold training labels.
+
+History completion uses the original token anchor. If that anchor is gone,
+cleanup cannot insert a marker by numeric position in a different history.
+An administrative approval preserves the held user's identity for memory.
+If accepted history succeeds but memory writing fails, the confirmation states
+that distinction.
+
 Regression coverage includes the reported `Sorry I did something wrong.` and
 outings-versus-coding conversation, appended harmful requests, explicit STOP,
 urgency carryover, identity isolation, judge failures/concurrency, and bounded

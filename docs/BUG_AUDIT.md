@@ -234,8 +234,7 @@ Preference learning/reset and false-refusal follow-up:
   hot reload, preventing local training artifacts from changing their results.
 
 These fixes were reproduced with regressions before applying the changes. The
-broader Area 3 review remains in progress; outbound approval holds and expiry
-are a remaining review path. Area 2's code pass remains complete, with live
+broader Area 3 review remains in progress. Area 2's code pass remains complete, with live
 inference and physical Jetson validation pending rather than additional known
 code fixes in its current checklist.
 
@@ -243,3 +242,36 @@ Final combined unit/integration verification for this follow-up: 2,263 passed,
 5 skipped, 13 warnings, and 34 passing subtests. Local HTTP fixtures used
 loopback networking. This is code-side verification, not live Jetson or model
 validation.
+
+Outbound approval hold follow-up:
+
+- Held output expiry and content integrity are checked before recording a
+  human approval. Expired rows close as `timeout`; changed or superseded
+  output closes as `discarded`, without new human training labels.
+- A turn hold carries all of its sentence question IDs. A decision on the
+  full turn closes those duplicate questions as `covered`, retaining one
+  explicit human label for the full-turn question.
+- Refused final drafts, failed final checks, and failed model streams discard
+  their now-unresumable sentence questions. Expiry sweeps close every question
+  in the held group. Capacity eviction also closes its questions and prevents
+  a late approval from resurrecting the evicted output.
+- Hold validation, ledger resolution, and consumption are synchronized against
+  concurrent decisions and expiry sweeps. Competing approvals commit once.
+- Route-time expiry cleanup is scoped to the current user. History purge
+  requires the original token anchor; a missing/trimmed anchor cannot fall
+  back to a numeric position in another turn or session.
+- Cross-user administrative approval commits under the held user's identity
+  and display name, then restores the approver's context, including on failure.
+- Accepted history and memory-write failure are reported separately. A memory
+  failure cannot make an already-inserted reply appear to have been withheld
+  or be mistaken for a missing history anchor.
+
+Focused verification: 426 passed, 2 skipped, and 34 passing subtests across
+conscience, policy, attention, chat streaming, latency, and integration suites.
+The broader Area 3 review remains open, including noninteractive speech and
+preference interpretation beyond the deterministic cases covered so far.
+
+Final combined unit/integration verification for this hold-lifecycle batch:
+2,279 passed, 5 skipped, 13 warnings, and 34 passing subtests. Loopback HTTP
+fixtures were enabled. Physical Jetson and deployed-model behavior remain
+unverified.

@@ -34,7 +34,7 @@ from . import allowlist
 from . import canon as canon_mod
 from . import guardrails as gr
 from . import judge as judge_mod
-from .ledger import HITL_APPROVED, HITL_COVERED, HITL_DENIED, ledger_for
+from .ledger import HITL_APPROVED, HITL_COVERED, HITL_DENIED, HITL_DISCARDED, HITL_TIMEOUT, ledger_for
 from .schema import (
     ACT_RESPOND,
     ACT_SPEAK,
@@ -629,12 +629,20 @@ class ConscienceCircuitCore:
         return ok
 
     def cover_escalation(self, escalation_id: str, note: str = "") -> bool:
-        """Close a repeated ask using existing permission, without new learning.
+        """Close a duplicate ask covered by another decision, without learning.
 
         This is not another human judgment and must not become a gold training
-        label or another self-decision. The original approval remains auditable.
+        label or another self-decision. The covering decision remains auditable.
         """
         return ledger_for(self._user_id).resolve(escalation_id, HITL_COVERED, note)
+
+    def expire_escalation(self, escalation_id: str, note: str = "") -> bool:
+        """Expire an unavailable output without inventing a human judgment."""
+        return ledger_for(self._user_id).resolve(escalation_id, HITL_TIMEOUT, note)
+
+    def discard_escalation(self, escalation_id: str, note: str = "") -> bool:
+        """Close a superseded or invalid output question without learning."""
+        return ledger_for(self._user_id).resolve(escalation_id, HITL_DISCARDED, note)
 
     def pending(self, limit: int = 5) -> list[dict]:
         return ledger_for(self._user_id).pending(limit)

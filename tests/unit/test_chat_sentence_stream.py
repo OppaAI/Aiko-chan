@@ -124,3 +124,38 @@ def test_llm_failure_is_not_stored_as_conversation_or_memory(monkeypatch):
     assert think._history == []
     assert stores == []
     assert displayed == ['[LLM error] unavailable']
+
+
+def test_chat_forwards_related_sentence_questions_into_hold(monkeypatch):
+    from cognition.conscience import hooks
+    think = _stream_think(monkeypatch, None)
+    think._stream_response = lambda *a, **kw: 'answer'
+    captured = []
+    def finalize(user_input, response, cb=None, **kw):
+        kw['_ask_out'].update({
+            'escalation_id': 'abc123', 'related_escalation_ids': ['def456', 'abc789'],
+            'held_text': response, 'sentence_indices': [0, 1], 'categories': [],
+            'user_id': 'u1', 'notice_summary': 'turn flagged',
+        })
+        return response
+    think._finalize_response = finalize
+    monkeypatch.setattr(hooks, 'hold_output_for_approval', lambda eid, **kw: captured.append((eid, kw)))
+    monkeypatch.setattr(hooks, 'push_turn_ask_notice', lambda *a: None)
+    assert think.chat('hello', skip_memory=True, store_turn=False) == 'answer'
+    assert captured[0][0] == 'abc123'
+    assert captured[0][1]['related_escalation_ids'] == ['def456', 'abc789']
+
+
+def test_failed_stream_discards_pending_sentence_questions(monkeypatch):
+    from cognition.conscience import hooks
+    think = _stream_think(monkeypatch, _FakeSpeak())
+    def make_sink(user_input, speak, cb, state):
+        state['ask_flags'] = [{'escalation_id': 'def456'}]
+        return lambda sentence: True
+    think._make_sentence_sink = make_sink
+    think._stream_response = lambda *a, **kw: '[LLM error] failed after a sentence'
+    discarded = []
+    monkeypatch.setattr(hooks, 'discard_output_questions', lambda ids, **kw: discarded.extend(ids))
+    assert think.chat('hello', skip_memory=True, store_turn=False).startswith('[LLM error]')
+    assert discarded == ['def456']
+    assert think._history == []

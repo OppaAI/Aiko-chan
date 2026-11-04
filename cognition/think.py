@@ -1403,11 +1403,11 @@ class AikoThink:
                 log.debug("[route] approval resume pre-check skipped: %s", exc)
 
             # Expired held outputs (streamed turns nobody answered): purge with
-            # a withheld marker at their recorded history positions. A new turn
-            # supersedes a pending hold — the held text never enters the record.
+            # a withheld marker at their token anchors. Unexpired holds retain
+            # their anchors across newer turns and can still be decided.
             try:
                 from cognition.conscience.hooks import sweep_held_outputs
-                for _expired in sweep_held_outputs():
+                for _expired in sweep_held_outputs(user_id=user_id):
                     self._purge_held_output(
                         _expired, "[withheld: turn did not pass the final conscience check]")
             except Exception as exc:
@@ -3213,6 +3213,11 @@ class AikoThink:
             if (raw_response or "").startswith("[LLM error]"):
                 if stream_state.get("streaming"):
                     speak.stop_speech_stream(cancel=True)
+                from cognition.conscience.hooks import discard_output_questions
+                discard_output_questions(
+                    [f["escalation_id"] for f in stream_state.get("ask_flags", []) if f.get("escalation_id")],
+                    user_id=current_user_id(), note="sentence output superseded by model failure",
+                )
                 with self._history_lock:
                     self._history = [m for m in self._history if m is not _current_turn]
                 _thinking_text_ctx.set("")
@@ -3263,6 +3268,7 @@ class AikoThink:
                     hold_token=_hold_token,
                     user_input=raw_input,
                     store_turn=store_turn,
+                    related_escalation_ids=_ask_out.get("related_escalation_ids"),
                 )
                 push_turn_ask_notice(
                     _ask_out["user_id"], _ask_out["escalation_id"],
@@ -4270,6 +4276,12 @@ class AikoThink:
             _ask_flags = list(ask_flags or [])
             _final_escalated = _fverdict is not None and _fverdict.decision == _ESCALATE
             _was_refused = _fverdict is not None and _fverdict.decision == _REFUSE
+            if _was_refused and _ask_flags:
+                from cognition.conscience.hooks import discard_output_questions
+                discard_output_questions(
+                    [f["escalation_id"] for f in _ask_flags if f.get("escalation_id")],
+                    user_id=current_user_id(), note="sentence asks superseded by full-draft refusal",
+                )
             if _ask_out is not None and not _was_refused and (_final_escalated or _ask_flags):
                 _turn_id = (_fverdict.escalation_id if _final_escalated and _fverdict.escalation_id
                             else (_ask_flags[0].get("escalation_id") if _ask_flags else None))
@@ -4292,6 +4304,9 @@ class AikoThink:
                                 + (f" [{_detail}]" if _detail else ""))
                     _ask_out.update({
                         "escalation_id": _turn_id,
+                        "related_escalation_ids": list(dict.fromkeys(
+                            f["escalation_id"] for f in _ask_flags if f.get("escalation_id")
+                        )),
                         "held_text": response,
                         "sentence_indices": sorted(_idx),
                         "categories": _cats,
@@ -4307,6 +4322,11 @@ class AikoThink:
                 log.warning("[finalize] conscience speak gate failed on streamed turn; "
                             "withholding from record: %s", exc)
                 response = "[withheld: final conscience check unavailable]"
+                from cognition.conscience.hooks import discard_output_questions
+                discard_output_questions(
+                    [f["escalation_id"] for f in (ask_flags or []) if f.get("escalation_id")],
+                    user_id=current_user_id(), note="sentence asks superseded by final-check failure",
+                )
                 try:
                     if not already_emitted and token_callback is not None \
                             and hasattr(token_callback, "reset"):
@@ -4393,12 +4413,13 @@ class AikoThink:
         except Exception:
             return {}
 
-    def _commit_held_output(self, held: dict) -> None:
+    def _commit_held_output(self, held: dict) -> bool:
         """Commit an approved held turn: insert the text just after its user
         message and queue the memory write. Token resolve and insert happen
         under a single lock acquisition (no TOCTOU gap where a concurrent
         trim could shift the position). Raises when the anchor is gone
-        (trimmed) so the caller fails closed instead of misplacing it."""
+        (trimmed) so the caller fails closed instead of misplacing it. Returns
+        False if history succeeded but the memory write could not be confirmed."""
         token = held.get("hold_token")
         with self._history_lock:
             idx = None
@@ -4411,14 +4432,22 @@ class AikoThink:
                 raise ValueError("held-output anchor missing (trimmed?)")
             self._history.insert(idx, {"role": "assistant", "content": held["held_text"]})
         if held.get("store_turn"):
-            self._store_async(held.get("user_input") or "", held["held_text"])
+            try:
+                self._store_async(held.get("user_input") or "", held["held_text"])
+            except Exception as exc:
+                # The user-approved history insert already succeeded. Do not
+                # report it as withheld or mistake a memory ValueError for a
+                # missing anchor; the memory write has a separate outcome.
+                log.warning("[think] held output recorded, memory write unconfirmed: %s", exc)
+                return False
         log.info("[think] held output committed to history at position %d", idx)
+        return True
 
     def _purge_held_output(self, held: dict, marker: str) -> None:
         """Purge a declined/expired held turn: a withheld marker takes the
         turn's slot; nothing is stored to memory. Resolve and insert are
-        atomic under the history lock. Falls back to the recorded numeric
-        position for holds that predate token anchoring."""
+        atomic under the history lock. A trimmed/missing anchor never falls
+        back to a numeric position in a different turn or owner's history."""
         token = held.get("hold_token")
         with self._history_lock:
             idx = None
@@ -4428,7 +4457,8 @@ class AikoThink:
                         idx = i + 1
                         break
             if idx is None:
-                idx = max(0, min(held.get("history_len", 0), len(self._history)))
+                log.info("[think] held-output purge skipped: anchor no longer in this history")
+                return
             self._history.insert(idx, {"role": "assistant", "content": marker})
         log.info("[think] held output purged; marker at position %d", idx)
 

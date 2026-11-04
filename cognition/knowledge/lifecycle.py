@@ -62,6 +62,8 @@ def prune_knowledge(
     Prune knowledge DB: archive cold chunks, delete never-accessed old chunks,
     deduplicate near-duplicates. Returns stats dict.
     """
+    if not np.isfinite(dedupe_threshold) or not 0 <= dedupe_threshold <= 1:
+        raise ValueError("dedupe threshold must be finite and between zero and one")
     uid = user_id or current_user_id()
     conn = connect(uid)
     stats = {"archived": 0, "deleted": 0, "deduped": 0, "errors": 0}
@@ -109,6 +111,8 @@ def prune_knowledge(
             stats["deduped"] = _deduplicate_chunks(conn, uid, embedder, dedupe_threshold)
 
         conn.commit()
+        from .search import maybe_clear_knowledge_cache
+        maybe_clear_knowledge_cache()
     except Exception as exc:
         conn.rollback()
         log.warning("prune_knowledge failed: %s", exc)
@@ -194,8 +198,11 @@ def _deduplicate_chunks(
         else:
             batch = [embedder.embed_query(t) for t in texts]
         vectors = np.array(batch, dtype=np.float32)
+        if vectors.ndim != 2 or vectors.shape[0] != len(rows) or not vectors.shape[1] or not np.isfinite(vectors).all():
+            raise ValueError("invalid deduplication embedding matrix")
         norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-        norms[norms == 0] = 1
+        if not np.isfinite(norms).all() or np.any(norms <= 1e-12):
+            raise ValueError("invalid deduplication embedding norms")
         vectors = vectors / norms
         sim = vectors @ vectors.T
     except Exception as exc:

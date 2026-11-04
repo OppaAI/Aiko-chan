@@ -10,15 +10,15 @@ back to nothing (the interval scan remains available as a safety net).
 from __future__ import annotations
 
 import ctypes
+import contextvars
 import os
 import select
 import struct
 import threading
-import time
 from pathlib import Path
 
 from system.log import get_logger
-from system.userspace import user_workspace_root
+from system.userspace import user_workspace_root, current_user_id, set_current_user_id
 
 log = get_logger(__name__)
 
@@ -42,7 +42,9 @@ class KnowledgeFolderWatcher:
         knowledge_dir: str = "library",
         debounce_seconds: float = 1.5,
         on_files=None,
+        user_id: str | None = None,
     ):
+        self.user_id = user_id or current_user_id()
         self._knowledge_dir = knowledge_dir
         self._debounce = debounce_seconds
         self._on_files = on_files
@@ -53,7 +55,7 @@ class KnowledgeFolderWatcher:
 
     @property
     def folder(self) -> Path:
-        return (user_workspace_root() / self._knowledge_dir).resolve()
+        return (user_workspace_root(self.user_id) / self._knowledge_dir).resolve()
 
     def start(self) -> bool:
         """Start the watcher thread. Returns False when inotify is unavailable."""
@@ -74,7 +76,10 @@ class KnowledgeFolderWatcher:
             self._fd = None
             log.warning("knowledge watcher: failed to add watch: %s", exc)
             return False
-        self._thread = threading.Thread(target=self._run, name="aiko-knowledge-watch", daemon=True)
+        self._stop.clear()
+        context = contextvars.copy_context()
+        context.run(set_current_user_id, self.user_id)
+        self._thread = threading.Thread(target=context.run, args=(self._run,), name="aiko-knowledge-watch", daemon=True)
         self._thread.start()
         return True
 
@@ -107,7 +112,8 @@ class KnowledgeFolderWatcher:
                 pending.extend(_parse_events(data, self.folder))
 
             # Debounce: wait for the copy to settle, then fire once.
-            time.sleep(self._debounce)
+            if self._stop.wait(self._debounce):
+                break
             if not pending:
                 continue
 
@@ -149,9 +155,11 @@ def _inotify_close(fd: int) -> None:
 def _parse_events(data: bytes, folder: Path) -> list[Path]:
     paths: list[Path] = []
     offset = 0
-    while offset < len(data):
+    while offset + _INOTIFY_EVENT.size <= len(data):
         wd, mask, _cookie, name_len = _INOTIFY_EVENT.unpack_from(data, offset)
         offset += _INOTIFY_EVENT.size
+        if name_len > len(data) - offset:
+            break
         name = data[offset : offset + name_len].rstrip(b"\x00").decode("utf-8", errors="replace")
         offset += name_len
         if mask & _WATCH_MASK and name:

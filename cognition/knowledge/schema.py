@@ -149,8 +149,12 @@ def connect(user_id: str | None = None) -> sqlite3.Connection:
     delegates to (not a shim — this is the live code path). Kept for the historical
     import path."""
     conn = initialize_store_db(KNOWLEDGE_DB_PATH, _DDL, user_id=user_id, vector=True)
-    ensure_knowledge_schema_migrated(conn, user_id)
-    return conn
+    try:
+        ensure_knowledge_schema_migrated(conn, user_id)
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def ensure_knowledge_schema_migrated(conn: sqlite3.Connection, user_id: str | None = None) -> None:
@@ -233,5 +237,7 @@ def delete_all(user_id: str | None = None) -> dict[str, int]:
         conn.commit()
     finally:
         conn.close()
+    from .search import maybe_clear_knowledge_cache
+    maybe_clear_knowledge_cache()
     vacuum_knowledge_db(uid)
     return counts

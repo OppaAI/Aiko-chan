@@ -1318,6 +1318,15 @@ class _MemoryBackend:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def _knn_pass(self, vector, user_id, limit, active_only=True):
+        if vector is None:
+            return []
+        try:
+            return _sqlite_knn_search(self._conn, vector, user_id, limit, active_only=active_only)
+        except (sqlite3.Error, TypeError, ValueError) as exc:
+            log.warning("Memory vector index unavailable; using lexical/entity recall: %s", exc)
+            return []
+
     def _fts_pass(self, fts_query: str | None, user_id: str, fts_limit: int, active_only: bool = True) -> list[sqlite3.Row]:
         """Run one FTS5 BM25 pass. Returns [] if fts_query is None (nothing usable to match).
         Caller must hold self._db_lock."""
@@ -1951,153 +1960,6 @@ class _MemoryBackend:
                                        "include_history": include_history,
                                        "user_id": user_id}) as ctx:
             return self._search_inner(query, user_id, limit, vector, include_history, ctx)
-        # Phase 17: record query embedding for session dynamic anchor
-        try:
-            from cognition.memory.entity import push_query_vector
-            push_query_vector(user_id, vector)
-        except Exception:
-            pass
-        fts_query = _sanitize_fts_query(query)
-        query_entities = extract_entities(query, max_entities=5)
-        active_only = not include_history
-
-        # Phase 21: encoding-specificity context. Cheap heuristic valence/
-        # arousal of the query itself, matched against stored memory tags.
-        query_context: tuple[int, int] | None = None
-        if MEMORY_RECALL_CONTEXT_MATCH_ENABLED and MEMORY_RECALL_CONTEXT_MATCH_WEIGHT > 0:
-            try:
-                q_val = int(infer_valence_score(query))
-                q_aro = int(infer_arousal_score(query))
-                if q_val or q_aro:
-                    query_context = (q_val, q_aro)
-            except Exception:
-                query_context = None
-
-        entity_importance_map = {}
-        if MEMORY_RANK_ENTITY_IMPORTANCE_WEIGHT > 0:
-            entity_importance_map = self._get_entity_importance_map(user_id) or {}
-
-        # ── Quick pass: fetch candidate IDs only (short lock scope) ──
-        with self._db_lock:
-            self._ensure_open()
-            quick_knn_rows = _sqlite_knn_search(
-                self._conn, vector, user_id, QUICK_KNN_LIMIT, active_only=active_only
-            )
-            rank_knn_q = {row["id"]: i + 1 for i, row in enumerate(quick_knn_rows)}
-            quick_fts_rows = self._fts_pass(fts_query, user_id, QUICK_FTS_LIMIT, active_only=active_only)
-            rank_fts_q = {row["id"]: i + 1 for i, row in enumerate(quick_fts_rows)}
-            quick_graph_rows = self._graph_pass(query_entities, user_id, QUICK_GRAPH_LIMIT, active_only=active_only)
-            rank_graph_q = {row["id"]: i + 1 for i, row in enumerate(quick_graph_rows)}
-
-        # Fetch full rows for quick pass candidates (separate lock scope)
-        quick_all_ids = set(rank_knn_q) | set(rank_fts_q) | set(rank_graph_q)
-        with self._db_lock:
-            quick_row_by_id = self._fetch_full_rows(quick_all_ids)
-
-        # Score quick pass (no lock needed)
-        scored_ids, scores, row_by_id = self._rank_and_score(
-            rank_knn_q, rank_fts_q, rank_graph_q,
-            entity_importance_map=entity_importance_map,
-            query_context=query_context,
-            row_by_id=quick_row_by_id,
-            user_id=user_id,
-        )
-
-        confident = (
-            len(scored_ids) >= limit
-            and scores.get(scored_ids[limit - 1], 0.0) >= MEMORY_RECALL_SCORE_THRESHOLD
-        )
-
-        # ── Widen only if the quick pass was under-filled or under-confident ──
-        if not confident:
-            with self._db_lock:
-                wide_knn_rows = _sqlite_knn_search(
-                    self._conn, vector, user_id, KNN_LIMIT, active_only=active_only
-                )
-                rank_knn_w = {row["id"]: i + 1 for i, row in enumerate(wide_knn_rows)}
-                wide_fts_rows = self._fts_pass(fts_query, user_id, FTS_LIMIT, active_only=active_only)
-                rank_fts_w = {row["id"]: i + 1 for i, row in enumerate(wide_fts_rows)}
-                wide_graph_rows = self._graph_pass(query_entities, user_id, GRAPH_LIMIT, active_only=active_only)
-                rank_graph_w = {row["id"]: i + 1 for i, row in enumerate(wide_graph_rows)}
-
-            wide_all_ids = set(rank_knn_w) | set(rank_fts_w) | set(rank_graph_w)
-            # Latency #11: the wide candidate set is a superset of the quick
-            # pass — only fetch rows we haven't already fetched, then merge.
-            # Skips the redundant SELECT for overlapping IDs.
-            new_ids = wide_all_ids - set(quick_row_by_id)
-            with self._db_lock:
-                new_row_by_id = self._fetch_full_rows(new_ids) if new_ids else {}
-            wide_row_by_id = {**quick_row_by_id, **new_row_by_id}
-
-            scored_ids, scores, row_by_id = self._rank_and_score(
-                rank_knn_w, rank_fts_w, rank_graph_w,
-                entity_importance_map=entity_importance_map,
-                query_context=query_context,
-                row_by_id=wide_row_by_id,
-                user_id=user_id,
-            )
-
-        ordered_ids = self._apply_recency_rerank(scored_ids, scores, row_by_id)
-        top_ids = ordered_ids[:limit]
-
-        results = []
-        for mid in top_ids:
-            if mid not in row_by_id:
-                continue
-            d = dict(row_by_id[mid])
-            d["_recall_score"] = scores.get(mid, 0.0)
-            results.append(d)
-
-        activation: dict[str, float] = {}
-        if MEMORY_SPREADING_ENABLED and results:
-            try:
-                with self._db_lock:
-                    exclude = {str(r.get("id")) for r in results}
-                    activation, extra_ids = self._spreading_extra_ids(
-                        user_id, results, exclude_ids=exclude, query=query,
-                    )
-                    if extra_ids:
-                        placeholders = ",".join("?" * len(extra_ids))
-                        rows = self._conn.execute(
-                            f"SELECT * FROM memories WHERE id IN ({placeholders}) AND user_id = ?",
-                            list(extra_ids) + [user_id],
-                        ).fetchall()
-                        for row in rows:
-                            d = dict(row)
-                            d["_recall_score"] = 0.0
-                            d["_from_spreading"] = True
-                            results.append(d)
-            except Exception as exc:
-                log.debug("spreading activation skipped: %s", exc)
-
-        if MEMORY_SPREADING_SCORE_WEIGHT > 0 and activation and results:
-            try:
-                from cognition.memory.entity import memory_max_activation
-                for r in results:
-                    boost = MEMORY_SPREADING_SCORE_WEIGHT * memory_max_activation(r, activation)
-                    r["_recall_score"] = float(r.get("_recall_score") or 0.0) + boost
-                results.sort(key=lambda x: float(x.get("_recall_score") or 0.0), reverse=True)
-            except Exception as exc:
-                log.debug("spreading activation score boost skipped: %s", exc)
-
-        if MEMORY_NEG_RECALL_AVOID and results:
-            relax = MEMORY_NEG_RECALL_AVOID_EXCEPT and query_wants_emotion(query or "")
-            if not relax:
-                from cognition.memory.forget import negative_recall_penalty
-                for r in results:
-                    if r.get("pinned"):
-                        continue
-                    pen = negative_recall_penalty(
-                        valence_tag=r.get("valence_tag"),
-                        valence_score=r.get("valence_score"),
-                    )
-                    if pen > 0:
-                        r["_recall_score"] = float(r.get("_recall_score") or 0.0) - pen
-                results.sort(key=lambda x: float(x.get("_recall_score") or x.get("score") or 0.0), reverse=True)
-
-        # Phase 19: sticky-neg not volunteered unless query engages them
-        results = apply_neg_hard_filter(results, query)
-        return results[:limit]
 
     def _expand_supersession_chains(self, query: str, user_id: str, results: list[dict], limit: int = 5) -> list[dict]:
         """Expand supersession chains — older → newer for hits that need lineage."""
@@ -2133,9 +1995,15 @@ class _MemoryBackend:
 
     def _search_inner(self, query, user_id, limit, vector, include_history, ctx):
         """Heavy lift of search(), split out so brain_trace.step can wrap it."""
+        if limit <= 0:
+            return []
         if vector is None:
-            vector = self._embed(query, query=True)
-            ctx.add_extra(vector_embedded_here=True, dims=len(vector))
+            try:
+                vector = self._embed(query, query=True)
+                ctx.add_extra(vector_embedded_here=True, dims=len(vector))
+            except Exception as exc:
+                log.warning("Memory query embedding unavailable; using lexical/entity recall: %s", exc)
+                ctx.add_extra(vector_embedded_here=False, embedding_unavailable=True)
         else:
             ctx.add_extra(vector_embedded_here=False, dims=len(vector))
         # Phase 17: record query embedding for session dynamic anchor
@@ -2167,9 +2035,7 @@ class _MemoryBackend:
         # ── Quick pass: fetch candidate IDs only (short lock scope) ──
         with self._db_lock:
             self._ensure_open()
-            quick_knn_rows = _sqlite_knn_search(
-                self._conn, vector, user_id, QUICK_KNN_LIMIT, active_only=active_only
-            )
+            quick_knn_rows = self._knn_pass(vector, user_id, QUICK_KNN_LIMIT, active_only=active_only)
             rank_knn_q = {row["id"]: i + 1 for i, row in enumerate(quick_knn_rows)}
             quick_fts_rows = self._fts_pass(fts_query, user_id, QUICK_FTS_LIMIT, active_only=active_only)
             rank_fts_q = {row["id"]: i + 1 for i, row in enumerate(quick_fts_rows)}
@@ -2212,9 +2078,7 @@ class _MemoryBackend:
         # ── Widen only if the quick pass was under-filled or under-confident ──
         if not confident:
             with self._db_lock:
-                wide_knn_rows = _sqlite_knn_search(
-                    self._conn, vector, user_id, KNN_LIMIT, active_only=active_only
-                )
+                wide_knn_rows = self._knn_pass(vector, user_id, KNN_LIMIT, active_only=active_only)
                 rank_knn_w = {row["id"]: i + 1 for i, row in enumerate(wide_knn_rows)}
                 wide_fts_rows = self._fts_pass(fts_query, user_id, FTS_LIMIT, active_only=active_only)
                 rank_fts_w = {row["id"]: i + 1 for i, row in enumerate(wide_fts_rows)}
@@ -2569,6 +2433,7 @@ class AikoMemorize:
             maxsize=MEMORY_WRITE_QUEUE_MAXSIZE
         )
         self._user_switch_lock = threading.RLock()
+        self._accepting_writes = True
         self._write_worker = threading.Thread(target=self._write_loop, daemon=True)
         self._write_worker.start()
         self._last_cache_clear_time: float = 0.0
@@ -2776,6 +2641,8 @@ class AikoMemorize:
         previous user's store.
         """
         with self._user_switch_lock:
+            if not getattr(self, "_accepting_writes", True):
+                return False
             # Drain any pending writes first. If a write is still in flight when
             # we close the connection and reassign self._mem below, the
             # write-worker thread's in-progress self.add() call can end up
@@ -3020,6 +2887,9 @@ class AikoMemorize:
         best-effort; a dropped turn simply isn't persisted.
         """
         with self._user_switch_lock:
+            if not getattr(self, "_accepting_writes", True):
+                log.warning("Memory write ignored after shutdown started")
+                return
             user_id = self._resolve_user_id(user_id)  # resolved here, on the caller's thread — not in _write_loop
             display_name = display_name or current_display_name()
             if _brain_trace and _brain_trace.TRACE_ENABLED:
@@ -3103,8 +2973,10 @@ class AikoMemorize:
                 # corrupting the sqlite heap (flaky segfaults) or
                 # checkpointing the wrong user's DB.
                 try:
-                    if self._conn:
-                        self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    backend = self._mem_backend
+                    if item is not None and backend is not None:
+                        with backend._db_lock:
+                            backend._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 except Exception:
                     pass
                 self._write_queue.task_done()
@@ -3158,61 +3030,63 @@ class AikoMemorize:
         the heap-corruption/segfault scenario the _write_loop finally-block
         comment warns about — leak-on-shutdown beats segfault.
         """
-        # Use MEMORY_WRITE_MAX_WAIT + buffer since the write worker may wait
-        # for an idle window up to that long before processing queued writes
-        # (same discipline as switch_user()).
-        drain_timeout = MEMORY_WRITE_MAX_WAIT + 15.0
-        try:
-            if not self.wait_for_writes(timeout=drain_timeout):
-                log.error(
-                    "AikoMemorize.close(): pending writes did not drain within %.0fs",
-                    drain_timeout,
-                )
-        except Exception as e:
-            log.debug("AikoMemorize.close(): wait_for_writes: %s", e)
-        # Stop the write-worker thread if it's running. The sentinel put must
-        # not block: the queue is bounded, and with a wedged worker a
-        # blocking put() would hang shutdown forever — drop the oldest item
-        # to make room for the sentinel instead.
-        if self._write_worker is not None and self._write_worker.is_alive():
+        with self._user_switch_lock:
+            self._accepting_writes = False
+            # Use MEMORY_WRITE_MAX_WAIT + buffer since the write worker may wait
+            # for an idle window up to that long before processing queued writes
+            # (same discipline as switch_user()).
+            drain_timeout = MEMORY_WRITE_MAX_WAIT + 15.0
             try:
+                if not self.wait_for_writes(timeout=drain_timeout):
+                    log.error(
+                        "AikoMemorize.close(): pending writes did not drain within %.0fs",
+                        drain_timeout,
+                    )
+            except Exception as e:
+                log.debug("AikoMemorize.close(): wait_for_writes: %s", e)
+            # Stop the write-worker thread if it's running. The sentinel put must
+            # not block: the queue is bounded, and with a wedged worker a
+            # blocking put() would hang shutdown forever — drop the oldest item
+            # to make room for the sentinel instead.
+            if self._write_worker is not None and self._write_worker.is_alive():
                 try:
-                    self._write_queue.put_nowait(None)
-                except queue.Full:
-                    try:
-                        self._write_queue.get_nowait()
-                        self._write_queue.task_done()
-                    except queue.Empty:
-                        pass
                     try:
                         self._write_queue.put_nowait(None)
                     except queue.Full:
-                        log.warning("AikoMemorize.close(): write queue full; worker may not observe shutdown")
-                self._write_worker.join(timeout=drain_timeout)
+                        try:
+                            self._write_queue.get_nowait()
+                            self._write_queue.task_done()
+                        except queue.Empty:
+                            pass
+                        try:
+                            self._write_queue.put_nowait(None)
+                        except queue.Full:
+                            log.warning("AikoMemorize.close(): write queue full; worker may not observe shutdown")
+                    self._write_worker.join(timeout=drain_timeout)
+                except Exception as e:
+                    log.debug("AikoMemorize.close(): write worker shutdown: %s", e)
+            worker_exited = self._write_worker is None or not self._write_worker.is_alive()
+            if not worker_exited:
+                log.error(
+                    "AikoMemorize.close(): write worker still alive after %.0fs; "
+                    "leaving the sqlite connection open rather than closing it "
+                    "under a live worker",
+                    drain_timeout,
+                )
+            elif self._mem_backend is not None:
+                with self._mem._db_lock:
+                    try:
+                        self._conn.close()
+                    except Exception:
+                        pass
+            # Episodic stores were previously leaked here (only switch_user and
+            # LRU eviction closed them): flush + close so no buffered episode
+            # write survives its owner on shutdown.
+            try:
+                if self.episodic is not None:
+                    self.episodic.close_all()
             except Exception as e:
-                log.debug("AikoMemorize.close(): write worker shutdown: %s", e)
-        worker_exited = self._write_worker is None or not self._write_worker.is_alive()
-        if not worker_exited:
-            log.error(
-                "AikoMemorize.close(): write worker still alive after %.0fs; "
-                "leaving the sqlite connection open rather than closing it "
-                "under a live worker",
-                drain_timeout,
-            )
-        elif self._mem_backend is not None:
-            with self._mem._db_lock:
-                try:
-                    self._conn.close()
-                except Exception:
-                    pass
-        # Episodic stores were previously leaked here (only switch_user and
-        # LRU eviction closed them): flush + close so no buffered episode
-        # write survives its owner on shutdown.
-        try:
-            if self.episodic is not None:
-                self.episodic.close_all()
-        except Exception as e:
-            log.debug("AikoMemorize.close(): episodic close: %s", e)
+                log.debug("AikoMemorize.close(): episodic close: %s", e)
 
     # ── read ──────────────────────────────────────────────────────────────────
 

@@ -13,6 +13,11 @@ The HarrierEmbedder class provides HTTP-based text embeddings via llama-server.
 from __future__ import annotations
 
 import os
+import json
+import tempfile
+import contextlib
+import uuid
+from itertools import islice
 import re
 import sqlite3
 import struct
@@ -118,11 +123,11 @@ class HarrierEmbedder:
     Optional persistent disk cache (EMBED_CACHE_PATH) survives restarts.
     """
 
-    _CACHE_MAX: int = 256
+    _CACHE_MAX: int = 256  # retained vectors, not batches
     # Nano default 300s: same greeting/query must not re-embed after 30s.
     # Override with EMBED_CACHE_TTL seconds when needed.
     _CACHE_TTL: float = env_float("EMBED_CACHE_TTL", 300.0)
-    _DISK_CACHE_MAX: int = 2048  # cap on in-RAM disk-cache entries
+    _DISK_CACHE_MAX: int = 2048  # cap on retained vectors
     _DISK_CACHE_FILE_MAX_BYTES: int = 8 * 1024 * 1024  # compact JSONL past this
 
     def __init__(
@@ -137,16 +142,18 @@ class HarrierEmbedder:
         self.base_url   = base_url.rstrip("/")
         self.model      = model
         self.dims       = dims
-        self.batch_size = batch_size
+        self.batch_size = int(batch_size)
+        if self.batch_size < 1 or int(dims) < 1:
+            raise ValueError("embedding dimensions and batch size must be positive")
         self.timeout    = timeout
         self._session   = requests.Session()
         self._cache: OrderedDict[tuple[str, ...], tuple[float, np.ndarray]] = OrderedDict()
         self._cache_lock = threading.Lock()
 
         # Persistent disk cache for embeddings across restarts
-        self._disk_cache_path = Path(cache_path) if cache_path else None
+        self._disk_cache_path = Path(cache_path).expanduser() if cache_path else None
         self._disk_cache: dict[tuple[str, ...], np.ndarray] = {}
-        self._disk_cache_lock = threading.Lock()
+        self._disk_cache_lock = threading.RLock()
         if self._disk_cache_path:
             self._load_disk_cache()
 
@@ -168,81 +175,109 @@ class HarrierEmbedder:
         self._cb_failures: int = 0
         self._cb_open_until: float = 0.0
 
-    def _load_disk_cache(self) -> None:
-        """Load embeddings from disk cache (JSON Lines format).
+    def _geometry(self, mode=None):
+        return (self.base_url, self.model, self.dims, _flyal_mode() if mode is None else mode)
 
-        Keeps only the most recent _DISK_CACHE_MAX entries — the file is
-        append-ordered, so the tail wins and a stale 100k-line cache from
-        before the cap can't OOM the Nano on boot.
-        """
+    def _embedding_key(self, texts, mode=None):
+        return (*self._geometry(mode), tuple(texts))
+
+    def _validated_batch(self, values, count):
+        arr = np.asarray(values, dtype=np.float32)
+        if arr.shape != (count, self.dims) or not np.isfinite(arr).all():
+            raise ValueError("embedding response has invalid dimensions, count, or values")
+        norms = np.linalg.norm(arr, axis=1, keepdims=True)
+        if not np.isfinite(norms).all() or np.any(norms <= 1e-12):
+            raise ValueError("embedding response contains zero or invalid vectors")
+        return arr
+
+    @staticmethod
+    def _trim_vector_cache(cache, limit):
+        # Limits count vectors, not batches, so a larger batch setting cannot
+        # multiply cache RAM usage on an 8 GB device.
+        count = sum(len(value[1] if isinstance(value, tuple) else value) for value in cache.values())
+        while cache and count > limit:
+            oldest = next(iter(cache))
+            value = cache.pop(oldest)
+            count -= len(value[1] if isinstance(value, tuple) else value)
+
+    @contextlib.contextmanager
+    def _disk_guard(self):
+        # The sidecar lock also coordinates separate instances/processes.
+        import fcntl
+        self._disk_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._disk_cache_lock, self._disk_cache_path.with_suffix(self._disk_cache_path.suffix + ".lock").open("a") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def _load_disk_cache(self) -> None:
+        """Stream validated, geometry-tagged batches with bounded retention."""
         if not self._disk_cache_path or not self._disk_cache_path.exists():
             return
         try:
-            import json
-            self._disk_cache_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._disk_cache_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                        key = tuple(entry["texts"])
-                        # Entries written before the AL layer (or under another
-                        # mode) are skipped so geometry never mixes modes.
-                        if entry.get("flyal", "off") != _flyal_mode():
-                            continue
-                        vec = np.asarray(entry["vector"], dtype=np.float32)
-                        # Drop stale geometry: wrong dims poison sqlite-vec
-                        # inserts/searches downstream.
-                        if vec.shape != (self.dims,):
-                            continue
-                        self._disk_cache[key] = vec
-                    except Exception:
-                        continue
-            log.info(f"Loaded {len(self._disk_cache)} embeddings from disk cache: {self._disk_cache_path}")
-            if len(self._disk_cache) > self._DISK_CACHE_MAX:
-                tail = list(self._disk_cache.items())[-self._DISK_CACHE_MAX:]
-                self._disk_cache = dict(tail)
-                log.info(f"Trimmed disk embedding cache to {len(self._disk_cache)} most-recent entries")
-        except Exception as e:
-            log.warning(f"Failed to load disk embedding cache: {e}")
+            with self._disk_guard(), self._disk_cache_path.open("rb") as stream:
+                self._read_disk_entries(stream, self._disk_cache)
+        except Exception as exc:
+            log.warning("Failed to load embedding cache: %s", exc)
 
-    def _save_to_disk_cache(self, key: tuple[str, ...], vec: np.ndarray) -> None:
-        """Append embedding to disk cache (JSON Lines)."""
+    def _read_disk_entries(self, stream, cache):
+        # Corrupt or obsolete cache lines are disposable; never allocate an
+        # unbounded line from an old cache or accept untagged model geometry.
+        line_limit = 1024 * 1024
+        while line := stream.readline(line_limit + 1):
+            if len(line) > line_limit:
+                while line and not line.endswith(b"\n"):
+                    line = stream.readline(line_limit + 1)
+                continue
+            try:
+                entry = json.loads(line)
+                if entry.get("geometry") != list(self._geometry()):
+                    continue
+                texts = entry["texts"]
+                if not isinstance(texts, list) or not texts or not all(isinstance(t, str) for t in texts):
+                    continue
+                vec = self._validated_batch(entry["vector"], len(texts))
+                key = self._embedding_key(texts)
+                cache.pop(key, None)
+                cache[key] = vec
+                self._trim_vector_cache(cache, self._DISK_CACHE_MAX)
+            except (ValueError, TypeError, KeyError, AttributeError):
+                continue
+
+    @staticmethod
+    def _disk_entry(key, vec):
+        return {"geometry": list(key[:4]), "texts": list(key[4]), "vector": vec.tolist()}
+
+    def _save_to_disk_cache(self, key, vec) -> None:
         if not self._disk_cache_path:
             return
         try:
-            import json
-            entry = {"texts": list(key), "vector": vec.tolist(), "flyal": _flyal_mode()}
-            with open(self._disk_cache_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-            self._maybe_compact_disk_cache()
-        except Exception as e:
-            log.debug(f"Failed to write disk embedding cache: {e}")
+            with self._disk_guard():
+                with self._disk_cache_path.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(self._disk_entry(key, vec), ensure_ascii=False) + "\n")
+                self._maybe_compact_disk_cache()
+        except Exception as exc:
+            log.debug("Failed to write embedding cache: %s", exc)
 
     def _maybe_compact_disk_cache(self) -> None:
-        """Rewrite an overgrown JSONL cache from the capped in-RAM dict."""
+        # Called under _disk_guard so appends cannot be lost during replace.
+        if not self._disk_cache_path or self._disk_cache_path.stat().st_size <= self._DISK_CACHE_FILE_MAX_BYTES:
+            return
+        entries = {}
+        with self._disk_cache_path.open("rb") as stream:
+            self._read_disk_entries(stream, entries)
+        fd, temporary = tempfile.mkstemp(prefix=".embed-cache-", dir=self._disk_cache_path.parent)
         try:
-            if not self._disk_cache_path or not self._disk_cache_path.exists():
-                return
-            if self._disk_cache_path.stat().st_size <= self._DISK_CACHE_FILE_MAX_BYTES:
-                return
-            import json
-            with self._disk_cache_lock:
-                entries = list(self._disk_cache.items())
-            tmp = self._disk_cache_path.with_suffix(".tmp")
-            with open(tmp, "w", encoding="utf-8") as f:
-                for key, vec in entries:
-                    # Keep the flyal tag: tagless entries are skipped on
-                    # reload whenever the mode is not off (mass cache miss
-                    # after one compaction).
-                    f.write(json.dumps({"texts": list(key), "vector": np.asarray(vec).tolist(),
-                                        "flyal": _flyal_mode()}, ensure_ascii=False) + "\n")
-            tmp.replace(self._disk_cache_path)
-            log.info(f"Compacted disk embedding cache to {len(entries)} entries")
-        except Exception as e:
-            log.debug(f"Disk embedding cache compaction skipped: {e}")
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                for key, vec in entries.items():
+                    stream.write(json.dumps(self._disk_entry(key, vec), ensure_ascii=False) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self._disk_cache_path)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
 
     def _embed_texts(self, texts: list[str]) -> np.ndarray:
         """
@@ -253,39 +288,28 @@ class HarrierEmbedder:
         of input texts, so duplicate calls within _CACHE_TTL seconds skip the
         HTTP round-trip. Also checks persistent disk cache.
         """
-        key = tuple(texts)
+        if not texts:
+            return np.empty((0, self.dims), dtype=np.float32)
         now = time.monotonic()
         mode = _flyal_mode()
-        if getattr(self, "_flyal_seen_mode", None) not in (None, mode):
-            # Mid-run flip: drop both caches so raw and gain-controlled
-            # geometry never mix (disk file keeps tagged lines for later boots).
-            with self._cache_lock:
-                self._cache.clear()
-            with self._disk_cache_lock:
-                self._disk_cache.clear()
-            log.info(f"flyal mode -> {mode}; embedding caches cleared for geometry consistency")
-        self._flyal_seen_mode = mode
-        # In-RAM cache is partitioned by AL mode so a mid-run flip can never
-        # serve geometry from another mode (disk entries carry their own tag).
-        mkey = (f"flyal={mode}",) + key
+        mkey = self._embedding_key(texts, mode)
 
         # Check memory cache first
         with self._cache_lock:
             cached = self._cache.get(mkey)
             if cached is not None and now - cached[0] <= self._CACHE_TTL:
                 self._cache.move_to_end(mkey)
-                return cached[1]
+                return cached[1].copy()
 
         # Check disk cache
         with self._disk_cache_lock:
-            disk_cached = self._disk_cache.get(key)
+            disk_cached = self._disk_cache.get(mkey)
             if disk_cached is not None:
                 # Promote to memory cache
                 with self._cache_lock:
                     self._cache[mkey] = (now, disk_cached)
-                    while len(self._cache) > self._CACHE_MAX:
-                        self._cache.popitem(last=False)
-                return disk_cached
+                    self._trim_vector_cache(self._cache, self._CACHE_MAX)
+                return disk_cached.copy()
 
         # Circuit breaker: after _CB_FAILURES consecutive HTTP failures,
         # fail fast for _CB_COOLDOWN_S instead of burning timeout×retries
@@ -305,7 +329,20 @@ class HarrierEmbedder:
             )
             resp.raise_for_status()
             data = resp.json()
-        except Exception:
+            if not isinstance(data, list) or len(data) != len(texts):
+                raise ValueError("embedding response count mismatch")
+            vecs = []
+            for item in data:
+                emb = item["embedding"]
+                if emb and isinstance(emb[0], list):
+                    if len(emb) != 1:
+                        raise ValueError("embedding response has multiple vectors per input")
+                    emb = emb[0]
+                vecs.append(emb)
+            arr = self._validated_batch(vecs, len(texts))
+        except Exception as exc:
+            if isinstance(exc, requests.exceptions.HTTPError) and getattr(exc.response, "status_code", None) == 400:
+                raise  # oversized input is not an unavailable backend
             with self._cache_lock:
                 self._cb_failures += 1
                 if self._cb_failures >= _CB_FAILURES:
@@ -320,18 +357,7 @@ class HarrierEmbedder:
             self._cb_failures = 0
             self._cb_open_until = 0.0
 
-        vecs = []
-        for item in data:
-            emb = item["embedding"]
-            if isinstance(emb[0], list):
-                emb = emb[0]
-            vecs.append(emb)
-
-        arr = np.asarray(vecs, dtype=np.float32)
-
-        norms = np.linalg.norm(arr, axis=1, keepdims=True)
-        norms = np.where(norms == 0, 1.0, norms)
-        result = arr / norms
+        result = arr / np.linalg.norm(arr, axis=1, keepdims=True)
 
         # Fly AL layer: divisive gain control (shadow logs, live replaces).
         if mode in ("shadow", "live"):
@@ -346,27 +372,25 @@ class HarrierEmbedder:
                 log.debug(f"flyal transform skipped: {exc}")
 
         # Store in both caches (both capped LRU-style). The disk-cache dict
-        # mutation holds the lock; the file append below takes it again
-        # briefly inside _maybe_compact_disk_cache, so it must run outside.
+        # mutation holds the lock; file appends and compaction are separately
+        # serialized across instances/processes by the sidecar file lock.
         with self._cache_lock:
-            self._cache[mkey] = (now, result)
-            while len(self._cache) > self._CACHE_MAX:
-                self._cache.popitem(last=False)
+            self._cache[mkey] = (time.monotonic(), result.copy())
+            self._trim_vector_cache(self._cache, self._CACHE_MAX)
 
-        with self._disk_cache_lock:
-            self._disk_cache[key] = result
-            while len(self._disk_cache) > self._DISK_CACHE_MAX:
-                self._disk_cache.popitem(next(iter(self._disk_cache)))
-        self._save_to_disk_cache(key, result)
+        if self._disk_cache_path:
+            with self._disk_cache_lock:
+                self._disk_cache[mkey] = result.copy()
+                self._trim_vector_cache(self._disk_cache, self._DISK_CACHE_MAX)
+            self._save_to_disk_cache(mkey, result)
 
         return result
 
     def embed(self, texts: Iterable[str]) -> Generator[np.ndarray, None, None]:
         """Embed documents (no instruction prefix). Yields one np.ndarray(dim,) per text."""
-        texts = list(texts)
-        for start in range(0, len(texts), self.batch_size):
-            batch = texts[start : start + self.batch_size]
-            vecs  = self._embed_texts(batch)
+        iterator = iter(texts)
+        while batch := list(islice(iterator, self.batch_size)):
+            vecs = self._embed_texts(batch)
             for v in vecs:
                 yield v
 
@@ -376,7 +400,7 @@ class HarrierEmbedder:
         for start in range(0, len(texts), self.batch_size):
             batch = texts[start : start + self.batch_size]
             all_vecs.append(self._embed_texts(batch))
-        return np.vstack(all_vecs)
+        return np.vstack(all_vecs) if all_vecs else np.empty((0, self.dims), dtype=np.float32)
 
     def embed_query(self, query: str, instruct: str = _QUERY_INSTRUCT) -> np.ndarray:
         """
@@ -440,46 +464,60 @@ def connect_sqlite_db(path: str | os.PathLike[str], *, user_id: str | None = Non
     # CWD (e.g. the repo root when launched via main.py).
     resolved = resolve_user_db_path(path, user_id=uid)
     conn = connect_sqlite(resolved, user_id=uid)
-    conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
-    conn.execute("PRAGMA journal_mode = WAL")
-    return conn
+    try:
+        conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
+        conn.execute("PRAGMA journal_mode = WAL")
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def initialize_sqlite_db(path: str | os.PathLike[str], ddl: str, *, user_id: str | None = None) -> sqlite3.Connection:
     """Open a standard SQLite DB, apply schema DDL, commit, and return connection."""
     conn = connect_sqlite_db(path, user_id=user_id)
-    conn.executescript(ddl)
-    conn.commit()
-    return conn
+    try:
+        conn.executescript(ddl)
+        conn.commit()
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def connect_sqlite_vec(path: str | os.PathLike[str], *, user_id: str | None = None, busy_timeout_ms: int = 5000) -> sqlite3.Connection:
     """Open an optionally encrypted SQLite connection with sqlite-vec loaded."""
-    uid = user_id or current_user_id()
-    resolved = resolve_user_db_path(path, user_id=uid)
-    conn = connect_sqlite(resolved, user_id=uid)
-    conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
-    conn.execute("PRAGMA journal_mode = WAL")
+    conn = connect_sqlite_db(path, user_id=user_id, busy_timeout_ms=busy_timeout_ms)
     try:
-        conn.enable_load_extension(True)
-    except Exception:
-        pass
-    import sqlite_vec
-    sqlite_vec.load(conn)
-    try:
-        conn.enable_load_extension(False)
-    except Exception:
-        pass
-    return conn
+        try:
+            conn.enable_load_extension(True)
+        except Exception:
+            pass
+        try:
+            import sqlite_vec
+            sqlite_vec.load(conn)
+        finally:
+            try:
+                conn.enable_load_extension(False)
+            except Exception:
+                pass
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def initialize_sqlite_vec_db(path: str | os.PathLike[str], ddl: str, *, user_id: str | None = None) -> Any:
     """Open a sqlite-vec DB, apply schema DDL, commit, and return connection."""
     conn = connect_sqlite_vec(path, user_id=user_id)
-    conn.executescript(ddl)
-    conn.commit()
-    ensure_vec0_cosine_metric(conn)
-    return conn
+    try:
+        conn.executescript(ddl)
+        conn.commit()
+        ensure_vec0_cosine_metric(conn)
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 _VEC0_TABLE_RE = re.compile(
@@ -489,63 +527,44 @@ _VEC0_TABLE_RE = re.compile(
 
 
 def ensure_vec0_cosine_metric(conn: sqlite3.Connection) -> list[str]:
-    """Rebuild any vec0 table that was created without `distance_metric=cosine`.
+    """Atomically rebuild legacy vector indexes without materializing them in RAM.
 
-    vec0's default metric is L2, but every KNN caller in this codebase
-    interprets the returned `distance` as cosine (1 - similarity) and applies
-    cosine-based thresholds (dedup, recall, dream merge). Running MATCH against
-    an L2-metric table would silently rank by L2 and return L2 distances, so
-    existing stores must be migrated once. sqlite-vec 0.1.9 cannot ALTER a
-    vec0 table's metric, so we rebuild in place: copy rows out, drop, recreate
-    with the metric, reinsert. Returns the list of migrated table names.
+    Copy identifiers and embeddings in the same SQL projection; separate scans
+    are not guaranteed to visit virtual-table rows in the same order. A savepoint
+    retains the original index and caller transaction if any rebuild step fails.
     """
-    migrated: list[str] = []
-    try:
-        rows = conn.execute(
-            "SELECT name, sql FROM sqlite_master WHERE type = 'table'"
-        ).fetchall()
-    except sqlite3.Error as e:
-        log.debug("vec0 metric scan skipped: %s", e)
-        return migrated
+    migrated = []
+    rows = conn.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table'").fetchall()
     for name, ddl_sql in rows:
-        ddl_sql = ddl_sql or ""
-        if "USING vec0" not in ddl_sql or "distance_metric=cosine" in ddl_sql:
+        match = _VEC0_TABLE_RE.search(ddl_sql or "")
+        if not match or re.search(r"distance_metric\s*=\s*cosine", ddl_sql, re.I):
             continue
-        m = _VEC0_TABLE_RE.search(ddl_sql)
-        if not m:
+        name = _ident(name)
+        cols = conn.execute(f"PRAGMA table_info({name})").fetchall()
+        if not any(c[1] == "embedding" for c in cols):
             continue
-        cols_text = m.group(2).rstrip()
-        new_ddl = f"CREATE VIRTUAL TABLE IF NOT EXISTS {name} USING vec0({cols_text} distance_metric=cosine);"
+        key = "id" if any(c[1] == "id" for c in cols) else "rowid"
+        definition = match.group(2).rstrip()
+        if re.search(r"distance_metric\s*=", definition, re.I):
+            definition = re.sub(r"distance_metric\s*=\s*\w+", "distance_metric=cosine", definition, flags=re.I)
+        else:
+            definition = re.sub(r"(\b(?:float|int8)\s*\[\s*\d+\s*\])",
+                                r"\1 distance_metric=cosine", definition, count=1, flags=re.I)
+        temporary = "vec_backup_" + uuid.uuid4().hex
+        conn.execute("SAVEPOINT vec_metric_migration")
         try:
-            cols = conn.execute(f"PRAGMA table_info({name})").fetchall()
-            id_col = next((c[1] for c in cols if c[1] == "id"), None)
-            embed_col = next((c[1] for c in cols if c[1] == "embedding"), None)
-            if not embed_col:
-                continue
-            if id_col:
-                id_rows = conn.execute(f"SELECT {id_col} FROM {name}").fetchall()
-            else:
-                id_rows = conn.execute(f"SELECT rowid FROM {name}").fetchall()
-            embed_rows = conn.execute(f"SELECT {embed_col} FROM {name}").fetchall()
-            rows_out = [(r[0], e[0]) for r, e in zip(id_rows, embed_rows)]
+            conn.execute(f"CREATE TEMP TABLE {temporary} AS SELECT {key} AS vector_id, embedding FROM {name}")
             conn.execute(f"DROP TABLE {name}")
-            conn.executescript(new_ddl)
-            for rowid, embedding in rows_out:
-                if id_col:
-                    conn.execute(
-                        f"INSERT INTO {name}({id_col}, embedding) VALUES (?, ?)",
-                        (rowid, embedding),
-                    )
-                else:
-                    conn.execute(
-                        f"INSERT INTO {name}(rowid, embedding) VALUES (?, ?)",
-                        (rowid, embedding),
-                    )
-            conn.commit()
-            migrated.append(name)
-            log.info("vec0 %s: migrated to distance_metric=cosine (%d rows)", name, len(rows_out))
-        except sqlite3.Error as e:
-            log.warning("vec0 %s metric migration skipped: %s", name, e)
+            conn.execute(f"CREATE VIRTUAL TABLE {name} USING vec0({definition})")
+            conn.execute(f"INSERT INTO {name}({key}, embedding) SELECT vector_id, embedding FROM {temporary}")
+            conn.execute(f"DROP TABLE {temporary}")
+            conn.execute("RELEASE SAVEPOINT vec_metric_migration")
+        except BaseException:
+            conn.execute("ROLLBACK TO SAVEPOINT vec_metric_migration")
+            conn.execute("RELEASE SAVEPOINT vec_metric_migration")
+            raise
+        migrated.append(name)
+        log.info("vec0 %s: migrated to distance_metric=cosine", name)
     return migrated
 
 

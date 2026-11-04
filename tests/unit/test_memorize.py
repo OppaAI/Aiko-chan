@@ -220,6 +220,15 @@ def _bare_memo(backend, user_id: str = "u1"):
     return memo
 
 
+def test_embedding_outage_retains_personal_keyword_recall(backend, monkeypatch):
+    monkeypatch.setattr(backend, '_embed', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('offline')))
+    saved = backend.add_raw('OppaAI enjoys autumn leaves in Kyoto.', user_id='owner')
+    assert saved
+    results = backend.search('autumn leaves Kyoto', user_id='owner')
+    assert saved in {row['id'] for row in results}
+    assert backend.search('autumn leaves Kyoto', user_id='other') == []
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Tier 2 — ranking / scoring, hand-seeded rows, no embedder call during scoring
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1653,6 +1662,8 @@ class TestCloseDrainDiscipline:
         memo = AikoMemorize.__new__(AikoMemorize)
         memo._mem_backend = backend
         memo._write_queue = queue.Queue()
+        memo._user_switch_lock = threading.RLock()
+        memo._accepting_writes = True
         memo.episodic = None
 
         def fake_write_loop():
@@ -1707,6 +1718,9 @@ class TestCloseDrainDiscipline:
         elapsed = time.monotonic() - start
         assert elapsed < 5.0
         assert not memo._write_worker.is_alive()
+        memo.queue_write('late user input', 'late response')
+        assert memo._write_queue.unfinished_tasks == 0
+        assert memo.switch_user('other') is False
         with pytest.raises(sqlite3.ProgrammingError):
             backend._conn.execute("SELECT 1")
 

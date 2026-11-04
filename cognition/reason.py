@@ -62,13 +62,27 @@ _EMBED_QUERY_CACHE_MAX = env_int("EMBED_QUERY_CACHE_MAX", 1024)
 _embed_query_cache: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
 _embed_query_cache_lock = threading.Lock()
 
+class _EmbeddingInstance:
+    """Keep foreign providers alive while identity-keyed cache entries exist."""
+    __slots__ = ("owner",)
+
+    def __init__(self, owner):
+        self.owner = owner
+
+    def __hash__(self):
+        return id(self.owner)
+
+    def __eq__(self, other):
+        return isinstance(other, _EmbeddingInstance) and self.owner is other.owner
+
+
 def _cache_key(text: str, instruct: str, embedder=None) -> tuple:
     from cognition.memory.vecstore import HarrierEmbedder, _flyal_mode
 
     if isinstance(embedder, HarrierEmbedder):
         geometry = (embedder.base_url, embedder.model, embedder.dims, _flyal_mode())
     else:
-        geometry = (id(embedder),)
+        geometry = (_EmbeddingInstance(embedder),)
     return (
         hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest(),
         hashlib.sha256(instruct.encode("utf-8", errors="replace")).hexdigest(),

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Iterable
 
 from defusedxml import ElementTree as DET
+import numpy as np
 
 from cognition import reason
 from cognition.memory.vecstore import insert_vector, user_scoped_vec_knn
@@ -21,6 +22,7 @@ from .schema import (
     connect,
     Embedder,
     KNOWLEDGE_CHUNK_CHARS,
+    EMBED_DIMS,
     KNOWLEDGE_SUPERSEDE_ON_DEDUP,
     KNOWLEDGE_WORKSPACE_DIR,
     KNOWLEDGE_WRITE_DEDUP_THRESHOLD,
@@ -93,6 +95,29 @@ class KnowledgeIngest:
 
 def _sanitize_text(text: str, max_chars: int = 200_000) -> str:
     return re.sub(r"\s+", " ", (text or "").strip())[:max_chars]
+
+
+def _read_plain_text(path: Path, max_chars: int) -> str:
+    """Normalize incrementally so a large log is not loaded before clipping."""
+    parts = []
+    remaining = max(0, max_chars)
+    previous_space = False
+    with path.open(encoding="utf-8", errors="replace") as stream:
+        while remaining > 0:
+            block = stream.read(8192)
+            if not block:
+                break
+            block = re.sub(r"\s+", " ", block)
+            if not parts:
+                block = block.lstrip()
+            elif previous_space:
+                block = block.lstrip(" ")
+            block = block[:remaining]
+            if block:
+                parts.append(block)
+                previous_space = block.endswith(" ")
+                remaining -= len(block)
+    return "".join(parts).rstrip()
 
 
 def _safe_workspace_path(relative_path: str, user_id: str | None = None) -> Path:
@@ -234,11 +259,13 @@ def extract_text_from_file(relative_path: str, *, user_id: str | None = None, ma
     if not path.is_file():
         raise ValueError(f"workspace file not found: {relative_path}")
     suffix = path.suffix.casefold()
-    source = str(path.relative_to(user_workspace_root(user_id)))
+    source = str(path.relative_to(user_workspace_root(user_id).resolve()))
+    if max_chars <= 0:
+        return "", source
 
     # Plain text / code / config formats: read directly.
     if suffix in {".txt", ".md", ".rst", ".json", ".yaml", ".yml", ".toml", ".csv", ".tsv", ".log", ".py", ".js", ".ts", ".tex", ".latex", ".rtf"}:
-        return _sanitize_text(path.read_text(encoding="utf-8", errors="replace"), max_chars), source
+        return _read_plain_text(path, max_chars), source
 
     # Document formats: prefer MarkItDown, fall back to built-in extractors.
     md_text = _extract_with_markitdown(path, max_chars)
@@ -333,6 +360,20 @@ def ingest_text(
     doc_id = str(uuid.uuid4())
     created_at = now()
     chunks = reason.chunk_text(clean, KNOWLEDGE_CHUNK_CHARS) or [clean]
+    # Do network/embedding work before taking SQLite's writer lock.
+    vectors = []
+    if embedder is not None:
+        batch = reason.embed_batch_or_none(embedder, chunks)
+        vectors = list(batch) if batch is not None and len(batch) == len(chunks) else []
+        for index, value in enumerate(vectors):
+            try:
+                vector = np.asarray(value, dtype=np.float32)
+                norm = float(np.linalg.norm(vector))
+                if vector.shape != (EMBED_DIMS,) or not np.isfinite(vector).all() or not np.isfinite(norm) or norm <= 1e-12:
+                    raise ValueError("invalid chunk embedding")
+                vectors[index] = vector
+            except (TypeError, ValueError, OverflowError):
+                vectors[index] = None
     store = schema or KnowledgeSchema()
     conn = store.connect(uid)
     try:
@@ -340,11 +381,6 @@ def ingest_text(
             "INSERT INTO learned_docs(id,user_id,title,source,kind,created_at) VALUES(?,?,?,?,?,?)",
             (doc_id, uid, (title or "Untitled knowledge")[:200], source[:500], kind[:50], created_at),
         )
-        vectors = []
-        if embedder is not None:
-            batch = reason.embed_batch_or_none(embedder, chunks)
-            vectors = list(batch) if batch is not None and len(batch) == len(chunks) else []
-
         written_chunks = 0
         for index, chunk in enumerate(chunks):  # always loop chunks
             ents_json = entities_to_json(extract_entities(chunk))

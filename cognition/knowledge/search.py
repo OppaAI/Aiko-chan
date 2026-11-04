@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import numpy as np
 import threading
 import time
 from collections import OrderedDict
@@ -41,6 +43,7 @@ _KNOWLEDGE_SEARCH_CACHE: OrderedDict[
 _KNOWLEDGE_SEARCH_CACHE_LOCK = threading.RLock()
 _KNOWLEDGE_SEARCH_CACHE_TTL: float = 20.0
 _KNOWLEDGE_SEARCH_CACHE_MAX: int = 128
+_CACHE_GENERATION = 0
 
 # Phase 2: access-count touches accumulate per user; flush_access_counts()
 # writes them in one UPDATE + single commit at the turn boundary. The
@@ -68,10 +71,12 @@ def _search_cache_get(query: str, user_id: str, limit: int, embedder_id: str) ->
     return None
 
 
-def _search_cache_set(query: str, user_id: str, limit: int, embedder_id: str, results: list[dict]) -> None:
+def _search_cache_set(query: str, user_id: str, limit: int, embedder_id: str, results: list[dict], *, generation=None) -> None:
     key = _cache_key(query, user_id, limit, embedder_id)
     now = time.monotonic()
     with _KNOWLEDGE_SEARCH_CACHE_LOCK:
+        if generation is not None and generation != _CACHE_GENERATION:
+            return
         _KNOWLEDGE_SEARCH_CACHE[key] = (now, [dict(r) for r in results])
         while len(_KNOWLEDGE_SEARCH_CACHE) > _KNOWLEDGE_SEARCH_CACHE_MAX:
             _KNOWLEDGE_SEARCH_CACHE.popitem(last=False)
@@ -79,7 +84,9 @@ def _search_cache_set(query: str, user_id: str, limit: int, embedder_id: str, re
 
 def maybe_clear_knowledge_cache() -> None:
     """Clear the cache after every successful write to ensure fresh data."""
+    global _CACHE_GENERATION
     with _KNOWLEDGE_SEARCH_CACHE_LOCK:
+        _CACHE_GENERATION += 1
         _KNOWLEDGE_SEARCH_CACHE.clear()
 
 
@@ -98,12 +105,14 @@ class KnowledgeSearch:
         *,
         embedder: Embedder | None = None,
         user_id: str | None = None,
+        query_vector=None,
     ) -> list[dict]:
         return search_knowledge(
             query,
             limit=limit,
             embedder=embedder if embedder is not None else self.embedder,
             user_id=user_id,
+            query_vector=query_vector,
         )
 
     def context_for(
@@ -127,7 +136,7 @@ class KnowledgeSearch:
 
 def _knn(conn: sqlite3.Connection, query: str, embedder: Embedder | None, uid: str, limit: int,
         query_vector=None) -> list[sqlite3.Row]:
-    if embedder is None or not (query or "").strip():
+    if (embedder is None and query_vector is None) or not (query or "").strip():
         return []
     # Phase 2: shared module cache — identical (text, instruct) pairs embed
     # once per process instead of once per call site. A precomputed
@@ -212,10 +221,16 @@ def search_knowledge(
 ) -> list[dict]:
     """Canonical implementation that :class:`KnowledgeSearch`
     delegates to (not a shim — this is the live code path). Kept for the historical import path."""
+    if limit <= 0:
+        return []
     uid = user_id or current_user_id()
     conn = connect(uid)
     try:
-        rank_knn = rank_by_id(_knn(conn, query, embedder, uid, KNOWLEDGE_KNN_LIMIT, query_vector=query_vector))
+        try:
+            rank_knn = rank_by_id(_knn(conn, query, embedder, uid, KNOWLEDGE_KNN_LIMIT, query_vector=query_vector))
+        except Exception as exc:
+            log.warning("Knowledge vector search unavailable; using lexical recall: %s", exc)
+            rank_knn = {}
         rank_fts = rank_by_id(_fts(conn, query, uid, KNOWLEDGE_FTS_LIMIT))
         ids = set(rank_knn) | set(rank_fts)
         if not ids:
@@ -227,10 +242,10 @@ def search_knowledge(
                 d.title, d.source, d.kind, d.id AS doc_id
             FROM learned_chunks c
             JOIN learned_docs d ON d.id = c.doc_id
-            WHERE c.id IN ({placeholders})
+            WHERE c.id IN ({placeholders}) AND c.user_id = ? AND d.user_id = ?
                 AND (c.status = 'active' OR c.status IS NULL)
             """,
-            list(ids),
+            [*ids, uid, uid],
         ).fetchall()
         by_id = {row["id"]: row for row in rows}
         scored: list[tuple[float, str]] = []
@@ -353,10 +368,13 @@ def knowledge_context_for(
     uid = user_id or current_user_id()
     remaining = KNOWLEDGE_CONTEXT_CHARS if max_chars is None else max_chars
 
-    # Generate embedder ID for cache key
-    embedder_id = str(id(embedder)) if embedder is not None else "default"
-
-    cached = _search_cache_get(query, uid, limit, embedder_id)
+    embedder_id = reason._cache_key(query or "", KNOWLEDGE_QUERY_INSTRUCT, embedder)
+    if query_vector is not None:
+        digest = hashlib.sha256(np.asarray(query_vector, dtype=np.float32).tobytes()).hexdigest()
+        embedder_id = (embedder_id, digest)
+    with _KNOWLEDGE_SEARCH_CACHE_LOCK:
+        generation = _CACHE_GENERATION
+        cached = _search_cache_get(query, uid, limit, embedder_id)
     if cached is not None:
         # Phase 2: no touch on cache hits — a cached read must not issue a
         # write. Counts were bumped on the uncached search.
@@ -364,7 +382,7 @@ def knowledge_context_for(
 
     hits = search_knowledge(query, limit=limit, embedder=embedder, user_id=uid, query_vector=query_vector)
     if hits:
-        _search_cache_set(query, uid, limit, embedder_id, hits)
+        _search_cache_set(query, uid, limit, embedder_id, hits, generation=generation)
 
     if not hits:
         return "<knowledge_context>\nNo matching learned knowledge found.\n</knowledge_context>"
@@ -405,19 +423,21 @@ def _increment_access_count(chunk_ids: list[str], user_id: str | None = None) ->
 def _write_access_counts(user_id: str, chunk_ids: list[str]) -> None:
     if not chunk_ids:
         return
-    conn = connect(user_id)
+    conn = None
     try:
+        conn = connect(user_id)
         now = utc_now_iso()
         placeholders = ",".join("?" * len(chunk_ids))
         conn.execute(
-            f"UPDATE learned_chunks SET access_count = access_count + 1, last_accessed = ? WHERE id IN ({placeholders})",
-            [now] + chunk_ids,
+            f"UPDATE learned_chunks SET access_count = access_count + 1, last_accessed = ? WHERE user_id = ? AND id IN ({placeholders})",
+            [now, user_id] + chunk_ids,
         )
         conn.commit()
     except Exception as exc:
         log.warning("increment access count failed: %s", exc)
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def flush_access_counts(user_id: str | None = None) -> int:

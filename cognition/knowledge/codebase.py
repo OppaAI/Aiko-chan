@@ -28,11 +28,9 @@ import re
 import sqlite3
 import uuid
 from pathlib import Path
-import threading
 
 from system.log import get_logger
-from system.config import env_float
-from system.userspace import current_user_id, user_state_path
+from system.userspace import current_user_id
 from cognition import reason
 from cognition.memory.vecstore import (
     HarrierEmbedder,
@@ -103,7 +101,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS codebase_chunks_fts USING fts5(
     text, id UNINDEXED, content='codebase_chunks', content_rowid='rowid'
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS codebase_chunks_vec USING vec0(
-    id TEXT PRIMARY KEY, embedding FLOAT[640] distance_metric=cosine
+    id TEXT PRIMARY KEY, embedding FLOAT[{embed_dims}] distance_metric=cosine
 );
 CREATE TRIGGER IF NOT EXISTS codebase_chunks_ai AFTER INSERT ON codebase_chunks BEGIN
     INSERT INTO codebase_chunks_fts(rowid, text, id) VALUES (new.rowid, new.text, new.id);
@@ -117,6 +115,8 @@ CREATE TRIGGER IF NOT EXISTS codebase_chunks_au AFTER UPDATE OF text ON codebase
     INSERT INTO codebase_chunks_fts(rowid, text, id) VALUES (new.rowid, new.text, new.id);
 END;
 """
+
+_DDL = _DDL.format(embed_dims=EMBED_DIMS)
 
 def connect_codebase(user_id: str | None = None) -> sqlite3.Connection:
     return initialize_store_db(CODEBASE_DB_PATH, _DDL, user_id=user_id, vector=True)
@@ -153,6 +153,8 @@ def _should_index(path: Path, rel: str) -> bool:
     return True
 
 def _chunk_text(text: str, chunk_chars: int = CODEBASE_CHUNK_CHARS, overlap: int = CODEBASE_CHUNK_OVERLAP) -> list[str]:
+    if chunk_chars <= 0 or overlap < 0 or overlap >= chunk_chars:
+        raise ValueError("chunk size must be positive and overlap smaller than chunk size")
     text = text.strip()
     if not text:
         return []
@@ -171,9 +173,7 @@ def _chunk_text(text: str, chunk_chars: int = CODEBASE_CHUNK_CHARS, overlap: int
         chunks.append(text[start:end].strip())
         if end >= n:
             break
-        start = end - overlap
-        if start < 0:
-            start = 0
+        start = max(start + 1, end - overlap)
     return [c for c in chunks if len(c.strip()) >= 40]
 
 def ingest_codebase(user_id: str | None = None, repo_root: Path | None = None, force: bool = False, embedder: HarrierEmbedder | None = None) -> dict:
@@ -223,6 +223,21 @@ def ingest_codebase(user_id: str | None = None, repo_root: Path | None = None, f
             sha = _sha1(full_text)
             doc_id, old_sha = existing.get(rel, (None, None))
             if not force and doc_id and old_sha == sha:
+                # An outage must not permanently strand unchanged files in
+                # lexical-only recall. Preserve their IDs and retry missing
+                # vector rows when the next indexing pass can embed them.
+                missing = conn.execute(
+                    "SELECT c.id, c.doc_id, c.chunk_index, c.text FROM codebase_chunks c "
+                    "LEFT JOIN codebase_chunks_vec v ON v.id=c.id "
+                    "WHERE c.doc_id=? AND c.user_id=? AND v.id IS NULL ORDER BY c.chunk_index",
+                    (doc_id, uid),
+                ).fetchall()
+                pending_chunks.extend(tuple(row) for row in missing)
+                if len(pending_chunks) >= 48:
+                    conn.commit()
+                    _embed_and_insert(conn, pending_chunks, embedder)
+                    conn.commit()
+                    pending_chunks.clear()
                 skipped += 1
                 continue
             # Remove old doc if exists (cascades chunks + vec)
@@ -249,10 +264,12 @@ def ingest_codebase(user_id: str | None = None, repo_root: Path | None = None, f
                 added_chunks += 1
             # Flush embeddings in batches to keep RAM low on 8GB
             if len(pending_chunks) >= 48:
+                conn.commit()
                 _embed_and_insert(conn, pending_chunks, embedder)
                 conn.commit()
                 pending_chunks.clear()
         if pending_chunks:
+            conn.commit()
             _embed_and_insert(conn, pending_chunks, embedder)
             conn.commit()
         # Prune stale docs (files deleted since last ingest)
@@ -264,7 +281,7 @@ def ingest_codebase(user_id: str | None = None, repo_root: Path | None = None, f
         conn.commit()
         conn.execute("ANALYZE")
         conn.commit()
-        return {"ok": True, "user_id": uid, "files_scanned": len(files), "docs_added": added_docs, "chunks_added": added_chunks, "skipped_unchanged": skipped, "pruned": pruned, "db": str(connect_codebase(uid).execute("PRAGMA database_list").fetchone()[2] if False else CODEBASE_DB_PATH)}
+        return {"ok": True, "user_id": uid, "files_scanned": len(files), "docs_added": added_docs, "chunks_added": added_chunks, "skipped_unchanged": skipped, "pruned": pruned, "db": CODEBASE_DB_PATH}
     except Exception as e:
         log.warning("ingest_codebase failed: %s", e)
         return {"ok": False, "error": str(e)}
@@ -289,20 +306,16 @@ def _embed_and_insert(conn: sqlite3.Connection, pending: list[tuple[str,str,int,
     import sqlite_vec
     import numpy as np
     if vecs is None:
-        # Fallback: zero vectors so vec table stays consistent but KNN won't match; FTS still works
-        zero = np.zeros(640, dtype=np.float32)
-        for (cid, _, _, _) in pending:
-            conn.execute("INSERT INTO codebase_chunks_vec(id, embedding) VALUES(?,?)", (cid, sqlite_vec.serialize_float32(zero)))
+        return  # absent vectors are honest; zero vectors have undefined cosine
+    vectors = np.asarray(vecs, dtype=np.float32)
+    if (vectors.shape != (len(pending), EMBED_DIMS) or not np.isfinite(vectors).all()
+            or np.any(np.linalg.norm(vectors, axis=1) <= 1e-12)):
+        log.warning("codebase embeddings invalid; retaining lexical index only")
         return
     for (cid, _, _, _), vec in zip(pending, vecs):
         conn.execute("INSERT INTO codebase_chunks_vec(id, embedding) VALUES(?,?)", (cid, sqlite_vec.serialize_float32(vec)))
 
 # ── search (hybrid RRF, mirroring cognition/knowledge/search.py) ──────────
-
-_SEARCH_CACHE: OrderedDict[tuple[str,str,int], tuple[float, list[dict]]] = OrderedDict()
-_CACHE_LOCK = threading.RLock()
-_CACHE_TTL = env_float("CODEBASE_CACHE_TTL", 300.0)
-_CACHE_MAX = 64
 
 def _knn(conn, query: str, embedder, uid: str, limit: int):
     if embedder is None or not (query or "").strip():
@@ -321,10 +334,16 @@ def _fts(conn, query: str, uid: str, limit: int):
     return user_scoped_fts_search(conn, fts_table="codebase_chunks_fts", owner_table="codebase_chunks", owner_alias="c", query=query, user_id=uid, limit=limit)
 
 def search_codebase(query: str, limit: int = 5, *, embedder=None, user_id: str | None = None) -> list[dict]:
+    if limit <= 0:
+        return []
     uid = user_id or current_user_id()
     conn = connect_codebase(uid)
     try:
-        rk = rank_by_id(_knn(conn, query, embedder, uid, CODEBASE_KNN_LIMIT))
+        try:
+            rk = rank_by_id(_knn(conn, query, embedder, uid, CODEBASE_KNN_LIMIT))
+        except Exception as exc:
+            log.warning("Codebase vector search unavailable; using lexical recall: %s", exc)
+            rk = {}
         rf = rank_by_id(_fts(conn, query, uid, CODEBASE_FTS_LIMIT))
         ids = set(rk) | set(rf)
         if not ids:

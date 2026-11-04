@@ -13,7 +13,7 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 | 2 | Conversation routing, context assembly, and response streaming | `cognition/think.py`, `cognition/deep_think.py`, `cognition/inner_speech.py` | Current code pass completed; combined validation recorded below; real-model/device checks pending |
 | 3 | Conscience, refusal gates, and user preferences | `cognition/conscience/`, `cognition/policy.py`, `cognition/attention.py` | Current code pass completed; final validation below; live-model and physical Jetson checks pending |
 | 4 | Agentic tasks, tools, and self-coding | `agentic/`, `Aiko-Playground` integration | Current code pass completed; final validation below; live-model and physical Jetson checks pending |
-| 5 | Memory, retrieval, knowledge, and persistence | `cognition/memory/`, `cognition/knowledge/` | Not started |
+| 5 | Memory, retrieval, knowledge, and persistence | `cognition/memory/`, `cognition/knowledge/` | In progress; shared storage, embedding caches, outage recall, codebase repair, and worker lifecycle fixes below |
 | 6 | Fly-brain circuits and state wiring | `cognition/fly*`, `cognition/centralcomplex/`, `cognition/neural_state.py` | Focused wiring fixes shipped; broad review not started |
 | 7 | Speech, listening, and sensory pathways | `sensory/`, `cognition/flysense/` | Not started |
 | 8 | Web, desktop, mobile, and external interfaces | `interface/` | Not started |
@@ -484,3 +484,78 @@ external publishing was performed by these cloud tests.
 
 For graph timeout/cancellation behavior and the boundary between direct graph
 interrupts and interactive approvals, see [SELF_CODING.md](SELF_CODING.md).
+
+## Area 5 progress
+
+The initial pass covers shared storage and embedding infrastructure, semantic
+and learned-knowledge retrieval during outages, codebase RAG, and worker/watcher
+lifecycle. SQLite remains the recommended backend for the 8 GB Jetson; see
+[MEMORY_STORAGE_REVIEW.md](MEMORY_STORAGE_REVIEW.md) for the reasoning and the
+requested Aidon comparison boundary.
+
+- Embedding caches now read the batch shape they write, distinguish endpoint,
+  model, dimensions, and FlyAL mode, and return private arrays. Legacy untagged,
+  malformed, nonfinite, or zero-vector entries are disposable cache misses.
+- Startup reads cache records incrementally, rejects oversized lines, and caps
+  retained vectors as it reads. In-memory capacities count vectors rather than
+  batches. Document embedding iterates inputs in bounded batches, including
+  well-shaped empty results. HTTP response count/dimensions/values are checked
+  before caching. Oversized-input HTTP 400 retries do not open the outage breaker.
+- Disk cache appends/compaction share a sidecar file lock across instances and
+  processes. Compaction reads committed file entries under that lock and uses
+  random atomic replacement, preserving concurrent appends. Foreign embedding
+  providers remain alive while identity-keyed query-cache entries exist, so
+  recycled object IDs cannot return another provider's vectors.
+- Legacy vector metric migration uses a savepoint and SQLite temporary storage,
+  keeps each identifier paired with its vector in one query, and rolls back an
+  unsuccessful rebuild. It no longer materializes the entire index in Python
+  or commits implicitly between dropping and recreating the index. Failed
+  database initialization closes its connection.
+- Personal memory falls back to lexical/entity recall when embedding or vector
+  search is unavailable. Learned-knowledge and codebase retrieval similarly
+  retain lexical recall during vector failures. Removed an unreachable duplicate
+  personal-memory search implementation after its unconditional return.
+- Knowledge result fetches and access-count updates explicitly scope the user.
+  Precomputed vectors work without an embedder, including through the facade.
+  Context cache keys distinguish provider geometry and supplied vectors; an
+  in-flight result cannot undo a newer invalidation. Delete/prune maintenance
+  invalidates cached context.
+- Learned-knowledge embeddings are computed before acquiring the SQLite writer
+  transaction. Invalid chunk vectors leave text durably indexed for keyword
+  search. Deduplication rejects malformed/nonfinite/zero-norm matrices, avoiding
+  the NaN-comparison path that could archive unrelated chunks.
+- Codebase RAG imports again after removing unused cache code that referenced
+  an unimported name. Index geometry follows configured dimensions. Failed
+  embeddings no longer create invalid zero-vector rows; subsequent indexing
+  repairs missing vectors in unchanged files. Network embedding work occurs
+  outside its writer transaction. Removed dead database-path construction and
+  guarded chunking against non-progressing overlap parameters.
+- Semantic shutdown serializes with queue admission/user switching and rejects
+  new queued writes after shutdown begins. A guest shutdown sentinel does not
+  materialize a database. Existing queue accounting and write-drain safeguards
+  remain covered by their regression tests.
+- Episodic shutdown stops new embedding admission, retains SQLite while a worker
+  is in flight, and lets that worker finish and close the connection on its
+  sentinel. It no longer closes the store under an active embedding worker.
+- Plain-text document extraction normalizes bounded reads instead of loading an
+  entire large log before clipping it. Workspace source paths use the resolved
+  root consistently.
+- Knowledge watchers bind the watched user and worker context, are replaced on
+  owner changes, restart with a clear stop event, and stop during debounce.
+  Scheduler callbacks ingest for the watched owner, and truncated kernel events
+  do not crash parsing.
+
+Focused checks: 194 memory/knowledge/cache tests, 138 lifecycle/regression tests,
+and 113 ingestion/watcher/scheduler tests passed at their respective stages.
+The first combined run passed 2,483 tests with five skips and 34 subtests.
+Final combined validation after watcher, extraction, and repair changes:
+**2,487 passed, 5 skipped, 13 warnings, and 34 passing subtests**. The final
+connection cleanup adjustment and adjacent real storage/knowledge checks passed
+**59 tests** afterward.
+
+Area 5 is still in progress. Further review includes consolidation/dream and
+retention policy, temporal reconciliation and lineage edge cases, working
+memory/journal persistence, embedding-version migration and reindexing strategy,
+and retrieval-quality evaluation. The Aidon comparison requires its source
+link. Live-model retrieval quality and physical Jetson RAM/latency measurements
+remain pending; no existing personal database was modified by these tests.

@@ -586,6 +586,7 @@ class EpisodicStore:
             maxsize=EMC_EMBED_QUEUE_MAXSIZE
         )
         self._embed_worker: threading.Thread | None = None
+        self._closing = False
         # Guards the check-then-act worker (re)start in _enqueue_embed: without
         # it, two concurrent enqueues can both see a dead worker and spawn two
         # threads consuming the same queue. Dedicated lock (not self._lock):
@@ -968,6 +969,8 @@ class EpisodicStore:
         conversation thread or growing memory without bound.
         """
         with self._embed_worker_lock:
+            if getattr(self, "_closing", False):
+                return
             if self._embed_worker is None or not self._embed_worker.is_alive():
                 self._embed_worker = threading.Thread(
                     target=self._embed_worker_loop,
@@ -975,23 +978,23 @@ class EpisodicStore:
                     daemon=True,
                 )
                 self._embed_worker.start()
-        try:
-            self._embed_queue.put_nowait((storage_id, trace))
-        except queue.Full:
-            try:
-                self._embed_queue.get_nowait()
-                self._embed_queue.task_done()
-            except queue.Empty:
-                pass
             try:
                 self._embed_queue.put_nowait((storage_id, trace))
             except queue.Full:
-                log.warning(
-                    "EMC embed queue full; skipping embed for episode %s",
-                    storage_id,
-                )
-                return
-            log.warning("EMC embed queue full; dropped oldest queued episode embed")
+                try:
+                    self._embed_queue.get_nowait()
+                    self._embed_queue.task_done()
+                except queue.Empty:
+                    pass
+                try:
+                    self._embed_queue.put_nowait((storage_id, trace))
+                except queue.Full:
+                    log.warning(
+                        "EMC embed queue full; skipping embed for episode %s",
+                        storage_id,
+                    )
+                    return
+                log.warning("EMC embed queue full; dropped oldest queued episode embed")
 
     def _embed_worker_loop(self) -> None:
         """Embed queued episodes off the conversation thread. Best-effort: a
@@ -1002,6 +1005,9 @@ class EpisodicStore:
             item = self._embed_queue.get()
             try:
                 if item is None:
+                    if getattr(self, "_closing", False):
+                        with self._lock:
+                            self._conn.close()
                     return
                 storage_id, trace = item
                 vec = list(self._embedder.embed([trace]))[0]
@@ -1408,23 +1414,29 @@ class EpisodicStore:
         # not block: with a bounded queue and a wedged worker, a blocking
         # put() would hang shutdown forever — drop the oldest item to make
         # room for the sentinel instead.
-        if self._embed_worker is not None and self._embed_worker.is_alive():
-            try:
+        with self._embed_worker_lock:
+            self._closing = True
+            if self._embed_worker is not None and self._embed_worker.is_alive():
                 try:
-                    self._embed_queue.put_nowait(None)
-                except queue.Full:
-                    try:
-                        self._embed_queue.get_nowait()
-                        self._embed_queue.task_done()
-                    except queue.Empty:
-                        pass
                     try:
                         self._embed_queue.put_nowait(None)
                     except queue.Full:
-                        log.warning("EMC embed queue full on close; worker may not observe shutdown")
-                self._embed_worker.join(timeout=2.0)
-            except Exception as e:
-                log.debug("EMC embed worker shutdown: %s", e)
+                        try:
+                            self._embed_queue.get_nowait()
+                            self._embed_queue.task_done()
+                        except queue.Empty:
+                            pass
+                        try:
+                            self._embed_queue.put_nowait(None)
+                        except queue.Full:
+                            log.warning("EMC embed queue full on close; worker may not observe shutdown")
+                except Exception as e:
+                    log.debug("EMC embed worker shutdown: %s", e)
+        if self._embed_worker is not None and self._embed_worker.is_alive():
+            self._embed_worker.join(timeout=2.0)
+            if self._embed_worker.is_alive():
+                # The worker owns late cleanup after it observes the sentinel.
+                return
         with self._lock:
             try:
                 self._conn.close()

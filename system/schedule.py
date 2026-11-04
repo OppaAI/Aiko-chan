@@ -1528,7 +1528,7 @@ def register_social_handlers(
     log.info("Registered social handlers and seeded social jobs; Lane D uses schedule_graphs.json.")
 
 
-def _workspace_scan_handler(_memorize) -> None:
+def _workspace_scan_handler(_memorize, user_id: str | None = None) -> None:
     """System-handler callable: ingest the workspace knowledge folder.
 
     Module-level so both pre-auth handler registration
@@ -1539,7 +1539,7 @@ def _workspace_scan_handler(_memorize) -> None:
 
     ingest_workspace_knowledge_folder(
         embedder=_memorize.embedder(),
-        user_id=_memorize.get_user_id(),
+        user_id=user_id or _memorize.get_user_id(),
     )
 
 
@@ -1703,10 +1703,15 @@ def bootstrap_non_system_jobs(
             from cognition.knowledge.schema import KNOWLEDGE_WORKSPACE_DIR
 
             global _knowledge_folder_watcher
+            if (_knowledge_folder_watcher is not None
+                    and _knowledge_folder_watcher.user_id != user_id):
+                _knowledge_folder_watcher.stop()
+                _knowledge_folder_watcher = None
             if _knowledge_folder_watcher is None:
                 _knowledge_folder_watcher = KnowledgeFolderWatcher(
                     knowledge_dir=KNOWLEDGE_WORKSPACE_DIR,
-                    on_files=lambda files: _workspace_scan_handler(memorize),
+                    on_files=lambda files: _workspace_scan_handler(memorize, user_id=user_id),
+                    user_id=user_id,
                 )
             if not _knowledge_folder_watcher.start():
                 # inotify unavailable — keep the interval job as a safety net.

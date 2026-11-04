@@ -52,3 +52,15 @@ The scripted-model test exercises real file creation, sandbox subprocesses,
 and checkpointing while checking every assembled request against 8192 tokens.
 It tests execution plumbing and budgeting; live model quality still requires
 an actual model server and a real goal.
+
+Normal interactive tool approvals are one-shot: the saved action is consumed
+before execution, including when the tool reports failure. A failure may follow
+an external side effect, so retry by making a fresh request after checking the
+outcome. Calls receive unique resumable run IDs, and failed approval storage
+reports that nothing executed. The scheduled worker's scoped authorization
+remains separate from these interactive approvals.
+
+Experience-promoted workflows retain sequential dependencies. Promotion uses
+atomic file replacement and a shared write lock, preserves invalid existing
+playbooks for repair, and reuses a source experience's existing plan rather
+than creating duplicates on a retried promotion.

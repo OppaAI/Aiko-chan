@@ -253,3 +253,67 @@ def test_failed_playbook_run_does_not_bump_use_count(exp_db, playbook_file, monk
     monkeypatch.setattr(schema, "execute_graph", lambda *a, **k: fake_result)
     schema.run_schema_agent("practice task")
     assert _use_count(exp_id) == 0
+
+
+def test_promoted_steps_keep_order_and_fill_missing_operational_args(playbook_file):
+    _, plan_id = schema.append_playbook_from_experience('review code', [
+        {'tool': 'code_plan', 'args': {}},
+        {'tool': 'repo_read_file', 'args': {'relative_path': 'app.py'}},
+        {'tool': 'final_answer', 'args': {'answer': 'done'}},
+    ], name='Review workflow')
+    plan = json.loads(playbook_file.read_text())[0]
+    assert plan['id'] == plan_id
+    assert plan['name'] == 'Review workflow'
+    assert len(plan['nodes']) == 2
+    assert plan['nodes'][0]['args'] == {'goal': '$prompt'}
+    assert plan['nodes'][1]['args'] == {'relative_path': 'app.py'}
+    assert plan['nodes'][1]['depends_on'] == [plan['nodes'][0]['id']]
+
+
+def test_concurrent_promotions_do_not_lose_updates(playbook_file):
+    from concurrent.futures import ThreadPoolExecutor
+    def promote(i):
+        return schema.append_playbook_from_experience(f'goal {i}', [{'tool': 'kb_search'}])[1]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        ids = list(pool.map(promote, range(16)))
+    plans = json.loads(playbook_file.read_text())
+    assert {plan['id'] for plan in plans} == set(ids)
+
+
+@pytest.mark.parametrize('existing', ['{broken', '{}'])
+def test_promotion_does_not_destroy_invalid_existing_playbooks(playbook_file, existing):
+    playbook_file.write_text(existing)
+    with pytest.raises(ValueError):
+        schema.append_playbook_from_experience('goal', [{'tool': 'kb_search'}])
+    assert playbook_file.read_text() == existing
+
+
+def test_non_executable_experience_does_not_create_empty_workflow(playbook_file):
+    with pytest.raises(ValueError, match='no promotable'):
+        schema.append_playbook_from_experience('goal', [{'tool': 'final_answer'}])
+    assert json.loads(playbook_file.read_text()) == []
+
+
+def test_explicit_user_promotion_selects_their_store_and_restores_context(tmp_path, monkeypatch):
+    from system.userspace import set_current_user_id, reset_current_user_id, current_user_id
+    monkeypatch.setattr(schema, '_playbook_file', lambda: tmp_path / current_user_id() / 'playbooks.json')
+    token = set_current_user_id('caller')
+    try:
+        path, _ = schema.append_playbook_from_experience('goal', [{'tool': 'kb_search'}], user_id='target')
+        assert path == tmp_path / 'target' / 'playbooks.json'
+        assert current_user_id() == 'caller'
+        assert not (tmp_path / 'caller' / 'playbooks.json').exists()
+    finally:
+        reset_current_user_id(token)
+
+
+def test_repeated_promotion_reuses_source_plan_and_preserves_user_edits(playbook_file):
+    _, first = schema.append_playbook_from_experience('goal', [{'tool': 'kb_search'}], source_experience_id='source-1')
+    data = json.loads(playbook_file.read_text())
+    data[0]['name'] = 'User edited workflow'
+    playbook_file.write_text(json.dumps(data))
+    _, second = schema.append_playbook_from_experience('goal', [{'tool': 'kb_search'}], source_experience_id='source-1')
+    assert second == first
+    plans = json.loads(playbook_file.read_text())
+    assert len(plans) == 1
+    assert plans[0]['name'] == 'User edited workflow'

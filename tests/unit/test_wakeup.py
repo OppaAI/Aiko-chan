@@ -179,6 +179,11 @@ def _patch_common(monkeypatch, *, think_cls=FakeThink, memorize_cls=FakeMemorize
     # wakeup.boot() calls directly. Neutralize that seam so boot() performs
     # no real scheduling under test.
     monkeypatch.setattr(wakeup_module, "start_scheduler", _noop)
+    # Startup-handshake tests must not launch a real MCP subprocess or load
+    # the Fly catalog. Dedicated startup tests override these seams below.
+    import agentic.mcp_client.bridge as bridge
+    monkeypatch.setattr(bridge, "bootstrap_mcp", lambda: False)
+    monkeypatch.setenv("AIKO_FLY_RUNTIME_MODE", "off")
 
     # register_deep_study_handlers lives on memory.learn -- patch the
     # attribute wakeup.py actually calls through (module-level import

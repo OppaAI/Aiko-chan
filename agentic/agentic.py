@@ -31,6 +31,8 @@ import os
 import re
 import threading
 import time
+import tempfile
+import uuid
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -605,14 +607,30 @@ def _append_step_trace(ctx: AgentContext | None, event: str, payload: dict[str, 
 
 
 def _pending_approval_path(ctx: AgentContext) -> Path:
+    if not ctx.run_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", ctx.run_id):
+        raise ValueError("invalid approval run id")
     root = user_state_dir(ctx.user_id) / "agentic" / "pending_approvals"
     root.mkdir(parents=True, exist_ok=True)
     return root / f"{ctx.run_id}.json"
 
 
+_PENDING_APPROVAL_LOCK = threading.Lock()
+
+
 def _persist_pending_approval(ctx: AgentContext, tool: str, args: dict[str, Any], state: "TaskState") -> None:
-    payload = {"run_id": ctx.run_id, "tool": tool, "args": args, "checkpoint": json.loads(state.summary()), "created_at": time.time()}
-    _pending_approval_path(ctx).write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    payload = {"run_id": ctx.run_id, "user_id": ctx.user_id or current_user_id(), "tool": tool, "args": args,
+               "checkpoint": json.loads(state.summary()), "created_at": time.time()}
+    path = _pending_approval_path(ctx)
+    with _PENDING_APPROVAL_LOCK:
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".tmp", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream, ensure_ascii=False, indent=2, default=str)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
 
 
 _CCC_APPROVAL_LOCK = threading.Lock()
@@ -727,14 +745,14 @@ def _looks_like_approval_reply(user_input: str) -> bool:
     return bool(
         re.fullmatch(
             r"[\s.!?,;:-]*(?:y|yes|yeah|yep|sure|ok(?:ay)?|confirm|approve|approved|resume|continue|go\s+ahead|do\s+it|proceed)"
-            r"(?:\s+(?:please|pls|now))?[\s.!?,;:-]*(?:\b(?:run-[0-9]+|r\d[0-9A-Za-z_-]*)\b)?[\s.!?,;:-]*",
+            r"(?:\s+(?:please|pls|now))?[\s.!?,;:-]*(?:\b(?:run-[0-9a-f]+|r\d[0-9A-Za-z_-]*)\b)?[\s.!?,;:-]*",
             text,
             re.I,
         )
         or bool(
             re.fullmatch(
                 r"[\s.!?,;:-]*(?:(?:y|yes|yeah|yep|sure|ok(?:ay)?|confirm|approve|approved|resume|continue|go\s+ahead|do\s+it|proceed)[\s.!?,;:-]+)?"
-                r"(?:approve|confirm|resume|continue)\s+(?:run-[0-9]+|r\d[0-9A-Za-z_-]*)[\s.!?,;:-]*",
+                r"(?:approve|confirm|resume|continue)\s+(?:run-[0-9a-f]+|r\d[0-9A-Za-z_-]*)[\s.!?,;:-]*",
                 text,
                 re.I,
             )
@@ -746,20 +764,37 @@ def _maybe_resume_approval(owner, user_input: str, token_callback=None) -> str |
     if not _looks_like_approval_reply(user_input):
         return None
     base_ctx = _agent_context(owner)
-    match = re.search(r"\b(run-[0-9]+|r\d[0-9A-Za-z_-]*)\b", user_input or "")
+    match = re.search(r"\b(run-[0-9a-f]+|r\d[0-9A-Za-z_-]*)\b", user_input or "", re.I)
     if match:
         run_id = match.group(1)
+        if run_id.lower().startswith("run-"):
+            run_id = run_id.lower()
     else:
         pending_root = user_state_dir(base_ctx.user_id) / "agentic" / "pending_approvals"
-        pending = sorted(pending_root.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True) if pending_root.exists() else []
+        with _PENDING_APPROVAL_LOCK:
+            pending = list(pending_root.glob("*.json")) if pending_root.exists() else []
         if len(pending) != 1:
             return None
         run_id = pending[0].stem
     ctx = _agent_context(owner, run_id=run_id)
     path = _pending_approval_path(ctx)
-    if not path.exists():
-        return None
-    data = json.loads(path.read_text(encoding="utf-8"))
+    with _PENDING_APPROVAL_LOCK:
+        try:
+            serialized = path.read_text(encoding="utf-8")
+            # Claim before dispatch: failure may follow a real side effect.
+            # A replay must not retry the same external operation implicitly.
+            path.unlink()
+        except FileNotFoundError:
+            return None
+    try:
+        data = json.loads(serialized)
+        if not isinstance(data, dict) or data.get("run_id") != run_id or not isinstance(data.get("args"), dict):
+            raise ValueError("invalid approval record")
+        if data.get("user_id", ctx.user_id) != ctx.user_id:
+            raise ValueError("approval belongs to another user")
+    except (TypeError, ValueError):
+        log.warning("agentic: malformed pending approval %s discarded", run_id)
+        return "That saved approval is invalid. Nothing was executed; please send the request again."
     tool_name = str(data.get("tool") or "")
     state = TaskState(goal=f"resume approval {ctx.run_id}")
     resume_ctx = AgentContext(
@@ -769,11 +804,6 @@ def _maybe_resume_approval(owner, user_input: str, token_callback=None) -> str |
     )
     _append_step_trace(resume_ctx, "approval_resume", {"tool": tool_name})
     result = execute_tool_with_policy(tool_name, dict(data.get("args") or {}), state, ctx=resume_ctx)
-    if result.ok:
-        try:
-            path.unlink()
-        except OSError:
-            log.debug("agentic: failed to unlink approval pause file")
     final = result.observation()
     if token_callback:
         token_callback(final)
@@ -1303,6 +1333,8 @@ def _preference_requires_approval(name: str) -> bool:
 def execute_tool_with_policy(name: str, args: dict, state: TaskState, owner=None, ctx: AgentContext | None = None, guards=None) -> ToolResult:
     """Validate, guard, run, retry, and ledger one tool call."""
     ctx = ctx or (owner if isinstance(owner, AgentContext) else _agent_context(owner))
+    if ctx.run_id is None:
+        ctx = replace(ctx, run_id=f"run-{uuid.uuid4().hex}")
     _append_step_trace(ctx, "tool_call", {"tool": name, "args": args})
     worker_authorized = False
     if ctx.worker_root is not None:
@@ -1339,7 +1371,15 @@ def execute_tool_with_policy(name: str, args: dict, state: TaskState, owner=None
 
     preference_gate = _preference_requires_approval(name)
     if (preference_gate or (spec and spec.needs_approval and not worker_authorized)) and name not in ctx.approval_bypass:
-        _persist_pending_approval(ctx, name, args, state)
+        try:
+            _persist_pending_approval(ctx, name, args, state)
+        except (OSError, ValueError, TypeError) as exc:
+            log.warning("agentic: could not save approval request: %s", exc)
+            result = ToolResult(ok=False, tool=name, args=args,
+                                content="Approval could not be saved. Nothing was executed; please try again.",
+                                error_type="approval_storage", retryable=False)
+            state.record(result)
+            return result
         draft_dir = args.get("draft_dir") if isinstance(args, dict) else None
         wait_payload = {"status": "waiting_for_approval", "run_id": ctx.run_id, "instruction": f"Reply with approve {ctx.run_id} to run {name}."}
         if preference_gate and not (spec and spec.needs_approval):
@@ -2282,7 +2322,7 @@ def _run_agentic_chat_inner(
         default_max_iter=MAX_AGENT_ITER,
         default_research_budget=AGENT_RESEARCH_MAX_CALLS,
     )
-    trace_ctx = _agent_context(owner, run_id=f"run-{int(time.time() * 1000)}")
+    trace_ctx = _agent_context(owner, run_id=f"run-{uuid.uuid4().hex}")
     if worker_mode:
         from system.playground import playground_dir
         trace_ctx = replace(trace_ctx, worker_root=playground_dir().resolve())

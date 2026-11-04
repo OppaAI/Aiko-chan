@@ -39,6 +39,7 @@ import json
 import os
 import re
 import time
+import tempfile
 import uuid
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
@@ -2484,7 +2485,7 @@ def run_playbook_json(task: str, cap_ids: list[str] | None = None, embedder=None
 
 
 def _promotion_args_for_step(tool: str, step: dict[str, Any]) -> dict[str, Any]:
-    if tool == "make_plan":
+    if tool in {"make_plan", "code_plan"}:
         return {"goal": "$prompt"}
     if tool == "create_checklist":
         return {"title": "$title", "items": "$heuristic_items"}
@@ -2511,47 +2512,6 @@ def _promotion_args_for_step(tool: str, step: dict[str, Any]) -> dict[str, Any]:
     return {str(k): "$prompt" for k in arg_keys}
 
 
-def append_playbook_from_experience(goal: str, steps: list[dict[str, Any]], *, name: str | None = None) -> Path:
-    """Promote a practiced or ReAct-discovered tool sequence into user playbooks.
-
-    Args are stored as sanitized previews by the experience layer, so promoted
-    templates intentionally use ``$prompt``/``$title`` placeholders unless the
-    operator edits the JSON by hand.
-    """
-    nodes = []
-    for idx, step in enumerate(steps, start=1):
-        tool = str(step.get("tool") or "").strip()
-        if not tool or tool in {"final_answer", "llm_call"}:
-            continue
-        node = {"id": f"step_{idx}", "tool": tool, "args": _promotion_args_for_step(tool, step)}
-        if nodes:
-            node["depends_on"] = [nodes[-1]["id"]]
-        nodes.append(node)
-    if not nodes:
-        raise ValueError("no promotable tool steps found")
-    path = _playbook_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    new_plan = {
-        "id": f"practiced_{uuid.uuid4().hex[:10]}",
-        "name": name or _title(goal),
-        "triggers": _heuristic_items(goal)[:4],
-        "requires_any": [],
-        "nodes": nodes,
-    }
-    with _playbook_write_guard(path):
-        existing = []
-        if path.exists():
-            try:
-                existing = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(existing, list):
-                    existing = []
-            except (OSError, json.JSONDecodeError):
-                existing = []
-        existing.append(new_plan)
-        tmp_path = path.with_suffix(".tmp")
-        tmp_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp_path.replace(path)
-        return path
 
 
 from agentic.registry import TOOLS, register_tool_schema, tool
@@ -2627,6 +2587,7 @@ def append_playbook_from_experience(
     goal: str,
     steps: list[dict],
     source_experience_id: str | None = None,
+    *, name: str | None = None, user_id: str | None = None,
 ) -> tuple[Path, str]:
     """Append a practice-derived plan to the playbook file.
 
@@ -2639,32 +2600,58 @@ def append_playbook_from_experience(
     plan_id = f"exp-{uuid.uuid4().hex[:8]}"
     nodes = []
     for i, s in enumerate(steps or []):
-        if not isinstance(s, dict) or not s.get("tool"):
+        if not isinstance(s, dict) or not s.get("tool") or s["tool"] in {"final_answer", "llm_call"}:
             continue
-        nodes.append({
+        raw_args = s.get("args")
+        if raw_args is not None and not isinstance(raw_args, dict):
+            raise ValueError("promoted tool arguments must be an object")
+        node = {
             "id": f"{plan_id}-n{i}",
             "tool": str(s["tool"]),
-            "args": dict(s.get("args") or {}),
-        })
+            "args": dict(raw_args) if raw_args else _promotion_args_for_step(str(s["tool"]), s),
+        }
+        if nodes:
+            node["depends_on"] = [nodes[-1]["id"]]
+        nodes.append(node)
+    if not nodes:
+        raise ValueError("no promotable tool steps found")
     triggers = sorted({t for t in re.findall(r"[a-z0-9]+", (goal or "").lower()) if len(t) > 2})
     plan = {
         "id": plan_id,
-        "name": (goal or plan_id)[:60],
+        "name": (name or goal or plan_id)[:60],
         "goal": goal,
         "nodes": nodes,
         "triggers": triggers,
         "source_experience_id": source_experience_id,
     }
-    path = _playbook_file()
+    from system.userspace import set_current_user_id, reset_current_user_id
+    user_token = set_current_user_id(user_id) if user_id is not None else None
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path = _playbook_file()
+    finally:
+        if user_token is not None:
+            reset_current_user_id(user_token)
+    with _playbook_write_guard(path):
         data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
         if not isinstance(data, list):
-            data = []
-    except Exception:
-        data = []
-    data.append(plan)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            raise ValueError("playbooks file must contain a list")
+        if source_experience_id:
+            for existing in data:
+                if (isinstance(existing, dict) and existing.get("source_experience_id") == source_experience_id
+                        and isinstance(existing.get("id"), str) and existing["id"]):
+                    # The JSON write may have succeeded before the experience
+                    # stamp failed, or another promoter may have won the race.
+                    return path, existing["id"]
+        data.append(plan)
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(data, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
     return path, plan_id
 
 
@@ -2727,7 +2714,7 @@ def maybe_autopromote_experiences(user_id: str | None = None) -> list[dict]:
                                    "args": dict(s.get("args") or s.get("args_preview") or {})})
             try:
                 _, plan_id = append_playbook_from_experience(
-                    goal, node_steps, source_experience_id=exp_id)
+                    goal, node_steps, source_experience_id=exp_id, user_id=uid)
             except Exception as exc:
                 log.debug("autopromote: append failed for %s: %s", exp_id, exc)
                 continue

@@ -12,7 +12,7 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 | 1 | Startup, shutdown, and session orchestration | `main.py`, `system/wakeup.py`, `system/orchestrate.py`, `system/schedule.py` | Code review completed; final validation recorded below; physical Jetson checks pending |
 | 2 | Conversation routing, context assembly, and response streaming | `cognition/think.py`, `cognition/deep_think.py`, `cognition/inner_speech.py` | Current code pass completed; combined validation recorded below; real-model/device checks pending |
 | 3 | Conscience, refusal gates, and user preferences | `cognition/conscience/`, `cognition/policy.py`, `cognition/attention.py` | Current code pass completed; final validation below; live-model and physical Jetson checks pending |
-| 4 | Agentic tasks, tools, and self-coding | `agentic/`, `Aiko-Playground` integration | Focused self-coding fixes shipped; broad review not started |
+| 4 | Agentic tasks, tools, and self-coding | `agentic/`, `Aiko-Playground` integration | In progress; approval replay and workflow-promotion fixes completed; graph execution and coding subprocess review ongoing |
 | 5 | Memory, retrieval, knowledge, and persistence | `cognition/memory/`, `cognition/knowledge/` | Not started |
 | 6 | Fly-brain circuits and state wiring | `cognition/fly*`, `cognition/centralcomplex/`, `cognition/neural_state.py` | Focused wiring fixes shipped; broad review not started |
 | 7 | Speech, listening, and sensory pathways | `sensory/`, `cognition/flysense/` | Not started |
@@ -349,3 +349,56 @@ conscience harness. The final run includes the real-provider generator adapter
 and legacy self-pattern migration regressions. Local HTTP fixtures used
 loopback networking. Pull `dev` and restart Aiko to apply the code and the
 version-2 self-pattern cleanup when each identity's state loads.
+
+## Area 4 progress
+
+The first batch covers normal tool approval persistence/resume and promotion
+of practiced/discovered tool sequences into executable graph playbooks.
+
+- Normal approval files are written atomically and claimed before dispatch.
+  A failed result can follow a real external effect, so replaying the same
+  approval cannot implicitly execute the operation again. Competing replies
+  consume the request once.
+- Completion cannot unlink a new pause file created by the approved handler.
+  Invalid records and mismatched run/user identity do not execute. Invalid
+  run IDs cannot escape the pending-approval directory.
+- Calls without a run ID receive a unique resumable UUID-based identifier;
+  normal run identifiers also avoid timestamp collisions. Approval parsing
+  accepts the new IDs and existing numeric run IDs.
+- Failure to persist a pause returns a recorded nonexecution result rather
+  than an approval question with no saved action behind it. Existing
+  validation, tool/conscience checks, and registry approval flags remain in
+  the execution path.
+- Removed a duplicate promotion function that silently overrode the guarded
+  implementation. Promoted nodes now preserve the observed step sequence via
+  dependencies, retain supplied arguments, and use operational placeholders
+  for recognized tools with missing arguments, including `code_plan`.
+- Promotion excludes terminal model/answer pseudo-steps and rejects empty
+  workflows. Its shared lock and atomic replacement prevent concurrent lost
+  updates and partial JSON. Invalid existing playbooks are preserved for
+  repair instead of silently overwritten.
+- Source experience IDs make promotion idempotent after a lost database stamp
+  or concurrent sweep; an existing plan and user edits are retained. Explicit
+  target-user promotions select that user's file and restore caller context.
+
+Focused verification: 313 tests passed across approvals, agent execution,
+promotion, graph execution, conscience wiring, Playground workers, coding
+safety/retries, and 8K context fitting. Additional promotion-idempotency
+verification passed with the approval/promotion suite (31 passed).
+The broader run exposed startup-handshake fixtures launching a real optional
+MCP server. Those fixtures now stub MCP bootstrap and disable Fly catalog
+loading; dedicated tests can override the seams. Their timeouts and behavioral
+assertions are unchanged. The combined startup/approval/promotion check passed
+all 48 tests after this isolation fix.
+
+Area 4 remains in progress. Follow-up review includes graph checkpoint and
+interrupt/resume behavior, timeout enforcement, structured tool outcomes and
+fallbacks, streamed graph delivery, coding subprocess output/process limits,
+tool-registry ownership, and the remaining agent loop/skill/MCP integration.
+The physical Jetson, real Playground checkout, and live model have not been
+exercised by these scripted cloud tests.
+
+Final combined validation for this Area 4 batch: **2,406 passed, 5 skipped,
+13 warnings, and 34 passing subtests**, covering all unit/integration tests
+and the standalone conscience harness. Local HTTP fixtures used loopback
+networking. Area 4 is not yet a completed code pass.

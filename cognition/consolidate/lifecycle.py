@@ -7,6 +7,8 @@ Mirrors :mod:`cognition.knowledge` structure.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from contextlib import nullcontext
+import hashlib
 
 from system import bioclock
 from system.log import get_logger
@@ -49,6 +51,21 @@ def _delete_coverage_ok(facts_written: int, kept_count: int) -> bool:
         return facts_written >= DELETE_MIN_WRITTEN
     ratio = facts_written / float(kept_count)
     return ratio >= DELETE_MIN_RATIO
+
+
+def _existing_monthly_id(memorize, text, user_id):
+    """Recognize a previously committed pin when retrying a partial month."""
+    from cognition.memory.redaction import redact_text
+    backend = getattr(memorize, '_mem', memorize)
+    try:
+        with getattr(backend, '_db_lock', None) or nullcontext():
+            row = backend._conn.execute(
+                "SELECT id FROM memories WHERE user_id=? AND memory=? AND pinned=1 "
+                "AND (status='active' OR status IS NULL) LIMIT 1",
+                (user_id, redact_text(text))).fetchone()
+        return str(row['id']) if row else None
+    except Exception:
+        return None
 
 
 def maybe_run_consolidation(memorize, now: datetime | None = None, user_id: str | None = None) -> dict:
@@ -101,10 +118,10 @@ def maybe_run_consolidation(memorize, now: datetime | None = None, user_id: str 
         from cognition.attention import for_identity
         cognitive_state = for_identity(user_id)
         cognitive_lesson_rows = [
-            {"id": None, "memory": f"Interaction lesson: {lesson}", "pinned": 0,
+            {"id": 'cognitive:' + hashlib.sha256(str(lesson).encode()).hexdigest(), "memory": f"Interaction lesson: {lesson}", "pinned": 0,
              "access_count": 0, "access_day_count": 0, "entities": "[]",
              "status": "active", "_store": "cognitive",
-             "_text": f"Interaction lesson: {lesson}", "_cognitive_lesson": True}
+             "_text": f"Interaction lesson: {lesson}", "_cognitive_lesson": True, '_lesson': lesson}
             for lesson in cognitive_state.snapshot().get("lessons", []) if lesson
         ]
         reflection_text = cognitive_state.reflection_summary() if cognitive_state is not None else ""
@@ -151,21 +168,41 @@ def maybe_run_consolidation(memorize, now: datetime | None = None, user_id: str 
 
     facts_written = 0
     written_ids: list[str] = []
+    persisted_items = []
+    write_failures = 0
     for item in final_items:
         fact = (item.get("fact") if isinstance(item, dict) else item) or ""
         fact = str(fact).strip()
         if not fact:
             continue
         try:
-            mem_id = memorize.add_raw(f"[{month_key}] {fact}", user_id=user_id, pinned=True)
+            text = f"[{month_key}] {fact}"
+            mem_id = memorize.add_raw(text, user_id=user_id, pinned=True)
+            if not mem_id:
+                mem_id = _existing_monthly_id(memorize, text, user_id)
             if mem_id:
                 facts_written += 1
                 written_ids.append(mem_id)
+                persisted_items.append(item)
+            else:
+                write_failures += 1
         except Exception as e:
+            write_failures += 1
             log.warning("Failed to pin monthly fact %r: %s", fact, e)
 
+    if write_failures:
+        # Leave the month retryable and its source pins intact. Existing exact
+        # monthly pins are recognized on the next run without duplicating them.
+        return {"ran": False, "reason": "partial_write", "month": month_key,
+                "facts_written": facts_written, "write_failures": write_failures,
+                "daily_deleted": 0, **gate_stats}
+
     if facts_written > 0 and cognitive_state is not None and cognitive_lesson_rows:
-        cognitive_state.consume_lessons()
+        covered_lessons = {str(sid) for item in persisted_items if isinstance(item, dict)
+                           for sid in item.get('source_ids') or []}
+        consumed = [row['_lesson'] for row in cognitive_lesson_rows if row['id'] in covered_lessons]
+        if consumed:
+            cognitive_state.consume_lessons(expected=consumed)
 
     if facts_written == 0:
         return {"ran": False, "reason": "no_facts_written", "month": month_key, "count": source_count, **gate_stats}
@@ -176,7 +213,7 @@ def maybe_run_consolidation(memorize, now: datetime | None = None, user_id: str 
     kept_count = len(kept_rows)
     hard_ok, covered_ids = True, set()
     if HARD_SOURCE_PROVENANCE:
-        hard_ok, covered_ids = hard_provenance_ok(kept_rows, final_items)
+        hard_ok, covered_ids = hard_provenance_ok(kept_rows, persisted_items)
 
     if CONSOLIDATION_DELETE_DAILY_SUMMARIES:
         if not _delete_coverage_ok(facts_written, kept_count):
@@ -195,6 +232,8 @@ def maybe_run_consolidation(memorize, now: datetime | None = None, user_id: str 
             )
         else:
             for m in memory_day_rows:
+                if m.get('_store') != 'memory':
+                    continue
                 if m.get("_promoted_from_journal"):
                     continue
                 mem_id = m.get("id")

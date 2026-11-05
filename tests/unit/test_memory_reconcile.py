@@ -452,3 +452,122 @@ class TestRunReconcile:
         assert m._search_cache == {}
         assert backend_calls == [1]
         assert m._persona_cached is None
+
+
+def test_reconcile_rejects_source_pinned_during_llm_decision(backend):
+    a = _add(backend, 'User likes green tea.')
+    b = _add(backend, 'User likes green tea.')
+    members = [dict(_row(backend, mid)) for mid in (a, b)]
+    backend._conn.execute('UPDATE memories SET pinned=1 WHERE id=?', (a,))
+    backend._conn.commit()
+    result = {'merged': 0, 'superseded': 0, 'kept': 0}
+    with pytest.raises(ValueError, match='source changed'):
+        reconcile_mod._apply_cluster(backend, USER_ID, members,
+            [{'action': 'merge', 'text': 'Merged tea fact', 'source_ids': [a, b]}],
+            datetime.now(timezone.utc).isoformat(), result)
+    assert _row(backend, a)['status'] == 'active'
+    assert _row(backend, a)['pinned'] == 1
+    assert _row(backend, b)['status'] == 'active'
+
+
+def test_duplicate_source_id_is_not_a_two_source_merge(backend):
+    a = _add(backend, 'User likes green tea.')
+    b = _add(backend, 'User likes black tea.')
+    members = [dict(_row(backend, mid)) for mid in (a, b)]
+    result = {'merged': 0, 'superseded': 0, 'kept': 0}
+    reconcile_mod._apply_cluster(backend, USER_ID, members,
+        [{'action': 'merge', 'text': 'Fabricated combined fact', 'source_ids': [a, a]}],
+        datetime.now(timezone.utc).isoformat(), result)
+    assert result['merged'] == 0
+    assert _row(backend, a)['status'] == 'active'
+
+
+def test_existing_monthly_pin_lookup_is_user_scoped(backend):
+    from cognition.consolidate.lifecycle import _existing_monthly_id
+    mid = _add(backend, '[2026-01] User likes tea.', pinned=1)
+    assert _existing_monthly_id(backend, '[2026-01] User likes tea.', USER_ID) == mid
+    assert _existing_monthly_id(backend, '[2026-01] User likes tea.', 'another-user') is None
+
+
+def test_reconcile_embeds_before_opening_write_transaction(backend, monkeypatch):
+    a = _add(backend, 'User likes green tea.')
+    b = _add(backend, 'User likes green tea.')
+    members = [dict(_row(backend, mid)) for mid in (a, b)]
+    original = backend._embed
+    def embed(text):
+        assert not backend._conn.in_transaction
+        return original(text)
+    monkeypatch.setattr(backend, '_embed', embed)
+    result = {'merged': 0, 'superseded': 0, 'kept': 0}
+    reconcile_mod._apply_cluster(backend, USER_ID, members,
+        [{'action': 'merge', 'text': 'User enjoys green tea.', 'source_ids': [a, b]}],
+        datetime.now(timezone.utc).isoformat(), result)
+    assert result['merged'] == 1
+
+
+@pytest.mark.parametrize('change', ['pin', 'edit', 'access'])
+def test_cleanup_cannot_delete_a_changed_snapshot(backend, change):
+    mid = _add(backend, 'User likes green tea.')
+    old = dict(_row(backend, mid))
+    if change == 'pin':
+        backend._conn.execute('UPDATE memories SET pinned=1 WHERE id=?', (mid,))
+    elif change == 'edit':
+        backend._conn.execute('UPDATE memories SET memory=? WHERE id=?', ('User likes black tea.', mid))
+    else:
+        backend._conn.execute('UPDATE memories SET access_count=access_count+1 WHERE id=?', (mid,))
+    backend._conn.commit()
+    assert not backend.delete_lifecycle_candidate(mid, USER_ID, old['memory'], old['access_count'], old['last_accessed_at'])
+    assert _row(backend, mid)
+
+
+def test_cleanup_keeps_both_ends_of_merged_lineage(backend):
+    a = _add(backend, 'User likes green tea.')
+    b = _add(backend, 'User enjoys green tea.')
+    members = [dict(_row(backend, mid)) for mid in (a, b)]
+    result = {'merged': 0, 'superseded': 0, 'kept': 0}
+    reconcile_mod._apply_cluster(backend, USER_ID, members,
+        [{'action': 'merge', 'text': 'User enjoys drinking green tea.', 'source_ids': [a, b]}],
+        datetime.now(timezone.utc).isoformat(), result)
+    rows = backend._conn.execute('SELECT * FROM memories WHERE user_id=?', (USER_ID,)).fetchall()
+    for row in rows:
+        assert not backend.delete_lifecycle_candidate(row['id'], USER_ID, row['memory'], row['access_count'], row['last_accessed_at'])
+    assert len(rows) == 3
+
+
+def test_lineage_reaches_merged_successor_and_all_sources(backend):
+    from cognition.memory.lineage import walk_supersession_lineage
+    a = _add(backend, 'User likes green tea.')
+    b = _add(backend, 'User enjoys green tea.')
+    members = [dict(_row(backend, mid)) for mid in (a, b)]
+    result = {'merged': 0, 'superseded': 0, 'kept': 0}
+    reconcile_mod._apply_cluster(backend, USER_ID, members,
+        [{'action': 'merge', 'text': 'User enjoys drinking green tea.', 'source_ids': [a, b]}],
+        datetime.now(timezone.utc).isoformat(), result)
+    merged = _row(backend, a)['superseded_by']
+    assert merged in {row['id'] for row in walk_supersession_lineage(backend, a, user_id=USER_ID)['chain']}
+    assert {row['id'] for row in walk_supersession_lineage(backend, merged, user_id=USER_ID)['chain']} == {a, b, merged}
+    assert walk_supersession_lineage(backend, a, user_id='other')['error'] == 'not_found'
+
+
+def test_lineage_depth_limit_always_keeps_requested_memory(backend):
+    from cognition.memory.lineage import walk_supersession_lineage
+    ids = [_add(backend, f'Tea fact {i}') for i in range(5)]
+    for old, new in zip(ids, ids[1:]):
+        backend._conn.execute('UPDATE memories SET supersedes_id=? WHERE id=?', (old, new))
+    backend._conn.commit()
+    result = walk_supersession_lineage(backend, ids[-1], user_id=USER_ID, max_depth=2)
+    assert result['depth'] == 2
+    assert result['chain'][-1]['id'] == ids[-1]
+    assert walk_supersession_lineage(backend, ids[-1], user_id=USER_ID, max_depth=0)['depth'] == 1
+
+
+def test_vectorless_memory_is_eligible_after_vector_recovery(backend):
+    mid = _add(backend, 'User likes green tea.')
+    backend._conn.execute('DELETE FROM memories_vec WHERE id=?', (mid,))
+    backend._conn.commit()
+    assert mid not in {row['id'] for row in reconcile_mod._candidate_rows(backend._conn, USER_ID)}
+    assert _row(backend, mid)['reconciled_at'] is None
+    from cognition.memory.vecstore import insert_vector
+    insert_vector(backend._conn, 'memories_vec', mid, FakeEmbedder()._vec('User likes green tea.'))
+    backend._conn.commit()
+    assert mid in {row['id'] for row in reconcile_mod._candidate_rows(backend._conn, USER_ID)}

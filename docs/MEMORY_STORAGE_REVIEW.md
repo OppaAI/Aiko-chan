@@ -35,8 +35,9 @@ parallel writes; WAL allows readers alongside a writer.
 | Preference facts and retrieval diversity | `preference_store.py`, `diversity.py` |
 | Learned documents, archive, and codebase retrieval | `cognition/knowledge/` |
 
-These are implementation locations, not evidence that every feature behaves
-correctly in every live-model scenario. Area 5 remains under review.
+These are implementation locations. The current Area 5 code pass covers their
+shared persistence, retention, recovery, and lineage paths; real-model retrieval
+quality and physical Jetson resource measurements remain pending.
 
 ## Aidon comparison
 
@@ -49,10 +50,10 @@ source; its models and remote services were not started.
 | Aidon feature | Aiko's current position | Decision for the 8 GB Jetson |
 |---|---|---|
 | File hashes and changed-document refresh in `src/memory/kb.py`; content-addressed document chunks in `docstore.py` | Codebase indexing already tracks changes. Learned-library scanning previously skipped any path imported once. | Implemented source fingerprints and transactional refresh for learned files. Unchanged files avoid extraction/embedding; old text remains as superseded history. |
-| Credential redaction before embedding/storage in `src/memory/memory.py` and `redaction.py` | Encryption support exists, but the reviewed personal/episodic/knowledge write paths do not share an equivalent credential-redaction boundary. | High-priority follow-up. Use one tested helper across ingress paths and caches; preserve legitimate email addresses and ordinary personal facts. Define credential patterns carefully to avoid erasing normal technical text. |
-| Structured failure lessons with recurrence, failure class, and repair/test fields in `failure_lessons.py` | Experiences, verification results, and engram relations exist, but no equivalent complete recurrence/repair lifecycle was found. | High-priority follow-up for self-coding. Extend the existing SQLite experience store; include only a few relevant lessons in an 8K prompt. Require actual repair evidence rather than equating a similar later success with proof that the same failure was fixed. |
-| Image memory points with file references in `memory.py:record_image` and a shared text/image encoder in `embedder.py` | The reviewed memory API stores text/episodic traces; no equivalent image-embedding record API was found. Sensory integration remains Area 7. | Useful later, subject to measured RAM/latency with Aiko's normal model and services loaded. Keep image assets on disk and captions/references in SQLite; benchmark an encoder before adding another resident model. |
-| Persistent parser-needed status in `kb.py` | Failed extraction is logged and the source remains available for retry. | Useful follow-up: persist ingestion status/error/retry metadata so unsupported documents are visible to the owner. No need for another database. |
+| Credential redaction before embedding/storage in `src/memory/memory.py` and `redaction.py` | Shared credential scrubbing now covers new memory, episode, journal, knowledge, experience, trace, and embedding-cache writes. | Implemented; ordinary contact facts remain intact. Historical databases are not automatically scrubbed. |
+| Structured failure lessons with recurrence, failure class, and repair/test fields in `failure_lessons.py` | Recurring failure lessons and verified repair/check evidence now live in the existing SQLite experience store. | Implemented with bounded prompt context; a later successful answer alone does not mark a repair. |
+| Image memory points with file references in `memory.py:record_image` and a shared text/image encoder in `embedder.py` | Image captions and workspace file links are now stored in SQLite and indexed with existing text embeddings. | Caption-based recall implemented. Native image embeddings still need device benchmarks before adding another model. |
+| Persistent parser-needed status in `kb.py` | Bounded per-user ready/failed/needs-caption scan outcomes survive restart in SQLite. | Implemented; failed refreshes retain the accepted document link. |
 | SQLite source of truth with rebuildable FAISS indexes in `stores.py` | SQLite + sqlite-vec already supplies durable text and vector retrieval. The first Area 5 fixes repair codebase vectors after outages. | Keep sqlite-vec now. Rebuildable indexes and explicit embedding-version metadata are useful design principles; a FAISS replacement needs a benchmark and a migration plan. |
 | RecallBudget and model-summary helper modules | Aiko already fits assembled requests to the configured context and has working-memory/episode/scene summaries. Aidon's `RecallBudget` and `rolling_summary_model` have no production call sites in the reviewed source; the budget helper only trims point count. | Keep Aiko's active budget enforcement. Evaluate summary quality and combined retrieval budgets before adding another summarizer or unused policy object. |
 | Extracted facts, entity links, recency/retention, and long-term promotion | Aiko already has corresponding features, plus temporal validity, supersession narratives, and lineage. | Review correctness and evaluate retrieval quality in Area 5; no additional memory layer is justified solely by a similar feature name. |
@@ -153,3 +154,38 @@ lexical fallback during embedding outages, user scoping, index repair, and
 worker cleanup. They do not measure Jetson peak RAM, real Harrier retrieval
 quality, or the owner's existing database. No live user memories were migrated
 or removed during this review.
+
+## Final current-configuration code pass
+
+Monthly consolidation now preserves source pins after any failed write, keeps
+the month retryable, and recognizes already committed exact monthly facts on
+retry. Only persisted summaries contribute source provenance. Cognitive lessons
+are consumed only when a saved summary covers their source identifiers; lessons
+that arrived while the model ran remain available.
+
+Reconciliation prepares embeddings before its writer transaction, revalidates
+active/unpinned source text, rejects repeated IDs as a two-source merge, and
+retries failed/empty decisions. Knowledge deduplication likewise embeds outside
+its writer transaction and revalidates source text and access counts. Retention
+handles malformed embedding batches through its existing neutral fallback.
+
+Cleanup and duplicate deletion use conditional SQL to preserve facts changed,
+pinned, or recalled after scoring. Both ends of temporal lineage survive
+automatic cleanup. Recall and Studio share a bounded lineage walker that keeps
+the requested center and follows merge predecessors and successors. Health
+counts are SQL aggregates, and pin rebalancing excludes identity rows and checks
+its snapshot before updating. Dreaming releases text bodies between batches.
+
+Knowledge vector repair fills missing vectors after outages in batches of 32
+(default, hard cap 128), revalidates each chunk before publication, and does not
+reimport unchanged documents. It uses the configured embedding geometry. Changing
+the embedding model remains a deliberate full-index rebuild operation: missing
+vector repair does not translate existing vectors into a different model space.
+Canonical SQL rows remain the source from which indexes can be rebuilt.
+
+Remaining validation requires a running Jetson and real models: peak RAM under
+concurrent services, retrieval quality on representative prompts, restart
+behavior with the owner's database, and sustained ingestion latency.
+
+Final combined regression validation for this code pass: **2,537 tests passed,
+5 skipped, 13 existing deprecation warnings, and 34 passing subtests**.

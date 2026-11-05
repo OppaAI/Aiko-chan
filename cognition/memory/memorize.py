@@ -2293,7 +2293,7 @@ class _MemoryBackend:
         with self._db_lock:
             row = self._conn.execute(
                 """
-                SELECT id, memory, created_at, status, supersedes_id, pinned,
+                SELECT id, memory, created_at, status, supersedes_id, superseded_by, user_id, pinned,
                        kind, source, valence_score, arousal_score, entities, access_count
                 FROM memories
                 WHERE id = ? AND (? IS NULL OR user_id = ?)
@@ -2307,7 +2307,7 @@ class _MemoryBackend:
         with self._db_lock:
             rows = self._conn.execute(
                 """
-                SELECT id, memory, created_at, status, supersedes_id, pinned,
+                SELECT id, memory, created_at, status, supersedes_id, superseded_by, user_id, pinned,
                        kind, source, valence_score, arousal_score, entities, access_count
                 FROM memories
                 WHERE supersedes_id = ? AND (? IS NULL OR user_id = ?)
@@ -2319,6 +2319,33 @@ class _MemoryBackend:
         return [dict(r) for r in rows]
 
     # ── delete ────────────────────────────────────────────────────────────────
+
+    def delete_lifecycle_candidate(self, memory_id, user_id, text, access_count, last_accessed):
+        """Delete only the unchanged, unpinned snapshot scored by maintenance."""
+        with self._db_lock:
+            try:
+                self._ensure_open()
+                cols = existing_columns(self._conn)
+                links = [f'child.{name}=memories.id' for name in ('supersedes_id', 'superseded_by') if name in cols]
+                lineage = (' AND NOT EXISTS (SELECT 1 FROM memories child WHERE '
+                           + ' OR '.join(links) + ')') if links else ''
+                lineage += ''.join(f" AND coalesce({name},'')=''" for name in ('supersedes_id', 'superseded_by') if name in cols)
+                cursor = self._conn.execute(
+                    "DELETE FROM memories WHERE id=? AND user_id=? AND memory=? "
+                    "AND (pinned=0 OR pinned IS NULL) AND access_count=? "
+                    "AND coalesce(last_accessed_at,'never')=?" + lineage,
+                    (memory_id, user_id, text, access_count, last_accessed or 'never'))
+                deleted = cursor.rowcount > 0
+                if deleted:
+                    self._conn.execute('DELETE FROM memories_vec WHERE id=?', (memory_id,))
+                    self._conn.execute('DELETE FROM entity_relations WHERE memory_id=?', (memory_id,))
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+        if deleted:
+            self._invalidate_entity_importance(user_id)
+        return deleted
 
     def delete(self, memory_id: str) -> None:
         """
@@ -3694,8 +3721,8 @@ class AikoMemorize:
              single generalized kind='schema' gist memory (Phase 21).
           4. Prune  — standard decay cleanup runs last.
 
-        all_mems is fetched once and passed through to cleanup() so the
-        prune stage doesn't re-scan the table from scratch.
+        Text payloads are processed in bounded batches; cleanup streams a
+        fresh scan rather than retaining every memory body through the job.
 
         Returns dict: {boosted, merged, schemas, pruned, duration_s}
         """
@@ -3714,7 +3741,6 @@ class AikoMemorize:
         )
 
         mem_ids: list[str] = []
-        all_batch_mems: list[dict] = []
         boosted = 0
         dream_mb_biases: list[float] = []
 
@@ -3722,7 +3748,6 @@ class AikoMemorize:
             batch_ids = [str(m.get("id", "")) for m in batch if m.get("id")]
             if not batch_ids:
                 continue
-            all_batch_mems.extend(batch)
             # FIX: only active memories are eligible as a merge *source*.
             # _dream_merge's KNN neighbor search is already active_only=True,
             # but the outer mem_id being probed wasn't filtered — so a
@@ -3776,14 +3801,9 @@ class AikoMemorize:
         except (TypeError, ValueError):
             pin_access = 2
         pin_result = self.rebalance_pins(user_id, max_age_days=pin_age, min_access_count=pin_access, dry_run=dry_run)
-        # FIX: dream() previously called cleanup() with no _all_mems, so the
-        # "already-fetched memory list is passed through here to avoid a
-        # redundant get_all() scan" claim in cleanup()'s docstring was dead —
-        # cleanup() always re-scanned the whole table from scratch, right
-        # after dream() had just scanned it for the boost stage. Passing the
-        # batches we already fetched above wires up that optimization for
-        # real.
-        prune_result = self.cleanup(user_id=user_id, dry_run=dry_run, _all_mems=all_batch_mems)
+        # A second streaming read bounds RAM and sees any recalls/pins that
+        # changed during dreaming. Deletion also validates its snapshot.
+        prune_result = self.cleanup(user_id=user_id, dry_run=dry_run)
         pruned = prune_result.get("deleted", 0)
 
         duration = round(time.perf_counter() - t_start, 2)
@@ -4188,14 +4208,19 @@ class AikoMemorize:
         ac_a, _     = payload_map.get(id_a, (0, "never"))
         ac_b, _     = payload_map.get(id_b, (0, "never"))
         with self._mem._db_lock:
-            row_map = {
-                row["id"]: row["created_at"]
+            snapshots = {
+                row["id"]: dict(row)
                 for row in self._conn.execute(
-                    "SELECT id, created_at FROM memories WHERE id IN (?, ?)", (id_a, id_b)
+                    "SELECT id,user_id,memory,created_at,pinned,status,access_count,last_accessed_at "
+                    "FROM memories WHERE id IN (?, ?)", (id_a, id_b)
                 ).fetchall()
             }
+        if (len(snapshots) != 2 or snapshots[id_a]['user_id'] != snapshots[id_b]['user_id']
+                or any(row['pinned'] or row['status'] == STATUS_SUPERSEDED for row in snapshots.values())):
+            return False
+        ac_a, ac_b = snapshots[id_a]['access_count'], snapshots[id_b]['access_count']
         if ac_a == ac_b:
-            loser = id_b if row_map.get(id_a, "") >= row_map.get(id_b, "") else id_a
+            loser = id_b if snapshots[id_a]['created_at'] >= snapshots[id_b]['created_at'] else id_a
         else:
             loser = id_b if ac_a > ac_b else id_a
 
@@ -4207,7 +4232,10 @@ class AikoMemorize:
             return True
 
         try:
-            self._mem.delete(memory_id=loser)
+            snapshot = snapshots[loser]
+            if not self._mem.delete_lifecycle_candidate(loser, snapshot['user_id'], snapshot['memory'],
+                    snapshot['access_count'], snapshot['last_accessed_at']):
+                return False
             log.info(
                 f"Merged duplicate (score={score:.3f}, "
                 f"ac_a={ac_a}, ac_b={ac_b}) → deleted {loser}"
@@ -4320,10 +4348,15 @@ class AikoMemorize:
                         dry_candidates.extend(candidates)
                         continue
 
+                    snapshots = {str(m.get('id')): m for m in batch}
                     for c in candidates:
                         try:
-                            self._mem.delete(memory_id=c["id"])
-                            deleted.append(c["id"])
+                            snapshot = snapshots[c['id']]
+                            if self._mem.delete_lifecycle_candidate(c['id'], user_id, snapshot.get('memory') or '',
+                                    c['access_count'], c['last_accessed_at']):
+                                deleted.append(c['id'])
+                            else:
+                                kept += 1
                         except Exception as e:
                             failed.append({"id": c["id"], "error": str(e)})
 
@@ -4489,6 +4522,7 @@ class AikoMemorize:
             re.IGNORECASE,
         )
         candidates: list[dict] = []
+        updates = []
         # NOTE: get_all()/iter_all() return a narrow projection (id, memory,
         # created_at, status, ...) tuned for the recall/dream hot paths -- it
         # no longer carries pinned/access_count/last_accessed_at, which this
@@ -4500,9 +4534,11 @@ class AikoMemorize:
                 SELECT id, memory, pinned, status, access_count,
                        last_accessed_at, created_at
                 FROM memories
-                WHERE user_id = ?
+                WHERE user_id = ? AND pinned=1 AND access_count < ?
+                  AND (kind IS NULL OR kind != 'identity')
+                  AND (status='active' OR status IS NULL)
                 """,
-                (uid,),
+                (uid, access_floor),
             ).fetchall()
         for _r in lifecycle_rows:
             row = dict(_r)
@@ -4531,25 +4567,31 @@ class AikoMemorize:
             if (now - touched).total_seconds() < age_days * 86400:
                 continue
             candidates.append({"id": str(row.get("id") or ""), "memory": text[:120], "age_days": round((now - touched).total_seconds() / 86400, 1), "access_count": accesses})
+            updates.append((uid, row['id'], text, accesses, row.get('last_accessed_at')))
 
+        changed = 0
         if not dry_run and candidates:
-            ids = [item["id"] for item in candidates if item["id"]]
-            placeholders = ",".join("?" for _ in ids)
             with self._mem._db_lock:
-                self._conn.execute(
-                    f"UPDATE memories SET pinned = 0 WHERE user_id = ? AND id IN ({placeholders})",
-                    [uid, *ids],
-                )
+                cursor = self._conn.executemany(
+                    "UPDATE memories SET pinned=0 WHERE user_id=? AND id=? AND memory=? "
+                    "AND access_count=? AND last_accessed_at IS ? AND pinned=1 "
+                    "AND (status='active' OR status IS NULL)", updates)
+                changed = cursor.rowcount
                 self._conn.commit()
-        return {"unpinned": 0 if dry_run else len(candidates), "candidates": candidates, "protected": True}
+            if changed:
+                self._clear_search_cache()
+        return {"unpinned": changed, "candidates": candidates, "protected": True}
 
     def memory_health(self, user_id: str | None = None, *, max_age_days: int = 45, min_access_count: int = 2) -> dict:
         """Return retention diagnostics without modifying memory rows."""
         uid = self._resolve_user_id(user_id)
-        rows = self.get_all(user_id=uid)
-        pinned = sum(1 for row in rows if int(row.get("pinned") or 0))
+        with self._mem._db_lock:
+            counts = self._conn.execute(
+                "SELECT count(*) AS total,coalesce(sum(CASE WHEN pinned=1 THEN 1 ELSE 0 END),0) AS pinned "
+                "FROM memories WHERE user_id=?", (uid,)).fetchone()
+        pinned = int(counts['pinned'])
         candidates = self.rebalance_pins(uid, max_age_days=max_age_days, min_access_count=min_access_count, dry_run=True)
-        total = len(rows)
+        total = int(counts['total'])
         # DB size cap check (Jetson Nano: cap at ~50MB to avoid memory pressure)
         try:
             import os

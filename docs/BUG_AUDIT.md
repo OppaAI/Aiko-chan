@@ -13,7 +13,7 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 | 2 | Conversation routing, context assembly, and response streaming | `cognition/think.py`, `cognition/deep_think.py`, `cognition/inner_speech.py` | Current code pass completed; combined validation recorded below; real-model/device checks pending |
 | 3 | Conscience, refusal gates, and user preferences | `cognition/conscience/`, `cognition/policy.py`, `cognition/attention.py` | Current code pass completed; final validation below; live-model and physical Jetson checks pending |
 | 4 | Agentic tasks, tools, and self-coding | `agentic/`, `Aiko-Playground` integration | Current code pass completed; final validation below; live-model and physical Jetson checks pending |
-| 5 | Memory, retrieval, knowledge, and persistence | `cognition/memory/`, `cognition/knowledge/` | In progress; shared storage, embedding caches, outage recall, codebase repair, and worker lifecycle fixes below |
+| 5 | Memory, retrieval, knowledge, and persistence | `cognition/memory/`, `cognition/knowledge/` | Current code pass completed for SQLite/Harrier; final validation below; live-model retrieval quality and physical Jetson RAM/latency checks pending |
 | 6 | Fly-brain circuits and state wiring | `cognition/fly*`, `cognition/centralcomplex/`, `cognition/neural_state.py` | Focused wiring fixes shipped; broad review not started |
 | 7 | Speech, listening, and sensory pathways | `sensory/`, `cognition/flysense/` | Not started |
 | 8 | Web, desktop, mobile, and external interfaces | `interface/` | Not started |
@@ -638,3 +638,39 @@ same-size/mtime atomic replacement, bounded cache eviction, hidden-directory
 exclusion, failed-refresh retries, and existing watcher/storage regressions.
 Consolidation/retention, lineage, embedding-version migration, retrieval quality,
 and live Jetson measurements remain under the Area 5 review.
+
+
+### Area 5: final consolidation, retention, lineage, and outage-recovery pass
+
+- Monthly write failures retain daily sources and leave the month retryable.
+  Retries recognize exact monthly pins already committed; only saved summaries
+  contribute provenance. Only covered cognitive lessons are consumed, preserving
+  lessons that arrive during model work.
+- Reconciliation revalidates active, unpinned sources after model work, prepares
+  vectors before taking the writer transaction, rejects duplicate source IDs as
+  a merge, and retries failed/empty decisions. Vectorless memories are deferred
+  until their embeddings are recovered.
+- Knowledge deduplication embeds before its writer transaction and rechecks text
+  and access snapshots. Rolled-back maintenance reports zero completed changes.
+- Retention scoring rejects malformed, short, zero, and nonfinite vector batches
+  and uses its neutral fallback. Daily journals now share credential scrubbing.
+- Automatic deletion checks current pin, text, access, and lineage state in SQL.
+  Both ends of temporal lineage are protected. Identity pins remain protected,
+  pin updates validate their snapshot, and health counts use SQL aggregates.
+- Recall and Studio share a bounded lineage walker. It keeps the requested row
+  at the depth limit and follows both merge-source and successor links.
+- Dreaming releases memory text between batches. Knowledge backfill repairs
+  missing vectors in bounded batches after embedding outages without duplicating
+  unchanged source documents or publishing stale/orphan vectors.
+
+The current code pass targets the configured SQLite/sqlite-vec and Harrier
+setup. Full model-space migration is a deliberate index rebuild; missing-vector
+repair is not a model-space conversion. Real-model retrieval quality and the
+physical 8 GB Jetson RAM/latency checks require the running device.
+
+Final combined validation: **2,537 passed, 5 skipped, 13 existing deprecation
+warnings, and 34 passing subtests** across all unit/integration tests and the
+standalone conscience harness. The current Area 5 code pass is complete for the
+configured SQLite/Harrier setup. Real-model retrieval quality and physical Jetson
+measurements remain pending; this is not a claim that every live-model scenario
+is bug-free.

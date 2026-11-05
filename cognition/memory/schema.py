@@ -399,6 +399,9 @@ def ensure_reconcile_schema(conn: sqlite3.Connection) -> list[str]:
             "CREATE INDEX IF NOT EXISTS idx_memories_user_valid "
             "ON memories(user_id, valid_to)"
         )
+        for name in ('supersedes_id', 'superseded_by'):
+            if name in existing_columns(conn):
+                conn.execute(f'CREATE INDEX IF NOT EXISTS idx_memories_{name} ON memories({name})')
         conn.commit()
     except sqlite3.Error as e:
         log.debug("memory reconcile index: %s", e)

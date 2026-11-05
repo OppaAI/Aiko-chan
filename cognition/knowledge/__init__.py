@@ -56,6 +56,7 @@ from .lifecycle import (
     prune_knowledge,
 )
 from .status import ingestion_status
+from .backfill import backfill_missing_vectors
 
 
 class KnowledgeStore:
@@ -88,6 +89,11 @@ class KnowledgeStore:
     def ingestion_status(self, **kwargs):
         kwargs.setdefault("user_id", self.user_id)
         return ingestion_status(**kwargs)
+
+    def backfill_missing_vectors(self, **kwargs):
+        kwargs.setdefault('user_id', self.user_id)
+        kwargs.setdefault('embedder', self.embedder)
+        return backfill_missing_vectors(**kwargs)
 
     def search_knowledge(self, query: str, limit: int = 5, **kwargs):
         kwargs.setdefault("user_id", self.user_id)
@@ -137,6 +143,7 @@ __all__ = [
     "KnowledgeSearch",
     "KnowledgeStore",
     "ingestion_status",
+    "backfill_missing_vectors",
     "maybe_clear_knowledge_cache",
     "now",   
     "prune_knowledge",

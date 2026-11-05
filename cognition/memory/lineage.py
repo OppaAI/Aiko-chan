@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import nullcontext
 from typing import Any, Protocol
 
 
@@ -21,7 +22,7 @@ def _row_public(row: dict[str, Any]) -> dict[str, Any]:
     keys = (
         "id", "memory", "created_at", "status", "supersedes_id",
         "pinned", "kind", "source", "valence_score", "arousal_score",
-        "entities", "access_count",
+        "entities", "access_count", "superseded_by", "valid_from", "valid_to",
     )
     return {k: row.get(k) for k in keys if k in row or row.get(k) is not None}
 
@@ -44,67 +45,86 @@ def walk_supersession_lineage(
 
         SELECT * FROM memories WHERE id=? AND user_id=?
     """
-    depth = max_depth if max_depth is not None else _max_depth()
+    depth = max(1, min(256, int(max_depth if max_depth is not None else _max_depth())))
     uid = user_id
+    conn = getattr(store, '_conn', None)
+    lock = getattr(store, '_db_lock', None)
+    cache = {}
 
-    def load(mid: str) -> dict | None:
-        if hasattr(store, "get_by_id"):
-            return store.get_by_id(mid, user_id=uid)
-        # Fallback: AikoMemorize-style connection helper expected on backend
-        get = getattr(store, "_get_memory_row", None)
-        if callable(get):
-            return get(mid, user_id=uid)
-        raise AttributeError("store must provide get_by_id or _get_memory_row")
+    def load(mid):
+        if mid in cache:
+            return cache[mid]
+        if hasattr(store, 'get_by_id'):
+            row = store.get_by_id(mid, user_id=uid)
+        elif callable(getattr(store, '_get_memory_row', None)):
+            row = store._get_memory_row(mid, user_id=uid)
+        elif conn is not None:
+            with lock or nullcontext():
+                raw = conn.execute('SELECT * FROM memories WHERE id=? AND (? IS NULL OR user_id=?)',
+                                   (mid, uid, uid)).fetchone()
+            row = dict(raw) if raw else None
+        else:
+            raise AttributeError('store must support memory row lookup')
+        cache[mid] = row
+        return row
 
     center = load(mem_id)
     if not center:
-        return {"center_id": mem_id, "chain": [], "error": "not_found"}
+        return {'center_id': mem_id, 'chain': [], 'error': 'not_found'}
+    uid = uid or center.get('user_id')
+    temporal = False
+    if conn is not None:
+        with lock or nullcontext():
+            temporal = any(row[1] == 'superseded_by' for row in conn.execute('PRAGMA table_info(memories)'))
 
-    # Backward: follow supersedes_id toward older roots
-    backward: list[dict] = []
-    cur = center
-    seen: set[str] = {str(center.get("id") or mem_id)}
-    for _ in range(depth):
-        sid = cur.get("supersedes_id")
-        if not sid or sid in seen:
-            break
-        prev = load(str(sid))
-        if not prev:
-            break
-        backward.append(prev)
-        seen.add(str(prev.get("id")))
-        cur = prev
-    backward.reverse()  # oldest first
-
-    # Forward: memories that supersede the current node (one hop fan-in at a time)
-    # Prefer a store method if present; else single-step SQL via store helper.
-    forward: list[dict] = []
-    frontier = [str(center.get("id") or mem_id)]
-    for _ in range(depth):
-        if not frontier:
-            break
-        nxt_ids: list[str] = []
-        for fid in frontier:
-            children = _find_superseding(store, fid, user_id=uid)
-            for ch in children:
-                cid = str(ch.get("id") or "")
-                if not cid or cid in seen:
-                    continue
-                seen.add(cid)
-                forward.append(ch)
-                nxt_ids.append(cid)
-                if len(backward) + 1 + len(forward) >= depth:
+    seen = {str(center.get('id') or mem_id)}
+    backward = []
+    frontier = [center]
+    while frontier and len(seen) < depth:
+        following = []
+        for row in frontier:
+            ids = [row['supersedes_id']] if row.get('supersedes_id') else []
+            if temporal:
+                with lock or nullcontext():
+                    ids.extend(r[0] for r in conn.execute(
+                        'SELECT id FROM memories WHERE superseded_by=? AND (? IS NULL OR user_id=?) '
+                        'ORDER BY created_at,id LIMIT ?', (row['id'], uid, uid, depth)))
+            for mid in ids:
+                if len(seen) >= depth:
                     break
-            if len(backward) + 1 + len(forward) >= depth:
-                break
-        frontier = nxt_ids
+                if mid in seen:
+                    continue
+                previous = load(mid)
+                if previous:
+                    seen.add(mid)
+                    backward.append(previous)
+                    following.append(previous)
+        frontier = following
+    backward.reverse()
 
-    chain = [_row_public(r) for r in backward] + [_row_public(center)] + [_row_public(r) for r in forward]
-    return {
-        "center_id": str(center.get("id") or mem_id),
-        "chain": chain[:depth],
-        "depth": len(chain[:depth]),
-    }
+    forward = []
+    frontier = [center]
+    while frontier and len(seen) < depth:
+        following = []
+        for row in frontier:
+            children = _find_superseding(store, row['id'], user_id=uid)
+            if row.get('superseded_by'):
+                child = load(str(row['superseded_by']))
+                if child:
+                    children.append(child)
+            for child in children:
+                mid = str(child.get('id') or '')
+                if len(seen) >= depth:
+                    break
+                if mid and mid not in seen:
+                    seen.add(mid)
+                    # Load full temporal fields for the next hop.
+                    child = load(mid) or child
+                    forward.append(child)
+                    following.append(child)
+        frontier = following
+    chain = [_row_public(row) for row in backward + [center] + forward]
+    return {'center_id': str(center['id']), 'chain': chain, 'depth': len(chain)}
 
 
 def _find_superseding(store: Any, mem_id: str, user_id: str | None) -> list[dict]:

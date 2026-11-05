@@ -1914,11 +1914,17 @@ class EdgeCognitiveState:
         lines = [f"- {lesson}" for lesson in durable[:3]]
         return "<lesson_guidance>\n" + "\n".join(lines) + "\n</lesson_guidance>"
 
-    def consume_lessons(self) -> list[str]:
+    def consume_lessons(self, expected=None) -> list[str]:
         """Return current outcome lessons for successful background consolidation. Lesson retrieval."""
         with self._lock:
-            lessons = list(self._lessons)
-            self._lessons.clear()
+            if expected is None:
+                lessons = list(self._lessons)
+                self._lessons.clear()
+            else:
+                selected = set(expected)
+                lessons = [lesson for lesson in self._lessons if lesson in selected]
+                self._lessons = deque((lesson for lesson in self._lessons if lesson not in selected),
+                                      maxlen=self._lessons.maxlen)
             return lessons
 
     def load_persistent(self) -> None:

@@ -1826,3 +1826,41 @@ class TestWriteQueueBound:
         # Several minutes of active chatting at ~1 turn / 20-30s; each item
         # is a few KB. Not absurd in either direction.
         assert 8 <= MEMORY_WRITE_QUEUE_MAXSIZE <= 4096
+
+
+def test_memory_health_counts_pins_from_sql_without_loading_all_text(backend, monkeypatch):
+    memo = _bare_memo(backend)
+    now = datetime.now(timezone.utc).isoformat()
+    _insert_row(backend._conn, 'health-pin', 'u1', 'Pinned fact.', now, pinned=1)
+    _insert_row(backend._conn, 'health-note', 'u1', 'Ordinary fact.', now, pinned=0)
+    _insert_row(backend._conn, 'health-other', 'u2', 'Other user fact.', now, pinned=1)
+    backend._conn.commit()
+    monkeypatch.setattr(memo, 'get_all', lambda **k: (_ for _ in ()).throw(AssertionError('full-text scan')))
+    result = memo.memory_health('u1')
+    assert result['total'] == 2
+    assert result['pinned'] == 1
+    assert result['pinned_ratio'] == .5
+
+
+def test_dream_releases_memory_bodies_between_batches(backend, monkeypatch):
+    import weakref
+    memo = _bare_memo(backend)
+    references = []
+    class Row(dict):
+        pass
+    def batches(uid):
+        for i in range(5):
+            row = Row(id=f'stream-{i}', memory='A' * 10000, status='active')
+            references.append(weakref.ref(row))
+            yield [row]
+    monkeypatch.setattr(memo, '_iter_memory_batches', batches)
+    monkeypatch.setattr(memo, '_batch_get_payloads', lambda ids: {})
+    monkeypatch.setattr(memo, '_dream_boost', lambda *a, **k: 0)
+    def merge(*a, **k):
+        assert sum(ref() is not None for ref in references) <= 1
+        return 0
+    monkeypatch.setattr(memo, '_dream_merge', merge)
+    monkeypatch.setattr(memo, '_dream_schema', lambda **k: 0)
+    monkeypatch.setattr(memo, 'rebalance_pins', lambda *a, **k: {'unpinned': 0})
+    monkeypatch.setattr(memo, 'cleanup', lambda **k: {'deleted': 0})
+    assert memo.dream('u1', dry_run=True)['merged'] == 0

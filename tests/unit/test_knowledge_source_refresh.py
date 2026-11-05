@@ -256,3 +256,47 @@ def test_deleting_a_source_file_does_not_implicitly_forget_learned_history(libra
     library.file.unlink()
     assert scan() == []
     assert search.search_knowledge('autumn instructions', user_id='owner')[0]['doc_id'] == original
+
+
+def test_embedding_recovery_backfills_without_reimporting_unchanged_file(library):
+    library.file.write_text('Maple leaves in the quiet garden.')
+    first = scan()[0]
+    assert not rows(library, 'SELECT id FROM learned_chunks_vec')
+    class Provider:
+        def embed_queries(self, texts):
+            return np.ones((len(texts), schema.EMBED_DIMS), dtype=np.float32)
+    assert scan(embedder=Provider()) == []
+    assert len(rows(library, 'SELECT id FROM learned_docs')) == 1
+    assert rows(library, 'SELECT doc_id FROM knowledge_file_state')[0]['doc_id'] == first
+    assert rows(library, 'SELECT id FROM learned_chunks_vec')
+
+
+def test_vector_repair_revalidates_chunk_after_remote_embedding(library):
+    from cognition.knowledge.backfill import backfill_missing_vectors
+    library.file.write_text('Maple leaves in the quiet garden.')
+    scan()
+    class Provider:
+        def embed_queries(self, texts):
+            conn = library.connect()
+            try:
+                conn.execute("UPDATE learned_chunks SET text='Changed while embedding' WHERE user_id='owner'")
+                conn.commit()
+            finally:
+                conn.close()
+            return np.ones((len(texts), schema.EMBED_DIMS), dtype=np.float32)
+    assert backfill_missing_vectors(embedder=Provider(), user_id='owner') == 0
+    assert not rows(library, 'SELECT id FROM learned_chunks_vec')
+
+
+def test_vector_repair_is_bounded_and_user_scoped(library):
+    from cognition.knowledge.backfill import backfill_missing_vectors
+    for i in range(3):
+        assert ingest.ingest_text(str(i), f'Maple garden instructions {i}', user_id='owner')
+    assert ingest.ingest_text('Other', 'Other user private knowledge', user_id='other')
+    class Provider:
+        def embed_queries(self, texts):
+            assert len(texts) == 2
+            return np.ones((len(texts), schema.EMBED_DIMS), dtype=np.float32)
+    assert backfill_missing_vectors(embedder=Provider(), user_id='owner', limit=2) == 2
+    assert len(rows(library, 'SELECT id FROM learned_chunks_vec')) == 2
+    assert not rows(library, "SELECT v.id FROM learned_chunks_vec v JOIN learned_chunks c ON c.id=v.id WHERE c.user_id='other'")

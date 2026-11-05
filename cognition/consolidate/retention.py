@@ -33,6 +33,17 @@ from .schema import (
 
 log = get_logger(__name__)
 
+
+def _validated_embeddings(values, count):
+    matrix = np.asarray(values, dtype=np.float32)
+    if (matrix.ndim != 2 or matrix.shape[0] != count or not matrix.shape[1]
+            or not np.isfinite(matrix).all()):
+        raise ValueError('invalid retention embedding batch')
+    norms = np.linalg.norm(matrix, axis=1)
+    if not np.isfinite(norms).all() or np.any(norms <= 1e-12):
+        raise ValueError('invalid retention embedding norms')
+    return matrix
+
 __all__ = [
     "apply_retention_gate",
     "build_dynamic_anchors",
@@ -99,7 +110,7 @@ def build_static_anchors(memorize, user_id: str) -> "np.ndarray | None":
         return None
 
     try:
-        vectors = np.array(memorize.embed_texts(monthly_texts, query=False))
+        vectors = _validated_embeddings(memorize.embed_texts(monthly_texts, query=False), len(monthly_texts))
     except Exception as exc:
         log.warning("Static anchor build: embedding failed: %s", exc)
         return None
@@ -181,7 +192,7 @@ def build_dynamic_anchors(memorize, user_id: str) -> "np.ndarray | None":
     if len(texts) < 2:
         return None
     try:
-        vectors = np.array(memorize.embed_texts(texts, query=False))
+        vectors = _validated_embeddings(memorize.embed_texts(texts, query=False), len(texts))
     except Exception as exc:
         log.warning("Dynamic anchor build: embedding failed: %s", exc)
         return None
@@ -254,6 +265,8 @@ def score_daily_row(
         try:
             norms = np.linalg.norm(anchors, axis=1) * np.linalg.norm(vec) + 1e-9
             sims = (anchors @ vec) / norms
+            if not np.isfinite(sims).all():
+                return None
             return float(max(0.0, min(1.0, 1.0 - float(np.max(sims)))))
         except Exception:
             return None
@@ -321,7 +334,7 @@ def apply_retention_gate(
     candidate_texts = [row.get("_text", "") or "" for row in candidate_rows]
     candidate_vectors = None
     try:
-        candidate_vectors = np.array(memorize.embed_texts(candidate_texts, query=False))
+        candidate_vectors = _validated_embeddings(memorize.embed_texts(candidate_texts, query=False), len(candidate_texts))
     except Exception as exc:
         log.warning(
             "Retention gate: failed to embed %d candidate row(s), "

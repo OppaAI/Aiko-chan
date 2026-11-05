@@ -85,6 +85,7 @@ def _candidate_rows(conn, user_id: str) -> list:
         "WHERE m.user_id = ? AND (m.status = 'active' OR m.status IS NULL) "
         "AND m.kind IN ('fact', 'identity') "
         "AND (m.pinned IS NULL OR m.pinned = 0)"
+        " AND EXISTS (SELECT 1 FROM memories_vec v WHERE v.id=m.id)"
     )
     params: list = [user_id]
     if "reconciled_at" in cols:
@@ -187,7 +188,7 @@ def _decide_cluster_actions(members: list) -> list[dict]:
     )
     arr = parse_json_array(raw)
     if not arr:
-        return [{"action": "keep"}]
+        raise ValueError('reconciliation returned no actions; retry later')
     clean: list[dict] = []
     for a in arr:
         if not isinstance(a, dict):
@@ -195,17 +196,32 @@ def _decide_cluster_actions(members: list) -> list[dict]:
         act = str(a.get("action", "")).strip().lower()
         if act in ("keep", "merge", "supersede"):
             clean.append({"action": act, **{k: v for k, v in a.items() if k != "action"}})
-    return clean or [{"action": "keep"}]
+    if not clean:
+        raise ValueError('reconciliation returned no valid actions; retry later')
+    return clean
+
+
+def _prepare_cluster_vectors(backend, actions):
+    vectors = []
+    for action in actions:
+        text = (action.get('text') if action.get('action') == 'merge'
+                else action.get('new_text') if action.get('action') == 'supersede' else '')
+        try:
+            vectors.append(backend._embed(str(text).strip()) if text else None)
+        except Exception as exc:
+            log.debug('reconcile embedding unavailable: %s', exc)
+            vectors.append(None)
+    return vectors
 
 
 def _apply_cluster(backend, user_id: str, members: list, actions: list[dict],
-                   now: str, result: dict) -> None:
+                   now: str, result: dict, vectors=None) -> None:
     """Apply one cluster's actions atomically.
 
     Owns the transaction: all actions commit together, or the whole cluster
     rolls back on error (re-raised for the caller's per-cluster logging).
-    supersede_with_temporal runs with commit=False so its writes join this
-    transaction instead of committing early.
+    Replacement vectors are prepared before taking the transaction; source
+    snapshots are revalidated under the write lock before applying actions.
     """
     conn = backend._conn
     by_id = {str(m["id"]): m for m in members}
@@ -213,25 +229,32 @@ def _apply_cluster(backend, user_id: str, members: list, actions: list[dict],
     covered: set[str] = set()
     merged = 0
     superseded = 0
+    if vectors is None:
+        vectors = _prepare_cluster_vectors(backend, actions)
 
     try:
-        for a in actions:
+        conn.execute('BEGIN IMMEDIATE')
+        for mid, member in by_id.items():
+            current = conn.execute(
+                "SELECT memory,kind,pinned,status FROM memories WHERE id=? AND user_id=?",
+                (mid, user_id)).fetchone()
+            if (current is None or current['memory'] != member['memory']
+                    or current['kind'] != member['kind'] or current['pinned']
+                    or current['status'] not in ('active', None)):
+                raise ValueError('reconciliation source changed; retry with a fresh snapshot')
+        for index, a in enumerate(actions):
             act = a.get("action")
             if act == "merge":
-                src_ids = [
+                src_ids = list(dict.fromkeys(
                     str(s) for s in (a.get("source_ids") or [])
                     if str(s) in member_ids and str(s) not in covered
-                ]
+                ))
                 text = str(a.get("text") or "").strip()
                 if len(src_ids) < 2 or not text:
                     continue
                 mem_type = _majority(str(by_id[s]["mem_type"] or "") for s in src_ids)
                 kind = _majority(str(by_id[s]["kind"] or "") for s in src_ids) or KIND_FACT
-                try:
-                    vector = backend._embed(text)
-                except Exception as e:
-                    log.debug("reconcile: merge embed failed: %s", e)
-                    vector = None
+                vector = vectors[index]
                 new_id = str(uuid.uuid4())
                 backend._insert_row(
                     mem_id=new_id, user_id=user_id, text=text, now=now,
@@ -248,11 +271,14 @@ def _apply_cluster(backend, user_id: str, members: list, actions: list[dict],
                 new_text = str(a.get("new_text") or "").strip()
                 if old_id not in member_ids or old_id in covered or not new_text:
                     continue
-                new_id = backend.supersede_with_temporal(
-                    old_id, new_text, user_id, commit=False)
-                if new_id:
-                    covered.add(old_id)
-                    superseded += 1
+                new_id = str(uuid.uuid4())
+                old = by_id[old_id]
+                backend._insert_row(mem_id=new_id, user_id=user_id, text=new_text,
+                    now=now, vector=vectors[index], pinned=0, source=SOURCE_DREAM,
+                    supersedes_id=old_id, kind=old['kind'], mem_type=old['mem_type'], valid_from=now)
+                _close_row_temporal(conn, old_id, new_id, user_id, now)
+                covered.add(old_id)
+                superseded += 1
             # "keep" and unknown actions: nothing to do.
 
         conn.commit()
@@ -354,7 +380,7 @@ def run_reconcile(memorize, user_id: str, now: str | None = None,
     # instead of waiting out RESCAN_DAYS.
     examined_ids = {
         str(r["id"]) for r in rows
-        if str(r["id"]) not in all_cluster_ids
+        if str(r["id"]) not in all_cluster_ids and str(r['id']) not in vectorless
     }
 
     for cluster in clusters:
@@ -364,7 +390,6 @@ def run_reconcile(memorize, user_id: str, now: str | None = None,
         if result["llm_calls"] >= MEMORY_RECONCILE_MAX_LLM_CALLS:
             log.info("reconcile: LLM call budget exhausted")
             break
-        examined_ids.update(str(m["id"]) for m in members)
         result["clusters"] += 1
         result["llm_calls"] += 1
         try:
@@ -373,12 +398,15 @@ def run_reconcile(memorize, user_id: str, now: str | None = None,
             log.warning("reconcile: cluster decision failed: %s", e)
             continue
         if dry_run:
+            examined_ids.update(str(m["id"]) for m in members)
             result.setdefault("planned", []).append(
                 {"cluster": cluster, "actions": actions}
             )
             continue
         try:
-            _locked(_apply_cluster, backend, uid, members, actions, now, result)
+            vectors = _prepare_cluster_vectors(backend, actions)
+            _locked(_apply_cluster, backend, uid, members, actions, now, result, vectors)
+            examined_ids.update(str(m["id"]) for m in members)
         except Exception:
             log.exception("reconcile: apply failed for cluster %s", cluster)
             continue

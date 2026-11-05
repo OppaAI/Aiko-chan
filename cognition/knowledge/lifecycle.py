@@ -69,6 +69,10 @@ def prune_knowledge(
     stats = {"archived": 0, "deleted": 0, "deduped": 0, "errors": 0}
     now = utc_now_iso()
     try:
+        # Compute remote embeddings before any maintenance acquires the writer
+        # lock. The deduper revalidates its snapshot before archiving rows.
+        if embedder is not None:
+            stats['deduped'] = _deduplicate_chunks(conn, uid, embedder, dedupe_threshold)
         # 1. Archive: move cold chunks (old + low access) to archive table
         archive_cutoff = (datetime.fromisoformat(now.replace('Z', '+00:00')) - timedelta(days=archive_days)).isoformat()
         archive_cursor = conn.execute(
@@ -106,16 +110,13 @@ def prune_knowledge(
         )
         stats["deleted"] = delete_cursor.rowcount
 
-        # 3. Deduplicate: find near-duplicate chunks via embedding similarity
-        if embedder is not None:
-            stats["deduped"] = _deduplicate_chunks(conn, uid, embedder, dedupe_threshold)
-
         conn.commit()
         from .search import maybe_clear_knowledge_cache
         maybe_clear_knowledge_cache()
     except Exception as exc:
         conn.rollback()
         log.warning("prune_knowledge failed: %s", exc)
+        stats.update(archived=0, deleted=0, deduped=0)
         stats["errors"] = 1
     finally:
         conn.close()
@@ -180,11 +181,10 @@ def _deduplicate_chunks(
         _set_dedupe_cursor(conn, user_id, "")
         return 0
 
-    # Advance cursor past this page (even if no dups found)
     page_last_id = str(rows[-1]["id"])
-    _set_dedupe_cursor(conn, user_id, page_last_id)
 
     if len(rows) < 2:
+        _set_dedupe_cursor(conn, user_id, page_last_id)
         return 0
 
     texts = [row["text"] for row in rows]
@@ -232,6 +232,19 @@ def _deduplicate_chunks(
                     to_archive.add(ids[i])
                     break
 
+    if not conn.in_transaction:
+        conn.execute('BEGIN IMMEDIATE')
+    # Embedding can take seconds. A user edit, access, or concurrent refresh
+    # during that time invalidates the planned choice of which copy to keep.
+    for original in rows:
+        current = conn.execute(
+            "SELECT text,access_count,status FROM learned_chunks WHERE id=? AND user_id=?",
+            (original['id'], user_id)).fetchone()
+        if (current is None or current['text'] != original['text']
+                or current['access_count'] != original['access_count']
+                or current['status'] not in ('active', None)):
+            return 0
+    _set_dedupe_cursor(conn, user_id, page_last_id)
     if not to_archive:
         return 0
 

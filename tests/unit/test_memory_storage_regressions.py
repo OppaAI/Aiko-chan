@@ -416,3 +416,34 @@ def test_failed_vector_extension_load_disables_loading_and_closes_connection(mon
         vecstore.connect_sqlite_vec(':memory:')
     assert [call.args for call in conn.enable_load_extension.call_args_list] == [(True,), (False,)]
     conn.close.assert_called_once()
+
+
+def test_knowledge_maintenance_embeds_without_holding_writer_lock(knowledge_db, monkeypatch):
+    main = knowledge_db()
+    monkeypatch.setattr(lifecycle, 'connect', lambda uid=None: main)
+    def embed(texts):
+        assert not main.in_transaction
+        return np.ones((len(texts), 2), dtype=np.float32)
+    result = lifecycle.prune_knowledge(user_id='owner', embedder=NS(embed_queries=embed),
+                                      archive_days=10000, delete_days=10000)
+    assert result['errors'] == 0
+    assert result['deduped'] == 1
+
+
+def test_knowledge_dedupe_rejects_snapshot_changed_during_embedding(knowledge_db):
+    main = knowledge_db()
+    def embed(texts):
+        assert not main.in_transaction
+        other = knowledge_db()
+        try:
+            other.execute("UPDATE learned_chunks SET access_count=8 WHERE id='owner1'")
+            other.commit()
+        finally:
+            other.close()
+        return np.ones((len(texts), 2), dtype=np.float32)
+    try:
+        assert lifecycle._deduplicate_chunks(main, 'owner', NS(embed_queries=embed), .95) == 0
+        assert main.execute('SELECT count(*) FROM learned_chunks_archive').fetchone()[0] == 0
+        assert main.execute("SELECT access_count FROM learned_chunks WHERE id='owner1'").fetchone()[0] == 8
+    finally:
+        main.close()

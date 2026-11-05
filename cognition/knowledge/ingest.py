@@ -704,4 +704,10 @@ def ingest_workspace_knowledge_folder(*, embedder: Embedder | None = None, user_
         record_ingestion_statuses(outcomes, user_id=uid)
     except Exception:
         log.exception("knowledge ingestion status recording failed")
+    if embedder is not None:
+        try:
+            from .backfill import backfill_missing_vectors
+            backfill_missing_vectors(embedder=embedder, user_id=uid)
+        except Exception:
+            log.exception('Knowledge vector repair unavailable; retry next scan')
     return doc_ids

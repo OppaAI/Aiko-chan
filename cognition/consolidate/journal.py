@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime
 
 from cognition.memory.vecstore import delete_user_row, initialize_store_db, utc_now_iso
+from cognition.memory.redaction import redact_text
 from system.userspace import current_user_id
 
 JOURNAL_DB_PATH = os.getenv("JOURNAL_DB_PATH", "memory/journal.db")
@@ -74,7 +75,7 @@ def pin_daily_journal(body: str, date: datetime, *, user_id: str | None = None) 
                 pinned=1,
                 updated_at=excluded.updated_at
             """,
-            (row_id, uid, entry_date, tag, body, 1, ts, ts),
+            (row_id, uid, entry_date, tag, redact_text(body), 1, ts, ts),
         )
         conn.commit()
         row = conn.execute(

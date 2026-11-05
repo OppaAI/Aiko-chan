@@ -409,56 +409,21 @@ def should_expand_supersession_chain(query: str, row) -> bool:
 
 
 def walk_supersession_chain(conn, mem_id: str, user_id: str, max_depth: int = 12) -> list[dict]:
+    """Use the same bounded, temporal-aware lineage walk as the Studio."""
+    from types import SimpleNamespace
+    from .lineage import walk_supersession_lineage
     try:
-        row = conn.execute(
-            "SELECT * FROM memories WHERE id = ? AND user_id = ?",
-            (mem_id, user_id),
-        ).fetchone()
-        if row is None:
-            return []
-        chain_ids: list[str] = [mem_id]
-        seen = {mem_id}
-        cur = row
-        for _ in range(max_depth):
-            sid = cur["supersedes_id"] if "supersedes_id" in cur.keys() else None
-            if not sid or sid in seen:
-                break
-            prev = conn.execute(
-                "SELECT * FROM memories WHERE id = ? AND user_id = ?",
-                (sid, user_id),
-            ).fetchone()
-            if prev is None:
-                break
-            chain_ids.append(sid)
-            seen.add(sid)
-            cur = prev
-        chain_ids.reverse()
-        tip = chain_ids[-1]
-        for _ in range(max_depth):
-            nxt = conn.execute(
-                """
-                SELECT * FROM memories
-                WHERE user_id = ? AND supersedes_id = ?
-                ORDER BY created_at ASC LIMIT 1
-                """,
-                (user_id, tip),
-            ).fetchone()
-            if nxt is None:
-                break
-            nid = str(nxt["id"])
-            if nid in seen:
-                break
-            chain_ids.append(nid)
-            seen.add(nid)
-            tip = nid
-        out: list[dict] = []
-        for mid in chain_ids:
-            r = conn.execute("SELECT * FROM memories WHERE id = ?", (mid,)).fetchone()
-            if r is not None:
-                out.append(dict(r))
-        return out
+        lineage = walk_supersession_lineage(SimpleNamespace(_conn=conn), mem_id,
+                                            user_id=user_id, max_depth=max_depth)
+        rows = []
+        for item in lineage['chain']:
+            row = conn.execute('SELECT * FROM memories WHERE id=? AND user_id=?',
+                               (item['id'], user_id)).fetchone()
+            if row:
+                rows.append(dict(row))
+        return rows
     except Exception as exc:
-        log.debug("supersession chain walk failed for %s: %s", mem_id, exc)
+        log.debug('supersession chain walk failed for %s: %s', mem_id, exc)
         return []
 
 # ═══════════════════════════════════════════════════════════════════════════════

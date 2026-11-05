@@ -18,7 +18,7 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 | 7 | Speech, listening, and sensory pathways | `sensory/`, `cognition/flysense/` | Current code pass completed; final validation below; real-model/audio quality and physical Jetson RAM/latency checks pending |
 | 8 | Web, desktop, mobile, and external interfaces | `interface/` | Current code pass completed; final validation below; packaged desktop, live platform accounts and physical client checks pending |
 | 9 | Configuration, security boundaries, storage, and deployment | `system/`, `config/`, `backend/`, `scripts/` | Current code pass completed; final validation below; real SQLCipher, backup media/remotes, Modal deployments and physical Jetson checks pending |
-| 10 | Evaluation, observability, and developer tooling | `tests/`, `eval/`, `conscience-lab/`, `util/` | Not started |
+| 10 | Evaluation, observability, and developer tooling | `tests/`, `eval/`, `conscience-lab/`, `util/` | Current code pass completed; final validation below; live-model quality and physical Jetson performance baselines pending |
 
 ## Already fixed in the current `dev` history
 
@@ -1089,3 +1089,58 @@ round-trip an encrypted database; back up/restore on the configured USB/rclone
 remotes; run OSRM's map build and image models against the installed Modal stack;
 measure cold/warm RAM and latency on the 8 GB Jetson. No factory reset, secret
 rotation, remote deployment or live backup destination was executed in this pass.
+
+## Area 10 completion: evaluation, observability and developer tooling
+
+The current code pass is complete across the conscience harness and judge
+self-checks, memory evaluation/adapters, trace/log presentation and ownership,
+pytest discovery/isolation, performance entry points and developer catalog/data
+utilities. Tests and synthetic self-checks establish implementation behavior;
+they do not establish a real model's quality or a Jetson performance baseline.
+
+- Use unique temporary databases for memory extraction/recall evaluations and
+  close SQLite/HTTP clients even when embedding or inference fails. Honor
+  configured endpoint/model environment values instead of hardcoded endpoints.
+- Replace the Mem0 adapter's stale single-live-wrapper assumptions with an
+  isolated semantic MemoryBackend. Default to private scratch storage, refuse
+  existing explicit DB paths, preserve the runtime's retrieval order, return
+  real inserted IDs, close resources, and propagate errors. Native work retains
+  its operation lock through cancellation so close cannot race SQLite work.
+  This benchmarks semantic extraction/retrieval, not the full memory facade.
+- Validate case labels/IDs, reject empty or duplicate datasets, validate benign
+  inputs before model calls, record dataset hashes, use monotonic timing and
+  reject invalid thresholds/confidence/probabilities. Unknown classifier labels
+  and server errors cannot become valid scored decisions. Do not use another
+  category's probability as the selected category's confidence.
+- Reject invalid calibration inputs and represent unavailable ECE explicitly.
+  Judge network/parse failures cannot count as correct benign gate decisions.
+  Threshold sweeps discard invalid confidence values; frozen split regeneration
+  refuses a differing locked file unless explicitly forced.
+- Update the judge parser self-check to match production range rejection and
+  count all 11 checks correctly. TEV1, Laya and production-judge self-checks pass
+  using synthetic outputs; no live inference quality score was produced.
+- Store bounded independent trace snapshots, redact credential-key fields,
+  give steps monotonic IDs across ring rollover, isolate concurrent turn timers,
+  and filter live trace views by user. Trace readers cannot mutate stored data.
+  Log Studio requires creator/admin privileges for shared system diagnostics.
+- Normal pytest runs use private user/workspace/log/session paths and do not
+  decrypt the deployment's secrets. Keep discovery in the authoritative
+  pytest.ini: unit/integration tests plus the conscience gate. Real performance
+  runs require --run-live; their requests are not silently mocked. Replace
+  process-random hash fake embeddings with seeded deterministic vectors.
+- Keep the strict sub-millisecond credit timing check as an explicit
+  AIKO_ASSERT_PERF=1 target check instead of a flaky shared-cloud correctness
+  gate. Fix obsolete benchmark connection assignments and use one cold-boot
+  measurement without repeated calibration boots.
+- Regenerate the stale 160-tool catalog, verify it with --check, reject invalid
+  source catalogs and publish normalized output atomically. KB lint passes.
+  Remove the email diagnostic's import-time hardcoded owner override.
+- Final default pytest validation passed with **2,778 tests, 6 skips, and
+  34 subtests**. KB lint, the 160-tool catalog check, and all three judge
+  self-check commands passed. Syntax checks cover evaluation, harness and
+  utility code. Remaining live work is documented
+  in [Evaluation and tooling](EVALUATION_TOOLING.md).
+
+Areas 1–10 now have completed current code passes. This checklist is not a proof
+that the repository is bug-free. Remaining live-device/model/deployment checks
+are explicitly retained in their respective area records.

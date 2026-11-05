@@ -16,6 +16,8 @@ but with no registered handler are preserved (schema-only entries).
 """
 from __future__ import annotations
 
+import tempfile
+import os
 import argparse
 import importlib
 import json
@@ -121,12 +123,10 @@ def build_catalog() -> list[dict]:
 def _read_raw_tools() -> list:
     from system.config import load_yaml
 
-    try:
-        data = load_yaml("tools.yaml")
-    except Exception:
-        return []
-    tools = data.get("tools", [])
-    return tools if isinstance(tools, list) else []
+    data = load_yaml("tools.yaml")
+    if not isinstance(data, dict) or not isinstance(data.get("tools"), list):
+        raise ValueError("tools.yaml must contain a tools list")
+    return data["tools"]
 
 
 def render(entries: list[dict]) -> str:
@@ -151,7 +151,15 @@ def main() -> int:
             return 1
         print(f"{path} is up to date ({len(entries)} tools)")
         return 0
-    path.write_text(rendered, encoding="utf-8")
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".tools-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(rendered)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
     print(f"Normalized {len(entries)} tools -> {path}")
     return 0
 

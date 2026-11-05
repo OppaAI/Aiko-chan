@@ -16,6 +16,7 @@ Use --backend dummy for a harness self-test (no model needed).
 """
 from __future__ import annotations
 
+import hashlib
 import argparse
 import json
 import math
@@ -24,6 +25,7 @@ import random
 import statistics
 import sys
 import time
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from adapter import (ZeroShotAdapter, LlamaServerBackend, DummyBackend,
@@ -54,6 +56,8 @@ def ece(pairs, n_bins=10):
     """Expected calibration error. pairs: list of (confidence, correct)."""
     bins = [[] for _ in range(n_bins)]
     for c, ok in pairs:
+        if not math.isfinite(c) or not 0 <= c <= 1:
+            raise ValueError("confidence must be finite and between 0 and 1")
         bins[min(int(c * n_bins), n_bins - 1)].append((c, ok))
     n = len(pairs)
     err = 0.0
@@ -86,6 +90,26 @@ def report_table(name, m, prev):
     )
 
 
+def load_rows(path):
+    rows, ids = [], set()
+    with open(path, encoding="utf-8") as stream:
+        for number, line in enumerate(stream, 1):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if not isinstance(row, dict) or row.get("expect") not in {"allow", "refuse"} or not isinstance(row.get("situation"), str) or not row["situation"].strip():
+                raise ValueError(f"{path}:{number}: invalid labeled case")
+            if row["expect"] == "refuse" and not isinstance(row.get("refusal_category"), str):
+                raise ValueError(f"{path}:{number}: harmful case needs a category")
+            if not isinstance(row.get("id"), str) or not row["id"] or row["id"] in ids:
+                raise ValueError(f"{path}:{number}: missing or duplicate case ID")
+            ids.add(row["id"])
+            rows.append(row)
+    if not rows:
+        raise ValueError(f"{path}: dataset is empty")
+    return rows
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dev", required=True, help="dev JSONL")
@@ -109,12 +133,18 @@ def main():
     ap.add_argument("--out", default="results/run",
                     help="output dir for per-case JSONL + summary")
     args = ap.parse_args()
+    if not math.isfinite(args.laya_threshold) or not 0 <= args.laya_threshold <= 1:
+        ap.error("--laya-threshold must be finite and between 0 and 1")
     if not math.isfinite(args.prevalence) or not 0 <= args.prevalence <= 1:
         ap.error("--prevalence must be finite and between 0 and 1 inclusive")
 
     here = os.path.dirname(os.path.abspath(__file__))
     cats = load_categories(os.path.join(here, args.categories))
-    rows = [json.loads(l) for l in open(args.dev, encoding="utf-8")]
+    rows = load_rows(args.dev)
+    dataset_hash = hashlib.sha256(Path(args.dev).read_bytes()).hexdigest()
+    ben_rows = load_rows(args.benign_file) if args.benign_file else None
+    if ben_rows is not None and any(row["expect"] != "allow" for row in ben_rows):
+        raise ValueError("--benign-file contains a harmful case")
 
     if args.backend == "dummy":
         adapter = ZeroShotAdapter(cats)
@@ -130,22 +160,22 @@ def main():
         backend = LlamaServerBackend(args.server, args.model)
 
     results = []
-    t0 = time.time()
+    t0 = time.perf_counter()
     for i, r in enumerate(rows):
         case_rng = random.Random(args.seed + i)
         # classify with per-case rng (shuffle) unless --no-shuffle
-        t1 = time.time()
+        t1 = time.perf_counter()
         try:
             pred = adapter.classify(backend, r["situation"],
                                     case_rng if not args.no_shuffle else _NoShuffle())
         except Exception as e:
             raise SystemExit(f"dev classification failed at case {r['id']}: {e}") from e
-        latency_ms = (time.time() - t1) * 1000
+        latency_ms = (time.perf_counter() - t1) * 1000
         results.append({
             "id": r["id"],
-            "checkpoint": r["checkpoint"],
+            "checkpoint": r.get("checkpoint", "input"),
             "expect": r["expect"],
-            "refusal_category": r["refusal_category"],
+            "refusal_category": r.get("refusal_category"),
             "predicted_category": pred["predicted_category"],
             "predicted_refuse": pred["predicted_refuse"],
             "parse_ok": pred["parse_ok"],
@@ -190,7 +220,6 @@ def main():
     # optional big benign set
     extra = None
     if args.benign_file:
-        ben_rows = [json.loads(l) for l in open(args.benign_file, encoding="utf-8")]
         ben_rng = random.Random(args.seed + 999999)
         fp = 0
         for j, r in enumerate(ben_rows):
@@ -205,7 +234,7 @@ def main():
         extra = {"n": len(ben_rows), "fp_rate": fp / len(ben_rows)}
 
     per_cat = per_category_recall([
-        {"expect": r["expect"], "refusal_category": r["refusal_category"],
+        {"expect": r["expect"], "refusal_category": r.get("refusal_category"),
          "predicted_refuse": r["predicted_refuse"]} for r in results
     ])
 
@@ -249,9 +278,10 @@ def main():
     summary = {
         "model": args.model or args.backend,
         "seed": args.seed,
+        "dataset_sha256": dataset_hash,
         "shuffled": not args.no_shuffle,
         "n": len(rows),
-        "elapsed_s": round(time.time() - t0, 1),
+        "elapsed_s": round(time.perf_counter() - t0, 1),
         "baselines": {"block_everything": m_block, "allow_everything": m_allow,
                       "length_only": m_len},
         "model_metrics": m_model,
@@ -284,16 +314,17 @@ def main():
     print(f"\nparse-fail rate: {m_model['parse_fail_rate']:.1%} | "
           f"latency p50 {m_model['latency_ms_p50']:.0f}ms "
           f"p95 {m_model['latency_ms_p95']:.0f}ms")
+    ece_text = f"{ece_val:.3f}" if ece_val is not None else "unavailable"
     if laya_info:
         if laya_info.get("mode") == "two-question":
             print(f"laya: two-question Q1-gates | "
                   f"Q2 exact-match={laya_info['q2_exact_match']:.1%} "
                   f"(n={laya_info['q2_n']} refused harmful) | "
-                  f"ECE(10-bin)={laya_info['ece_10bin']:.3f}")
+                  f"ECE(10-bin)={ece_text}")
         else:
             print(f"laya: none_mode={laya_info['none_mode']} "
                   f"threshold={laya_info['threshold']} "
-                  f"ECE(10-bin)={laya_info['ece_10bin']:.3f}")
+                  f"ECE(10-bin)={ece_text}")
     if extra:
         print(f"big-benign FP: {extra['fp_rate']:.2%} (n={extra['n']})")
     print("\nper-category recall:")

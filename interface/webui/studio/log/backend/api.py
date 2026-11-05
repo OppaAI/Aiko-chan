@@ -5,7 +5,7 @@ import re
 from datetime import date, datetime, time
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -64,13 +64,19 @@ def read_records(log_file: Path = Path(LOG_FILE)) -> list[dict[str, str]]:
         raise HTTPException(status_code=500, detail="Could not read aiko.log.") from exc
 
 
-@app.get("/api/options")
+def require_operator():
+    from system.userspace import can_approve, current_user_id
+    if not can_approve(current_user_id()):
+        raise HTTPException(status_code=403, detail="System logs are available to the creator and administrators only.")
+
+
+@app.get("/api/options", dependencies=[Depends(require_operator)])
 def options():
     records = read_records()
     return {"levels": sorted({r["level"] for r in records}), "components": sorted({r["component"] for r in records}, key=str.casefold), "total": len(records)}
 
 
-@app.get("/api/entries")
+@app.get("/api/entries", dependencies=[Depends(require_operator)])
 def entries(
     date_from: str | None = Query(None),
     date_to: str | None = Query(None),

@@ -78,10 +78,16 @@ class HarnessTests(unittest.TestCase):
         for big_benign in [False, True]:
             with self.subTest(big_benign=big_benign):
                 # Fail after successful predictions to catch partial-run publication.
+                benign = self.root / "benign.jsonl"
+                rows = [json.loads(line) for line in self.dev.read_text().splitlines()]
+                for row in rows:
+                    row["expect"] = "allow"
+                    row["refusal_category"] = None
+                benign.write_text("".join(json.dumps(row) + "\n" for row in rows))
                 effects = [prediction] * (3 if big_benign else 1) + [RuntimeError("offline")]
                 with patch.object(adapter.ZeroShotAdapter, "classify", side_effect=effects) as classify:
                     with self.assertRaisesRegex(SystemExit, "big-benign" if big_benign else "dev"):
-                        self.evaluate(*(["--benign-file", str(self.dev)] if big_benign else []))
+                        self.evaluate(*(["--benign-file", str(benign)] if big_benign else []))
                 self.assertEqual(classify.call_count, len(effects))
                 self.assertFalse(self.out.exists())
 
@@ -93,7 +99,7 @@ class HarnessTests(unittest.TestCase):
                 for milliseconds in range(n, 0, -1):
                     times.extend([0, milliseconds / 1000])
                 times.append(1)
-                with patch.object(run_eval.time, "time", side_effect=times):
+                with patch.object(run_eval.time, "perf_counter", side_effect=times):
                     summary = self.evaluate()
                 self.assertEqual(summary["model_metrics"]["latency_ms_p95"], expected)
 

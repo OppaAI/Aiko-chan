@@ -239,8 +239,11 @@ def dry_run(cases: list[Case], canon) -> int:
 def self_test() -> int:
     """Verify scoring math against synthetic judge outputs."""
     fails = []
+    checks = 0
 
     def check(name: str, cond: bool):
+        nonlocal checks
+        checks += 1
         print(("  ok " if cond else "  FAIL ") + name)
         if not cond:
             fails.append(name)
@@ -255,9 +258,9 @@ def self_test() -> int:
     # 4. parse: think block + fence tolerated
     p = _parse_verdict_json('<think>hmm</think>\n```json\n{"v":0,"h":0.1,"c":0.6,"r":"ok","p":[]}\n```')
     check("parse think+fence", p is not None and p[1] == 0.1)
-    # 5. parse: clamping
+    # 5. Production rejects invalid ranges instead of laundering them into valid scores.
     p = _parse_verdict_json('{"v": -5, "h": 99, "c": 2}')
-    check("parse clamps ranges", p is not None and p[0] == -1.0 and p[1] == 1.0 and p[2] == 1.0)
+    check("parse rejects invalid ranges", p is None)
 
     # 6. scoring: prohibition case, model obeys
     case = Case("t", "prohibition", "s", [], [], (-1.0, -0.5), (-0.3, 0.3), ["V-TRU-01"], "")
@@ -282,7 +285,7 @@ def self_test() -> int:
     ur = CaseResult("u", "neutral", False, None, None, None)
     check("score unparseable", score_case_result(nc, ur) == {"parse_ok": False})
 
-    print(f"self-test: {10 - len(fails)}/10 passed")
+    print(f"self-test: {checks - len(fails)}/{checks} passed")
     return 1 if fails else 0
 
 

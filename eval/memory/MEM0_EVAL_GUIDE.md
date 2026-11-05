@@ -1,135 +1,38 @@
-# Memory Benchmarks & Eval Guide
+# Mem0 benchmark adapter
 
-## Committed Fixes
+Copy `aiko_mem0_adapter.py` into the benchmark repository and import
+`AikoMemClient as Mem0Client` from it. Set `AIKO_ROOT` to the Aiko checkout,
+`LLM_BASE_URL` to the configured model endpoint, and `EXTRACT_MODEL` (or
+`LLM_MODEL`) to the extraction model.
 
-### 1. Memory JSON Parse Bug (b65b12b)
-- Added `parse_json_array()` to salvage truncated LLM output
-- Bumped `_EXTRACT_MAX_TOKENS`: 128 → 512
-- Cleaned dead imports
-
-### 2. KB Graph Import Timing (25a46fd)
-- Deferred `cognition.knowledge` import in `_open_conn()`
-- Import runs at request time, not module load
-- Prevents fallback to wrong DB when age binary not ready at import time
-
-## Running the mem0 Eval
-
-### Setup
-
-```bash
-git clone https://github.com/mem0ai/memory-benchmarks.git
-cd memory-benchmarks
-cp /home/oppa-ai/jetson/eval/memory/aiko_mem0_adapter.py benchmarks/common/
-```
-
-### Environment Variables
-
-```bash
-export AIKO_ROOT=/home/oppa-ai/jetson
-export SQLITE_MEMORY_PATH=/tmp/aiko_bench_memory.db
+```sh
+export AIKO_ROOT=/path/to/Aiko-chan
 export LLM_BASE_URL=http://localhost:8080/v1
-export EXTRACT_MODEL=ministral   # or your extraction model
-export OPENAI_API_KEY=sk-...     # for gpt-4o judge/answerer
+export EXTRACT_MODEL=your-extraction-model
 ```
 
-### Patch Runner
+Each client uses a new private temporary database by default and removes it on
+close. Use the client as an async context manager, or call `await client.close()`.
+`SQLITE_MEMORY_PATH` optionally selects a **new** scratch file for inspection;
+existing files are refused to prevent a benchmark from clearing a live store.
+Do not point this variable at a production database. The selected path is
+available as `client.db_path`.
 
-Edit `benchmarks/locomo/run.py`:
+`AIKO_BENCH_DRY_RUN=1` tests protocol wiring without model calls; it cannot
+produce meaningful accuracy scores. `AIKO_BENCH_USER` can explicitly force one
+benchmark row identity. Distinct user IDs otherwise remain row filters within
+the isolated database, without switching production profile/episodic stores.
 
-```python
-from benchmarks.common.aiko_mem0_adapter import AikoMemClient as Mem0Client
-```
+This adapter measures semantic extraction/retrieval through MemoryBackend. It
+preserves final result order and returns actual inserted IDs. Native calls run
+outside the event loop and finish before cancellation can release the operation
+lock. Model or storage errors fail the benchmark instead of returning fake empty
+results. Closing releases both database and HTTP clients.
 
-### Execute Benchmark
+Episodic consolidation, the full AikoMemorize facade, persona behavior and a
+historical clock are outside this adapter's scope. Observation timestamps and
+custom-instruction arguments are accepted for protocol compatibility but do not
+simulate historical time. Treat results as a new semantic-backend baseline;
+older adapter results may reflect different or broken storage wiring.
 
-```bash
-python -m benchmarks.locomo.run \
-  --project-name aiko-locomo \
-  --judge-model gpt-4o \
-  --answerer-model gpt-4o
-```
-
-## LLM Configuration
-
-| Component | Default | Notes |
-|-----------|---------|-------|
-| **Extraction** | Local llama-server | Uses `LLM_BASE_URL` + `EXTRACT_MODEL` |
-| **Judge** | gpt-4o | Requires `OPENAI_API_KEY` |
-| **Answerer** | gpt-4o | Requires `OPENAI_API_KEY` |
-
-### Override Models
-
-```bash
-python -m benchmarks.locomo.run \
-  --project-name aiko-locomo \
-  --judge-model gpt-4o \
-  --answerer-model gpt-4o \
-  --provider openai|anthropic|azure
-```# Memory Benchmarks & Eval Guide
-
-## Committed Fixes
-
-### 1. Memory JSON Parse Bug (b65b12b)
-- Added `parse_json_array()` to salvage truncated LLM output
-- Bumped `_EXTRACT_MAX_TOKENS`: 128 → 512
-- Cleaned dead imports
-
-### 2. KB Graph Import Timing (25a46fd)
-- Deferred `cognition.knowledge` import in `_open_conn()`
-- Import runs at request time, not module load
-- Prevents fallback to wrong DB when age binary not ready at import time
-
-## Running the mem0 Eval
-
-### Setup
-
-```bash
-git clone https://github.com/mem0ai/memory-benchmarks.git
-cd memory-benchmarks
-cp /home/oppa-ai/jetson/eval/memory/aiko_mem0_adapter.py benchmarks/common/
-```
-
-### Environment Variables
-
-```bash
-export AIKO_ROOT=/home/oppa-ai/jetson
-export SQLITE_MEMORY_PATH=/tmp/aiko_bench_memory.db
-export LLM_BASE_URL=http://localhost:8080/v1
-export EXTRACT_MODEL=ministral   # or your extraction model
-export OPENAI_API_KEY=sk-...     # for gpt-4o judge/answerer
-```
-
-### Patch Runner
-
-Edit `benchmarks/locomo/run.py`:
-
-```python
-from benchmarks.common.aiko_mem0_adapter import AikoMemClient as Mem0Client
-```
-
-### Execute Benchmark
-
-```bash
-python -m benchmarks.locomo.run \
-  --project-name aiko-locomo \
-  --judge-model gpt-4o \
-  --answerer-model gpt-4o
-```
-
-## LLM Configuration
-
-| Component | Default | Notes |
-|-----------|---------|-------|
-| **Extraction** | Local llama-server | Uses `LLM_BASE_URL` + `EXTRACT_MODEL` |
-| **Judge** | gpt-4o | Requires `OPENAI_API_KEY` |
-| **Answerer** | gpt-4o | Requires `OPENAI_API_KEY` |
-
-### Override Models
-
-```bash
-python -m benchmarks.locomo.run \
-  --project-name aiko-locomo \
-  --judge-model gpt-4o \
-  --answerer-model gpt-4o \
-  --provider openai|anthropic|azure
-```
+See [Evaluation and tooling](../../docs/EVALUATION_TOOLING.md) for local checks.

@@ -39,6 +39,7 @@ Things intentionally NOT covered here (see eval/ instead):
 """
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -74,8 +75,9 @@ def real_backend(tmp_path_factory):
     try:
         backend = MemoryBackend(
             db_path=str(db_path),
-            llm_base_url="http://localhost:8080/v1",
-            model="ministral",
+            llm_base_url=os.getenv("LLM_BASE_URL", "http://localhost:8080/v1"),
+            model=os.getenv("EXTRACT_MODEL") or os.getenv("LLM_MODEL", "ministral"),
+            user_id="perf_user",
         )
         # touch the embedder once so a load failure surfaces here, not
         # mid-benchmark
@@ -87,6 +89,7 @@ def real_backend(tmp_path_factory):
         )
     yield backend
     backend._conn.close()
+    backend._client.close()
 
 
 @pytest.fixture(scope="module")
@@ -175,7 +178,6 @@ class TestCacheEffectiveness:
     def test_cache_hit_meaningfully_faster_than_miss(self, seeded_backend):
         memo = AikoMemorize.__new__(AikoMemorize)
         memo._mem = seeded_backend
-        memo._conn = seeded_backend._conn
         from collections import OrderedDict
         import threading
         memo._search_cache = OrderedDict()
@@ -207,25 +209,9 @@ class TestCacheEffectiveness:
 
 class TestDreamPassDuration:
     def test_full_dream_pass_duration(self, benchmark, seeded_backend):
-        """
-        Runs the full boost -> merge -> prune pipeline against the seeded
-        store. Uses dry_run where possible isn't an option here since
-        dream() doesn't expose a global dry_run flag at the top level in
-        the same call signature as cleanup() -- if you add one, prefer
-        benchmarking the dry_run path so this doesn't mutate seeded_backend
-        state between repeated benchmark iterations.
-
-        NOTE: pytest-benchmark calls the target function multiple times by
-        default to get a stable mean. Since dream() mutates the DB (merges/
-        prunes), repeated calls will see a shrinking store each iteration --
-        this benchmark is really only valid for `--benchmark-min-rounds=1`.
-        Run it as:
-            pytest tests/perf/benchmark_memory.py::TestDreamPassDuration \\
-                -m perf --benchmark-only --benchmark-min-rounds=1
-        """
+        """Measure the real non-mutating dream preview on the seeded store."""
         memo = AikoMemorize.__new__(AikoMemorize)
         memo._mem = seeded_backend
-        memo._conn = seeded_backend._conn
 
         def _run_dream_dry():
             return memo.dream(user_id="perf_user", dry_run=True)

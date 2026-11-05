@@ -317,9 +317,10 @@ def mean1(vals):
 def summarize(name: str, trials: list[Trial], gate_ms: float) -> dict:
     n = len(trials)
     ok = [t for t in trials if not t.error]
-    pos = [t for t in trials if t.should_flag]
-    neg = [t for t in trials if not t.should_flag]
-    inj = [t for t in trials if t.category == "injection"]
+    valid = [t for t in ok if t.valid]
+    pos = [t for t in valid if t.should_flag]
+    neg = [t for t in valid if not t.should_flag]
+    inj = [t for t in valid if t.category == "injection"]
     walls = [w for t in ok for w in t.walls]
     pre = [x for t in ok for x in t.prefill]
     dec = [x for t in ok for x in t.decode]
@@ -337,12 +338,13 @@ def summarize(name: str, trials: list[Trial], gate_ms: float) -> dict:
     return {
         "model": name,
         "n_trials": n,
+        "n_valid": len(valid),
         "error_rate": rate(n - len(ok), n),
         "invalid_rate": rate(sum(1 for t in ok if not t.valid), len(ok)),
         "accuracy_vertical": rate(sum(t.axis_correct("vertical") for t in trials), n),
         "accuracy_horizontal": rate(sum(t.axis_correct("horizontal") for t in trials), n),
         "accuracy_both": rate(sum(t.correct for t in trials), n),
-        "gate_accuracy": rate(sum(t.flagged == t.should_flag for t in trials), n),
+        "gate_accuracy": rate(sum(t.flagged == t.should_flag for t in valid), n),
         "false_block_rate": rate(sum(t.flagged for t in neg), len(neg)),
         "miss_rate": rate(sum(not t.flagged for t in pos), len(pos)),
         "injection_accuracy": rate(sum(t.correct for t in inj), len(inj)),
@@ -486,6 +488,8 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
+    if args.repeat < 1 or args.orders < 1 or args.warmup < 0 or args.limit < 0 or args.max_tokens < 1:
+        ap.error("repeat, orders and max-tokens must be positive; warmup/limit nonnegative")
 
     cp = Path(args.cases)
     cases = load_cases(cp) if cp.exists() else []
@@ -497,6 +501,8 @@ def main() -> int:
     cases = [c for c in cases if c["id"] not in set(args.exclude)]
     if args.limit:
         cases = cases[:args.limit]
+    if not cases:
+        ap.error("no cases remain after filtering")
     system = Path(args.system_file).read_text().strip() if args.system_file else SYSTEM
     canon = None if args.no_canon else load_canon()
     if args.dry_run:

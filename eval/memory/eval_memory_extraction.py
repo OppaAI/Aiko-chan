@@ -1,14 +1,14 @@
 """
-eval/eval_memory_extraction.py
+eval/memory/eval_memory_extraction.py
 Accuracy eval for memory/memorize.py's fact extraction -- NOT a pytest
 suite. Extraction accuracy depends on the real LLM's non-deterministic
 phrasing, so this is scored and reported like bench_intent_routing.py,
 not asserted pass/fail in CI.
 
 Usage:
-    python eval/eval_memory_extraction.py
-    python eval/eval_memory_extraction.py --verbose
-    python eval/eval_memory_extraction.py --out results/extraction_2026-07-18.json
+    python eval/memory/eval_memory_extraction.py
+    python eval/memory/eval_memory_extraction.py --verbose
+    python eval/memory/eval_memory_extraction.py --out results/extraction_2026-07-18.json
 
 What it measures, per golden case:
   - precision / recall / F1 of extracted facts against expected facts
@@ -27,10 +27,14 @@ last run's saved JSON to see if accuracy moved.
 from __future__ import annotations
 
 import argparse
+import os
+import tempfile
 import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 
@@ -187,7 +191,7 @@ def _contains_forbidden(extracted: list[str], forbidden: list[str], embed_fn) ->
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _load_real_backend():
+def _load_real_backend(db_path: str):
     """
     Import the real MemoryBackend + embedder. Fails loudly and early if
     the environment (LLM_BASE_URL, GGUF model, etc.) isn't set up --
@@ -196,15 +200,25 @@ def _load_real_backend():
     from cognition.memory.memorize import MemoryBackend
 
     backend = MemoryBackend(
-        db_path="/tmp/eval_memory_extraction.db",
-        llm_base_url="http://localhost:8080/v1",
-        model="ministral",
+        db_path=db_path,
+        llm_base_url=os.getenv("LLM_BASE_URL", "http://localhost:8080/v1"),
+        model=os.getenv("EXTRACT_MODEL") or os.getenv("LLM_MODEL", "ministral"),
+        user_id="eval_memory",
     )
     return backend
 
 
 def run_eval(verbose: bool = False) -> dict:
-    backend = _load_real_backend()
+    with tempfile.TemporaryDirectory(prefix="aiko-extraction-eval-") as scratch:
+        backend = _load_real_backend(str(Path(scratch) / "memory.db"))
+        try:
+            return _run_cases(backend, verbose)
+        finally:
+            backend._conn.close()
+            backend._client.close()
+
+
+def _run_cases(backend, verbose: bool) -> dict:
 
     def embed_fn(texts: list[str]) -> list[list[float]]:
         return backend._embed_batch(texts)

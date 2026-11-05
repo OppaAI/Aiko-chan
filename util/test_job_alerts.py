@@ -38,9 +38,6 @@ sys.path.insert(0, str(REPO_ROOT))
 # from system.config import load_config
 # load_config()
 
-# Set user ID early to avoid guest fallback during testing
-import os
-os.environ["AIKO_USER_ID"] = "github_205369547"
 
 from agentic.mcp_client import get_mcp_client
 from agentic.mcp_client.bridge import bootstrap_mcp
@@ -316,7 +313,14 @@ async def main():
     parser.add_argument("--max-jobs", type=int, default=None, help="Cap jobs walked in --pipeline mode")
     parser.add_argument("--save-drafts", action="store_true", default=True, help="In --pipeline mode, actually persist drafts to disk (default: True)")
     parser.add_argument("--context", type=int, default=80, help="Chars of context shown around a 'senior' match")
+    parser.add_argument("--user", default=None, help="Authenticated/configured runtime identity")
     args = parser.parse_args()
+    if args.user:
+        from system.userspace import set_current_user_id
+        set_current_user_id(args.user)
+    from system.userspace import current_user_id
+    if current_user_id() == "guest":
+        parser.error("select --user or configure AIKO_USER_ID before accessing private email")
     
     overall_start = time.time()
     progress("Starting job alert test...")

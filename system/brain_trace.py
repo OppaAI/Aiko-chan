@@ -28,7 +28,7 @@ Every step records:
   name         function/method name (e.g. "think.route")
   layer        "transport" | "gate" | "route" | "recall" | "rerank" |
                "context" | "stream" | "review" | "write" | "consolidate"
-  inputs       dict of what flowed in (truncated strings, no secrets)
+  inputs       bounded snapshot of what flowed in (credential fields redacted)
   outputs      dict of what came out (truncated strings)
   duration_ms  wall-clock time the step took (when step() is used)
   factors      list of human-readable reasons that drove the outcome
@@ -36,6 +36,9 @@ Every step records:
 """
 from __future__ import annotations
 
+import copy
+import contextvars
+import itertools
 import json
 import os
 import re
@@ -99,11 +102,12 @@ _SENTINEL = "🧠"  # visible marker for the trace header line
 
 # ── global state ──────────────────────────────────────────────────────────────
 
-_lock = threading.Lock()
+_lock = threading.RLock()
 _steps: deque[dict] = deque(maxlen=2000)   # in-memory ring buffer for the session
 _ui_sink = None                # injected by main.py → ui.add_message("sys", ...)
 _turn_counter: int = 0
-_turn_started_at: float | None = None
+_turn_state = contextvars.ContextVar("brain_trace_turn", default=None)
+_step_ids = itertools.count(1)
 
 
 # ── small render helpers ─────────────────────────────────────────────────────
@@ -174,31 +178,61 @@ def set_ui_sink(sink) -> None:
 
 
 def begin_turn(label: str = "") -> None:
-    """Mark the start of a new turn (one user prompt → response)."""
-    global _turn_counter, _turn_started_at
     if not TRACE_ENABLED:
         return
-    _turn_counter += 1
-    _turn_started_at = time.monotonic()
-    banner = (
-        f"{_SENTINEL}  ── turn #{_turn_counter}"
-        f"{f'  [{label}]' if label else ''}"
-        f"  @ {datetime.now().strftime('%H:%M:%S')} ──"
-    )
-    _emit_banner(banner, _HEADER)
+    global _turn_counter
+    with _lock:
+        _turn_counter += 1
+        number = _turn_counter
+    _turn_state.set((number, time.monotonic()))
+    _emit_banner(f"{_SENTINEL}  ── turn #{number}  [{_trunc(label)}] ──", _HEADER)
 
 
 def end_turn() -> None:
-    """Mark the end of the current turn — flush a footer with total ms."""
-    global _turn_started_at
-    if not TRACE_ENABLED or _turn_started_at is None:
+    state = _turn_state.get()
+    if not TRACE_ENABLED or state is None:
         return
-    elapsed_ms = int((time.monotonic() - _turn_started_at) * 1000)
-    banner = (
-        f"{_SENTINEL}  ── turn #{_turn_counter} done in {elapsed_ms} ms ──"
-    )
-    _emit_banner(banner, _HEADER)
-    _turn_started_at = None
+    number, started = state
+    _emit_banner(f"{_SENTINEL}  ── turn #{number} done in {int((time.monotonic() - started) * 1000)} ms ──", _HEADER)
+    _turn_state.set(None)
+
+
+def _snapshot(value, budget=None, depth=0):
+    if budget is None:
+        budget = [4096]
+    if budget[0] <= 0:
+        return "[truncated]"
+    budget[0] -= 1
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, dict) and depth < 3:
+        result = {}
+        for key, item in itertools.islice(value.items(), 16):
+            label = str(key)[:80]
+            private = any(part in label.lower() for part in ("password", "secret", "authorization", "api_key", "access_token", "refresh_token"))
+            result[label] = "[redacted]" if private else _snapshot(item, budget, depth + 1)
+            if budget[0] <= 0:
+                break
+        return result
+    if isinstance(value, (list, tuple)) and depth < 3:
+        result = []
+        for item in itertools.islice(value, 16):
+            result.append(_snapshot(item, budget, depth + 1))
+            if budget[0] <= 0:
+                break
+        return result
+    text = value if isinstance(value, str) else f"<{type(value).__name__}>"
+    text = _trunc(text, min(max(1, TRACE_MAX_VALUE_CHARS), budget[0] or 1))
+    budget[0] -= len(text)
+    return text
+
+
+def _append_step(item):
+    from system.userspace import current_user_id
+    item["user_id"] = current_user_id()
+    with _lock:
+        item["index"] = next(_step_ids)
+        _steps.append(item)
 
 
 def record_step(
@@ -224,18 +258,17 @@ def record_step(
         return
 
     step = {
-        "index": len(_steps) + 1,
+        "index": 0,
         "timestamp": datetime.now().isoformat(timespec="milliseconds"),
         "name": name,
         "layer": layer,
-        "inputs": inputs or {},
-        "outputs": outputs or {},
-        "factors": factors or [],
-        "extras": extras or {},
+        "inputs": _snapshot(inputs or {}),
+        "outputs": _snapshot(outputs or {}),
+        "factors": _snapshot(factors or []),
+        "extras": _snapshot(extras or {}),
         "duration_ms": duration_ms,
     }
-    with _lock:
-        _steps.append(step)
+    _append_step(step)
 
     _emit_step(step)
 
@@ -259,25 +292,28 @@ def step(name: str, *, layer: str = "context", inputs: dict | None = None, facto
     inputs = inputs or {}
     factors = factors or []
     step_obj = {
-        "index": len(_steps) + 1,
+        "index": 0,
         "timestamp": datetime.now().isoformat(timespec="milliseconds"),
         "name": name,
         "layer": layer,
-        "inputs": inputs,
+        "inputs": _snapshot(inputs),
         "outputs": {},
-        "factors": factors,
+        "factors": _snapshot(factors),
         "extras": {},
         "duration_ms": None,
     }
-    with _lock:
-        _steps.append(step_obj)
+    _append_step(step_obj)
     _emit_step(step_obj, phase="start")
 
     ctx = _StepCtx(step_obj, start)
     try:
         yield ctx
+    except BaseException as exc:
+        ctx.add_extra(error_type=type(exc).__name__)
+        raise
     finally:
-        step_obj["duration_ms"] = int((time.monotonic() - start) * 1000)
+        with _lock:
+            step_obj["duration_ms"] = int((time.monotonic() - start) * 1000)
         _emit_step(step_obj, phase="end")
 
 
@@ -296,16 +332,21 @@ class _StepCtx:
         self._start = start
 
     def set(self, *, outputs: dict | None = None, factors: list[str] | None = None) -> None:
-        if outputs:
-            self._step["outputs"].update(outputs)
-        if factors:
-            self._step["factors"].extend(factors)
+        with _lock:
+            if outputs:
+                self._step["outputs"].update(_snapshot(outputs))
+                self._step["outputs"] = _snapshot(self._step["outputs"])
+            if factors:
+                self._step["factors"] = _snapshot(self._step["factors"] + factors)
 
     def add_factor(self, factor: str) -> None:
-        self._step["factors"].append(factor)
+        with _lock:
+            self._step["factors"] = _snapshot(self._step["factors"] + [factor])
 
     def add_extra(self, **kwargs) -> None:
-        self._step["extras"].update(kwargs)
+        with _lock:
+            self._step["extras"].update(_snapshot(kwargs))
+            self._step["extras"] = _snapshot(self._step["extras"])
 
 
 # ── internal rendering ───────────────────────────────────────────────────────
@@ -329,6 +370,8 @@ def _format_kv(label: str, value: Any) -> str:
 def _emit_step(step: dict, *, phase: str = "end") -> None:
     """One step = one log record (multi-line message groups in Log Studio).
     Nothing goes to the chat — steps no longer shred the conversation."""
+    with _lock:
+        step = copy.deepcopy(step)
     lines = [
         f"┌─ [{step['layer']}] {step['name']}"
         + (f"  ({step['duration_ms']} ms)" if step.get("duration_ms") is not None else "")
@@ -348,6 +391,8 @@ def _emit_step(step: dict, *, phase: str = "end") -> None:
 
 def get_box_summary(max_lines: int = 3, max_chars: int = 200) -> list[str]:
     """Return a compact multi-line box summary of recent trace steps for CLI top-box display."""
+    if max_lines <= 0:
+        return []
     steps = get_recent_steps(max_lines)
     lines = []
     for s in steps[-max_lines:]:
@@ -366,8 +411,11 @@ def get_box_summary(max_lines: int = 3, max_chars: int = 200) -> list[str]:
 
 def get_recent_steps(limit: int = 50) -> list[dict]:
     """Return the last `limit` recorded steps — useful for /trace command."""
+    from system.userspace import current_user_id
+    uid = current_user_id()
     with _lock:
-        return list(_steps)[-limit:]
+        visible = [item for item in _steps if item.get("user_id") == uid]
+        return copy.deepcopy(visible[-limit:]) if limit > 0 else []
 
 
 def reset() -> None:

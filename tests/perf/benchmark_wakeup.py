@@ -85,7 +85,7 @@ class TestFullBootDuration:
         def _boot():
             return AikoWakeup().boot(on_loading=_noop, on_done=_noop, on_skip=_noop)
 
-        result = benchmark(_boot)
+        result = benchmark.pedantic(_boot, rounds=1, iterations=1, warmup_rounds=0)
         assert result.think is not None, "think failed to boot -- benchmark result is not representative"
         assert result.memorize is not None, "memorize failed to boot -- benchmark result is not representative"
 

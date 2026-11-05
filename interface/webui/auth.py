@@ -289,7 +289,7 @@ def _record_terms_acceptance(provider: str, user_id) -> None:
 # (0600) and reload on boot; entries older than the 30-day TTL are dropped.
 # NOTE: a permanent SECRET_KEY in .env is still required — otherwise the
 # signer rotates each restart and old cookies fail signature checks anyway.
-_SESSIONS_PATH = Path.home() / ".aiko" / "sessions.json"
+_SESSIONS_PATH = Path(os.getenv("AIKO_SESSION_FILE") or Path.home() / ".aiko" / "sessions.json").expanduser()
 
 
 def _load_sessions() -> None:

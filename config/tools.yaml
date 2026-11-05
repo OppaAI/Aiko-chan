@@ -23,6 +23,28 @@
       "skill": false
     },
     {
+      "handler": "agentic.toolkit.flow:aggregate_items",
+      "name": "aggregate_items",
+      "description": "Aggregate node. Rolls the stream up: count, sum, avg, min, max, concat, or collect — optionally grouped by a field. The usual last step before a report or a notification.",
+      "props": {},
+      "domain": "transform",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:ai_agent",
+      "name": "ai_agent",
+      "description": "Composite agent node. Takes a prompt plus an optional chat-model config ($result:<chat_model node>) and a memory key, calls the LLM, and returns the response. Chat model, memory and tools are attached as sub-nodes on the canvas.",
+      "props": {},
+      "domain": "ai",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
       "handler": "agentic.toolkit.tool_result_cache_tools:cache_gc_tool",
       "name": "cache_gc",
       "description": "Drop old tool-result cache runs for a workflow (retention).",
@@ -147,6 +169,28 @@
       "skill": false
     },
     {
+      "handler": "agentic.toolkit.flow:calendar_create",
+      "name": "calendar_create",
+      "description": "Create a Google Calendar event. No calendar backend is configured — the node returns a graceful not-connected result instead of failing the run.",
+      "props": {},
+      "domain": "scheduling",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:calendar_list",
+      "name": "calendar_list",
+      "description": "List upcoming Google Calendar events. No calendar backend is configured — the node returns a graceful not-connected result instead of failing the run.",
+      "props": {},
+      "domain": "scheduling",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
       "handler": "agentic.toolkit.organize:cancel_reminder",
       "name": "cancel_reminder",
       "description": "Cancel reminder by id.",
@@ -178,6 +222,17 @@
       ],
       "domain": "scheduling",
       "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:chat_model",
+      "name": "chat_model",
+      "description": "Sub-node for the AI Agent: which chat model to use, temperature and max tokens. Emits its config so the agent can read it via $result:<node>.",
+      "props": {},
+      "domain": "ai",
+      "react": false,
       "graph": true,
       "wiki": false,
       "skill": false
@@ -229,6 +284,18 @@
       "graph": true,
       "wiki": false,
       "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.coding:code_apply_correction",
+      "name": "code_apply_correction",
+      "description": "Apply a structured triage correction (APPROVAL REQUIRED).",
+      "props": {},
+      "domain": "coding",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false,
+      "needs_approval": true
     },
     {
       "handler": "agentic.toolkit.coding:code_apply_patch",
@@ -287,6 +354,17 @@
       "skill": false
     },
     {
+      "handler": "agentic.toolkit.flow:code_transform",
+      "name": "code_transform",
+      "description": "Code node. Evaluates a restricted expression (no imports, no exec) either per item (each) or once over the whole list (all). Names available: item/json, index, items, state, now.",
+      "props": {},
+      "domain": "transform",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
       "handler": "agentic.toolkit.codebase:codebase_context",
       "name": "codebase_context",
       "description": "Retrieve formatted <codebase_context> block for a codebase question (RAG). For prompt injection.",
@@ -325,31 +403,6 @@
       "description": "Search Aiko's codebase RAG (separate DB at <USER_SPACE_ROOT>/<user_id>/knowledge/codebase.db) for code/docs relevant to the query. Optimized for Jetson Orin Nano 8GB (harrier 640d, 900-char chunks). Use for 'where is X', 'how does Y work', 'find file for Z'.",
       "props": {},
       "domain": "codebase",
-      "react": true,
-      "graph": true,
-      "wiki": false,
-      "skill": false
-    },
-    {
-      "handler": "agentic.toolkit.recall:retrieve_context",
-      "name": "retrieve_context",
-      "description": "Pull long-term memory, learned knowledge, past task experience, wiki operating cards, or skill instructions on demand mid-task. Use when upfront context was omitted for low relevance or you need specifics — do not guess from the system prompt. stores: comma-separated subset of memory,knowledge,experience,wiki,skill.",
-      "props": {
-        "query": {
-          "type": "string"
-        },
-        "stores": {
-          "type": "string"
-        },
-        "limit": {
-          "type": "integer"
-        }
-      },
-      "required": [
-        "query"
-      ],
-      "domain": "memory",
-      "always_on": true,
       "react": true,
       "graph": true,
       "wiki": false,
@@ -490,6 +543,18 @@
       "skill": false
     },
     {
+      "handler": "agentic.toolkit.flow:discord_send",
+      "name": "discord_send",
+      "description": "Send a Discord message through the running Discord adapter. chat_id defaults to the most recent Discord conversation (the owner). Two-way channel — no approval needed.",
+      "props": {},
+      "domain": "social",
+      "always_on": true,
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
       "handler": "agentic.toolkit.it_ops:disk_large_files",
       "name": "disk_large_files",
       "description": "Preview largest files under a directory (read-only, never deletes).",
@@ -598,6 +663,51 @@
       "skill": false
     },
     {
+      "handler": "agentic.toolkit.flow:email_check",
+      "name": "email_check",
+      "description": "Poll the owner's inbox via Aiko's email bridge (ProtonMail). Returns one item per new message with id, from, subject and prompt text.",
+      "props": {},
+      "domain": "email",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:email_draft",
+      "name": "email_draft",
+      "description": "Compose an email draft and park it under a GraphState key for review. Nothing is sent — a later email_send step (or a human) delivers it.",
+      "props": {},
+      "domain": "email",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:email_reply",
+      "name": "email_reply",
+      "description": "Generate replies with Aiko's LLM and send them back through the email bridge. Takes the email_check batch ($result:<node>) or reads it from state.",
+      "props": {},
+      "domain": "email",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:email_send",
+      "name": "email_send",
+      "description": "Send an email via Aiko's mail bridge. Recipient defaults to the owner's AIKO_EMAIL. Best-effort — check ok in the result.",
+      "props": {},
+      "domain": "email",
+      "always_on": true,
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
       "handler": "agentic.toolkit.ingest:fetch_from_url",
       "name": "fetch_from_url",
       "description": "Download and extract text from any URL. Handles HTML pages, PDFs, DOCX, PPTX, XLSX, EPUB, CSV, XML, ZIP, IPYNB, MSG. Lightweight alternative to deep_read — no JS rendering, no relevance filtering, no Crawl4AI escalation. Use when you have a known URL and want its plain text.",
@@ -651,6 +761,39 @@
       "skill": false
     },
     {
+      "handler": "agentic.toolkit.flow:file_read",
+      "name": "file_read",
+      "description": "Read text from a file under Aiko's workspace root. Paths are jailed to the workspace — traversal outside is rejected. Pairs with file_write.",
+      "props": {},
+      "domain": "io",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:file_write",
+      "name": "file_write",
+      "description": "Write text to a file under Aiko's workspace root. Paths are jailed to the workspace — traversal outside is rejected.",
+      "props": {},
+      "domain": "io",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:filter_items",
+      "name": "filter_items",
+      "description": "Filter node. Drops items that fail the conditions and passes the rest on. Use this instead of IF when you want to narrow the stream rather than branch it.",
+      "props": {},
+      "domain": "transform",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
       "handler": "agentic.agentic:final_answer",
       "name": "final_answer",
       "description": "Final answer.",
@@ -686,12 +829,67 @@
       "skill": false
     },
     {
+      "handler": "agentic.toolkit.flow:gmail_draft",
+      "name": "gmail_draft",
+      "description": "Compose a Gmail draft and park it under a GraphState key for review. Nothing is sent — a later gmail_send step (or a human) delivers it.",
+      "props": {},
+      "domain": "email",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:gmail_search",
+      "name": "gmail_search",
+      "description": "Search Gmail messages. No Gmail adapter is configured — the node returns a graceful not-connected result instead of failing the run.",
+      "props": {},
+      "domain": "email",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:gmail_send",
+      "name": "gmail_send",
+      "description": "Send a Gmail message. No Gmail adapter is configured — the node returns a graceful not-connected result instead of failing the run.",
+      "props": {},
+      "domain": "email",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
       "handler": "agentic.toolkit.it_ops:http_check",
       "name": "http_check",
       "description": "Lightweight HTTP status check (no JS, 8s timeout).",
       "props": {},
       "domain": "it_ops",
       "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:http_request",
+      "name": "http_request",
+      "description": "HTTP Request node. GET/POST/PUT/PATCH/DELETE against a public URL, with SSRF protection, a byte cap and a timeout. JSON responses become items; response_path drills into a nested list.",
+      "props": {},
+      "domain": "io",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:if_condition",
+      "name": "if_condition",
+      "description": "IF node. Evaluates conditions and returns the literal string true or false so downstream nodes can gate with run_if {\"node\":\"<id>\",\"equals\":\"true\"}. Matching and non-matching items are written to separate state keys.",
+      "props": {},
+      "domain": "flow",
+      "react": false,
       "graph": true,
       "wiki": false,
       "skill": false
@@ -722,6 +920,39 @@
         }
       },
       "domain": "workflow",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:instagram_post",
+      "name": "instagram_post",
+      "description": "Post to Instagram. No Instagram backend is configured — the node returns a graceful not-connected result instead of failing the run.",
+      "props": {},
+      "domain": "social",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:instagram_read",
+      "name": "instagram_read",
+      "description": "Read recent Instagram posts or mentions. No Instagram read backend is configured — the node returns a graceful not-connected result instead of failing the run.",
+      "props": {},
+      "domain": "social",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:items_to_text",
+      "name": "items_to_text",
+      "description": "Bridge node. Renders every item through a template and joins them into a single string — feed this into synthesize_report, write_report, or any tool that wants prose rather than items.",
+      "props": {},
+      "domain": "transform",
       "react": false,
       "graph": true,
       "wiki": false,
@@ -764,10 +995,6 @@
         "relative_path": {
           "type": "string",
           "description": "Optional workspace-relative document path to ingest instead of text."
-        },
-        "image_caption": {
-          "type": "string",
-          "description": "Caption or description for an image at relative_path; indexed as text and linked to the workspace image."
         },
         "source": {
           "type": "string",
@@ -812,6 +1039,17 @@
         "text"
       ],
       "domain": "kb",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:limit_items",
+      "name": "limit_items",
+      "description": "Limit node. Truncates the stream to max_items, keeping either the first or last ones.",
+      "props": {},
+      "domain": "transform",
       "react": false,
       "graph": true,
       "wiki": false,
@@ -871,6 +1109,25 @@
       "skill": false
     },
     {
+      "handler": "agentic.skills:load_skill",
+      "name": "load_skill",
+      "description": "Load the full instructions for one skill by name (or id). Use after list_skillsets/search_skillsets_json to read the complete workflow only when needed.",
+      "props": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "domain": "skills",
+      "always_on": true,
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
       "handler": "agentic.skills:load_skillset",
       "name": "load_skillset",
       "description": "Load the full markdown instructions for one predefined skillset by id.",
@@ -887,25 +1144,6 @@
       "graph": false,
       "wiki": false,
       "skill": false
-    },
-    {
-      "handler": "agentic.skills:load_skill",
-      "name": "load_skill",
-      "description": "Load the full instructions for one skill by name (or id). Use after list_skillsets/search_skillsets_json to read the complete workflow only when needed.",
-      "props": {
-        "name": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "name"
-      ],
-      "domain": "skills",
-      "react": true,
-      "graph": true,
-      "wiki": false,
-      "skill": false,
-      "always_on": true
     },
     {
       "handler": "agentic.toolkit.it_ops:log_triage",
@@ -939,6 +1177,62 @@
       "domain": "planning",
       "always_on": true,
       "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:matrix_send",
+      "name": "matrix_send",
+      "description": "Send a Matrix message through the running Matrix adapter. chat_id defaults to the most recent Matrix conversation (the owner). Two-way channel — no approval needed.",
+      "props": {},
+      "domain": "social",
+      "always_on": true,
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:memory_buffer",
+      "name": "memory_buffer",
+      "description": "Sub-node for the AI Agent: keeps the last N items under a GraphState key so the agent sees recent conversation without re-reading everything.",
+      "props": {},
+      "domain": "ai",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:merge_items",
+      "name": "merge_items",
+      "description": "Merge node. Combines several branches: append, combine_by_key, combine_by_position, or pick_first_non_empty. Point depends_on at every branch you want joined.",
+      "props": {},
+      "domain": "flow",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:messenger_read",
+      "name": "messenger_read",
+      "description": "Read recent Messenger messages. No Messenger backend is configured — the node returns a graceful not-connected result instead of failing the run.",
+      "props": {},
+      "domain": "social",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:messenger_send",
+      "name": "messenger_send",
+      "description": "Send a Facebook Messenger message. No Messenger backend is configured — the node returns a graceful not-connected result instead of failing the run.",
+      "props": {},
+      "domain": "social",
+      "react": false,
       "graph": true,
       "wiki": false,
       "skill": false
@@ -983,6 +1277,28 @@
       "props": {},
       "domain": "it_ops",
       "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:no_op",
+      "name": "no_op",
+      "description": "Do nothing. Useful as a join point, a placeholder while building, or a stable anchor for several branches to converge on.",
+      "props": {},
+      "domain": "flow",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:notify_user",
+      "name": "notify_user",
+      "description": "Emit a notification item for the owner (title + message). Best-effort delivery via a registered mail tool; the item itself is always emitted so downstream nodes can act on it.",
+      "props": {},
+      "domain": "everyday",
+      "react": false,
       "graph": true,
       "wiki": false,
       "skill": false
@@ -1164,6 +1480,16 @@
       "needs_approval": true
     },
     {
+      "handler": "agentic.graph_engine:practice_sweep",
+      "name": "practice_sweep",
+      "description": "Run the practice auto-promotion sweep: promote frequently-used experiences into playbook DAGs. Call once at the end of a practice session.",
+      "props": {},
+      "react": true,
+      "graph": false,
+      "wiki": false,
+      "skill": false
+    },
+    {
       "handler": "agentic.toolkit.it_ops:process_top",
       "name": "process_top",
       "description": "List top processes by CPU/RAM (read-only, no kill).",
@@ -1215,12 +1541,84 @@
       "skill": false
     },
     {
+      "handler": "agentic.graph_engine:record_practice_result",
+      "name": "record_practice_result",
+      "description": "Record the outcome of a practice task as experience. Call once per practice session after attempting the task, with the tools used and whether it succeeded. Pass the experience_id returned by suggest_practice_task unchanged — a successful rehearse then reinforces that existing workflow (bumping its reuse count toward auto-promotion) instead of writing a duplicate row.",
+      "props": {
+        "goal": {
+          "type": "string",
+          "description": "The practice task goal that was attempted."
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tool names used, in order."
+        },
+        "ok": {
+          "type": "boolean",
+          "description": "Whether the practice run succeeded."
+        },
+        "notes": {
+          "type": "string",
+          "description": "One-line outcome note."
+        },
+        "experience_id": {
+          "type": "string",
+          "description": "The experience_id from suggest_practice_task, if the task came from an existing workflow (retry/rehearse). Omit for curriculum tasks."
+        }
+      },
+      "required": [
+        "goal",
+        "tools",
+        "ok"
+      ],
+      "react": true,
+      "graph": false,
+      "wiki": false,
+      "skill": false
+    },
+    {
       "handler": "agentic.workflows.codebase_refresh.graph:refresh_codebase_tool",
       "name": "refresh_codebase",
       "description": "Refresh per-user codebase RAG DB (incremental SHA1, prune stale). Nightly 22:00, Jetson-optimized.",
       "props": {},
       "domain": "codebase",
       "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:reminder",
+      "name": "reminder",
+      "description": "Schedule a local reminder (title + message at a time of day, optionally repeating). Uses Aiko's local scheduler while she is running.",
+      "props": {},
+      "domain": "scheduling",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:remove_duplicates",
+      "name": "remove_duplicates",
+      "description": "Remove Duplicates node. Keeps the first occurrence per key field (or per whole item when no field is given).",
+      "props": {},
+      "domain": "transform",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:rename_fields",
+      "name": "rename_fields",
+      "description": "Rename fields with a {\"old\":\"new\"} map, and optionally drop fields listed in drop (comma-separated).",
+      "props": {},
+      "domain": "transform",
+      "react": false,
       "graph": true,
       "wiki": false,
       "skill": false
@@ -1358,6 +1756,42 @@
       "skill": false
     },
     {
+      "handler": "agentic.toolkit.recall:retrieve_context",
+      "name": "retrieve_context",
+      "description": "Pull long-term memory, learned knowledge, past task experience, wiki operating cards, or skill instructions on demand mid-task. Use when upfront context was omitted for low relevance or you need specifics — do not guess from the system prompt. stores: comma-separated subset of memory,knowledge,experience,wiki,skill.",
+      "props": {
+        "query": {
+          "type": "string"
+        },
+        "stores": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "domain": "memory",
+      "always_on": true,
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:rss_read",
+      "name": "rss_read",
+      "description": "Fetch an RSS or Atom feed with the standard library (no extra deps) and emit one item per entry: title, link, summary, published.",
+      "props": {},
+      "domain": "research",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
       "handler": "agentic.toolkit.social:run_job_post_playbook",
       "name": "run_job_post_playbook",
       "description": "Legacy schedule tool name → Spec gen_job_post graph.",
@@ -1393,6 +1827,18 @@
       "graph": true,
       "wiki": false,
       "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.coding:sandbox_run",
+      "name": "sandbox_run",
+      "description": "Run a Python script in a confined sandbox (timeout, output cap).",
+      "props": {},
+      "domain": "coding",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false,
+      "needs_approval": true
     },
     {
       "handler": "agentic.toolkit.plan:save_note",
@@ -1627,12 +2073,125 @@
       "skill": false
     },
     {
+      "handler": "agentic.toolkit.flow:set_fields",
+      "name": "set_fields",
+      "description": "Set node. Adds or overwrites fields on each item. Values support {{ templates }} and =expressions, e.g. {\"label\":\"{{ title }} ({{ source }})\",\"double\":\"=price * 2\"}.",
+      "props": {},
+      "domain": "transform",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.coding:shell_run",
+      "name": "shell_run",
+      "description": "Run a shell command on Aiko's host (APPROVAL REQUIRED unless read-only).",
+      "props": {},
+      "domain": "coding",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false,
+      "needs_approval": true
+    },
+    {
+      "handler": "agentic.toolkit.flow:slack_send",
+      "name": "slack_send",
+      "description": "Send a Slack message through the running Slack adapter. chat_id defaults to the most recent Slack conversation (the owner). Two-way channel — no approval needed.",
+      "props": {},
+      "domain": "social",
+      "always_on": true,
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:social_read",
+      "name": "social_read",
+      "description": "Read recent social mentions or posts. No social read backend is configured — the node returns a graceful not-connected result instead of failing the run.",
+      "props": {},
+      "domain": "social",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:sort_items",
+      "name": "sort_items",
+      "description": "Sort node. Orders items by a dotted field path, ascending or descending, numeric when possible.",
+      "props": {},
+      "domain": "transform",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:split_in_batches",
+      "name": "split_in_batches",
+      "description": "Split In Batches. Returns {\"done\": false, \"batch\": [...]} until the list is exhausted. Pair it with loop_to on itself plus loop_condition {\"not\":{\"contains\":\"\\\"done\\\": true\"}} to walk big inputs without blowing the context budget.",
+      "props": {},
+      "domain": "flow",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:split_out",
+      "name": "split_out",
+      "description": "Split Out node. Turns a list-valued field into separate items (the inverse of Aggregate/collect).",
+      "props": {},
+      "domain": "transform",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.coding:ssh_run",
+      "name": "ssh_run",
+      "description": "Run a command on a pre-configured SSH host (APPROVAL REQUIRED).",
+      "props": {},
+      "domain": "coding",
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false,
+      "needs_approval": true
+    },
+    {
       "handler": "agentic.toolkit.it_ops:ssl_expiry",
       "name": "ssl_expiry",
       "description": "Days until TLS cert expires for host:port (read-only).",
       "props": {},
       "domain": "it_ops",
       "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:sticky_note",
+      "name": "sticky_note",
+      "description": "Sticky note for the canvas. Documentation only — the runner skips it.",
+      "props": {},
+      "domain": "note",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:stop_and_error",
+      "name": "stop_and_error",
+      "description": "Stop the workflow with an explicit error. Downstream nodes are marked dependency_failed, which is how you surface a bad precondition instead of silently continuing.",
+      "props": {},
+      "domain": "flow",
+      "react": false,
       "graph": true,
       "wiki": false,
       "skill": false
@@ -1661,6 +2220,16 @@
       "domain": "workflow",
       "react": false,
       "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.graph_engine:suggest_practice_task",
+      "name": "suggest_practice_task",
+      "description": "Pick one practice task for an autonomous practice session. Returns JSON with source (retry/rehearse/curriculum), goal, suggested_tools, and experience_id. Call once at the start of a practice session.",
+      "props": {},
+      "react": true,
+      "graph": false,
       "wiki": false,
       "skill": false
     },
@@ -1699,6 +2268,17 @@
       "domain": "planning",
       "always_on": true,
       "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:switch_route",
+      "name": "switch_route",
+      "description": "Switch node. Walks ordered rules and returns the first matching route name (or the fallback). Gate each branch with run_if {\"node\":\"<id>\",\"equals\":\"<route>\"}.",
+      "props": {},
+      "domain": "flow",
+      "react": false,
       "graph": true,
       "wiki": false,
       "skill": false
@@ -1766,6 +2346,29 @@
       "skill": false
     },
     {
+      "handler": "agentic.toolkit.flow:telegram_send",
+      "name": "telegram_send",
+      "description": "Send a Telegram message through the running Telegram adapter. chat_id defaults to the most recent Telegram conversation (the owner). Two-way channel — no approval needed.",
+      "props": {},
+      "domain": "social",
+      "always_on": true,
+      "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:template_render",
+      "name": "template_render",
+      "description": "Template node. Renders a {{ template }} string into a field on each item — the usual way to build post text, email bodies, or LLM evidence.",
+      "props": {},
+      "domain": "transform",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
       "handler": "agentic.toolkit.it_ops:text_summarize",
       "name": "text_summarize",
       "description": "Condense long text via LLM (heuristic fallback, Jetson-light).",
@@ -1783,6 +2386,83 @@
       "props": {},
       "domain": "everyday",
       "react": true,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:threads_post",
+      "name": "threads_post",
+      "description": "Post to Threads through Aiko's social MCP bridge. Returns the provider result — check ok before assuming it went out.",
+      "props": {},
+      "domain": "social",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:threads_read",
+      "name": "threads_read",
+      "description": "Read recent Threads posts or mentions. No Threads read backend is configured — the node returns a graceful not-connected result instead of failing the run.",
+      "props": {},
+      "domain": "social",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:tool_router",
+      "name": "tool_router",
+      "description": "Route items to a named branch. Each route pairs a keyword (or /regex/) with a branch name; the first matching route wins, otherwise the default branch is taken. Emits one item naming the chosen route so downstream if/switch nodes can branch on it.",
+      "props": {},
+      "domain": "flow",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:trigger_chat",
+      "name": "trigger_chat",
+      "description": "Entry node for conversational workflows. Emits one item carrying the incoming chat message — n8n's 'Chat Trigger' equivalent.",
+      "props": {},
+      "domain": "trigger",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:trigger_manual",
+      "name": "trigger_manual",
+      "description": "Workflow entry point. Emits the items you paste in (or a state key) so downstream nodes have data. The n8n 'Manual Trigger' / pinned-data equivalent.",
+      "props": {},
+      "domain": "flow",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:trigger_schedule",
+      "name": "trigger_schedule",
+      "description": "Entry node for scheduled workflows. Emits one item stamped with the current time; the cron expression documents the intended timetable.",
+      "props": {},
+      "domain": "trigger",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:trigger_webhook",
+      "name": "trigger_webhook",
+      "description": "Entry node for webhook-driven workflows. Emits the configured test payload (or one empty item) so downstream nodes have data to shape.",
+      "props": {},
+      "domain": "trigger",
+      "react": false,
       "graph": true,
       "wiki": false,
       "skill": false
@@ -1820,6 +2500,28 @@
         }
       },
       "domain": "workflow",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:wait_delay",
+      "name": "wait_delay",
+      "description": "Wait before continuing. Bounded by FLOW_MAX_WAIT_SECONDS so a canvas edit cannot stall the Jetson.",
+      "props": {},
+      "domain": "flow",
+      "react": false,
+      "graph": true,
+      "wiki": false,
+      "skill": false
+    },
+    {
+      "handler": "agentic.toolkit.flow:whatsapp_send",
+      "name": "whatsapp_send",
+      "description": "Send a WhatsApp message. No WhatsApp backend is configured — the node returns a graceful not-connected result instead of failing the run.",
+      "props": {},
+      "domain": "social",
       "react": false,
       "graph": true,
       "wiki": false,

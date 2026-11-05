@@ -14,16 +14,22 @@ parsing the `raw` field ("{choice}@{conf}").
 from __future__ import annotations
 
 import argparse
+import math
 import json
 import os
 import re
 
 
 def choice_conf(r: dict) -> float | None:
-    if r.get("choice_confidence") is not None:
-        return float(r["choice_confidence"])
-    m = re.search(r"@(\d+\.\d+)$", r.get("raw", ""))
-    return float(m.group(1)) if m else None
+    value = r.get("choice_confidence")
+    if value is None:
+        match = re.search(r"@([0-9]+(?:\.[0-9]+)?)$", str(r.get("raw") or ""))
+        value = match.group(1) if match else None
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and 0 <= value <= 1 else None
 
 
 def binary_metrics(rows):

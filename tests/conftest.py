@@ -5,6 +5,7 @@ Shared pytest fixtures and configuration.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import tempfile
@@ -14,8 +15,27 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-# Ensure config is loaded before any module imports
-os.environ.setdefault("WORKSPACE_ROOT", "/tmp/aiko_test_workspace")
+# Real-service runs require an explicit opt-in; normal tests get private paths
+# before config/auth/log modules are imported, including during collection.
+_LIVE = "--run-live" in sys.argv
+_TEST_ROOT = tempfile.TemporaryDirectory(prefix="aiko-pytest-") if not _LIVE else None
+if _TEST_ROOT is not None:
+    for key, suffix in {"WORKSPACE_ROOT": "workspace", "USER_SPACE_ROOT": "users",
+                        "ENV_AGE_PATH": "no-secrets.age", "AIKO_LOG_DIR": "logs",
+                        "AIKO_SESSION_FILE": "sessions.json"}.items():
+        os.environ[key] = str(Path(_TEST_ROOT.name) / suffix)
+
+
+def pytest_addoption(parser):
+    parser.addoption("--run-live", action="store_true", default=False,
+                     help="Allow explicitly selected perf tests to use real configured services.")
+
+
+def pytest_collection_modifyitems(config, items):
+    if not config.getoption("--run-live"):
+        for item in items:
+            if item.get_closest_marker("perf"):
+                item.add_marker(pytest.mark.skip(reason="real performance runs require --run-live"))
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # Mirror interface/mcp_server/social/server.py: it inserts interface/mcp_server
@@ -46,11 +66,11 @@ def fake_embedder():
             self.dim = dim
 
         def embed_query(self, text: str, instruct: str = "") -> np.ndarray:
-            h = hash(text + instruct) % 1000
-            return np.array([float(h) / 1000.0] * self.dim, dtype=np.float32)
+            seed = int.from_bytes(hashlib.sha256((text + instruct).encode()).digest()[:8], "big")
+            return np.random.default_rng(seed).normal(size=self.dim).astype(np.float32)
 
         def embed_batch(self, texts: list[str]) -> np.ndarray:
-            return np.stack([self.embed_query(t) for t in texts])
+            return np.stack([self.embed_query(t) for t in texts]) if texts else np.empty((0, self.dim), dtype=np.float32)
 
     return FakeEmbedder()
 
@@ -109,9 +129,9 @@ def mock_owner(mock_llm_client, fake_embedder):
 
 
 @pytest.fixture
-def temp_workspace(tmp_path):
+def temp_workspace(tmp_path, monkeypatch):
     """Temporary workspace directory."""
-    os.environ["WORKSPACE_ROOT"] = str(tmp_path)
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
     return tmp_path
 
 
@@ -164,8 +184,11 @@ def seeded_knowledge_db(tmp_path, fake_embedder):
 # ─── Common Mock Patches ─────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
-def mock_external_services():
+def mock_external_services(request):
     """Auto-mock external services to prevent network calls in tests."""
+    if request.node.get_closest_marker("perf") and request.config.getoption("--run-live"):
+        yield
+        return
     # Mock requests module at the system level so any import gets the mock,
     # while keeping the real exceptions namespace (raising/catching
     # requests.exceptions.* in retry logic requires real BaseException classes).

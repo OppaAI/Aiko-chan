@@ -10,6 +10,7 @@ Usage:
 """
 from __future__ import annotations
 
+import math
 import json
 import re
 import urllib.error
@@ -31,8 +32,8 @@ def apply_band(p_violation, lo: float = ASK_LO, hi: float = ASK_HI) -> str:
     """Route a triage P(violation) to refuse/ask/allow.
 
     Returns "ask" when p falls inside [lo, hi], else the argmax side.
-    p=None (older servers without probabilities) degrades to plain argmax
-    at 0.5 — never to "ask", so a missing signal can't nag the owner.
+    Missing/invalid probabilities are unmeasured ("ask-needs-probs"),
+    rather than a fabricated allow/refuse probability.
     """
     if p_violation is None:
         return "ask-needs-probs"
@@ -40,6 +41,10 @@ def apply_band(p_violation, lo: float = ASK_LO, hi: float = ASK_HI) -> str:
         p = float(p_violation)
     except (TypeError, ValueError):
         return "ask-needs-probs"
+    if not math.isfinite(p) or not 0 <= p <= 1:
+        return "ask-needs-probs"
+    if not (0 <= lo <= hi <= 1):
+        raise ValueError("approval band must satisfy 0 <= lo <= hi <= 1")
     if p < lo:
         return "allow"
     if p > hi:
@@ -70,8 +75,8 @@ def load_categories(path):
             m = DEF_RE.match(line)
             if m and cur is not None and not cur["definition"]:
                 cur["definition"] = m.group(1)
-    assert len(cats) == 16, f"expected 16 categories, got {len(cats)}"
-    assert all(c["definition"] for c in cats), "missing definition"
+    if len(cats) != 16 or len({c["name"] for c in cats}) != 16 or not all(c["definition"] for c in cats):
+        raise ValueError("expected 16 unique categories with definitions")
     return cats
 
 
@@ -195,6 +200,8 @@ class LayaZeroShotAdapter:
 
     def __init__(self, categories, threshold=0.5):
         self.categories = categories
+        if not math.isfinite(threshold) or not 0 <= threshold <= 1:
+            raise ValueError("threshold must be finite and between 0 and 1")
         self.threshold = threshold
         self._none_ok = None  # tri-state until the first call probes it
 
@@ -214,12 +221,19 @@ class LayaZeroShotAdapter:
 
     @staticmethod
     def _confidence(ans):
-        conf = ans.get("confidence")
         probs = ans.get("probabilities") or {}
-        top = max(probs.values()) if probs else 0.0
-        if isinstance(conf, (int, float)):
-            return max(0.0, min(1.0, float(max(float(conf), top))))
-        return float(top)
+        conf = ans.get("confidence")
+        if conf is None:
+            conf = probs.get(ans.get("choice")) if isinstance(probs, dict) else None
+        if conf is None:
+            return None
+        try:
+            value = float(conf)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid model confidence") from exc
+        if not math.isfinite(value) or not 0 <= value <= 1:
+            raise ValueError("invalid model confidence")
+        return value
 
     def classify(self, backend, situation, rng):
         attempts = ([True, False] if self._none_ok is None
@@ -234,13 +248,17 @@ class LayaZeroShotAdapter:
                 if self._none_ok is None:
                     self._none_ok = include_none
                 break
-            except urllib.error.HTTPError:
-                if include_none and self._none_ok is None:
+            except urllib.error.HTTPError as exc:
+                if exc.code in {400, 422} and include_none and self._none_ok is None:
                     continue  # >16 options rejected; retry without 'none'
                 raise
         ans = resp[self.QUESTION]
         choice = ans["choice"]
+        if choice not in {c["name"] for c in self.categories} | ({"none"} if self._none_ok else set()):
+            raise ValueError("model returned an unknown category")
         conf = self._confidence(ans)
+        if conf is None:
+            raise ValueError("model returned no confidence")
         if self._none_ok:
             refuse = choice != "none"
             bin_conf = conf
@@ -306,8 +324,12 @@ class LayaTwoQuestionAdapter:
         t = resp[self.TRIAGE]
         c = resp[self.CATEGORY]
         t_choice, c_choice = t["choice"], c["choice"]
+        if t_choice not in {"violation", "none"} or c_choice not in {cat["name"] for cat in self.categories}:
+            raise ValueError("model returned an unknown decision label")
         t_conf = LayaZeroShotAdapter._confidence(t)
         c_conf = LayaZeroShotAdapter._confidence(c)
+        if t_conf is None or c_conf is None:
+            raise ValueError("model returned no confidence")
         refuse = t_choice == "violation"
         # Real P(violation): the temperature-scaled softmax over the Q1
         # options, not the argmax. Approval-band analysis thresholds on
@@ -319,6 +341,8 @@ class LayaTwoQuestionAdapter:
             p_violation = round(float(_p_viol), 4) if _p_viol is not None else None
         except (TypeError, ValueError):
             p_violation = None
+        if p_violation is not None and (not math.isfinite(p_violation) or not 0 <= p_violation <= 1):
+            raise ValueError("invalid violation probability")
         return {
             "predicted_category": c_choice if refuse else None,
             "predicted_refuse": refuse,

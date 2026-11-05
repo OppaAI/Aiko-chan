@@ -85,7 +85,7 @@ from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler  # fo
 from pathlib import Path                      # for log directory resolution (py312 modern)
 
 # ── config ────────────────────────────────────────────────────────────────────
-LOG_DIR        = Path(__file__).resolve().parents[1] / "logs"  # logs/ at repo root
+LOG_DIR        = Path(os.getenv("AIKO_LOG_DIR") or Path(__file__).resolve().parents[1] / "logs").expanduser()  # logs/ at repo root
 LOG_FILE       = LOG_DIR / "aiko.log"        # main rotating log file
 ERROR_LOG_FILE = LOG_DIR / "aiko.error.log"  # error-only tail file
 

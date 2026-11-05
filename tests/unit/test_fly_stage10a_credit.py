@@ -13,6 +13,8 @@ Covers the QA contract:
 """
 from __future__ import annotations
 
+import os
+
 import time
 
 import numpy as np
@@ -342,6 +344,7 @@ def test_pulse_shim_explicit_shadow(monkeypatch, fake_mb):
 
 # ── performance ──────────────────────────────────────────────────────────
 
+@pytest.mark.skipif(os.getenv("AIKO_ASSERT_PERF") != "1", reason="timing budget requires AIKO_ASSERT_PERF=1 on a stable target")
 def test_per_event_cost_well_below_millisecond(live_credit, fake_mb):
     uid = live_credit
     for i in range(32):  # fill the trace store to its cap

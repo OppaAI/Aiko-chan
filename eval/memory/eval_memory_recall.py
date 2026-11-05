@@ -1,5 +1,5 @@
 """
-eval/eval_memory_recall.py
+eval/memory/eval_memory_recall.py
 Accuracy eval for memory/memorize.py's search()/recall pipeline -- NOT a
 pytest suite. Like eval_memory_extraction.py, this is scored and reported
 rather than asserted pass/fail, since recall quality is a spectrum you
@@ -7,9 +7,9 @@ want to track over time (e.g. after touching RRF weights, recency decay,
 or the quick/wide pass thresholds), not a binary gate.
 
 Usage:
-    python eval/eval_memory_recall.py
-    python eval/eval_memory_recall.py --verbose
-    python eval/eval_memory_recall.py --out results/recall_2026-07-18.json
+    python eval/memory/eval_memory_recall.py
+    python eval/memory/eval_memory_recall.py --verbose
+    python eval/memory/eval_memory_recall.py --out results/recall_2026-07-18.json
 
 What it measures:
   - recall@k: for each golden query, does the "must_retrieve" memory
@@ -27,11 +27,15 @@ distractor noise -- it does NOT run against your live Aiko-chan memory.db.
 from __future__ import annotations
 
 import argparse
+import os
+import tempfile
 import json
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -122,63 +126,69 @@ def _rank_of(results: list[dict], target_id: str) -> int | None:
 
 
 def run_eval(verbose: bool = False) -> dict:
+    with tempfile.TemporaryDirectory(prefix="aiko-recall-eval-") as scratch:
+        return _run_isolated(str(Path(scratch) / "memory.db"), verbose)
+
+
+def _run_isolated(db_path: str, verbose: bool) -> dict:
     from cognition.memory.memorize import MemoryBackend
+    backend = MemoryBackend(db_path=db_path,
+                            llm_base_url=os.getenv("LLM_BASE_URL", "http://localhost:8080/v1"),
+                            model=os.getenv("EXTRACT_MODEL") or os.getenv("LLM_MODEL", "ministral"),
+                            user_id="eval_memory")
+    try:
+        user_id = "eval_recall_user"
+        fact_ids = _seed_store(backend, user_id)
 
-    backend = MemoryBackend(
-        db_path="/tmp/eval_memory_recall.db",
-        llm_base_url="http://localhost:8080/v1",
-        model="ministral",
-    )
-    user_id = "eval_recall_user"
-    fact_ids = _seed_store(backend, user_id)
+        case_results = []
+        hits_at_k = 0
+        reciprocal_ranks = []
 
-    case_results = []
-    hits_at_k = 0
-    reciprocal_ranks = []
+        for case in GOLDEN_QUERIES:
+            target_text = case["must_retrieve"]
+            target_id = fact_ids.get(target_text)
+            k = case["k"]
 
-    for case in GOLDEN_QUERIES:
-        target_text = case["must_retrieve"]
-        target_id = fact_ids.get(target_text)
-        k = case["k"]
+            results = backend.search(case["query"], user_id=user_id, limit=k)
+            rank = _rank_of(results, target_id) if target_id else None
 
-        results = backend.search(case["query"], user_id=user_id, limit=k)
-        rank = _rank_of(results, target_id) if target_id else None
+            hit = rank is not None
+            hits_at_k += int(hit)
+            reciprocal_ranks.append(1.0 / rank if hit else 0.0)
 
-        hit = rank is not None
-        hits_at_k += int(hit)
-        reciprocal_ranks.append(1.0 / rank if hit else 0.0)
+            case_results.append({
+                "query": case["query"],
+                "target": target_text,
+                "hit": hit,
+                "rank": rank,
+                "top_results": [r.get("memory", "")[:80] for r in results],
+            })
 
-        case_results.append({
-            "query": case["query"],
-            "target": target_text,
-            "hit": hit,
-            "rank": rank,
-            "top_results": [r.get("memory", "")[:80] for r in results],
-        })
+            if verbose:
+                status = f"rank {rank}" if hit else "MISS"
+                print(f"\n[{case['query']!r}] -> {status}")
+                print(f"  target: {target_text}")
+                if not hit:
+                    print(f"  top-{k} returned instead: {[r.get('memory','')[:60] for r in results]}")
 
-        if verbose:
-            status = f"rank {rank}" if hit else "MISS"
-            print(f"\n[{case['query']!r}] -> {status}")
-            print(f"  target: {target_text}")
-            if not hit:
-                print(f"  top-{k} returned instead: {[r.get('memory','')[:60] for r in results]}")
+        n = len(GOLDEN_QUERIES)
+        recall_at_k = hits_at_k / n if n else 1.0
+        mrr = sum(reciprocal_ranks) / n if n else 1.0
 
-    n = len(GOLDEN_QUERIES)
-    recall_at_k = hits_at_k / n if n else 1.0
-    mrr = sum(reciprocal_ranks) / n if n else 1.0
+        summary = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "num_queries": n,
+            "distractor_count": DISTRACTOR_COUNT,
+            "recall_at_k": round(recall_at_k, 3),
+            "mrr": round(mrr, 3),
+            "cases": case_results,
+        }
 
-    summary = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "num_queries": n,
-        "distractor_count": DISTRACTOR_COUNT,
-        "recall_at_k": round(recall_at_k, 3),
-        "mrr": round(mrr, 3),
-        "cases": case_results,
-    }
-
-    backend.delete_all(user_id)
-    backend._conn.close()
-    return summary
+        backend.delete_all(user_id)
+        return summary
+    finally:
+        backend._conn.close()
+        backend._client.close()
 
 
 def main():

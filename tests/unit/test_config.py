@@ -279,6 +279,7 @@ def fake_root(tmp_path, monkeypatch):
     Layout created: <tmp_path>/pkg/config.py (fake, unused on disk) so
     root resolves to <tmp_path>.
     """
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
     fake_module_path = tmp_path / "pkg" / "config.py"
     monkeypatch.setattr(config_module, "__file__", str(fake_module_path))
     return tmp_path

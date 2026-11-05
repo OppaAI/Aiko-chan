@@ -752,3 +752,26 @@ Physical validation remains: peak RAM/latency with the real connectome and all
 model services on the 8 GB Jetson, real sensor/audio/body feedback, and sustained
 live interaction. Offline tests do not establish these measurements or biological
 fidelity. The sensory and interface areas retain their own broader audit scopes.
+
+## Settings Studio follow-up after area 6
+
+- Expanded the existing Settings Studio with Aidon-inspired cards, serif heading,
+  light/dark themes, search, paired bounded sliders, mobile layout, source labels,
+  and dirty-field saves. All runtime YAML leaves are discovered automatically;
+  the current catalog has 634 settings including 17 resource/context controls
+  previously available only through environment variables.
+- Added creator/admin authorization to both settings API methods. Credentials
+  remain masked; explicitly edited YAML credentials migrate into encrypted
+  `.env.age` storage instead of writing new plaintext credentials to YAML.
+- Added serialized, staged batch saves with rollback, revision conflict checks,
+  nested/list/multiline YAML edits, finite-number validation, and environment
+  provenance so pending restarts do not falsely lock fields as overrides.
+- Six audited per-request sampling controls apply live; other controls retain
+  explicit restart requirements. Saves run in a worker thread so encryption and
+  disk I/O do not block the WebUI event loop. See [Settings guide](SETTINGS.md).
+- Browser checks passed for dirty-only saves, live-result feedback, search,
+  light/dark rendering and 390px mobile width, without JavaScript errors.
+- Final combined validation: `pytest -q tests/unit tests/integration
+  cognition/conscience/test_conscience_gate.py --tb=short
+  -o faulthandler_timeout=60` passed with **2,591 tests, 5 skips, and 34
+  subtests**. Physical Jetson/live-model deployment verification remains pending.

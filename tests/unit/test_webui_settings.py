@@ -248,3 +248,196 @@ def test_api_app_constructs_with_settings_routes():
     paths = {route.path for route in api.app.routes}
     assert "/api/settings" in paths
     assert "/" in paths
+
+
+@pytest.mark.parametrize('raw', ['nan', 'NaN', 'inf', '-inf'])
+def test_nonfinite_sampling_rejected(raw):
+    with pytest.raises(ValueError, match='finite'):
+        core.validate_value(core._BY_KEY['TEMPERATURE'], raw)
+
+
+def test_discovery_covers_every_boot_setting_and_masks_credentials(config_dir):
+    (config_dir / 'memory.yaml').write_text('CUSTOM_API_KEY: hidden-key\nNESTED:\n  LIMIT: 5\n  PATHS:\n  - one\n  - two\n')
+    data = core.read_settings(config_dir, environ={})
+    assert _entry(data, 'NESTED_LIMIT')['type'] == 'int'
+    assert _entry(data, 'NESTED_PATHS')['type'] == 'json'
+    assert _entry(data, 'CUSTOM_API_KEY')['is_set']
+    assert 'hidden-key' not in json.dumps(data)
+    from system.config import _flatten
+    actual = {s['key'] for g in core.read_settings(environ={})['groups'] for s in g['settings']}
+    for filename in core._RUNTIME_FILES:
+        assert set(_flatten(core._load_yaml_file(core.DEFAULT_CONFIG_DIR / filename))) <= actual
+
+
+def test_nested_list_multiline_and_ambiguous_string_roundtrip(config_dir):
+    (config_dir / 'memory.yaml').write_text('NESTED:\n  PATHS:\n  - one\n  - two\n  LABEL: hello\n  TEXT: |\n    old\n    text\n# Keep this comment\nTAIL: 1\n')
+    core.write_settings({'NESTED_PATHS': '["new", "with spaces"]', 'NESTED_LABEL': 'yes',
+                         'NESTED_TEXT': 'new\ntext\n'}, config_dir=config_dir, environ={})
+    data = core._load_yaml_file(config_dir / 'memory.yaml')
+    assert data['NESTED'] == {'PATHS': ['new', 'with spaces'], 'LABEL': 'yes', 'TEXT': 'new\ntext\n'}
+    assert '# Keep this comment' in (config_dir / 'memory.yaml').read_text()
+    assert data['TAIL'] == 1
+
+
+def test_live_sampling_and_restart_fields(config_dir):
+    env = {}
+    result = core.write_settings({'TEMPERATURE': '0.8', 'LLM_MODEL': 'new-model'},
+                                 config_dir=config_dir, environ=env, apply_live=True)
+    assert result['applied_live'] == ['TEMPERATURE']
+    assert result['restart_keys'] == ['LLM_MODEL']
+    assert env == {'TEMPERATURE': '0.8'}
+    assert not _entry(core.read_settings(config_dir, env), 'TEMPERATURE')['restart_required']
+
+
+def test_managed_pending_restart_remains_editable(config_dir, monkeypatch):
+    import os
+    from system import config
+    monkeypatch.setattr(config, '_MANAGED_ENV', {'LLM_MODEL': 'ministral'})
+    monkeypatch.setattr(config, '_LOADED', True)
+    monkeypatch.setenv('LLM_MODEL', 'ministral')
+    core.write_settings({'LLM_MODEL': 'first'}, config_dir=config_dir, environ=os.environ)
+    entry = _entry(core.read_settings(config_dir, os.environ), 'LLM_MODEL')
+    assert not entry['env_overridden']
+    assert entry['pending_restart']
+    core.write_settings({'LLM_MODEL': 'second'}, config_dir=config_dir, environ=os.environ)
+    # An actual deployment override stays locked even when it matches the file.
+    monkeypatch.setattr(config, '_MANAGED_ENV', {})
+    monkeypatch.setenv('LLM_MODEL', 'second')
+    with pytest.raises(ValueError, match='overridden'):
+        core.write_settings({'LLM_MODEL': 'third'}, config_dir=config_dir, environ=os.environ)
+
+
+def test_yaml_credential_edit_migrates_into_encrypted_backend(config_dir, secrets_file):
+    backend = core.PlaintextSecretsBackend(secrets_file)
+    core.write_settings({'LLM_API_KEY': 'replacement'}, config_dir=config_dir,
+                        environ={}, secrets_backend=backend)
+    assert core._load_yaml_file(config_dir / 'cognition.yaml')['LLM_API_KEY'] == ''
+    assert backend.read_values()['LLM_API_KEY'] == 'replacement'
+    payload = core.read_all(config_dir, {}, backend)
+    assert _entry(payload, 'LLM_API_KEY')['is_set']
+    assert 'replacement' not in json.dumps(payload)
+
+
+def test_secret_failure_does_not_commit_yaml(config_dir, secrets_file):
+    class Broken(core.PlaintextSecretsBackend):
+        def write_values(self, values):
+            raise RuntimeError('encryption failed')
+    before = (config_dir / 'cognition.yaml').read_bytes()
+    with pytest.raises(RuntimeError):
+        core.write_settings({'TEMPERATURE': '0.8', 'LLM_API_KEY': 'replacement'},
+                            config_dir=config_dir, environ={}, secrets_backend=Broken(secrets_file))
+    assert (config_dir / 'cognition.yaml').read_bytes() == before
+    assert secrets_file.read_text() == 'EXISTING_TOKEN=original-value\n'
+    assert not list(config_dir.glob('*.settings-stage'))
+
+
+def test_stale_revision_rejected(config_dir, secrets_file):
+    backend = core.PlaintextSecretsBackend(secrets_file)
+    revision = core.read_all(config_dir, {}, backend)['revision']
+    core.write_settings({'TEMPERATURE': '0.6'}, config_dir=config_dir, environ={})
+    with pytest.raises(core.SettingsConflict):
+        core.write_settings({'TEMPERATURE': '0.9'}, config_dir=config_dir, environ={},
+                            secrets_backend=backend, revision=revision)
+    assert core._load_yaml_file(config_dir / 'cognition.yaml')['TEMPERATURE'] == '0.6'
+
+
+@pytest.mark.parametrize('field', ['values', 'secret_values'])
+def test_invalid_batch_shapes_rejected(config_dir, field):
+    with pytest.raises(ValueError, match='objects'):
+        core.write_settings(**{field: []}, **({} if field == 'values' else {'values': {}}),
+                            config_dir=config_dir, environ={})
+
+
+def test_settings_require_operator(monkeypatch):
+    from fastapi import HTTPException
+    from interface.webui.studio.settings.backend.api import require_operator, app
+    import system.userspace as userspace
+    monkeypatch.setattr(userspace, 'can_approve', lambda uid: False)
+    with pytest.raises(HTTPException) as error:
+        require_operator()
+    assert error.value.status_code == 403
+    monkeypatch.setattr(userspace, 'can_approve', lambda uid: True)
+    require_operator()
+    for route in app.routes:
+        if getattr(route, 'path', '') == '/api/settings':
+            assert require_operator in [dep.call for dep in route.dependant.dependencies]
+
+
+def test_list_comments_and_following_settings_survive(config_dir):
+    path = config_dir / 'memory.yaml'
+    path.write_text('PATHS:\n  # keep above\n  - one # keep inline\n  # keep below\nTAIL: 1\n')
+    core.write_settings({'PATHS': '["two"]'}, config_dir=config_dir, environ={})
+    assert core._load_yaml_file(path) == {'PATHS': ['two'], 'TAIL': 1}
+    for comment in ['keep above', 'keep inline', 'keep below']:
+        assert comment in path.read_text()
+
+
+def test_active_encrypted_secret_not_marked_pending(config_dir, secrets_file, monkeypatch):
+    import os
+    from system import config
+    backend = core.PlaintextSecretsBackend(secrets_file)
+    core.write_settings({'LLM_API_KEY': 'replacement'}, config_dir=config_dir, environ={}, secrets_backend=backend)
+    monkeypatch.setattr(config, '_MANAGED_ENV', {'LLM_API_KEY': 'replacement'})
+    monkeypatch.setenv('LLM_API_KEY', 'replacement')
+    assert not _entry(core.read_all(config_dir, os.environ, backend), 'LLM_API_KEY')['pending_restart']
+    core.write_settings({'LLM_API_KEY': 'newer'}, config_dir=config_dir, environ=os.environ, secrets_backend=backend)
+    assert _entry(core.read_all(config_dir, os.environ, backend), 'LLM_API_KEY')['pending_restart']
+
+
+def test_yaml_late_failure_rolls_back_earlier_replaces(config_dir, secrets_file, monkeypatch):
+    before = {p: p.read_bytes() for p in config_dir.glob('*.yaml')}
+    original = core.os.replace
+    failed = False
+    def fail_once(source, target):
+        nonlocal failed
+        if not failed and str(source).endswith('.settings-stage') and str(target).endswith('system.yaml'):
+            failed = True
+            raise OSError('disk failure')
+        return original(source, target)
+    monkeypatch.setattr(core.os, 'replace', fail_once)
+    with pytest.raises(OSError, match='disk failure'):
+        core.write_settings({'TEMPERATURE': '0.7', 'AI_NAME': 'Changed'}, {'NEW_TOKEN': 'new'},
+                            config_dir=config_dir, environ={}, secrets_backend=core.PlaintextSecretsBackend(secrets_file))
+    for path, data in before.items():
+        assert path.read_bytes() == data
+    assert secrets_file.read_text() == 'EXISTING_TOKEN=original-value\n'
+
+
+def test_settings_api_auth_and_live_save(monkeypatch, config_dir, secrets_file):
+    import asyncio
+    async def scenario():
+        import httpx
+        import interface.webui.auth as auth
+        import system.userspace as userspace
+        from interface.webui.studio.settings.backend.api import app
+        backend = core.PlaintextSecretsBackend(secrets_file)
+        real_read, real_write = core.read_all, core.write_settings
+        env = {}
+        monkeypatch.setattr(core, 'read_all', lambda: real_read(config_dir, env, backend))
+        def write(values, secrets, **kwargs):
+            return real_write(values, secrets, config_dir=config_dir, environ=env, secrets_backend=backend, **kwargs)
+        monkeypatch.setattr(core, 'write_settings', write)
+        session = None
+        async def require_session(request):
+            from fastapi import HTTPException
+            if session is None:
+                raise HTTPException(status_code=401, detail='sign in')
+            return session
+        monkeypatch.setattr(auth, 'require_session', require_session)
+        monkeypatch.setattr(userspace, 'can_approve', lambda uid: uid == 'owner')
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+            assert (await client.get('/api/settings')).status_code == 401
+            session = {'user_id': 'visitor', 'username': 'Visitor'}
+            assert (await client.get('/api/settings')).status_code == 403
+            assert (await client.post('/api/settings', json={'settings': {'TEMPERATURE': '.8'}})).status_code == 403
+            session = {'user_id': 'owner', 'username': 'Owner'}
+            data = (await client.get('/api/settings')).json()
+            assert 'yaml-secret-key' not in json.dumps(data)
+            response = await client.post('/api/settings', json={'settings': {'TEMPERATURE': '.8'}, 'revision': data['revision']})
+            assert response.status_code == 200, response.text
+            assert response.json()['applied_live'] == ['TEMPERATURE']
+            assert env['TEMPERATURE'] == '0.8'
+            stale = await client.post('/api/settings', json={'settings': {'TEMPERATURE': '.9'}, 'revision': data['revision']})
+            assert stale.status_code == 409
+            assert (await client.post('/api/settings', json={'settings': []})).status_code == 400
+    asyncio.run(scenario())

@@ -7,8 +7,8 @@ writes, no dynamic file paths.
 
 Writes to YAML are surgical line-level replacements (PyYAML round-trip
 would destroy the files' hand-written comments, and ruamel.yaml is not
-a dependency): only the edited key's line changes, every other line —
-comments included — is preserved byte-for-byte. Each file is verified
+a dependency): edited scalar/list nodes are replaced in place. Unrelated
+content is preserved; comments inside replaced lists remain as comments. Each file is verified
 by re-parsing before an atomic replace, so a bad edit can never land.
 
 Secrets (.env.age) are handled by a backend with the same decrypt path
@@ -18,13 +18,16 @@ state. A write decrypts, edits in memory, re-encrypts to a temp file,
 verifies the temp file decrypts back to the intended values, and only
 then atomically replaces the original; any failure leaves it untouched.
 
-Everything here resolves at load_config() time in the real process, so
-edits only take effect after Aiko restarts; read/write responses carry
-restart_required=True so the UI can say so.
+Only audited per-request readers apply live. Model, device and server
+configuration remains restart-required. Unknown runtime knobs default to restart.
 """
 from __future__ import annotations
 
 import json
+import math
+import hashlib
+import threading
+from functools import wraps
 import os
 import re
 import shutil
@@ -113,7 +116,7 @@ SETTINGS_GROUPS: list[dict] = [
               desc="Empty = use the chat model."),
         _flat("cognition.yaml", "REFLECT_MODEL", "Reflection model", "string"),
         _flat("cognition.yaml", "LLM_API_KEY", "Chat LLM API key", "password",
-              desc="Stored in cognition.yaml. Empty for local endpoints."),
+              desc="New values are saved encrypted in .env.age. Blank keeps the existing value."),
         _flat("cognition.yaml", "LLM_TIMEOUT", "LLM timeout (s)", "int", min=1, max=3600),
         _flat("cognition.yaml", "LLM_MAX_TOKENS", "Max reply tokens", "int", min=1, max=8192),
         _flat("cognition.yaml", "CONTEXT_WINDOW_TURNS", "Context window (turns)", "int", min=1, max=100),
@@ -310,11 +313,129 @@ SETTINGS_GROUPS: list[dict] = [
     ]},
 ]
 
+# Useful resource controls previously available only through environment variables.
+# Defaults mirror their consumers; saving other fields never writes these defaults.
+SETTINGS_GROUPS.append({"group": "Resources & context", "settings": [
+    _flat("memory.yaml", "MEMORY_RECALL_TIMEOUT", "Recall timeout (s)", "float", min=0.1, max=300, default="5.0"),
+    _flat("memory.yaml", "EMBED_CACHE_TTL", "Embedding cache lifetime (s)", "float", min=0, max=86400, default="300.0"),
+    _flat("memory.yaml", "EMBED_QUERY_CACHE_MAX", "Query embedding cache entries", "int", min=0, max=65536, default="1024"),
+    _flat("cognition.yaml", "AIKO_INTENT_CACHE_MAX", "Intent cache entries", "int", min=0, max=65536, default="2048",
+          desc="Zero disables the cache. Smaller caches can reduce memory use on the 8 GB Jetson."),
+    _flat("agentic.yaml", "AGENT_REQUEST_BUDGET_RATIO", "Agent context budget fraction", "float", min=0.1, max=0.95, default="0.8",
+          desc="Fraction of the model context available to agent requests; leave room for the reply."),
+    _flat("agentic.yaml", "AGENT_MEMKB_TIMEOUT", "Agent recall timeout (s)", "float", min=0.1, max=300, default="20.0"),
+    _flat("system.yaml", "RAM_RELEASE_MIN_INTERVAL_S", "RAM release minimum interval (s)", "float", min=0, max=86400, default="300.0"),
+    _flat("memory.yaml", "AIKO_FLY_ACTIVE_BUDGET", "Fly active neuron budget", "int", min=1, max=20000,
+          desc="Unset follows BUDGET_PER_TURN (default 20000). Lower budgets reduce per-turn work."),
+    _flat("memory.yaml", "AIKO_FLY_ACTIVE_HOPS", "Fly propagation hops", "int", min=1, max=8, default="4"),
+    _flat("memory.yaml", "AIKO_FLY_SEED_LIMIT", "Fly seed neuron limit", "int", min=1, max=256, default="64"),
+    _flat("memory.yaml", "AIKO_FLY_BG_EVERY_N", "Fly background cadence", "int", min=1, max=10000, default="1",
+          desc="Run background processing every N calls; larger values reduce work."),
+] + [_flat("memory.yaml", "RECALL_TOKEN_CAP_" + name.upper(), name.title() + " recall token cap", "int",
+           min=0, max=8192, default=str(default), desc="Approximate per-source token cap. Zero disables this source cap; the overall prompt budget still applies.")
+     for name, default in (("persona", 300), ("memory", 700), ("knowledge", 350), ("lorebook", 200), ("codebase", 350), ("wiki", 250))]})
+
 _BY_KEY: dict[str, dict] = {
     s["key"]: s for grp in SETTINGS_GROUPS for s in grp["settings"]
 }
 
-_PUBLIC_FIELDS = ("key", "label", "type", "desc", "options", "min", "max")
+_PUBLIC_FIELDS = ("key", "label", "type", "desc", "options", "min", "max", "file")
+_RUNTIME_FILES = ("agentic.yaml", "social.yaml", "cognition.yaml", "conscience.yaml",
+                  "memory.yaml", "system.yaml", "sensory.yaml", "interface.yaml", "android_app.yaml")
+class SettingsConflict(ValueError):
+    """A stale browser must reload instead of overwriting another edit."""
+
+
+def _revision(config_dir: Path, backend: Any = None) -> str:
+    digest = hashlib.sha256()
+    for filename in (*_RUNTIME_FILES, "index.yaml"):
+        path = config_dir / filename
+        digest.update(filename.encode())
+        digest.update(path.read_bytes() if path.exists() else b"<missing>")
+    secret_path = getattr(backend, "enc_path", getattr(backend, "path", None))
+    if secret_path is not None:
+        path = Path(secret_path)
+        digest.update(path.read_bytes() if path.exists() else b"<missing>")
+    return digest.hexdigest()
+
+
+LIVE_KEYS = frozenset({"TEMPERATURE", "TOP_P", "TOP_K", "LLM_MAX_TOKENS",
+                       "REPEAT_PENALTY", "REPEAT_LAST_N"})
+_EDIT_LOCK = threading.RLock()
+
+
+def _serialized(fn):
+    @wraps(fn)
+    def locked(*args, **kwargs):
+        with _EDIT_LOCK:
+            return fn(*args, **kwargs)
+    return locked
+
+
+def _catalog(config_dir: Path) -> list[dict]:
+    """Include every runtime YAML leaf; retain curated labels and bounds.
+
+    Files are server-owned, never supplied by the browser. Boot's load order
+    determines the winning location for duplicate environment keys.
+    """
+    groups = [{"group": g["group"], "settings": [dict(s) for s in g["settings"]]}
+              for g in SETTINGS_GROUPS]
+    by_key = {s["key"]: s for g in groups for s in g["settings"]}
+    index_path = config_dir / "index.yaml"
+    filenames = _load_yaml_file(index_path).get("configs", list(_RUNTIME_FILES))
+    if not isinstance(filenames, list) or any(not isinstance(name, str) or name not in _RUNTIME_FILES for name in filenames):
+        raise RuntimeError("Settings Studio supports the nine canonical runtime YAML files; correct config/index.yaml on disk.")
+    for filename in filenames:
+        path = config_dir / filename
+        if path.is_symlink():
+            raise ValueError(f"{filename}: symlinked config files cannot be edited")
+        extra = []
+        text_lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        def description(name):
+            # Only comments, never the YAML value (which may be a credential).
+            for i, line in enumerate(text_lines):
+                if re.match(r"^\s*" + re.escape(name) + r"\s*:", line):
+                    comments = []
+                    for previous in reversed(text_lines[max(0, i - 4):i]):
+                        if not previous.strip().startswith("#"):
+                            break
+                        comments.insert(0, previous.strip().lstrip("#").strip())
+                    return " ".join(comments)
+            return ""
+        def visit(data, prefix=()):
+            for name, value in data.items():
+                parts = prefix + (str(name),)
+                if isinstance(value, dict):
+                    visit(value, parts)
+                    continue
+                key = "_".join(parts).upper()
+                if key in by_key:
+                    by_key[key].update(file=filename, path=parts)
+                    continue
+                text = _stringify(value)
+                if re.search(r"(?:^|_)(?:PASSWORD|TOKEN|SECRET|API_KEY|PRIVATE_KEY|CREDENTIAL)(?:$|_)", key):
+                    kind = "password"
+                elif isinstance(value, list):
+                    kind = "json"
+                elif isinstance(value, bool):
+                    kind = "bool"
+                elif isinstance(value, int) or re.fullmatch(r"-?(?:0|[1-9][0-9]*)", text):
+                    kind = "int"
+                elif isinstance(value, float) or re.fullmatch(r"-?[0-9]+\.[0-9]+", text):
+                    kind = "float"
+                elif "\n" in text or len(text) > 2000:
+                    kind = "text"
+                else:
+                    kind = "string"
+                spec = _e(filename, parts, key.replace("_", " ").capitalize(), kind,
+                          desc=description(str(name)) or "Additional runtime setting. Restart required; consult the YAML comments before changing.")
+                by_key[key] = spec
+                extra.append(spec)
+        visit(_load_yaml_file(path))
+        if extra:
+            groups.append({"group": filename.removesuffix(".yaml").replace("_", " ").title() + " · advanced", "settings": extra})
+    return groups
+
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +453,7 @@ def validate_value(spec: dict, raw: Any) -> str:
     if t == "readonly":
         raise ValueError(f"{key} is read-only")
     val = "" if raw is None else str(raw)
-    if "\n" in val or "\r" in val:
+    if t not in ("text", "json") and ("\n" in val or "\r" in val):
         raise ValueError(f"{key}: newlines are not allowed")
     if t == "bool":
         low = val.strip().lower()
@@ -353,14 +474,24 @@ def validate_value(spec: dict, raw: Any) -> str:
             num = float(val.strip())
         except ValueError:
             raise ValueError(f"{key}: not a number: {val!r}") from None
+        if not math.isfinite(num):
+            raise ValueError(f"{key}: must be finite")
         _check_range(spec, num)
         return repr(num)
     if t == "enum":
         if val not in spec["options"]:
             raise ValueError(f"{key}: must be one of {spec['options']}")
         return val
-    # string / password
-    if len(val) > 2000:
+    if t == "json":
+        try:
+            items = json.loads(val)
+        except (ValueError, TypeError):
+            raise ValueError(f"{key}: expected a JSON list of strings") from None
+        if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
+            raise ValueError(f"{key}: expected a JSON list of strings")
+        val = json.dumps(items, ensure_ascii=False)
+    # text is JSON-quoted when persisted, never interpolated into YAML.
+    if len(val) > (65536 if t in ("text", "json") else 2000):
         raise ValueError(f"{key}: value too long")
     return val
 
@@ -382,7 +513,11 @@ def _load_yaml_file(path: Path) -> dict[str, Any]:
 
     if not path.exists():
         return {}
-    data = _load_yaml_mapping(path)
+    try:
+        data = _load_yaml_mapping(path)
+    except Exception:
+        # Parser errors include source lines, which can contain credentials.
+        raise RuntimeError(f"{path.name}: could not read YAML; correct the file on disk.") from None
     return data if isinstance(data, dict) else {}
 
 
@@ -409,6 +544,12 @@ def _env_overridden(key: str, file_value: str | None, environ: dict) -> bool:
     differs from the file value is therefore process-env controlled, and
     editing the file for it would silently do nothing.
     """
+    from system.config import is_managed_env, _LOADED
+    if environ is os.environ:
+        if is_managed_env(key):
+            return False
+        if _LOADED and key in environ:
+            return True
     if file_value is None or file_value == "":
         return False  # empty file value deliberately defers to lower layers
     current = environ.get(key)
@@ -446,7 +587,9 @@ def _render_scalar(canonical: str, type_: str, old_token: str | None) -> str:
         if type_ in ("int", "float", "bool"):
             return canonical
         if canonical and _BARE_SAFE_RE.match(canonical) and " #" not in canonical:
-            return canonical
+            import yaml
+            if isinstance(yaml.safe_load(canonical), str):
+                return canonical
         return json.dumps(canonical)
     if type_ in ("int", "float", "bool"):
         return canonical
@@ -522,11 +665,52 @@ def _write_yaml_values(
     yaml_path: Path, edits: list[tuple[dict, str]]
 ) -> None:
     """Apply [(spec, canonical)] edits to one YAML file, verified + atomic."""
+    import yaml
     original = yaml_path.read_text(encoding="utf-8")
-    lines = original.splitlines(keepends=True)
     for spec, canonical in edits:
-        lines = _replace_in_lines(lines, spec["path"], canonical, spec["type"])
-    new_text = "".join(lines)
+        root = yaml.compose(original)
+        node = root
+        key_node = None
+        for part in spec["path"]:
+            if not isinstance(node, yaml.MappingNode):
+                node = None
+                break
+            pair = next(((k, v) for k, v in node.value if k.value == part), None)
+            key_node, node = pair if pair else (None, None)
+        if node is None:
+            original = "".join(_replace_in_lines(original.splitlines(keepends=True), spec["path"], canonical, spec["type"]))
+            continue
+        if key_node and node.start_mark.line < key_node.start_mark.line:
+            raise ValueError(f"{spec['key']}: edit YAML aliases on disk")
+        if spec["type"] == "json":
+            rendered = canonical
+        else:
+            old = original[node.start_mark.index:node.end_mark.index]
+            rendered = _render_scalar(canonical, spec["type"], old)
+        # Block nodes consume their final newline; restore it before the next key.
+        old = original[node.start_mark.index:node.end_mark.index]
+        block_node = (isinstance(node, yaml.SequenceNode) and not node.flow_style) or (isinstance(node, yaml.ScalarNode) and node.style in ("|", ">"))
+        if block_node:
+            rendered += "\n" + " " * node.end_mark.column
+        elif old.endswith("\n"):
+            rendered += "\n"
+        start = node.start_mark.index
+        if key_node and node.start_mark.line > key_node.start_mark.line:
+            # Block lists/scalars start below the key. Write their replacement
+            # beside the colon rather than emitting an unindented JSON root.
+            colon = original.find(":", key_node.end_mark.index)
+            start = colon + 1
+            rendered = " " + rendered
+        if isinstance(node, yaml.SequenceNode) and not node.flow_style:
+            comments = []
+            for line in original[start:node.end_mark.index].splitlines():
+                _, comment = _split_value_comment(line)
+                if comment:
+                    comments.append(" " * key_node.start_mark.column + comment)
+            if comments:
+                rendered = rendered.rstrip() + "\n" + "\n".join(comments) + "\n" + " " * node.end_mark.column
+        original = original[:start] + rendered + original[node.end_mark.index:]
+    new_text = original
 
     fd, tmp_name = tempfile.mkstemp(
         dir=str(yaml_path.parent), prefix=yaml_path.name + ".", suffix=".tmp"
@@ -734,6 +918,7 @@ class AgeSecretsBackend:
 # ---------------------------------------------------------------------------
 
 
+@_serialized
 def read_settings(
     config_dir: Path | None = None,
     environ: dict | None = None,
@@ -743,7 +928,7 @@ def read_settings(
     environ = os.environ if environ is None else environ
     parsed_cache: dict[str, dict] = {}
     groups = []
-    for grp in SETTINGS_GROUPS:
+    for grp in _catalog(config_dir):
         items = []
         for spec in grp["settings"]:
             fname = spec["file"]
@@ -760,10 +945,13 @@ def read_settings(
                 entry["value"] = ""
                 entry["is_set"] = bool(file_value)
             else:
-                entry["value"] = file_value if file_value is not None else ""
+                entry["value"] = file_value if file_value is not None else spec.get("default", "")
+                entry["uses_default"] = file_value is None and "default" in spec
                 if overridden:
                     entry["env_value"] = environ.get(spec["key"], "")
-            entry["restart_required"] = True
+            entry["restart_required"] = spec["key"] not in LIVE_KEYS
+            entry["apply"] = "Next chat request" if spec["key"] in LIVE_KEYS else "Restart required"
+            entry["pending_restart"] = (not overridden and spec["key"] in environ and bool(file_value) and environ[spec["key"]] != file_value)
             items.append(entry)
         groups.append({"group": grp["group"], "settings": items})
     return {"groups": groups, "restart_required": True}
@@ -784,18 +972,42 @@ def read_secrets(
         keys.append({
             "key": key,
             "is_set": bool(values[key]),
-            "env_overridden": current is not None and current != values[key],
+            "env_overridden": _env_overridden(key, values[key], environ),
+            "pending_restart": (current is not None and not _env_overridden(key, values[key], environ) and current != values[key]),
         })
     return {"available": True, "keys": keys, "path": ".env.age"}
 
 
+@_serialized
 def read_all(
     config_dir: Path | None = None,
     environ: dict | None = None,
     secrets_backend: Any = None,
 ) -> dict:
+    config_dir = DEFAULT_CONFIG_DIR if config_dir is None else config_dir
+    environ = os.environ if environ is None else environ
+    backend = AgeSecretsBackend(environ=environ) if secrets_backend is None else secrets_backend
     data = read_settings(config_dir=config_dir, environ=environ)
-    data["secrets"] = read_secrets(environ=environ, backend=secrets_backend)
+    data["secrets"] = read_secrets(environ=environ, backend=backend)
+    entries = {s["key"]: s for g in data["groups"] for s in g["settings"]}
+    for secret in data["secrets"]["keys"]:
+        entry = entries.get(secret["key"])
+        if entry:
+            secret["yaml_managed"] = bool(entry["is_set"] if entry["secret"] else entry["value"])
+            if not secret["yaml_managed"]:
+                entry["pending_restart"] = secret["pending_restart"]
+            if entry["secret"]:
+                entry["is_set"] = entry["is_set"] or secret["is_set"]
+    data["revision"] = _revision(config_dir, backend)
+    counts = {}
+    for entry in entries.values():
+        counts[entry["file"]] = counts.get(entry["file"], 0) + 1
+    data["sources"] = [{"file": name, "settings": counts.get(name, 0), "editable": True}
+                       for name in _RUNTIME_FILES if (config_dir / name).exists()]
+    data["sources"] += [{"file": name, "editable": False, "reason": reason}
+                        for name, reason in (("index.yaml", "Bootstrap load order; edit on disk."),
+                                             ("tools.yaml", "Tool definitions, rather than runtime tunables; edit on disk."))
+                        if (config_dir / name).exists()]
     return data
 
 
@@ -807,6 +1019,7 @@ def _file_value_string(spec: dict, config_dir: Path, cache: dict) -> str | None:
     return None if raw is None else _stringify(raw)
 
 
+@_serialized
 def write_settings(
     values: dict,
     secret_values: dict | None = None,
@@ -814,6 +1027,8 @@ def write_settings(
     config_dir: Path | None = None,
     environ: dict | None = None,
     secrets_backend: Any = None,
+    apply_live: bool = False,
+    revision: str | None = None,
 ) -> dict:
     """Validate everything, then persist. Allowlist only.
 
@@ -824,7 +1039,13 @@ def write_settings(
     """
     config_dir = DEFAULT_CONFIG_DIR if config_dir is None else config_dir
     environ = os.environ if environ is None else environ
-    secret_values = secret_values or {}
+    secret_values = {} if secret_values is None else secret_values
+    revision_backend = AgeSecretsBackend(environ=environ) if secrets_backend is None else secrets_backend
+    if revision is not None and revision != _revision(config_dir, revision_backend):
+        raise SettingsConflict("Settings changed since this page loaded. Reload before saving.")
+    if not isinstance(values, dict) or not isinstance(secret_values, dict):
+        raise ValueError("settings and secrets must be objects")
+    by_key = {s["key"]: s for g in _catalog(config_dir) for s in g["settings"]}
     errors: list[str] = []
     updated: list[str] = []
     secrets_updated: list[str] = []
@@ -832,8 +1053,8 @@ def write_settings(
     parsed_cache: dict[str, dict] = {}
     by_file: dict[str, list[tuple[dict, str]]] = {}
     yaml_secret_updates: list[tuple[dict, str]] = []
-    for key, raw in (values or {}).items():
-        spec = _BY_KEY.get(key)
+    for key, raw in values.items():
+        spec = by_key.get(key)
         if spec is None:
             errors.append(f"unknown setting: {key}")
             continue
@@ -859,9 +1080,12 @@ def write_settings(
 
     # .env.age secrets: validate names/values up front so a bad batch
     # writes nothing at all.
-    pending_secrets: dict[str, str] = {}
+    pending_secrets: dict[str, str] = {spec["key"]: val for spec, val in yaml_secret_updates}
+    for spec, _ in yaml_secret_updates:
+        by_file.setdefault(spec["file"], []).append((spec, ""))
+
     for key, raw in secret_values.items():
-        if not _SECRET_KEY_RE.match(key or ""):
+        if not isinstance(key, str) or not _SECRET_KEY_RE.fullmatch(key):
             errors.append(f"invalid secret key name: {key!r}")
             continue
         val = "" if raw is None else str(raw)
@@ -873,6 +1097,8 @@ def write_settings(
         if len(val) > 4096:
             errors.append(f"{key}: secret value too long")
             continue
+        if key in pending_secrets and pending_secrets[key] != val:
+            errors.append(f"{key}: conflicting secret values")
         pending_secrets[key] = val
 
     if errors:
@@ -891,30 +1117,74 @@ def write_settings(
         current_secrets = backend.read_values()
         for key in pending_secrets:
             current = environ.get(key)
-            if current is not None and current != current_secrets.get(key):
+            yaml_spec = by_key.get(key)
+            yaml_value = _file_value_string(yaml_spec, config_dir, parsed_cache) if yaml_spec else None
+            if yaml_value and not any(spec["key"] == key for spec, _ in yaml_secret_updates):
+                raise ValueError(f"{key}: edit this credential in its YAML settings group to migrate it to encrypted storage")
+            baseline = yaml_value or current_secrets.get(key)
+            if current is not None and _env_overridden(key, baseline or "__unset__", environ):
                 raise ValueError(
                     f"{key} is overridden by the process environment; "
                     "editing the secrets file would have no effect"
                 )
 
-    for fname, edits in by_file.items():
-        _write_yaml_values(config_dir / fname, edits)
-    if yaml_secret_updates:
-        by_secret_file: dict[str, list[tuple[dict, str]]] = {}
-        for spec, canonical in yaml_secret_updates:
-            by_secret_file.setdefault(spec["file"], []).append((spec, canonical))
-        for fname, edits in by_secret_file.items():
-            _write_yaml_values(config_dir / fname, edits)
+    # Stage and verify every YAML file before touching any persistent setting.
+    # Serialize API batches, and restore originals if a later replace fails.
+    originals: dict[Path, bytes | None] = {}
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for fname, edits in by_file.items():
+            target = config_dir / fname
+            originals[target] = target.read_bytes() if target.exists() else None
+            fd, name = tempfile.mkstemp(dir=config_dir, suffix=".settings-stage")
+            os.close(fd)
+            stage = Path(name)
+            staged.append((stage, target))
+            stage.write_bytes(originals[target] or b"")
+            _write_yaml_values(stage, edits)
+        if pending_secrets:
+            secret_path = getattr(backend, "enc_path", getattr(backend, "path", None))
+            if secret_path is not None:
+                secret_path = Path(secret_path)
+                originals[secret_path] = secret_path.read_bytes() if secret_path.exists() else None
+            merged = dict(current_secrets)
+            merged.update(pending_secrets)
+            backend.write_values(merged)
+            secrets_updated = sorted(pending_secrets)
+        for stage, target in staged:
+            os.replace(stage, target)
+    except BaseException:
+        for target, data in originals.items():
+            if data is None:
+                target.unlink(missing_ok=True)
+            else:
+                fd, name = tempfile.mkstemp(dir=target.parent, suffix=".settings-restore")
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(data)
+                os.replace(name, target)
+        raise
+    finally:
+        for stage, _ in staged:
+            stage.unlink(missing_ok=True)
 
-    if pending_secrets:
-        merged = dict(current_secrets)
-        merged.update(pending_secrets)
-        backend.write_values(merged)
-        secrets_updated = sorted(pending_secrets)
-
+    live = []
+    if apply_live:
+        from system.config import apply_managed_env
+        for key in updated:
+            if key not in LIVE_KEYS:
+                continue
+            canonical = validate_value(by_key[key], values[key])
+            if environ is os.environ:
+                apply_managed_env(key, canonical)
+            else:
+                environ[key] = canonical
+            live.append(key)
+    restart = sorted((set(updated) | set(secrets_updated)) - set(live))
     return {
         "updated": updated,
         "secrets_updated": secrets_updated,
-        "restart_required": True,
-        "note": "Restart Aiko to apply changes.",
+        "applied_live": live,
+        "restart_keys": restart,
+        "restart_required": bool(restart),
+        "note": "Restart Aiko for the remaining changes." if restart else "Changes apply on the next chat request.",
     }

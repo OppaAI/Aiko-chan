@@ -62,6 +62,18 @@ except ImportError:  # pragma: no cover - optional dependency fallback
 
 _LOADED = False
 _load_lock = threading.Lock()
+# Values injected by the loader, distinct from deployment environment overrides.
+_MANAGED_ENV: dict[str, str] = {}
+
+
+def is_managed_env(key: str) -> bool:
+    return key in _MANAGED_ENV and os.environ.get(key) == _MANAGED_ENV[key]
+
+
+def apply_managed_env(key: str, value: str) -> None:
+    os.environ[key] = value
+    _MANAGED_ENV[key] = value
+
 
 __all__ = ["load_config", "load_yaml", "env_flag", "env_bool", "env_int", "env_float", "env_str"]
 
@@ -276,7 +288,7 @@ def load_config(*, override: bool = False) -> None:
                     if value is None or (isinstance(value, str) and value == ""):
                         continue
                     if override or key not in original_env:
-                        os.environ[key] = _stringify(value)
+                        apply_managed_env(key, _stringify(value))
 
         # --- Secrets: encrypted .env.age (preferred) with plaintext .env fallback ---
         # AGE_KEY / ENV_AGE_PATH may be bare filenames (e.g. from identity.yaml);
@@ -296,7 +308,7 @@ def load_config(*, override: bool = False) -> None:
                 if not key or value is None:
                     continue
                 if override or key not in os.environ:
-                    os.environ[key] = value
+                    apply_managed_env(key, value)
         else:
             # Dev-machine fallback only — should not exist on the Jetson deployment.
             env_path = root / ".env"
@@ -305,7 +317,7 @@ def load_config(*, override: bool = False) -> None:
                     if not key or value is None:
                         continue
                     if override or key not in os.environ:
-                        os.environ[key] = value
+                        apply_managed_env(key, value)
 
         _LOADED = True
 

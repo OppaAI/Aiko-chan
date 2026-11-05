@@ -13,17 +13,23 @@
 <header class="set-header">
   <a class="back" href="/">← Chat</a>
   <div>
-    <div class="brand">Settings</div>
+    <h1 class="brand">Aiko’s settings</h1>
     <div class="sub">Configuration files and encrypted secrets</div>
   </div>
+  <button id="set-theme" type="button" aria-label="Toggle light and dark theme">◐ Theme</button>
 </header>
 
+<div class="set-toolbar">
+  <label for="set-search">Find a setting</label>
+  <input id="set-search" type="search" placeholder="Search names, keys or files…" autocomplete="off">
+  <span id="set-coverage" class="set-note"></span>
+</div>
 <div id="set-tabs" class="set-tabs" role="tablist"></div>
 <main id="set-groups"></main>
+<details class="set-sources"><summary>Configuration sources</summary><p id="set-sources"></p></details>
 
 <footer class="set-footer">
-  <div class="set-note">Changes are written to the config files.
-    <strong>Restart Aiko to apply changes.</strong></div>
+  <div class="set-note"><span id="set-count">No unsaved changes.</span><br>Sampling changes apply to the next chat. Other settings require a restart.</div>
   <button id="set-save" type="button">Save settings</button>
   <span id="set-status" role="status"></span>
 </footer>

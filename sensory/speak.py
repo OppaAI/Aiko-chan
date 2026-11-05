@@ -14,7 +14,7 @@ Server setup (run separately):
       --repeat-penalty 1.15 \
       --ctx-size 1024 \
       -np 1 \
-      --llm-shared-context on
+      --llm-shared-context on \
       --tts-wavlm-model ~/Aiko-chan/models/miotts/wavlm_base_plus_2l_f32.gguf \
       --reference-file-json '[{"key":"jp_female","path":"~/Aiko-chan/models/miotts/jp_female.emb.gguf"},{"key":"aiko_flat","path":"~/Aiko-chan/models/miotts/aiko_flat.emb.gguf"}]'
     
@@ -555,11 +555,9 @@ class AikoSpeak:
         if not text:
             log.debug("[speak] skipping TTS synthesis for empty text")
             return None
-        # Normalize halfwidth katakana to fullwidth (mirrors C++ normalize_for_tts)
-        text = text.translate({str.maketrans(
-            'ｦｧｨｩｪｫｬｭｮｯｰｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ',
-            'ヲァィゥェォャュョッーアイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワン'
-        )})
+        # Normalize Japanese halfwidth runs together so voiced pairs such as
+        # ｶﾞ become ガ, without changing unrelated compatibility characters.
+        text = re.sub(r"[\uff61-\uff9f]+", lambda match: unicodedata.normalize("NFKC", match.group()), text)
         # Increased limit from 300 to 600 for Lingo support
         if len(text) > 600:
             log.warning(f"[speak] truncating oversized TTS chunk: {len(text)} chars")

@@ -815,3 +815,13 @@ fidelity. The sensory and interface areas retain their own broader audit scopes.
   subtests**. `python -m tests.unit.test_asr --stage env` also passed offline.
   Real microphone, speaker, wake-model accuracy, speaker-match quality and
   physical Jetson RAM/latency checks remain pending.
+- Integrated concurrent dev changes to dependencies and the MioTTS setup without
+  rewriting their commits. Fixed the incoming katakana normalization exception
+  (`translate` attempted to construct a set containing a dictionary), added
+  voiced/semi-voiced kana handling, and restored the documented shell command's
+  missing continuation. Four real-request-construction regressions cover the
+  normalization without making HTTP calls; 43 focused capture/upload/playback
+  integration tests passed after the rebase.
+- Final validation after integrating concurrent dev changes and the TTS fix:
+  **2,623 tests passed, 5 skipped, and 34 subtests passed** in the combined
+  unit/integration/conscience suite. Device/model-quality checks remain pending.

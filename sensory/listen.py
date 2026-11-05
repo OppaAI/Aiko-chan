@@ -53,8 +53,7 @@ Wake word (see config/sensory.yaml):
     engines are supported, chosen automatically:
 
     1. Acoustic (preferred) — set WAKE_WORD_MODEL_PATH to a trained
-       livekit-wakeword ONNX classifier (see util/train_wakeword.py or the
-       livekit-wakeword CLI: https://docs.livekit.io/agents/multimodality/audio/wakeword/).
+       livekit-wakeword ONNX model (see the package's training tools: https://docs.livekit.io/agents/multimodality/audio/wakeword/).
        Detection runs frame-by-frame on raw audio *during* _record(), before
        any ASR — so unlike the old approach, SenseVoice never has to run
        just to check whether the wake word was said, and "asleep" utterances
@@ -124,6 +123,7 @@ Known architectural limitation (audit item #7, not fixed here):
 from __future__ import annotations
 
 from functools import lru_cache, wraps
+from collections import OrderedDict
 from system.config import env_float, env_int
 from system.userspace import current_user_id, user_state_path
 import json
@@ -193,10 +193,9 @@ except ImportError:
     _fuzz = None
     import difflib as _difflib
 
-try:
-    from livekit.wakeword import WakeWordModel as _WakeWordModel
-except ImportError:
-    _WakeWordModel = None  # acoustic wake engine unavailable — falls back to fuzzy ASR-text matching
+# Import the optional wake SDK only when a configured model is actually loaded.
+# Its inference imports onnxruntime, which text-only sessions should never pay for.
+_WakeWordModel = None
 
 # ── boot labels ───────────────────────────────────────────────────────────────
 
@@ -499,6 +498,10 @@ def _ratio(a: str, b: str) -> float:
     return _difflib.SequenceMatcher(None, a, b).ratio() * 100.0
 
 
+def _wake_match_text(value: str) -> str:
+    return " ".join(re.sub(r"[^\w\s]", " ", value.casefold()).split())
+
+
 def _strip_prefix_phrase(text: str, candidates: list[str], threshold: float) -> tuple[bool, str]:
     """
     Fuzzy-match any of `candidates` against the leading words of `text` and,
@@ -523,12 +526,12 @@ def _strip_prefix_phrase(text: str, candidates: list[str], threshold: float) -> 
             continue
         for span in range(max(1, n - 1), min(len(words), n + 2) + 1):
             window = " ".join(words[:span])
-            score = _ratio(window, phrase)
+            score = _ratio(_wake_match_text(window), _wake_match_text(phrase))
             if score > best_score:
                 best_score, best_end, best_phrase = score, span, phrase
 
-    log.info("[wake] text=%r  best_phrase=%r  best_score=%.1f  threshold=%.1f  matched=%s",
-             text, best_phrase, best_score, threshold, best_score >= threshold)
+    log.debug("[wake] best_phrase=%r score=%.1f threshold=%.1f matched=%s",
+              best_phrase, best_score, threshold, best_score >= threshold)
     if best_score >= threshold:
         return True, " ".join(words[best_end:]).strip()
     return False, text
@@ -659,6 +662,8 @@ class AikoListen:
         # post-ASR text engine (_apply_activation_gate / _strip_prefix_phrase).
         self._wake_model:      object | None = None  # a livekit.wakeword.WakeWordModel, if loaded
         self._wake_model_name: str | None = None
+        self._wake_pending = np.empty(0, dtype=np.float32)
+        self._wake_since_eval = 0
         self._lock        = threading.Lock()
         self._listen_lock = threading.Lock()
         self._mic_lock = threading.Lock()
@@ -686,11 +691,12 @@ class AikoListen:
         self._enrolled_embedding: np.ndarray | None = None
         self._speaker_lock = threading.Lock()
         self._enrollment_signature = None
+        self._verify_thread: threading.Thread | None = None
 
         # wake word / trigger phrase activation session — 0 / expired means
         # "asleep", i.e. the configured phrase(s) must be said again.
         self._activation_lock = threading.Lock()
-        self._active_until: float = 0.0
+        self._active_until: OrderedDict[str, float] = OrderedDict()
 
     def _load_sd(self):
         """Lazy-load sounddevice, silencing ALSA noise."""
@@ -791,13 +797,18 @@ class AikoListen:
                         "falling back to fuzzy ASR-text wake matching.",
                         WAKE_WORD_MODEL_PATH)
             return
-        if _WakeWordModel is None:
-            log.warning("[listen] WAKE_WORD_MODEL_PATH is set but livekit-wakeword isn't "
-                        "installed (`pip install livekit-wakeword`) — falling back to "
-                        "fuzzy ASR-text wake matching.")
-            return
+        global _WakeWordModel
         try:
-            self._wake_model = _WakeWordModel(models=[WAKE_WORD_MODEL_PATH])
+            if _WakeWordModel is None:
+                from livekit.wakeword import WakeWordModel
+                _WakeWordModel = WakeWordModel
+            runtime = _ort
+            if runtime is None:
+                import onnxruntime as runtime
+            options = runtime.SessionOptions()
+            options.intra_op_num_threads = 1
+            options.inter_op_num_threads = 1
+            self._wake_model = _WakeWordModel(models=[WAKE_WORD_MODEL_PATH], sess_options=options)
             self._wake_model_name = os.path.splitext(os.path.basename(WAKE_WORD_MODEL_PATH))[0]
         except Exception:
             log.exception("[listen] failed to load acoustic wake word model — "
@@ -836,25 +847,27 @@ class AikoListen:
         # up re-enrollment without rebuilding the ONNX extractor each turn.
         try:
             stat = os.stat(enroll_path)
-            signature = (uid, stat.st_mtime_ns, stat.st_size)
+            signature = (uid, stat.st_mtime_ns, stat.st_size, stat.st_ino)
         except OSError:
             signature = (uid, None, None)
         if signature == self._enrollment_signature:
             return
-        self._enrollment_signature = signature
         self._enrolled_embedding = None
         if not os.path.isfile(enroll_path):
+            self._enrollment_signature = signature
             log.warning(
                 f"[listen] SPEAKER_VERIFY_ENABLED=1 but no enrollment found at "
                 f"{enroll_path!r}; run enroll_speaker.py first. Verification disabled."
             )
             return
 
-        with open(enroll_path) as f:
-            data = json.load(f)
-        embedding = np.asarray(data["embedding"], dtype=np.float32)
-        if embedding.ndim != 1 or not embedding.size or embedding.size > 16384 or not np.isfinite(embedding).all() or np.linalg.norm(embedding) <= 0:
-            raise ValueError("speaker enrollment must contain a finite nonzero vector")
+        with open(enroll_path, encoding="utf-8") as f:
+            raw = f.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise ValueError("speaker enrollment file is too large")
+        data = json.loads(raw)
+        from sensory.speaker_profile import validate_embedding
+        embedding = validate_embedding(data["embedding"])
         if self._speaker_extractor is None:
             _ensure_runtime()
             config = sherpa_onnx.SpeakerEmbeddingExtractorConfig(
@@ -865,6 +878,7 @@ class AikoListen:
             )
             self._speaker_extractor = sherpa_onnx.SpeakerEmbeddingExtractor(config)
         self._enrolled_embedding = embedding
+        self._enrollment_signature = signature
 
     def join_warmup(self, timeout: float = 120.0) -> bool:
         """Bounded warmup join. Returns False on timeout instead of trapping
@@ -889,7 +903,7 @@ class AikoListen:
         embedding = self._speaker_extractor.compute(stream)
         return np.asarray(embedding, dtype=np.float32)
 
-    def _verify_speaker(self, audio: np.ndarray) -> tuple[bool, float]:
+    def _verify_speaker(self, audio: np.ndarray, reference: np.ndarray | None = None) -> tuple[bool, float]:
         """
         Compare audio against the enrolled embedding via cosine similarity.
         Returns (is_match, score). Extractor sessions are not guaranteed
@@ -897,9 +911,14 @@ class AikoListen:
         """
         with self._speaker_lock:
             embedding = self._compute_embedding(audio)
-        a, b = embedding, self._enrolled_embedding
-        denom = (np.linalg.norm(a) * np.linalg.norm(b)) or 1e-8
-        score = float(np.dot(a, b) / denom)
+            enrolled = np.asarray(self._enrolled_embedding if reference is None else reference, dtype=np.float64).copy()
+        candidate = np.asarray(embedding, dtype=np.float64)
+        if candidate.ndim != 1 or candidate.shape != enrolled.shape or not candidate.size or not np.isfinite(candidate).all() or not np.isfinite(enrolled).all():
+            raise ValueError("speaker embedding has invalid dimensions or values")
+        a_norm, b_norm = np.linalg.norm(candidate), np.linalg.norm(enrolled)
+        if not np.isfinite(a_norm) or not np.isfinite(b_norm) or a_norm <= 0 or b_norm <= 0:
+            raise ValueError("speaker embedding must have finite nonzero magnitude")
+        score = float(np.clip(np.dot(candidate / a_norm, enrolled / b_norm), -1.0, 1.0))
         return score >= SPEAKER_VERIFY_THRESHOLD, score
 
     # ── wake word / trigger phrase activation gate ───────────────────────────
@@ -909,29 +928,25 @@ class AikoListen:
         a sleep/wake indicator only when the feature is actually in use."""
         return bool(WAKE_WORD)
 
-    def is_active(self) -> bool:
-        """
-        True if Aiko is currently awake/triggered (no phrase currently
-        required). Always True if gating isn't configured. Other subsystems
-        — e.g. proactive/unsolicited engagement — should check this before
-        acting, since once the session idles out, proactive behavior should
-        stay quiet until the wake word / trigger phrase is said again.
-        """
+    def is_active(self, user_id: str | None = None) -> bool:
+        """Wake windows belong to individual identities, never the shared mic."""
         if not self.gate_enabled():
             return True
+        uid = user_id or current_user_id()
         with self._activation_lock:
-            return self._active_until > time.monotonic()
+            return self._active_until.get(uid, 0.0) > time.monotonic()
 
-    def sleep_now(self) -> None:
-        """Force the activation session inactive immediately — e.g. for an
-        explicit 'go to sleep' voice command."""
+    def sleep_now(self, user_id: str | None = None) -> None:
         with self._activation_lock:
-            self._active_until = 0.0
+            self._active_until.pop(user_id or current_user_id(), None)
 
-    def extend_activation(self) -> None:
-        """Extend the wake-word-free session window."""
+    def extend_activation(self, user_id: str | None = None) -> None:
+        uid = user_id or current_user_id()
         with self._activation_lock:
-            self._active_until = time.monotonic() + ACTIVATION_TIMEOUT_S
+            self._active_until[uid] = time.monotonic() + max(0.0, ACTIVATION_TIMEOUT_S)
+            self._active_until.move_to_end(uid)
+            while len(self._active_until) > 32:
+                self._active_until.popitem(last=False)
 
     def _apply_activation_gate(self, text: str, verified: bool | None) -> tuple[str | None, dict]:
         """
@@ -950,6 +965,10 @@ class AikoListen:
         """
         if not bool(WAKE_WORD):
             return text, {"woke": None}
+        if speaker_verify_gate() and verified is False:
+            return None, {"woke": False}
+        if not text.strip():
+            return text, {"woke": None}
 
         if self.is_active():
             self.extend_activation()
@@ -959,7 +978,7 @@ class AikoListen:
             text, [WAKE_WORD, *WAKE_WORD_ALIASES], WAKE_FUZZY_THRESHOLD
         )
         if not matched:
-            log.debug("[gate] wake word %r NOT matched in %r — dropping", WAKE_WORD, text)
+            log.debug("[gate] wake word %r not matched — dropping", WAKE_WORD)
             return None, {"woke": False}
 
         self.extend_activation()
@@ -1170,14 +1189,17 @@ class AikoListen:
         )
         recording_stopped_at = time.monotonic()
         if audio is None:
+            if woke_acoustic and not (speaker_verify_gate() and SPEAKER_VERIFY_ENABLED):
+                self.extend_activation()
             return "", {
                 "verified": None,
                 "speaker_score": None,
                 # Acoustic engine may have woken the session even though no
                 # (or too-short) speech followed within this same call —
-                # extend_activation() already ran inside _record() in that
-                # case, so reflect it here rather than reporting None.
-                "woke": True if woke_acoustic else None,
+                # A detection commits here only when no speaker verification
+                # is required; strict verification needs a full utterance.
+                "woke": (True if self.is_active() else False) if woke_acoustic else None,
+                "wake_detected": woke_acoustic,
                 "listen_started_at": listen_started_at,
                 "recording_stopped_at": recording_stopped_at,
             }
@@ -1197,24 +1219,38 @@ class AikoListen:
             log.warning("listen: speaker enrollment unavailable: %s", exc)
         if self.speaker_verify_active():
             result_box: dict = {}
-
-            def _run_verify():
-                try:
-                    result_box["verified"], result_box["speaker_score"] = self._verify_speaker(audio)
-                except Exception as exc:
-                    # Verification failure cannot turn an enabled gate into
-                    # a successful match through a missing result-box entry.
-                    result_box["verified"] = False
-                    log.warning("listen: speaker verification failed: %s", exc)
-
-            verify_thread = threading.Thread(target=_run_verify, daemon=True)
-            verify_thread.start()
+            pending = self._verify_thread
+            timeout = env_float("SPEAKER_VERIFY_TIMEOUT_S", 5.0)
+            timeout = max(.1, min(30.0, timeout)) if np.isfinite(timeout) else 5.0
+            if pending is None or not pending.is_alive():
+                # Snapshot enrollment before starting: a timed-out old worker
+                # must never compare its audio against a later user's profile.
+                reference = self._enrolled_embedding.copy()
+                def _run_verify():
+                    try:
+                        result_box["verified"], result_box["speaker_score"] = self._verify_speaker(audio, reference=reference)
+                    except Exception as exc:
+                        result_box["verified"] = False
+                        log.warning("listen: speaker verification failed: %s", exc)
+                context = contextvars.copy_context()
+                pending = threading.Thread(target=context.run, args=(_run_verify,), daemon=True)
+                self._verify_thread = pending
+                pending.start()
+            else:
+                result_box["verified"] = False
+                info["verification_error"] = "previous verification is still running"
             try:
                 text = self._transcribe(audio)
             finally:
-                verify_thread.join()
-            info["verified"]      = result_box.get("verified")
-            info["speaker_score"] = result_box.get("speaker_score")
+                if self._verify_thread is pending and "verification_error" not in info:
+                    pending.join(timeout=timeout)
+            if pending.is_alive():
+                info["verified"] = False
+                info["verification_error"] = info.get("verification_error", "speaker verification timed out")
+                info["speaker_score"] = None
+            else:
+                info["verified"] = result_box.get("verified", False)
+                info["speaker_score"] = result_box.get("speaker_score")
         else:
             text = self._transcribe(audio)
 
@@ -1223,19 +1259,6 @@ class AikoListen:
             info["self_echo"] = True
             log.debug("listen: suppressed transcript matching overlapping TTS")
             return "", info
-
-        if self._wake_model is not None:
-            # Acoustic engine owns wake gating end-to-end: if we got this far
-            # with audio at all, either the session was already active or
-            # _record() just confirmed the wake word acoustically (both
-            # cases mean this utterance is a real command) — no post-ASR
-            # text stripping needed, so skip the fuzzy engine entirely.
-            gated_text = text
-            info["woke"] = True if woke_acoustic else None
-        else:
-            gated_text, gate_info = self._apply_activation_gate(text, info.get("verified"))
-            info["woke"] = gate_info["woke"]
-
 
         if (
             speaker_verify_gate()
@@ -1247,6 +1270,22 @@ class AikoListen:
                 info.get("speaker_score"),
             )
             return "", info
+
+        if not text.strip():
+            return "", info
+        if self._wake_model is not None:
+            # Acoustic engine owns wake gating end-to-end: if we got this far
+            # with audio at all, either the session was already active or
+            # _record() just confirmed the wake word acoustically (both
+            # cases mean this utterance is a real command) — no post-ASR
+            # text stripping needed, so skip the fuzzy engine entirely.
+            gated_text = text
+            self.extend_activation()
+            info["woke"] = True if woke_acoustic else None
+        else:
+            gated_text, gate_info = self._apply_activation_gate(text, info.get("verified"))
+            info["woke"] = gate_info["woke"]
+
 
         if gated_text is None:
             return "", info
@@ -1301,20 +1340,34 @@ class AikoListen:
 
         return is_speech
 
-    def _score_wake(self, chunk: np.ndarray) -> float:
+    def _reset_wake(self):
+        self._wake_pending = np.empty(0, dtype=np.float32)
+        self._wake_since_eval = 0
+        reset = getattr(self._wake_model, "reset", None)
+        if reset is not None:
+            reset()
+
+    def _score_wake(self, chunk: np.ndarray) -> float | None:
+        """Evaluate complete 80ms steps; support legacy 2s window classifiers.
+
+        livekit-wakeword 2.x returns zero when a call doesn't complete an
+        80ms step. Treating those zeros as predictions defeats confirmation
+        with Silero's 32ms chunks. Legacy 0.x instead needs a full 2s window.
         """
-        Score a raw audio chunk against the loaded acoustic wake-word model.
-        Only called when self._wake_model is not None (see load_wakeword()).
-        Feeds our existing 512-sample (32ms) chunks directly — livekit-
-        wakeword's predict() takes 16kHz int16/float32 frames and buffers
-        internally, per its docs; if this turns out to need a specific
-        frame size on hardware (openWakeWord-family models traditionally
-        window in 80ms/1280-sample steps), adjust by accumulating chunks
-        into a small ring buffer before calling predict(). Not verified on
-        AuRoRA hardware yet — flag if wake accuracy looks off.
-        """
-        scores = self._wake_model.predict(chunk)
-        return float(scores.get(self._wake_model_name, 0.0))
+        streaming = callable(getattr(self._wake_model, "reset", None))
+        self._wake_pending = np.concatenate((self._wake_pending, chunk))
+        self._wake_since_eval += chunk.size
+        needed = 1280 if streaming else SAMPLE_RATE * 2
+        if not streaming:
+            self._wake_pending = self._wake_pending[-needed:]
+        if self._wake_pending.size < needed or (not streaming and self._wake_since_eval < 1280):
+            return None
+        audio = self._wake_pending[:needed]
+        self._wake_pending = self._wake_pending[needed:] if streaming else self._wake_pending
+        self._wake_since_eval = 0
+        scores = self._wake_model.predict(audio)
+        score = float(scores.get(self._wake_model_name, 0.0))
+        return max(0.0, min(1.0, score)) if np.isfinite(score) else 0.0
 
     def _record(
         self,
@@ -1363,6 +1416,7 @@ class AikoListen:
         wake_needed = self._wake_model is not None and self.gate_enabled() and not self.is_active()
         woke_this_call = False
         wake_hits = 0
+        capture_uid = None
 
         _cb(status_callback, "__LISTENING__")
         self._recording.set()
@@ -1398,6 +1452,17 @@ class AikoListen:
                 else:
                     chunk = _read_input_chunk(stream, samples_per_chunk)
 
+                # WebUI binds the identity on the first accepted PCM frame.
+                # Re-evaluate wake state after that binding, not under the
+                # previous turn's identity captured before reading the queue.
+                uid = current_user_id()
+                if uid != capture_uid:
+                    capture_uid = uid
+                    wake_needed = self._wake_model is not None and self.gate_enabled() and not self.is_active()
+                    wake_hits = 0
+                    if self._wake_model is not None:
+                        self._reset_wake()
+
                 overlap_allowed = barge_in_enabled() and (use_external or local_barge_in_safe())
                 if speak is not None and not overlap_allowed and (
                     speak.is_playing() or getattr(speak, "echo_remaining", lambda: 0.0)() > 0
@@ -1408,6 +1473,9 @@ class AikoListen:
                     silence_count = speech_count = 0
                     hearing_speech = False
                     self._vad_model.reset()
+                    wake_hits = 0
+                    if self._wake_model is not None:
+                        self._reset_wake()
                     continue
 
                 if wake_needed:
@@ -1417,14 +1485,16 @@ class AikoListen:
                     # transcribed — this is the point of the acoustic
                     # engine over the fuzzy-text one, which had to run full
                     # SenseVoice on every utterance just to check.
-                    if self._score_wake(chunk) >= WAKE_WORD_THRESHOLD:
+                    score = self._score_wake(chunk)
+                    if score is None:
+                        continue
+                    if score >= WAKE_WORD_THRESHOLD:
                         wake_hits += 1
                     else:
                         wake_hits = 0
                     if wake_hits >= WAKE_WORD_CONFIRM_FRAMES:
                         wake_needed = False
                         woke_this_call = True
-                        self.extend_activation()
                         self._vad_model.reset()  # start VAD fresh from the wake point
                     continue
 

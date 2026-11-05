@@ -70,3 +70,42 @@ node tests/browser/voice_audio.test.js
 
 Real speaker/microphone feedback, AEC effectiveness, wake accuracy, speaker-match
 quality and RAM/latency measurements still need the physical Jetson.
+
+## Wake sessions and speaker enrollment
+
+Wake windows are per user. Waking Alice does not wake Bob; empty transcripts
+and failed speaker matches do not renew a window. Browser capture rechecks the
+identity after its first accepted frame, when that identity is actually known.
+Fuzzy matching ignores ASR capitalization and punctuation.
+
+Acoustic wake inference runs on complete 80 ms frames with the pinned
+`livekit-wakeword` 2.x streaming API. Legacy 0.x classifiers receive a bounded
+two-second window. Incomplete frames do not count as failed predictions. The
+optional SDK loads only when a wake model is configured; inference uses one CPU
+thread. A 2.x runtime needs a streaming 2.x ONNX artifact: older classifier
+artifacts must be retrained with that package's training tools. If loading fails,
+Aiko retains fuzzy ASR-text wake matching. Real model accuracy still needs testing.
+
+Enroll the identity used by the WebUI from the repository root:
+
+```sh
+python -m util.enroll_speak --user OppaAI --model models/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx --seconds 6
+```
+
+Omitting `--user` uses the bound/configured identity or a uniquely configured
+owner. If the identity is ambiguous, the utility asks for `--user` instead of
+writing a guest profile. `AIKO_USER_ID` and the legacy `USER_ID` are supported.
+`--out` remains available for an explicitly selected output file.
+
+Silent/short recordings, invalid embeddings and failed writes preserve the prior
+enrollment. Valid profiles are flushed and atomically replaced with private file
+permissions. Enrollment and runtime share vector validation. Re-enrollment is
+picked up without rebuilding the extractor; failed extractor initialization is
+not cached as a successful profile load.
+
+`SPEAKER_VERIFY_TIMEOUT_S` (default 5 seconds; range 0.1–30) bounds the optional
+verifier's wait. Only one verification worker may remain in flight per listener.
+It keeps its enrollment snapshot even if another user starts a later request.
+Non-finite, zero or dimension-mismatched vectors never produce a successful or
+NaN match. When the explicit speaker gate is enabled, failed/timed-out matches
+are dropped; otherwise verification remains metadata and text delivery continues.

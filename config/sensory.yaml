@@ -114,3 +114,6 @@ ASR_ECHO_TAIL_MS: "400"  # 0..2000 ms; does not load an additional model.
 # the OS (e.g. PipeWire AEC). Leave off for a raw Jetson microphone/speaker pair.
 # Browser barge-in instead uses the browser's confirmed echoCancellation setting.
 BARGE_IN_LOCAL_AEC: "0"
+
+# Bound optional speaker verification; a stalled request is not queued again.
+SPEAKER_VERIFY_TIMEOUT_S: "5.0"  # 0.1..30 seconds; default voice metadata remains optional.

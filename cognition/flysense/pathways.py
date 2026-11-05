@@ -178,7 +178,11 @@ class MotionPathway:
         if source not in self._flies:
             from cognition.flysense.motion import FlyMotion
             self._flies[source] = FlyMotion()
-        return self._flies[source]
+            while len(self._flies) > 4:
+                self._flies.pop(next(iter(self._flies)))
+        fly = self._flies.pop(source)
+        self._flies[source] = fly
+        return fly
 
     def feed_frame(self, frame, source: str = "camera") -> dict:
         """Score one frame (np.ndarray, or raw image bytes). Best-effort."""
@@ -206,7 +210,7 @@ class MotionPathway:
                 self._salience = max(self._salience, salience)
                 self._sudden = self._sudden or sudden
                 self._frames += 1
-                self._last_ts = time.time()
+                self._last_ts = time.monotonic()
             return {
                 "ok": True,
                 "salience": round(salience, 4),
@@ -221,11 +225,13 @@ class MotionPathway:
         """A consented frame was submitted (camera/screen). Provenance only."""
         with self._lock:
             self._visual_events += 1
-            self._last_ts = time.time()
 
     def turn_readout(self) -> dict:
         """Freshest motion salience for this turn; decays afterwards."""
         with self._lock:
+            if self._last_ts and time.monotonic() - self._last_ts > 30.0:
+                self._salience = 0.0
+                self._sudden = False
             out = {
                 "salience": round(self._salience, 4),
                 "sudden": self._sudden,
@@ -281,6 +287,10 @@ def get_motion_pathway(user_id: str | None = None) -> MotionPathway:
         if mp is None:
             mp = MotionPathway()
             _pathways[key] = mp
+            while len(_pathways) > 8:
+                _pathways.pop(next(iter(_pathways)))
+        _pathways.pop(key)
+        _pathways[key] = mp
         return mp
 
 

@@ -146,7 +146,7 @@ def test_speaker_verification_error_does_not_bypass_enabled_gate(monkeypatch):
     monkeypatch.setattr(listener, '_record', lambda *a, **kw: (np.zeros(512), False))
     monkeypatch.setattr(listener, '_transcribe', lambda audio: 'hello')
     monkeypatch.setattr(L, 'speaker_verify_gate', lambda: True)
-    def fail(audio):
+    def fail(audio, **kwargs):
         raise RuntimeError('native verifier error')
     monkeypatch.setattr(listener, '_verify_speaker', fail)
     statuses = []

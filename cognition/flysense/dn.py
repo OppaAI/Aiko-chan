@@ -13,6 +13,7 @@ SYNTHETIC: the mapping itself (functional DN-gain abstraction).
 from __future__ import annotations
 
 import json
+import math
 import threading
 from pathlib import Path
 
@@ -45,9 +46,15 @@ class FlyDN:
         affect: float = 0.0,
     ) -> dict:
         """Body + speech drive. Multipliers around 1.0; intensities in [0,1]."""
-        e = max(0.0, min(1.0, float(energy)))
-        d = max(0.0, min(1.0, float(decisiveness)))
-        a = max(-1.0, min(1.0, float(affect)))
+        def finite(value, default):
+            try:
+                result = float(value)
+                return result if math.isfinite(result) else default
+            except (TypeError, ValueError):
+                return default
+        e = max(0.0, min(1.0, finite(energy, .5)))
+        d = max(0.0, min(1.0, finite(decisiveness, .5)))
+        a = max(-1.0, min(1.0, finite(affect, 0.0)))
         arousal = 0.5 * e + 0.3 * d + 0.2 * (a * 0.5 + 0.5)
         v = (arousal - 0.5) * 2.0
         return {

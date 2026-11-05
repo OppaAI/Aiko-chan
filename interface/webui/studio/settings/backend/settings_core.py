@@ -187,6 +187,8 @@ SETTINGS_GROUPS: list[dict] = [
         _flat("sensory.yaml", "SPEAKER_VERIFY_GATE", "Speaker verification gates actions", "bool",
               desc="Approval actions must never rely on voice identity alone."),
         _flat("sensory.yaml", "SPEAKER_VERIFY_THRESHOLD", "Speaker threshold", "float", min=0.0, max=1.0),
+        _flat("sensory.yaml", "SPEAKER_VERIFY_TIMEOUT_S", "Speaker verification timeout (s)", "float", min=0.1, max=30,
+              desc="Bounds optional verification. A timed-out verifier cannot create additional queued verification workers."),
         _flat("sensory.yaml", "BARGE_IN_ENABLED", "Barge-in", "bool"),
         _flat("sensory.yaml", "BARGE_IN_LOCAL_AEC", "Local microphone has echo cancellation", "bool",
               desc="Enable only for hardware/OS echo-cancelled input. Raw local microphones stay half duplex; browser barge-in uses browser AEC."),

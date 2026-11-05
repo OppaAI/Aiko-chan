@@ -860,3 +860,35 @@ fidelity. The sensory and interface areas retain their own broader audit scopes.
   Browser JavaScript state-machine tests are included through the Node runner.
   Cancellation preserves generator-driven text delivery, including when audio
   itself is discarded. Physical feedback/AEC measurements remain pending.
+
+### Area 7 continuation: wake, enrollment and visual sensory state
+
+- Scoped wake windows to identities with bounded storage, and re-evaluate them
+  after the WebUI binds the first PCM frame. Rejected speaker matches and empty
+  transcripts cannot extend a wake session. Acoustic detections are committed
+  after verification; fuzzy matching tolerates ASR case and punctuation.
+- Inspected the hash-verified livekit-wakeword 2.1.0 wheel already pinned in
+  `uv.lock`. Its 80 ms streaming steps were incompatible with the previous
+  32 ms confirmation counter; the installed legacy 0.3.0 API instead needs a
+  full two-second window. Added bounded adapters and per-record model resets.
+  Wake imports are now lazy and ONNX wake sessions use one CPU thread.
+- Enrollment selects the configured owner instead of silently targeting guest,
+  supports `--user`, and remains usable with `--help` without loading native
+  speech libraries. Validate durations, silence, speech readiness and vectors;
+  write profiles atomically with fsync/private permissions. Close/reap capture
+  subprocess resources and tolerate incomplete final PCM samples.
+- Share profile validation with runtime; use finite, dimension-safe float64
+  cosine scoring and immutable enrollment snapshots. Added one-worker bounded
+  verification waits and a Settings control. Failed extractor construction no
+  longer poisons the enrollment cache as if loading succeeded.
+- Motion downscaling covers small images and uneven edges, rejects non-finite
+  frames before updating state, and caps user/source caches. Stale motion loses
+  salience after inactivity; visual-event provenance cannot refresh old motion.
+  Non-finite DN inputs use neutral defaults instead of maximal drive.
+- This pass does not certify real microphone/wake-model/speaker-match quality or
+  Jetson performance. Residual sensory integration and physical checks remain.
+- Validation: **120 focused tests passed**; the final combined unit/integration/
+  conscience run passed with **2,674 tests, 5 skips, and 34 subtests**. The
+  enrollment help command also works without loading the native voice runtime.
+  Runtime API inspection used the hash-verified pinned wheel; real wake ONNX
+  artifacts and physical speaker/microphone quality have not been exercised.

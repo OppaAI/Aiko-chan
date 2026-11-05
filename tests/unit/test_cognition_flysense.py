@@ -166,3 +166,55 @@ def test_vrm_intensity_modes(monkeypatch):
     name_live, int_live = s3.vrm_expression()
     assert name_live == name_off  # expression choice untouched, only vigor
     assert 0.0 <= int_live <= 1.0
+
+
+def test_motion_handles_small_and_uneven_frames_without_cropping():
+    motion = FlyMotion()
+    assert motion.downscale(np.ones((8, 12))).shape == (48, 48)
+    # Activity confined to the previously discarded bottom/right strip must count.
+    image = np.zeros((70, 100))
+    image[60:, 80:] = 1
+    scaled = motion.downscale(image)
+    assert scaled.shape == (48, 48) and scaled.max() > 0
+
+
+def test_invalid_motion_does_not_poison_the_next_valid_frame():
+    motion = FlyMotion()
+    baseline = np.arange(48 * 48).reshape(48, 48)
+    motion.score(baseline)
+    with pytest.raises(ValueError):
+        motion.score(np.full((48, 48), np.nan))
+    assert motion.score(baseline)['change'] == pytest.approx(0)
+    pathway = MotionPathway()
+    assert not pathway.feed_frame(np.full((48, 48), np.nan))['ok']
+    assert pathway.turn_readout()['salience'] == 0
+
+
+def test_motion_identity_and_source_caches_are_bounded(monkeypatch):
+    from cognition.flysense import pathways
+    monkeypatch.setattr(pathways, '_pathways', {})
+    for i in range(20):
+        pathways.get_motion_pathway(f'bounded-motion-{i}')
+    assert len(pathways._pathways) == 8
+    latest = pathways.get_motion_pathway('bounded-motion-19')
+    for i in range(10):
+        latest.feed_frame(np.zeros((48, 48)), source=str(i))
+    assert len(latest._flies) == 4
+
+
+def test_stale_motion_does_not_interrupt_a_later_turn(monkeypatch):
+    from cognition.flysense import pathways
+    now = [100.0]
+    monkeypatch.setattr(pathways.time, 'monotonic', lambda: now[0])
+    pathway = MotionPathway()
+    rng = np.random.default_rng(31)
+    pathway.feed_frame(rng.normal(size=(48, 48)))
+    pathway.feed_frame(rng.normal(size=(48, 48)))
+    now[0] += 60
+    state = pathway.turn_readout()
+    assert state['salience'] == 0 and not state['sudden']
+
+
+def test_nonfinite_dn_inputs_use_neutral_drive():
+    dn = FlyDN()
+    assert dn.drive(np.nan, np.inf, -np.inf) == dn.drive(.5, .5, 0)

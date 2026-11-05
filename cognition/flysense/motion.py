@@ -77,18 +77,41 @@ class FlyMotion:
             stats = json.load(f)
         self.gains = _subtype_gains(stats.get("lptc_gain", {}))
         self.size = int(size)
+        if not 1 <= self.size <= 256:
+            raise ValueError("motion thumbnail size must be between 1 and 256")
         self.threshold = float(threshold)
         self.change_threshold = float(change_threshold)
         self._last: np.ndarray | None = None
 
     def downscale(self, frame: np.ndarray) -> np.ndarray:
         """Mean-pool any grayscale frame to (size, size), zero-mean/unit-peak."""
-        f = np.asarray(frame, dtype=np.float64)
-        if f.ndim == 3:
-            f = f[..., :3].mean(axis=2)
+        arr = np.asarray(frame)
+        if arr.ndim not in (2, 3) or min(arr.shape[:2]) <= 0 or arr.shape[0] * arr.shape[1] > 4096 * 2048:
+            raise ValueError("motion frames need bounded, nonempty image dimensions")
+        if arr.ndim == 3:
+            if arr.shape[2] not in (1, 3, 4):
+                raise ValueError("unsupported motion image channel count")
+            f = arr[..., :3].mean(axis=2, dtype=np.float64)
+        else:
+            f = arr.astype(np.float64)
+        if not np.isfinite(f).all():
+            raise ValueError("motion frames must be finite")
         h, w = f.shape
-        sh, sw = max(1, h // self.size), max(1, w // self.size)
-        small = f[:sh * self.size, :sw * self.size].reshape(self.size, sh, self.size, sw).mean(axis=(1, 3))
+        # Scale before pooling to avoid overflow; final mean/peak normalization
+        # makes this invariant for ordinary image values.
+        maximum = float(np.abs(f).max())
+        if maximum > 1:
+            f /= maximum
+        if h < self.size or w < self.size:
+            rows = np.linspace(0, h - 1, self.size).astype(int)
+            cols = np.linspace(0, w - 1, self.size).astype(int)
+            small = f[np.ix_(rows, cols)]
+        else:
+            # Cover the entire image, including uneven right/bottom strips.
+            rows = np.linspace(0, h, self.size + 1).astype(int)
+            cols = np.linspace(0, w, self.size + 1).astype(int)
+            sums = np.add.reduceat(np.add.reduceat(f, rows[:-1], axis=0), cols[:-1], axis=1)
+            small = sums / (np.diff(rows)[:, None] * np.diff(cols)[None, :])
         small = small - small.mean()
         peak = float(abs(small).max())
         return small / peak if peak > 0 else small

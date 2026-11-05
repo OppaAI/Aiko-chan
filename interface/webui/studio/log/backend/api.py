@@ -20,6 +20,7 @@ app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="
 
 _RECORD = re.compile(r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})  \[(?P<level>[A-Z]+)\s*\]  (?P<component>.*?) — (?P<message>.*)$")
 _MAX_ENTRIES = 10_000
+_MAX_LOG_BYTES = 8 * 1024 * 1024
 
 
 def parse_log_records(text: str) -> list[dict[str, str]]:
@@ -49,7 +50,14 @@ def _parse_boundary(value: str | None, *, end: bool) -> datetime | None:
 
 def read_records(log_file: Path = Path(LOG_FILE)) -> list[dict[str, str]]:
     try:
-        return parse_log_records(log_file.read_text(encoding="utf-8", errors="replace"))
+        with log_file.open("rb") as stream:
+            stream.seek(0, 2)
+            size = stream.tell()
+            stream.seek(max(0, size - _MAX_LOG_BYTES))
+            if size > _MAX_LOG_BYTES:
+                stream.readline(_MAX_LOG_BYTES)  # discard incomplete first record line
+            text = stream.read(_MAX_LOG_BYTES).decode("utf-8", errors="replace")
+        return parse_log_records(text)[-_MAX_ENTRIES:]
     except FileNotFoundError:
         return []
     except OSError as exc:

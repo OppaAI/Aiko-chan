@@ -6,13 +6,14 @@
   "build": {
     "beforeDevCommand": "",
     "beforeBuildCommand": "",
-    "devUrl": "https://aiko.ide-chroma.ts.net/",
+    "devUrl": "http://localhost:8787/",
     "frontendDist": "../webui/static"
   },
   "app": {
     "windows": [
       {
         "label": "companion",
+        "url": "http://localhost:8787/",
         "title": "Aiko",
         "width": 1200,
         "height": 800,

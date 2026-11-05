@@ -8,7 +8,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from interface.webui.studio.session_binding import bind_login_session
+
 app = FastAPI(title="Aiko MCP Studio")
+bind_login_session(app)
 
 app.add_middleware(
     CORSMiddleware,

@@ -611,7 +611,19 @@ function parseMarkdown(text) {
   safe = safe.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   safe = safe.replace(/\*([^*]+)\*/g, '<em>$1</em>');
   safe = safe.replace(/_([^_]+)_/g, '<em>$1</em>');
-  safe = safe.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  safe = safe.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, label, href) => {
+    // Decode entities for URL validation, then escape the attribute again.
+    const decoder = document.createElement('textarea');
+    decoder.innerHTML = href;
+    const target = decoder.value;
+    try {
+      const url = new URL(target, location.href);
+      if (!['http:', 'https:', 'mailto:'].includes(url.protocol)) return label;
+      const attr = target.replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return `<a href="${attr}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+    } catch (_) { return label; }
+  });
   safe = safe.replace(/\n/g, '<br>');
   return safe;
 }
@@ -1421,6 +1433,7 @@ function connectWS() {
     }
     let msg;
     try { msg = JSON.parse(e.data); } catch (_) { return; }
+    if (!msg || typeof msg !== "object" || Array.isArray(msg)) return;
 
     if (!chatPhaseActive && ['chat', 'token'].includes(msg.type)) {
       switchToChat();
@@ -1571,14 +1584,17 @@ termsContinueBtn.addEventListener('click', async () => {
   if (!termsCheckbox.checked) return;
   termsContinueBtn.disabled = true;
   try {
-    await fetch('/api/auth/accept-terms', {
+    const response = await fetch('/api/auth/accept-terms', {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ accepted: true }),
-    });  }
-    catch (err) {
+    });
+    if (!response.ok) throw new Error('Acceptance was not saved');
+  } catch (err) {
     console.error('[terms] failed to record acceptance:', err);
+    termsContinueBtn.disabled = false;
+    return;
   }
   hideTermsOverlay();
   connectWS();

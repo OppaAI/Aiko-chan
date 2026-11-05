@@ -1,6 +1,7 @@
 """Approval Studio backend — review and approve daily job post drafts."""
 from __future__ import annotations
 
+import asyncio
 import json
 import mimetypes
 import os
@@ -219,8 +220,8 @@ async def update_content(draft_dir: str, request: Request):
         raise HTTPException(status_code=404, detail="Draft not found")
 
     body = await request.json()
-    new_text = body.get("draft_text")
-    if new_text is None:
+    new_text = body.get("draft_text") if isinstance(body, dict) else None
+    if not isinstance(new_text, str):
         raise HTTPException(status_code=400, detail="Missing draft_text")
 
     # A draft that's already been posted shouldn't be silently rewritten.
@@ -260,7 +261,7 @@ async def publish_draft(draft_dir: str):
     except ImportError as e:
         raise HTTPException(status_code=500, detail=f"Could not import posting module: {e}")
 
-    result = post_job_post_draft(draft_path)
+    result = await asyncio.to_thread(post_job_post_draft, draft_path)
     if not result.get("posted"):
         raise HTTPException(status_code=502, detail=result.get("error") or "Failed to post to Threads")
 
@@ -307,6 +308,34 @@ async def reject_draft(draft_dir: str):
     return {"success": True, "message": "Draft rejected and moved to rejected/", "rejected_dir": str(target)}
 
 
+def _download_page(url: str, headers: dict) -> tuple[bytes, str]:
+    """Bound downloads and validate every redirect before issuing a request."""
+    from urllib.parse import urlparse, urljoin
+    from agentic.toolkit.ingest import _check_host_ssrf
+    budget = 5_000_000
+    for _ in range(6):
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or _check_host_ssrf(parsed.hostname):
+            raise ValueError("URL host or scheme is not allowed")
+        with requests.get(url, headers=headers, timeout=15, allow_redirects=False, stream=True) as response:
+            if response.status_code in {301, 302, 303, 307, 308}:
+                location = response.headers.get("location")
+                if not location:
+                    raise ValueError("Redirect has no location")
+                url = urljoin(url, location)
+                continue
+            response.raise_for_status()
+            if int(response.headers.get("content-length", 0)) > budget:
+                raise ValueError("Page exceeds the 5 MB download limit")
+            body = bytearray()
+            for chunk in response.iter_content(65536):
+                if len(body) + len(chunk) > budget:
+                    raise ValueError("Page exceeds the 5 MB download limit")
+                body.extend(chunk)
+            return bytes(body), response.headers.get("content-type", "")
+    raise ValueError("Too many redirects")
+
+
 @app.get("/api/fetch-url")
 def fetch_url(url: str = Query(..., description="URL to fetch content from")):
     """Fetch a URL and convert it to Markdown using MarkItDown.
@@ -349,32 +378,25 @@ def fetch_url(url: str = Query(..., description="URL to fetch content from")):
         "Accept-Language": "en-US,en;q=0.9,fr;q=0.8",
     }
 
-    resp = None
+    page = None
+    content_type = ""
     last_err = ""
-    for attempt in range(2):  # one retry — 503s from gov sites are often transient
+    for attempt in range(2):
         try:
-            resp = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
-            if resp.status_code == 503 and attempt == 0:
-                time.sleep(1.5)
-                continue
-            resp.raise_for_status()
-            last_err = ""
+            page, content_type = _download_page(url, headers)
             break
-        except Exception as e:
-            last_err = str(e)
-            resp = None
+        except Exception as exc:
+            last_err = str(exc)
             if attempt == 0:
                 time.sleep(1.5)
-                continue
-
-    if resp is None:
+    if page is None:
         return {"content": "", "error": last_err or "Failed to fetch URL"}
 
     try:
         converter = MarkItDown()
-        content_type = resp.headers.get("content-type", "").split(";", 1)[0].strip()
+        content_type = content_type.split(";", 1)[0].strip()
         ext = mimetypes.guess_extension(content_type) or ".html"
-        result = converter.convert_stream(io.BytesIO(resp.content), file_extension=ext, url=url)
+        result = converter.convert_stream(io.BytesIO(page), file_extension=ext, url=url)
         content = (result.text_content or "").strip()
         if not content:
             content = "[Could not extract readable content]"

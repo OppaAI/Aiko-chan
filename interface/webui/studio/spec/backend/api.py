@@ -19,7 +19,10 @@ from fastapi.staticfiles import StaticFiles
 
 log = logging.getLogger(__name__)
 
+from interface.webui.studio.session_binding import bind_login_session
+
 app = FastAPI(title="Aiko Spec Studio")
+bind_login_session(app)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:8010", "http://127.0.0.1:8010"],
@@ -277,6 +280,8 @@ async def preview_graph(request: Request):
         raw = await request.json()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
     payload = raw.get("spec") if isinstance(raw.get("spec"), dict) else raw
     goal = raw.get("goal") if isinstance(raw, dict) else None
     try:
@@ -300,6 +305,8 @@ async def save_workflow_spec(workflow_id: str, request: Request):
         raw = await request.json()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
     payload = raw.get("spec") if isinstance(raw.get("spec"), dict) else raw
     try:
         spec = validate_spec(payload)

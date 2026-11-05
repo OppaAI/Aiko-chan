@@ -476,17 +476,8 @@ def _parse_dialogue_tags(flat_content: str) -> dict:
 
 
 async def get_lingo_session(request: Request) -> dict:
-    from interface.webui import auth
-    try:
-        session = await auth.require_session(request)
-        return await auth.require_accepted_session(session)
-    except Exception as e:
-        log.warning(f"Lingo session auth failed: {e} — falling back to app owner")
-        owner = os.getenv("AIKO_USER_ID", "")
-        if not owner:
-            log.error("AIKO_USER_ID not set and auth failed; aborting request")
-            raise HTTPException(status_code=500, detail="Session unavailable")
-        return {"user_id": owner, "username": owner}
+    from interface.android_app.session import require_companion_session
+    return await require_companion_session(request)
 
 
 # ============================================================================

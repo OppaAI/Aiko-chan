@@ -219,7 +219,7 @@ class AikoWeb:
         self._authenticated_display_name: str | None = None
         self._user_space_ready: set[str] = set()   # users whose deferred user-space seeding has run
 
-        self._input_q: queue.Queue[tuple[str, str, str]] = queue.Queue()
+        self._input_q: queue.Queue[tuple[str, str, str]] = queue.Queue(maxsize=64)
         try:
             _register_webui(self)
         except Exception:
@@ -578,7 +578,13 @@ class AikoWeb:
                                     {"type": "busy", "message": "Aiko is with someone else right now — you're next."},
                                     user_id=uid,
                                 )
-                            self._input_q.put((text, uid, display_name))
+                            if len(text) > 32768:
+                                await self._safe_send(ws, json.dumps({"type": "busy", "message": "Please shorten your message to 32,768 characters."}))
+                                continue
+                            try:
+                                self._input_q.put_nowait((text, uid, display_name))
+                            except queue.Full:
+                                await self._safe_send(ws, json.dumps({"type": "busy", "message": "The message queue is full. Please try again shortly."}))
 
                     elif mtype == "image_input":
                         image = _validate_image_data_uri(msg.get("image"))

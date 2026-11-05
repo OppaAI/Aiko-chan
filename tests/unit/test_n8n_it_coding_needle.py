@@ -9,6 +9,7 @@ interval); everything else is instant.
 from __future__ import annotations
 
 import json
+import pytest
 
 from system.config import load_config
 
@@ -149,6 +150,13 @@ class TestDefaultPlaybooks:
 
 
 class TestDagStudioApi:
+    @pytest.fixture(autouse=True)
+    def authenticated(self, monkeypatch):
+        from interface.webui import auth
+        async def session(_):
+            return {"user_id": "dag-test", "accepted_terms": True}
+        monkeypatch.setattr(auth, "require_session", session)
+
     def _client(self):
         from fastapi.testclient import TestClient
         from interface.webui.studio.dag.backend.api import app

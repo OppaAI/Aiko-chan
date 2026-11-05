@@ -9,7 +9,7 @@ Endpoints (mounted at /api/game):
 
 Hard state lives in state.py and is computed in code only; the LLM
 narrator/Aiko voices (Phase 0+) will read this state, never write it.
-Auth mirrors the games backends (session with owner fallback).
+Auth uses the shared companion session policy.
 """
 
 from __future__ import annotations
@@ -63,24 +63,8 @@ class TalkResponse(BaseModel):
 
 
 async def _require_user(request: Request) -> dict:
-    """Session auth with owner fallback for companion apps (same as games)."""
-    from interface.webui import auth
-
-    try:
-        session = await auth.require_session(request)
-        return await auth.require_accepted_session(session)
-    except HTTPException:
-        owner = (os.getenv("AIKO_USER_ID") or "").strip()
-        if owner:
-            log.warning("Game session auth failed — falling back to app owner")
-            return {"user_id": owner, "username": owner}
-        raise
-    except Exception as e:
-        log.warning("Game auth failed: %s", e)
-        owner = (os.getenv("AIKO_USER_ID") or "").strip()
-        if owner:
-            return {"user_id": owner, "username": owner}
-        raise HTTPException(status_code=401, detail="Authentication required")
+    from interface.android_app.session import require_companion_session
+    return await require_companion_session(request)
 
 
 @router.get("/health")

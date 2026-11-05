@@ -138,31 +138,8 @@ class GameState(BaseModel):
 
 
 async def _require_user(request: Request) -> dict:
-    """Session auth with owner fallback for the Android app.
-
-    Mirrors lingo's get_lingo_session: the Aiko-Shogi client has no
-    CookieJar/login flow, so unauthenticated calls fall back to the app
-    owner (AIKO_USER_ID) instead of hard-401ing every move.
-    """
-    from interface.webui import auth
-
-    try:
-        session = await auth.require_session(request)
-        return await auth.require_accepted_session(session)
-    except HTTPException:
-        # Auth attempted but rejected (no/invalid cookie, terms unaccepted)
-        # — fall back to owner before giving up.
-        owner = (os.getenv("AIKO_USER_ID") or "").strip()
-        if owner:
-            log.warning("Shogi session auth failed — falling back to app owner")
-            return {"user_id": owner, "username": owner}
-        raise
-    except Exception as e:
-        log.warning("Shogi auth failed: %s", e)
-        owner = (os.getenv("AIKO_USER_ID") or "").strip()
-        if owner:
-            return {"user_id": owner, "username": owner}
-        raise HTTPException(status_code=401, detail="Authentication required")
+    from interface.android_app.session import require_companion_session
+    return await require_companion_session(request)
 
 
 def _import_shogi():

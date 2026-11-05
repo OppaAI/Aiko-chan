@@ -68,35 +68,9 @@ class GameState(BaseModel):
     moves: List[str] = Field(default_factory=list)
 
 
-def _allow_owner_fallback(_request: Request) -> bool:
-    """Gate the AIKO_USER_ID fallback used by the Android companion apps.
-
-    Same-as-Shogi policy: whenever the server owner is configured, the
-    companion app (which has no login flow) is treated as the owner,
-    regardless of client IP or proxy headers. Keep the server on
-    Tailscale-only networking — anyone able to reach these endpoints
-    plays Go as the owner.
-    """
-    return bool((os.getenv("AIKO_USER_ID") or "").strip())
-
-
 async def _require_user(request: Request) -> dict:
-    """Session auth with owner fallback for the Android app (same as Shogi)."""
-    from interface.webui import auth
-
-    try:
-        session = await auth.require_session(request)
-        return await auth.require_accepted_session(session)
-    except HTTPException:
-        owner = (os.getenv("AIKO_USER_ID") or "").strip()
-        if owner and _allow_owner_fallback(request):
-            log.warning("Go session auth failed — falling back to app owner")
-            return {"user_id": owner, "username": owner}
-        raise
-    except Exception as e:
-        # Do not convert unexpected errors into an owner session.
-        log.warning("Go auth failed: %s", e)
-        raise HTTPException(status_code=401, detail="Authentication required") from e
+    from interface.android_app.session import require_companion_session
+    return await require_companion_session(request)
 
 
 _DIFFICULTY_PRESETS = {

@@ -16,7 +16,7 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 | 5 | Memory, retrieval, knowledge, and persistence | `cognition/memory/`, `cognition/knowledge/` | Current code pass completed for SQLite/Harrier; final validation below; live-model retrieval quality and physical Jetson RAM/latency checks pending |
 | 6 | Fly-brain circuits and state wiring | `cognition/fly*`, `cognition/centralcomplex/`, `cognition/neural_state.py` | Current code pass completed; final validation below; full-connectome and physical Jetson/sensor/body measurements pending |
 | 7 | Speech, listening, and sensory pathways | `sensory/`, `cognition/flysense/` | Current code pass completed; final validation below; real-model/audio quality and physical Jetson RAM/latency checks pending |
-| 8 | Web, desktop, mobile, and external interfaces | `interface/` | In progress: WebSocket input resilience and Telegram/Discord delivery fixes shipped; broader interface review pending |
+| 8 | Web, desktop, mobile, and external interfaces | `interface/` | Current code pass completed; final validation below; packaged desktop, live platform accounts and physical client checks pending |
 | 9 | Configuration, security boundaries, storage, and deployment | `system/`, `config/`, `backend/`, `scripts/` | Focused path/TLS fixes shipped; broad review not started |
 | 10 | Evaluation, observability, and developer tooling | `tests/`, `eval/`, `conscience-lab/`, `util/` | Not started |
 
@@ -955,3 +955,50 @@ certify model quality or physical-device performance.
   to external services. Live bot credentials/services and desktop runtime have
   not been exercised. Area 8's broader mobile, desktop, HTTP, frontend and
   external-interface review remains open.
+
+### Area 8 completion: shared sessions, studios, mobile and desktop
+
+The current interface code pass is complete. Review covered WebUI socket input,
+rendering and audio handoffs, session lifecycle, mounted studio API boundaries,
+companion/game authentication, messenger lifecycle/delivery, CLI login callers,
+desktop backend selection, and the MCP stdio entry point. Earlier speech and
+settings passes supply the audio and settings-specific coverage. This is a code
+review result, not a claim that every optional platform has been exercised live.
+
+- Replace six duplicate mobile authentication fallbacks with one policy. Normal
+  clients require a session and accepted terms. Legacy clients without cookies
+  may explicitly enable `AIKO_COMPANION_OWNER_FALLBACK` on a trusted network.
+  A supplied invalid cookie, rejected terms, or an unexpected auth exception
+  cannot become the owner's session. The setting is listed in Settings.
+- Bind DAG, Spec and MCP studio APIs to the same authenticated request context
+  as the other studios. Reject non-object Spec JSON before accessing fields.
+- Persist accepted terms and logout immediately; use private unique temporary
+  session files with atomic replacement. Use the configured session TTL
+  consistently when restoring and validating persisted sessions.
+- Keep the terms overlay open when saving acceptance fails. Validate chat link
+  protocols and escape link attributes, and ignore non-object socket messages.
+- Limit pending browser chat to 64 entries and each message to 32,768 characters;
+  full queues respond without blocking the event loop. Read only the latest
+  8 MiB/10,000 records in Log Studio rather than loading an entire growing log.
+- Correct Slack Socket Mode registration and acknowledge incoming envelopes;
+  close its socket resources, prevent duplicate starts, and split long replies.
+  Matrix closes its client/loop after failed login or listener exit, prevents
+  duplicate workers, checks delivery response errors and cancels timed-out sends.
+- Packaged desktop and development now open the actual localhost backend rather
+  than a bundled page with no API origin or a hardcoded private tailnet hostname.
+  Implement the documented `AIKO_WEBUI_URL` override and embed the tray PNG so
+  launch-directory changes do not lose the icon. See the desktop README.
+- Approval publication runs off the ASGI event loop. Validate editable draft
+  text, bound URL downloads to 5 MB, validate redirect targets, and close HTTP
+  responses after reading. The posting endpoint still requires prior approval.
+- Focused checks passed: 70 tests covering the final interface changes plus the
+  browser voice and chat-link scripts. Final combined unit/integration/conscience
+  validation passed with **2,723 tests, 5 skips, and 34 subtests**. The old DAG tests now supply authenticated
+  sessions; separate regressions verify anonymous calls are rejected.
+
+Remaining deployment checks: build/launch Tauri with its native prerequisites
+(`cargo`/Rust are unavailable in this cloud workspace), verify its configured
+Tailscale URL on the real client, log into the phone/browser, and exercise the
+configured bot platforms with real accounts. No external messages were sent
+while testing. Audio/device checks remain recorded under Area 7. Broader
+security/deployment and evaluation work retain their own Areas 9 and 10 scopes.

@@ -221,6 +221,8 @@ SETTINGS_GROUPS: list[dict] = [
         _flat("interface.yaml", "LATENCY_LOG", "Latency logging", "bool"),
         _flat("interface.yaml", "BUDGET_PER_TURN", "Brain budget per turn", "int", min=0, max=1000000),
         _flat("interface.yaml", "MAX_HOPS", "Brain max hops", "int", min=0, max=100),
+        _flat("android_app.yaml", "AIKO_COMPANION_OWNER_FALLBACK", "Companion owner fallback", "bool",
+              desc="Trusted networks only: clients without a session act as the configured owner. Invalid cookies and rejected terms never fall back."),
         _flat("android_app.yaml", "SHOGI_DIFFICULTY", "Shogi difficulty", "enum",
               options=["easy", "medium", "hard"]),
         _flat("android_app.yaml", "YANEURAOU_MOVETIME_MS", "Shogi move time (ms)", "int", min=50, max=60000),

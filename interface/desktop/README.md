@@ -11,7 +11,7 @@ always-on-top desktop companion. It includes a tray menu and global
 3. From `interface/desktop`, run `cargo tauri dev`.
 
 The WebUI is intentionally loaded from `http://localhost:8787` in development.
-Production packaging can set `AIKO_WEBUI_URL` or bundle a local Aiko service.
+Set `AIKO_WEBUI_URL` to select another running backend.
 
 ## Tray icon
 
@@ -19,9 +19,7 @@ Production packaging can set `AIKO_WEBUI_URL` or bundle a local Aiko service.
 Tauri requires `icons/icon.png` at compile time (`generate_context!` fails
 without it). `icons/aiko-tray.svg` is the text source — to regenerate after
 editing it, run `cargo tauri icon icons/aiko-tray.svg` from
-`interface/desktop`. At runtime `src/main.rs` picks up `icons/tray.png`
-automatically and falls back to a text-only tray menu (with a warning) when
-it is absent.
+`interface/desktop`. The tray PNG is embedded at compile time.
 
 ## Security notes
 
@@ -37,3 +35,9 @@ it is absent.
   the `Ctrl+Shift+A` show/hide hotkey. If hotkey registration fails (e.g. a
   conflict), the app logs a warning and keeps running — the tray menu's
   "Show / hide Aiko" item remains the fallback.
+
+Both development and packaged builds open `http://localhost:8787/` by default.
+Set `AIKO_WEBUI_URL=https://your-device.your-tailnet.ts.net/` in the desktop
+process environment to use Tailscale Serve or another backend address. The
+backend serves the page and WebSocket from the same origin. The tray PNG is
+embedded in the executable, so launching from another working directory works.

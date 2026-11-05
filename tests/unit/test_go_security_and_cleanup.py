@@ -1,6 +1,8 @@
 """Regression tests for Go owner fallback and KataGo process cleanup."""
 
+import asyncio
 import subprocess
+from fastapi import HTTPException
 
 import pytest
 from fastapi import Request
@@ -21,30 +23,33 @@ def _request(host: str, headers: dict[str, str] | None = None) -> Request:
     )
 
 
-@pytest.mark.parametrize(
-    "host",
-    ["127.0.0.1", "::1", "100.64.0.1", "203.0.113.10", "not-an-ip"],
-)
-def test_owner_fallback_allows_any_client_when_owner_set(host, monkeypatch):
-    """Same-as-Shogi policy: owner configured ⇒ app treated as owner."""
-    monkeypatch.setenv("AIKO_USER_ID", "owner_123")
-
-    assert games_go._allow_owner_fallback(_request(host))
-
-
-@pytest.mark.parametrize("header", ["Forwarded", "X-Forwarded-For", "X-Real-IP"])
-def test_owner_fallback_ignores_proxy_headers_when_owner_set(header, monkeypatch):
-    monkeypatch.setenv("AIKO_USER_ID", "owner_123")
-
-    request = _request("203.0.113.10", {header: "for=198.51.100.7"})
-
-    assert games_go._allow_owner_fallback(request)
+@pytest.mark.parametrize("enabled", [False, True])
+def test_owner_fallback_requires_opt_in(enabled, monkeypatch):
+    from interface.webui import auth
+    async def denied(_):
+        raise HTTPException(status_code=401)
+    monkeypatch.setattr(auth, 'require_session', denied)
+    monkeypatch.setenv('AIKO_USER_ID', 'owner_123')
+    monkeypatch.setenv('AIKO_COMPANION_OWNER_FALLBACK', '1' if enabled else '0')
+    if enabled:
+        assert asyncio.run(games_go._require_user(_request('100.64.0.1')))['user_id'] == 'owner_123'
+    else:
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(games_go._require_user(_request('100.64.0.1')))
+        assert exc.value.status_code == 401
 
 
-def test_owner_fallback_denies_when_no_owner_configured(monkeypatch):
-    monkeypatch.delenv("AIKO_USER_ID", raising=False)
-
-    assert not games_go._allow_owner_fallback(_request("127.0.0.1"))
+@pytest.mark.parametrize('status', [401, 403])
+def test_owner_fallback_never_upgrades_rejected_credentials(status, monkeypatch):
+    from interface.webui import auth
+    async def denied(_):
+        raise HTTPException(status_code=status)
+    monkeypatch.setattr(auth, 'require_session', denied)
+    monkeypatch.setenv('AIKO_USER_ID', 'owner_123')
+    monkeypatch.setenv('AIKO_COMPANION_OWNER_FALLBACK', '1')
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(games_go._require_user(_request('127.0.0.1', {'cookie': 'session_id=bad'})))
+    assert exc.value.status_code == status
 
 
 class _Stream:

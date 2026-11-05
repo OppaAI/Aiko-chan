@@ -230,24 +230,8 @@ class KoiState(BaseModel):
 
 
 async def _require_user(request: Request) -> dict:
-    """Session auth with owner fallback for the Android app (same as Shogi/Go)."""
-    from interface.webui import auth
-
-    try:
-        session = await auth.require_session(request)
-        return await auth.require_accepted_session(session)
-    except HTTPException:
-        owner = (os.getenv("AIKO_USER_ID") or "").strip()
-        if owner:
-            log.warning("Koikoi session auth failed — falling back to app owner")
-            return {"user_id": owner, "username": owner}
-        raise
-    except Exception as e:
-        log.warning("Koikoi auth failed: %s", e)
-        owner = (os.getenv("AIKO_USER_ID") or "").strip()
-        if owner:
-            return {"user_id": owner, "username": owner}
-        raise HTTPException(status_code=401, detail="Authentication required")
+    from interface.android_app.session import require_companion_session
+    return await require_companion_session(request)
 
 
 def _view(card: int) -> dict:

@@ -308,7 +308,7 @@ def _load_sessions() -> None:
             created = entry.get("created_at")
             created_at = (bioclock.local_now().fromisoformat(created)
                           if isinstance(created, str) else created)
-            if now - created_at > timedelta(days=30):
+            if now - created_at > timedelta(seconds=SESSION_MAX_AGE_SECONDS):
                 continue
             entry["created_at"] = created_at
             sessions[str(session_id)] = entry
@@ -330,13 +330,17 @@ def _save_sessions() -> None:
                 "created_at": (created.isoformat() if hasattr(created, "isoformat")
                                else str(created)),
             }
-        tmp = _SESSIONS_PATH.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(serialisable, ensure_ascii=False), encoding="utf-8")
+        import tempfile
+        fd, name = tempfile.mkstemp(prefix=".sessions-", suffix=".json", dir=_SESSIONS_PATH.parent)
+        tmp = Path(name)
         try:
-            os.chmod(tmp, 0o600)
-        except OSError:
-            pass
-        tmp.replace(_SESSIONS_PATH)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(serialisable, stream, ensure_ascii=False)
+                stream.flush()
+                os.fsync(stream.fileno())
+            tmp.replace(_SESSIONS_PATH)
+        finally:
+            tmp.unlink(missing_ok=True)
     except Exception as exc:
         log.debug("auth: session persist skipped: %s", exc)
 
@@ -447,7 +451,7 @@ async def require_session(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     session = sessions[session_id]
-    if bioclock.local_now() - session["created_at"] > timedelta(days=30):
+    if bioclock.local_now() - session["created_at"] > timedelta(seconds=SESSION_MAX_AGE_SECONDS):
         del sessions[session_id]
         _save_sessions()
         raise HTTPException(status_code=401, detail="Session expired")
@@ -633,7 +637,7 @@ async def get_me(session: dict = Depends(require_session)):
 @app.post("/api/auth/accept-terms")
 async def accept_terms(request: Request, session: dict = Depends(require_session)):
     body = await request.json()
-    if body.get("accepted") is not True:
+    if not isinstance(body, dict) or body.get("accepted") is not True:
         raise HTTPException(status_code=400, detail="Must explicitly accept")
 
     cookie_value = request.cookies.get("session_id")
@@ -642,6 +646,7 @@ async def accept_terms(request: Request, session: dict = Depends(require_session
     except (BadSignature, SignatureExpired, TypeError):
         raise HTTPException(status_code=401, detail="Invalid session")
     sessions[session_id]["accepted_terms"] = True
+    _save_sessions()
     _record_terms_acceptance(session["provider"], session["user_id"])
     return {"accepted": True}
 
@@ -653,6 +658,8 @@ async def logout(request: Request):
         try:
             session_id = signer.loads(cookie_value, max_age=SESSION_MAX_AGE_SECONDS)
             session = sessions.pop(session_id, None)
+            if session is not None:
+                _save_sessions()
             if session:
                 try:
                     from system.notice import drop_session

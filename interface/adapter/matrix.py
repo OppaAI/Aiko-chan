@@ -60,6 +60,8 @@ class MatrixAdapter(AdapterBase):
         return mapped
 
     def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
         if AsyncClient is None:
             log.error("[matrix] matrix-nio not installed. pip install matrix-nio")
             return
@@ -70,14 +72,26 @@ class MatrixAdapter(AdapterBase):
 
         self._stop_evt.clear()
         self._thread = threading.Thread(target=self._run_async, daemon=True)
-        self._thread.start()
         self._running = True
+        self._thread.start()
         log.info("[matrix] Adapter started")
 
     def _run_async(self) -> None:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._async_main())
+        try:
+            self._loop.run_until_complete(self._async_main())
+        except Exception:
+            log.exception("[matrix] listener failed")
+        finally:
+            try:
+                if self._client is not None:
+                    self._loop.run_until_complete(self._client.close())
+            finally:
+                self._running = False
+                self._loop.close()
+                self._loop = None
+                self._client = None
 
     async def _async_main(self) -> None:
         cfg = self._read_config()
@@ -128,13 +142,12 @@ class MatrixAdapter(AdapterBase):
     def stop(self) -> None:
         self._running = False
         self._stop_evt.set()
-        if self._client and self._loop:
-            try:
-                asyncio.run_coroutine_threadsafe(
-                    self._client.close(), self._loop
-                )
-            except Exception:
-                log.warning("matrix: async client close failed")
+        loop = self._loop
+        if self._client is not None and loop is not None and loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._client.close(), loop)
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=10)
 
     def send_message(self, conversation_id: str, text: str) -> None:
         """Send a text message, blocking until the homeserver confirms.
@@ -143,8 +156,10 @@ class MatrixAdapter(AdapterBase):
         Must not be called from the adapter's own asyncio event loop
         thread (the blocking wait would deadlock).
         """
-        if not self._client or not self._loop:
+        if not self._client or not self._loop or not self._loop.is_running():
             raise RuntimeError("matrix client not started")
+        if threading.current_thread() is self._thread:
+            raise RuntimeError("cannot synchronously send from Matrix event loop")
         try:
             fut = asyncio.run_coroutine_threadsafe(
                 self._client.room_send(
@@ -154,7 +169,14 @@ class MatrixAdapter(AdapterBase):
                 ),
                 self._loop,
             )
-            fut.result(timeout=30)
+            try:
+                response = fut.result(timeout=30)
+            except TimeoutError:
+                fut.cancel()
+                raise
+            from nio import RoomSendResponse
+            if not isinstance(response, RoomSendResponse):
+                raise RuntimeError(f"Matrix rejected delivery: {response}")
         except Exception as exc:
             log.error("[matrix] Failed to send to %s: %s", conversation_id, exc)
             raise

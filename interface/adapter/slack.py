@@ -49,6 +49,8 @@ class SlackAdapter(AdapterBase):
         return mapped
 
     def start(self) -> None:
+        if self._running:
+            return
         if WebClient is None:
             log.error("[slack] slack-sdk not installed. pip install slack-sdk")
             return
@@ -67,10 +69,11 @@ class SlackAdapter(AdapterBase):
             web_client=self._web_client,
         )
 
-        @self._socket_client.on("events_api")
         def handle_event(client: SocketModeClient, req: SocketModeRequest) -> None:
             if req.type != "events_api":
                 return
+            from slack_sdk.socket_mode.response import SocketModeResponse
+            client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
             payload = req.payload
             if not payload or "event" not in payload:
                 return
@@ -96,6 +99,8 @@ class SlackAdapter(AdapterBase):
             # delivers the reply via _on_platform_response -> send_message.
             self.handle_message(cid, uid, display, text)
 
+        self._socket_client.socket_mode_request_listeners.append(handle_event)
+
         self._thread = threading.Thread(
             target=self._socket_client.connect, daemon=True
         )
@@ -107,7 +112,7 @@ class SlackAdapter(AdapterBase):
         self._running = False
         if self._socket_client:
             try:
-                self._socket_client.disconnect()
+                self._socket_client.close()
             except Exception:
                 log.warning("slack: socket disconnect failed")
 
@@ -119,10 +124,10 @@ class SlackAdapter(AdapterBase):
         if not self._web_client:
             raise RuntimeError("slack client not configured")
         try:
-            self._web_client.chat_postMessage(
-                channel=conversation_id,
-                text=text,
-            )
+            for start in range(0, len(text), 4000):
+                self._web_client.chat_postMessage(
+                    channel=conversation_id, text=text[start:start + 4000],
+                )
         except SlackApiError as exc:
             log.error("[slack] Failed to send to %s: %s", conversation_id, exc)
             raise

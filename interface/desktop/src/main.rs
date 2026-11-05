@@ -20,22 +20,22 @@ fn toggle_window(app: &tauri::AppHandle) {
 }
 
 fn tray_icon() -> Option<tauri::image::Image<'static>> {
-    // Optional file-based icon so the repo ships no binary assets. Generate
-    // `icons/tray.png` (see README) to enable it; otherwise the tray falls
-    // back to a text menu and logs a warning instead of failing to start.
-    for path in ["icons/tray.png", "icons/32x32.png"] {
-        if let Ok(icon) = tauri::image::Image::from_path(path) {
-            return Some(icon);
-        }
-    }
-    eprintln!("aiko-companion: no tray icon found (tried icons/tray.png); see interface/desktop/README.md to generate one");
-    None
+    tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png")).ok()
 }
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
+            if let Ok(target) = std::env::var("AIKO_WEBUI_URL") {
+                let url = tauri::Url::parse(&target)?;
+                if !matches!(url.scheme(), "http" | "https") {
+                    return Err("AIKO_WEBUI_URL must use http or https".into());
+                }
+                if let Some(window) = app.get_webview_window("companion") {
+                    window.navigate(url)?;
+                }
+            }
             let toggle = MenuItem::with_id(app, "toggle", "Show / hide Aiko", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Aiko Companion", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&toggle, &quit])?;

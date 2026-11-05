@@ -9,6 +9,10 @@
 # binary, /api/games/shogi uses it for strong moves; otherwise Aiko falls
 # back to casual random moves (python-shogi).
 
+# Legacy clients without login may opt in on a trusted/private network.
+# All reachable clients then act as owner; invalid cookies and rejected terms still fail.
+AIKO_COMPANION_OWNER_FALLBACK: "0"
+
 # -- YaneuraOu (Shogi engine, USI) --
 YANEURAOU_PATH: "/home/oppa-ai/YaneuraOu/source/YaneuraOu-by-gcc"  # Jetson Orin Nano layout (~/YaneuraOu); blank = search PATH, fallback to random moves.
 YANEURAOU_MOVETIME_MS: "800"  # Engine search time per move (ms); clamped 50-30000. Used by hard; easy/medium use their own caps below.

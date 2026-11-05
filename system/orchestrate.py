@@ -683,7 +683,7 @@ class ProactiveIdleRunner:
                 with self._lock:
                     self._last_prompt = now
                 self._perception_times.append(now)
-                return ("perception_prompt", "[perception-event] A repeated camera cue was observed: " + event[1] + ". Use fresh visual context. Speak only if there is something useful or natural to say; otherwise return [SILENT]. Do not invent what the user is doing or narrate every gesture.")
+                return ("perception_prompt", "[perception-event] " + event[1] + ". Use fresh visual context. Speak only if there is something useful or natural to say; otherwise return [SILENT]. Do not invent what the user is doing or narrate every gesture.")
         if PROACTIVE_REST_AFTER_SECONDS > 0 and idle_for >= PROACTIVE_REST_AFTER_SECONDS:
             if PROACTIVE_USE_LLM and self._generate_fn is not None and PROACTIVE_REST_PROMPT_HINT:
                 return ("rest_prompt", _personalize_proactive_text(PROACTIVE_REST_PROMPT_HINT))

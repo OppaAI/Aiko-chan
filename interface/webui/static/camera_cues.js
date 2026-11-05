@@ -1,7 +1,8 @@
-/* Optional browser-side perception. Frames/templates never leave this module. */
+/* Browser-side perception. Landmarks and face templates stay in the browser. */
 const MP = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21';
 const FACE = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.15';
-let motionPromise, facePromise;
+import {lookingTowardCamera, raisedOpenPalm} from './camera_attention.js';
+let motionPromise, facePromise, gazePromise;
 export async function loadMotion() {
   if (!motionPromise) motionPromise = (async () => {
     const {FilesetResolver, GestureRecognizer, PoseLandmarker} = await import(`${MP}/vision_bundle.mjs`);
@@ -35,7 +36,19 @@ export async function motionCues(video) {
   const hands = tracker.hands.recognizeForVideo(video, now);
   const pose = tracker.pose.detectForVideo(video, now);
   return {gestures:(hands.gestures || []).map(items => items[0]).filter(item => item && item.score >= .7 && item.categoryName !== 'None').map(item => item.categoryName).slice(0,2),
-    posture:postureLabel(pose.landmarks?.[0])};
+    posture:postureLabel(pose.landmarks?.[0]), raised_open_palm:raisedOpenPalm(hands, pose.landmarks?.[0])};
+}
+export async function gazeCue(video) {
+  if (!gazePromise) gazePromise = (async () => {
+    const {FilesetResolver, FaceLandmarker} = await import(`${MP}/vision_bundle.mjs`);
+    const files = await FilesetResolver.forVisionTasks(`${MP}/wasm`);
+    return FaceLandmarker.createFromOptions(files, {baseOptions: {
+      modelAssetPath:'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task', delegate:'CPU'},
+      runningMode:'VIDEO', numFaces:2});
+  })().catch(error => { gazePromise = null; throw error; });
+  const tracker = await gazePromise;
+  const faces = tracker.detectForVideo(video, performance.now()).faceLandmarks || [];
+  return faces.length === 1 && lookingTowardCamera(faces[0]);
 }
 async function loadFace() {
   if (!facePromise) facePromise = (async () => {

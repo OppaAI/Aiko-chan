@@ -183,7 +183,7 @@
     if (webcamStream) { stopWebcam(); return; }
     try {
       webcamStream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 320 }, height: { ideal: 240 }, facingMode: 'user' }, audio: false });
-      if (webcamToggle) webcamToggle.textContent = 'Webcam on';
+      if (webcamToggle) webcamToggle.textContent = 'Local motion sensor on';
       if (status) status.textContent = 'webcam presence is local and can be stopped any time';
       const video = document.createElement('video'); video.srcObject = webcamStream; video.muted = true; video.playsInline = true; await video.play();
       // FaceDetector is optional and remains entirely in-browser. Aiko only uses
@@ -210,7 +210,7 @@
         if (!detector || detecting) return; detecting = true; try { const faces = await detector.detect(video); if (faces.length > 0) window.aikoSetPose?.('lookAround', true); } catch (_) { /* detection is best effort */ } finally { detecting = false; } }, 1200);
     } catch (_) { window.addMessage?.('sys', 'Webcam access was unavailable. Aiko will keep using her idle animations.'); stopWebcam(); }
   }
-  function stopWebcam() { if (webcamTimer) clearInterval(webcamTimer); webcamTimer = 0; if (webcamStream) webcamStream.getTracks().forEach(track => { try { track.stop(); } catch (_) { /* already stopped */ } }); webcamStream = null; motionPrev = null; motionLevel = 0; motionBin = -1; reportPresence(0, true); if (webcamToggle) webcamToggle.textContent = 'Webcam off'; window.aikoSetPose?.('lookAround', false); }
+  function stopWebcam() { if (webcamTimer) clearInterval(webcamTimer); webcamTimer = 0; if (webcamStream) webcamStream.getTracks().forEach(track => { try { track.stop(); } catch (_) { /* already stopped */ } }); webcamStream = null; motionPrev = null; motionLevel = 0; motionBin = -1; reportPresence(0, true); if (webcamToggle) webcamToggle.textContent = 'Local motion sensor off'; window.aikoSetPose?.('lookAround', false); }
   webcamToggle?.addEventListener('click', toggleWebcam);
   window.addEventListener('pagehide', () => { try { stopWebcam(); } catch (_) { /* teardown only */ } }, { once: true });
   loadState();

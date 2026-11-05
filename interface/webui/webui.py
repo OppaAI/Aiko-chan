@@ -614,9 +614,19 @@ class AikoWeb:
                         if (observe_only or observed_watch is not None) and (not isinstance(observed_watch, str) or observed_watch != watch_id):
                             continue
                         source = "attachment" if msg.get("source") == "attachment" else "camera"
+                        attention_reason = msg.get("attention_trigger")
+                        if attention_reason is not None:
+                            if not observe_only or source != "camera" or attention_reason not in ("open_palm", "camera_gaze"):
+                                continue
+                            from system.config import env_bool
+                            enabled = env_bool("CAMERA_PALM_TRIGGER" if attention_reason == "open_palm" else "CAMERA_GAZE_TRIGGER", "1")
+                            from sensory.perception_events import claim_attention
+                            if not enabled or not claim_attention(uid):
+                                await self._safe_send(ws, json.dumps({"type":"vision", "status":"done", "source":source, "watch_id":observed_watch}))
+                                continue
                         active = (lambda expected=observed_watch: watch_id == expected) if observed_watch is not None else None
                         task = asyncio.create_task(self._handle_image_input(image, prompt, uid, source=source,
-                            respond=not observe_only, still_active=active, watch_id=observed_watch))
+                            respond=not observe_only, still_active=active, watch_id=observed_watch, attention_reason=attention_reason))
                         vision_tasks.add(task)
                         task.add_done_callback(vision_tasks.discard)
 
@@ -648,6 +658,12 @@ class AikoWeb:
                             watch_id = msg["watch_id"]
                             from sensory.perception_events import watching
                             watching(uid, True)
+                            from system.config import env_bool
+                            await self._safe_send(ws, json.dumps({"type":"camera_config", "watch_id":watch_id,
+                                "gaze":env_bool("CAMERA_GAZE_TRIGGER", "1"),
+                                "palm":env_bool("CAMERA_PALM_TRIGGER", "1"),
+                                "cooldown_ms":max(15, min(3600, env_float("CAMERA_ATTENTION_COOLDOWN_S", 90))) * 1000,
+                                "dwell_ms":max(1, min(10, env_float("CAMERA_ATTENTION_DWELL_S", 2))) * 1000}))
                         else:
                             watch_id = None
                             forget(uid, camera_only=True)
@@ -806,7 +822,7 @@ class AikoWeb:
             _VISION_INFERENCE_SLOT.release()
 
     async def _handle_image_input(self, image: str, question: str, uid: str, source: str = "camera",
-                                  *, respond=True, still_active=None, watch_id=None) -> None:
+                                  *, respond=True, still_active=None, watch_id=None, attention_reason=None) -> None:
         """Run vision off the socket loop and return its result to the requesting user."""
         # The authenticated user explicitly submitted this frame. The optional
         # fly runtime receives no image bytes, only a consented scalar event.
@@ -835,6 +851,9 @@ class AikoWeb:
             return
         from sensory.vision import remember, context as visual_context, VisualInput
         remember(uid, answer, source)
+        if attention_reason:
+            from sensory.perception_events import attention_ready
+            attention_ready(uid, attention_reason)
         if respond:
             prompt = question or ("What do you notice in the screen I shared?" if source == "screen" else "What do you see in the image I shared?")
             try:

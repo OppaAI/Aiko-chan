@@ -24,11 +24,10 @@ def runner(monkeypatch):
 
 
 def signal():
-    events.offer('perception-user', ('Thumb_Up',), 'Thumb up')
-    events.offer('perception-user', ('Thumb_Up',), 'Thumb up')
+    events.attention_ready('perception-user', 'open_palm')
 
 
-def test_repeated_cue_can_initiate_without_new_user_turn(runner):
+def test_analyzed_attention_can_initiate_without_new_user_turn(runner):
     item, sent = runner
     signal()
     due = item._prompt_due(O.time.monotonic())
@@ -64,14 +63,6 @@ def test_stop_watching_during_generation_discards_reply(runner):
     assert sent == []
 
 
-def test_gesture_can_recur_after_it_disappears(runner):
-    signal()
-    events.consume('perception-user')
-    events.offer('perception-user', (), '')
-    signal()
-    assert events.peek('perception-user') is not None
-
-
 def test_speech_generated_during_user_activity_is_not_delivered(runner):
     item, sent = runner
     def generate(_):
@@ -82,9 +73,29 @@ def test_speech_generated_during_user_activity_is_not_delivered(runner):
     assert sent == []
 
 
-def test_scene_change_requires_two_updates_without_cue_interference(runner):
-    events.scene('perception-user', 'Laptop keyboard desk monitor coding computer')
-    events.scene('perception-user', 'Outdoor garden flowers trees sunshine grass')
+def test_automatic_vlm_cooldown_survives_camera_restart(runner, monkeypatch):
+    monkeypatch.setenv('CAMERA_ATTENTION_COOLDOWN_S', '90')
+    # Production uses OrderedDict to bound entries.
+    from collections import OrderedDict
+    monkeypatch.setattr(events, '_attention_calls', OrderedDict())
+    assert events.claim_attention('perception-user')
+    events.watching('perception-user', False)
+    events.watching('perception-user', True)
+    assert not events.claim_attention('perception-user')
+    assert not events.claim_attention('not-watching')
+
+
+def test_ordinary_hand_cues_update_context_without_initiating(runner):
+    from sensory import vision
+    vision.note_cues('perception-user', {'gestures':['Thumb_Up'], 'posture':'arms_raised'})
+    vision.note_cues('perception-user', {'gestures':['Thumb_Up'], 'posture':'arms_raised'})
     assert events.peek('perception-user') is None
-    events.scene('perception-user', 'Outdoor garden flowers trees sunshine grass')
-    assert events.peek('perception-user') is not None
+    assert 'Thumb_Up' in vision.context('perception-user')
+
+
+def test_invalid_or_stopped_attention_cannot_initiate(runner):
+    events.attention_ready('perception-user', 'fist')
+    assert events.peek('perception-user') is None
+    events.watching('perception-user', False)
+    signal()
+    assert events.peek('perception-user') is None

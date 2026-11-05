@@ -1,8 +1,9 @@
 /* Visible, user-requested camera sessions. One frame in flight; no recordings. */
 (() => {
   const $ = id => document.getElementById(id);
-  let stream = null, video = null, session = null, sequence = 0, frameTimer = 0, cuesTimer = 0, deadline = 0;
+  let stream = null, video = null, session = null, sequence = 0, cuesTimer = 0, deadline = 0;
   let inFlight = false, cueBusy = false, enrolling = false, currentPrompt = '', cuesModule;
+  let attentionGate, faceFailed = false;
   const panel = $('camera-panel'), status = $('camera-status');
   const say = text => { if (status) status.textContent = text; };
   const send = payload => window.aikoSendWS?.(payload) === true;
@@ -13,8 +14,8 @@
     sequence++;
     const hadSession = session;
     session = null;
-    clearTimeout(frameTimer); clearTimeout(cuesTimer); clearTimeout(deadline);
-    frameTimer = cuesTimer = deadline = 0;
+    clearTimeout(cuesTimer); clearTimeout(deadline);
+    cuesTimer = deadline = 0;
     stream?.getTracks().forEach(track => track.stop()); stream = null;
     if (video) { video.pause(); video.srcObject = null; }
     if (hadSession) send({type:'camera_state', active:false, watch_id:hadSession});
@@ -43,11 +44,11 @@
     canvas.getContext('2d').drawImage(video,0,0,canvas.width,canvas.height);
     return canvas.toDataURL('image/jpeg',.78);
   }
-  function submitFrame(token, respond=false) {
+  function submitFrame(token, respond=false, attention=null) {
     if (!valid(token) || inFlight) return;
     inFlight = true;
     try {
-      if (!send({type:'image_input', image:frame(), text:currentPrompt, observe_only:!respond, watch_id:token})) throw new Error('Connection lost.');
+      if (!send({type:'image_input', image:frame(), text:currentPrompt, observe_only:!respond, watch_id:token, attention_trigger:attention})) throw new Error('Connection lost.');
       say('Camera on · observing the current scene…');
       // No acknowledgment means no new request can accumulate.
       clearTimeout(deadline); deadline = setTimeout(() => stop('Vision response timed out.'),125000);
@@ -61,21 +62,37 @@
       try {
         const api = await module();
         if (!valid(token)) return;
-        if ($('camera-motion').checked) Object.assign(data, await api.motionCues(video));
+        if ($('camera-motion').checked) {
+          try { Object.assign(data, await api.motionCues(video)); }
+          catch (error) { $('camera-motion').checked = false; say(`Hand detection unavailable: ${error.message}`); }
+        }
         if (!valid(token)) return;
-        if ($('camera-face').checked) data.face = await api.faceCue(video, uid());
-        if (valid(token)) send({type:'visual_cues',watch_id:token,cues:data});
+        if ($('camera-gaze').checked) {
+          try { data.camera_gaze = await api.gazeCue(video); }
+          catch (error) { $('camera-gaze').checked = false; say(`Gaze detection unavailable: ${error.message}`); }
+        }
+        if (!valid(token)) return;
+        if (!$('camera-face').checked) faceFailed = false;
+        if ($('camera-face').checked && !faceFailed) {
+          try { data.face = await api.faceCue(video, uid()); }
+          catch (error) { faceFailed = true; say(`Face recognition unavailable: ${error.message}. Re-enable it to retry.`); }
+        }
+        if (valid(token)) {
+          send({type:'visual_cues',watch_id:token,cues:data});
+          const recognized = !$('camera-face').checked || data.face === 'enrolled_match';
+          const reason = recognized && (data.raised_open_palm ? 'open_palm' : data.camera_gaze ? 'camera_gaze' : null);
+          const trigger = attentionGate.update(reason, performance.now());
+          if (trigger && !inFlight) submitFrame(token, false, trigger);
+        }
       } catch (error) {
         if (valid(token)) {
           say(`Camera on · ${error.message}`);
-          // A missing optional model must not start repeated downloads.
-          $('camera-motion').checked = false; $('camera-face').checked = false;
         }
       } finally { cueBusy = false; }
     }
     if (valid(token)) cuesTimer = setTimeout(() => cues(token),2000);
   }
-  async function start(prompt='What do you notice about what I am doing?', respond=true) {
+  async function start(prompt='Describe the person and scene briefly, including visible gestures.', respond=false) {
     stop();
     const generation = sequence;
     window.dispatchEvent(new CustomEvent('aiko:camera-starting'));
@@ -84,24 +101,29 @@
       panel.hidden = false; say('Opening camera…');
       if (!await openVideo(generation)) return;
       session = crypto.randomUUID(); currentPrompt = prompt;
+      const token = session;
+      const {AttentionGate} = await import('./camera_attention.js');
+      if (!valid(token) || generation !== sequence) return;
+      attentionGate = new AttentionGate(); faceFailed = false;
       $('watch-btn')?.classList.add('on');
-      send({type:'camera_state', active:true, watch_id:session});
-      submitFrame(session,respond); cues(session);
+      send({type:'camera_state', active:true, watch_id:token});
+      say('Camera on · look toward the camera or raise an open palm for a few seconds');
+      if (respond) submitFrame(token,true);
+      cues(token);
     } catch (error) { stop(error.message); window.addMessage?.('sys', error.message); window.hideTypingIndicator?.(); }
   }
   function visionEvent(event) {
     if (!session || event.watch_id !== session) return;
     if (event.status === 'done') {
       inFlight = false; clearTimeout(deadline);
-      say('Camera on · scene refresh every 15 seconds');
-      const token = session;
-      clearTimeout(frameTimer); frameTimer = setTimeout(() => submitFrame(token),15000);
+      say('Camera on · waiting for eye contact or a raised open palm');
     } else if (event.status === 'error' || event.status === 'busy') {
       stop(event.message || 'Vision is unavailable.'); window.hideTypingIndicator?.();
     }
   }
   $('watch-btn')?.addEventListener('click', () => session ? stop() : start());
   $('camera-stop')?.addEventListener('click', () => stop());
+  $('camera-face')?.addEventListener('change', () => { faceFailed = false; });
   $('camera-enroll')?.addEventListener('click', async () => {
     if (!session || enrolling) return;
     const token = session; enrolling = true;
@@ -110,7 +132,7 @@
       // Avoid running descriptor inference concurrently with the cue tick.
       if (cueBusy) { say('Wait for the current gesture/face check, then try again.'); return; }
       await (await module()).enrollFace(video, uid(), () => valid(token));
-      if (valid(token)) { $('camera-face').checked = true; say('Face remembered on this browser.'); }
+      if (valid(token)) { $('camera-face').checked = true; faceFailed = false; say('Face enrolled on this browser · triggers now require a match.'); }
     } catch (error) { if (valid(token)) say(error.message); }
     finally { enrolling = false; }
   });
@@ -120,7 +142,15 @@
   });
   document.addEventListener('visibilitychange', () => { if (document.hidden) stop(); });
   window.addEventListener('pagehide', () => stop());
-  window.AikoCamera = {start,stop,visionEvent, control(message) {
+  window.AikoCamera = {start,stop,visionEvent, configure(message) {
+    if (!valid(message.watch_id)) return;
+    $('camera-gaze').checked = message.gaze === true;
+    $('camera-gaze').disabled = message.gaze !== true;
+    $('camera-motion').checked = message.palm === true;
+    $('camera-motion').disabled = message.palm !== true;
+    if (Number.isFinite(message.cooldown_ms)) attentionGate.cooldown = Math.max(15000,Math.min(3600000,message.cooldown_ms));
+    if (Number.isFinite(message.dwell_ms)) attentionGate.dwell = Math.max(1000,Math.min(10000,message.dwell_ms));
+  }, control(message) {
     if (message.action === 'stop') stop();
     else if (message.action === 'watch') start(message.prompt);
     else if (message.action === 'capture') { stop(); window.captureImage?.(message.prompt); }

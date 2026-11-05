@@ -1449,10 +1449,11 @@ function connectWS() {
       case 'phase': if (msg.value === 'chat') switchToChat(); break;
       case 'chat': addMessage(msg.sender, msg.text); break;
       case 'camera_control': window.AikoCamera?.control(msg); break;
+      case 'camera_config': window.AikoCamera?.configure(msg); break;
       case 'vision':
         window.AikoCamera?.visionEvent(msg);
         window.aikoCompanionVision?.(msg);
-        if (msg.status === 'working') toolStatus.textContent = `  👁  analyzing ${msg.source === 'screen' ? 'screen' : 'camera'} image…`;
+        if (msg.status === 'working') toolStatus.textContent = `  👁  analyzing ${msg.source === 'screen' ? 'screen' : msg.source === 'attachment' ? 'attached' : 'camera'} image…`;
         else if (msg.status === 'done') { toolStatus.textContent = ''; cameraBtn.disabled = false; }
         else if (msg.status === 'error') { toolStatus.textContent = ''; cameraBtn.disabled = false; addMessage('sys', msg.message); }
         else if (msg.status === 'busy') addMessage('sys', msg.message);

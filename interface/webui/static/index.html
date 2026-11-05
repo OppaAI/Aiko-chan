@@ -143,8 +143,8 @@
 
     <div id="stage-chatbox" aria-label="Message Aiko">
       <input id="user-input" type="text" autocomplete="off" spellcheck="false" placeholder="Type your message...">
-      <button id="camera-btn" class="input-btn ghost" title="Take a picture and ask Aiko's vision model" aria-label="Take a picture">📷</button>
-      <button id="watch-btn" class="input-btn ghost" title="Watch with camera" aria-label="Watch with camera">👁</button>
+      <button id="camera-btn" class="input-btn ghost" title="Take one camera snapshot and ask Aiko" aria-label="Camera snapshot">📷</button>
+      <button id="watch-btn" class="input-btn ghost" title="Watch for gaze or a raised open palm" aria-label="Watch for gaze or a raised open palm">👁</button>
       <button id="attach-btn" class="input-btn ghost" title="Attach image" aria-label="Attach image">＋</button><input id="image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden>
       <button id="screen-btn" class="input-btn ghost" title="Share one screen frame with Aiko" aria-label="Share screen with Aiko">▣</button>
       <button id="send-btn" class="input-btn send" aria-label="Send message">➤</button>
@@ -237,7 +237,7 @@
     </div>
     <div class="companion-actions companion-secondary-actions">
       <button type="button" id="task-toggle" class="companion-btn ghost">Tasks</button>
-      <button type="button" id="webcam-toggle" class="companion-btn ghost">Webcam off</button>
+      <button type="button" id="webcam-toggle" class="companion-btn ghost">Local motion sensor off</button>
     </div>
     <div id="companion-task-panel" hidden>
       <form id="companion-task-form"><input id="companion-task-input" maxlength="140" placeholder="Add a task…" aria-label="Add task" autocomplete="off"><button type="submit" class="companion-btn" aria-label="Add task">+</button></form>
@@ -251,18 +251,18 @@
 
 
     <nav id="studio-strip" aria-label="Studios">
-      <a class="sbtn" href="/studio/memory/stm/" target="_blank" rel="noopener" title="Memory Vault"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5.5" rx="7.5" ry="2.8"/><path d="M4.5 5.5v13c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8v-13"/><path d="M4.5 12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8"/></svg><span class="sbtn-label">Memory Vault</span></a>
+      <a class="sbtn" href="/studio/memory/stm/" target="_blank" rel="noopener" title="Short-term Memory"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5.5" rx="7.5" ry="2.8"/><path d="M4.5 5.5v13c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8v-13"/><path d="M4.5 12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8"/></svg><span class="sbtn-label">Short-term Memory</span></a>
       <a class="sbtn" href="/studio/memory/ltm/" target="_blank" rel="noopener" title="Long-Term Memory"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5.5" rx="7.5" ry="2.8"/><path d="M4.5 5.5v13c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8v-13"/></svg><span class="sbtn-label">LTM</span></a>
       <a class="sbtn" href="/studio/memory/itm/" target="_blank" rel="noopener" title="Intermediate Memory"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5.5" rx="7.5" ry="2.8"/><path d="M4.5 5.5v13c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8"/></svg><span class="sbtn-label">ITM</span></a>
       <a class="sbtn" href="/studio/memory/kb/" target="_blank" rel="noopener" title="Knowledge Base"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5h16v10.5H9.5L4 20z"/><path d="M8 9.5h8M8 12.5h5"/></svg><span class="sbtn-label">KB</span></a>
       <a class="sbtn" href="/studio/innerspeech/" target="_blank" rel="noopener" title="Inner Speech Studio"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5h16v10.5H9.5L4 20z"/><path d="M8 9.5h8M8 12.5h5"/></svg><span class="sbtn-label">Inner Speech</span></a>
       <button type="button" class="sbtn" id="theme-toggle" title="Switch appearance theme"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4L3.5 7l2.2 3.6 1.8-1v9.4h9v-9.4l1.8 1L20.5 7 15 4a3 3 0 0 1-6 0z"/></svg><span class="sbtn-label">Theme</span></button>
-      <button type="button" class="sbtn" id="tile-voice" title="Toggle microphone"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/></svg><span class="sbtn-label">Voice Lab</span></button>
-      <button type="button" class="sbtn" id="tile-scene" title="Toggle webcam"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="9.5" width="18" height="11" rx="2"/><path d="M3.2 9.5L4.8 5l15.6 2.6-.9 2"/><path d="M8.6 5.9l1.7 3.3M13.4 6.7l1.7 3.3"/></svg><span class="sbtn-label">Scene Director</span></button>
-      <button type="button" class="sbtn" id="transcript-toggle" title="Show/hide full transcript"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20.5S3.5 15.4 3.5 9.6A4.6 4.6 0 0 1 8.2 5c1.7 0 3 .9 3.8 2.2A4.6 4.6 0 0 1 15.8 5a4.6 4.6 0 0 1 4.7 4.6c0 5.8-8.5 10.9-8.5 10.9z"/></svg><span class="sbtn-label">Relationship Log</span></button>
-      <button type="button" class="sbtn" id="tile-photo" title="Take a picture"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7.5" width="18" height="12.5" rx="2.5"/><circle cx="12" cy="13.5" r="3.8"/><path d="M8.5 7.5L10 5h4l1.5 2.5"/></svg><span class="sbtn-label">Photo Mode</span></button>
-      <a class="sbtn" href="/studio/fly/" target="_blank" rel="noopener" title="Affinity Map"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="6" r="2.4"/><circle cx="12" cy="18" r="2.4"/><path d="M7.8 7.8l3 7.4M16.2 7.8l-3 7.4M8.4 6h7.2"/></svg><span class="sbtn-label">Affinity Map</span></a>
-      <button type="button" class="sbtn" id="tile-sys" title="Companion settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v2.6M12 18.6v2.6M2.8 12h2.6M18.6 12h2.6M5.5 5.5l1.8 1.8M16.7 16.7l1.8 1.8M18.5 5.5l-1.8 1.8M7.3 16.7l-1.8 1.8"/></svg><span class="sbtn-label">System Settings</span></button>
+      <button type="button" class="sbtn" id="tile-voice" title="Toggle microphone"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/></svg><span class="sbtn-label">Microphone</span></button>
+      <button type="button" class="sbtn" id="tile-scene" title="Toggle local webcam motion sensor"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="9.5" width="18" height="11" rx="2"/><path d="M3.2 9.5L4.8 5l15.6 2.6-.9 2"/><path d="M8.6 5.9l1.7 3.3M13.4 6.7l1.7 3.3"/></svg><span class="sbtn-label">Local Motion Sensor</span></button>
+      <button type="button" class="sbtn" id="transcript-toggle" title="Show/hide full transcript"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20.5S3.5 15.4 3.5 9.6A4.6 4.6 0 0 1 8.2 5c1.7 0 3 .9 3.8 2.2A4.6 4.6 0 0 1 15.8 5a4.6 4.6 0 0 1 4.7 4.6c0 5.8-8.5 10.9-8.5 10.9z"/></svg><span class="sbtn-label">Chat Transcript</span></button>
+      <button type="button" class="sbtn" id="tile-photo" title="Take a picture"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7.5" width="18" height="12.5" rx="2.5"/><circle cx="12" cy="13.5" r="3.8"/><path d="M8.5 7.5L10 5h4l1.5 2.5"/></svg><span class="sbtn-label">Camera Snapshot</span></button>
+      <a class="sbtn" href="/studio/fly/" target="_blank" rel="noopener" title="Flybrain"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="6" r="2.4"/><circle cx="12" cy="18" r="2.4"/><path d="M7.8 7.8l3 7.4M16.2 7.8l-3 7.4M8.4 6h7.2"/></svg><span class="sbtn-label">Flybrain</span></a>
+      <button type="button" class="sbtn" id="tile-sys" title="Toggle compact companion view"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v2.6M12 18.6v2.6M2.8 12h2.6M18.6 12h2.6M5.5 5.5l1.8 1.8M16.7 16.7l1.8 1.8M18.5 5.5l-1.8 1.8M7.3 16.7l-1.8 1.8"/></svg><span class="sbtn-label">Compact Companion</span></button>
       <a class="sbtn" href="/studio/settings/" target="_blank" rel="noopener" title="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h10M18 8h2M4 16h2M10 16h10"/><circle cx="16" cy="8" r="2.2"/><circle cx="8" cy="16" r="2.2"/></svg><span class="sbtn-label">Settings</span></a>
       <a class="sbtn" href="/studio/dag/" target="_blank" rel="noopener" title="DAG Studio"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="12" r="2.2"/><circle cx="19" cy="5.5" r="2.2"/><circle cx="19" cy="18.5" r="2.2"/><path d="M7 11l10-4.5M7 13l10 4.5"/></svg><span class="sbtn-label">DAG Studio</span></a>
       <a class="sbtn" href="/studio/approval/" target="_blank" rel="noopener" title="Approval Studio"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M8.5 12.2l2.4 2.4 4.6-5"/></svg><span class="sbtn-label">Approval Studio</span></a>
@@ -353,9 +353,12 @@
   <div id="camera-panel" hidden style="position:fixed;right:1rem;bottom:6rem;z-index:1000;background:#222;color:white;padding:12px;border-radius:12px;max-width:250px">
     <video id="camera-preview" autoplay muted playsinline style="width:100%;border-radius:8px"></video>
     <div id="camera-status" aria-live="polite">Camera ready</div>
-    <label><input id="camera-motion" type="checkbox" checked> Gestures and posture</label><br>
-    <label><input id="camera-face" type="checkbox"> Recognize saved face</label><br>
-    <button id="camera-enroll" type="button">Remember my face</button><button id="camera-forget" type="button">Forget face</button><button id="camera-stop" type="button">Stop camera</button>
+    <label><input id="camera-motion" type="checkbox" checked title="MediaPipe hand and pose detection in this browser; a raised open palm requests one camera analysis"> Hands / posture · raised-palm trigger</label><br>
+    <label><input id="camera-gaze" type="checkbox" checked title="MediaPipe face and iris landmarks in this browser; estimates gaze toward the camera"> Camera-directed gaze trigger (estimate)</label><br>
+    <label><input id="camera-face" type="checkbox" title="Browser face-api matching against your enrolled template; this is not authentication"> Require my enrolled face for triggers</label><br>
+    <p style="font-size:.8rem">Hold a cue for a few seconds. Enrollment stays in this browser. Enable face matching after enrolling to restrict triggers.</p>
+    <a href="/studio/settings/" target="_blank" rel="noopener">Camera trigger settings</a><br>
+    <button id="camera-enroll" type="button">Enroll my face</button><button id="camera-forget" type="button">Forget face</button><button id="camera-stop" type="button">Stop camera</button>
   </div>
   <script src="./script.js"></script>
   <script src="./camera.js"></script>
@@ -383,14 +386,13 @@
       window.addEventListener('resize', () => { if (!head.closest('.ry-panel').classList.contains('collapsed')) setBody(); });
     });
 
-    // studio tile actions (each tile does something real)
+    // Studio shortcuts: labels describe their actual destinations/actions.
     const click = id => { const el = $(id); if (el) el.click(); };
-    $('tile-voice')?.addEventListener('click', () => click('mic-btn'));       // VOICE LAB → mic kill-switch
-    $('tile-scene')?.addEventListener('click', () => click('webcam-toggle')); // SCENE DIRECTOR → webcam
-    $('tile-photo')?.addEventListener('click', () => click('camera-btn'));    // PHOTO MODE → snapshot
-    $('tile-sys')?.addEventListener('click', () => click('companion-toggle'));// SYSTEM SETTINGS → companion panel
-    // OUTFIT STUDIO is #theme-toggle (wired by script.js); RELATIONSHIP LOG is
-    // #transcript-toggle (wired by script.js); MEMORY VAULT / AFFINITY MAP are links.
+    $('tile-voice')?.addEventListener('click', () => click('mic-btn'));       // Microphone toggle
+    $('tile-scene')?.addEventListener('click', () => click('webcam-toggle')); // Local scalar motion sensor
+    $('tile-photo')?.addEventListener('click', () => click('camera-btn'));    // Single camera snapshot
+    $('tile-sys')?.addEventListener('click', () => click('companion-toggle'));// Compact companion view
+    // Theme and transcript controls are wired by script.js; memory/Flybrain are links.
 
     // UTC offset label, e.g. UTC+09:00
     const tz = $('tz-label');

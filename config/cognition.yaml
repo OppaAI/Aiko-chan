@@ -123,3 +123,7 @@ PERCEPTION_CONVERSATION_ENABLED: "1"
 PERCEPTION_SPEAK_COOLDOWN_S: "90"
 PERCEPTION_USER_GAP_S: "8"
 PERCEPTION_MAX_PER_HOUR: "6"
+CAMERA_GAZE_TRIGGER: "1"  # Browser iris/face estimate; not calibrated eye tracking.
+CAMERA_PALM_TRIGGER: "1"  # Raised open palm, above shoulder level.
+CAMERA_ATTENTION_COOLDOWN_S: "90"  # Minimum interval between automatic VLM requests.
+CAMERA_ATTENTION_DWELL_S: "2"  # Hold the attention cue; browser sampling is ~2 seconds.

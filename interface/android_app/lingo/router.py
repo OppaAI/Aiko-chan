@@ -1265,7 +1265,7 @@ async def conversation_stop(session: dict = Depends(get_lingo_session)):
     return {"success": True}
 
 
-# Max upload: ~60s of 16kHz mono 16-bit PCM + WAV header.
+# Bound upload bytes independently of the decoded audio duration.
 _STT_MAX_BYTES = 2 * 1024 * 1024
 _STT_MAX_SECONDS = 30
 
@@ -1281,7 +1281,7 @@ async def speech_to_text(audio: UploadFile = File(...),
     """
     from starlette.concurrency import run_in_threadpool
 
-    raw = await audio.read()
+    raw = await audio.read(_STT_MAX_BYTES + 1)
     if not raw or len(raw) > _STT_MAX_BYTES:
         raise HTTPException(status_code=400, detail="Audio must be 1 byte – 2 MB")
 
@@ -1295,9 +1295,13 @@ async def speech_to_text(audio: UploadFile = File(...),
             sampwidth = w.getsampwidth()
             framerate = w.getframerate()
             n_frames = w.getnframes()
-            if n_frames <= 0 or n_frames > 16000 * _STT_MAX_SECONDS * 2:
-                raise ValueError("bad frame count")
+            if not 8000 <= framerate <= 192000 or not 1 <= n_channels <= 8:
+                raise ValueError("unsupported sample rate or channel count")
+            if n_frames <= 0 or n_frames > framerate * _STT_MAX_SECONDS:
+                raise ValueError("audio exceeds the 30-second duration limit")
             frames = w.readframes(n_frames)
+            if len(frames) != n_frames * n_channels * sampwidth:
+                raise ValueError("truncated WAV audio")
         if sampwidth == 2:
             pcm = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
         elif sampwidth == 1:
@@ -1306,9 +1310,6 @@ async def speech_to_text(audio: UploadFile = File(...),
             raise ValueError(f"unsupported sample width: {sampwidth}")
         if n_channels > 1:
             pcm = pcm.reshape(-1, n_channels).mean(axis=1).astype(np.float32)
-        max_len = 16000 * _STT_MAX_SECONDS
-        if pcm.size > max_len:
-            pcm = pcm[:max_len]
     except HTTPException:
         raise
     except Exception as e:

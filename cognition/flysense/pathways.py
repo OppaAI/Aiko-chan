@@ -25,6 +25,7 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
+import math
 import threading
 import time
 
@@ -44,7 +45,7 @@ def _clamp01(x: float) -> float:
         v = float(x)
     except Exception:
         return 0.0
-    return max(0.0, min(1.0, v))
+    return max(0.0, min(1.0, v)) if math.isfinite(v) else 0.0
 
 
 # ── voice ──────────────────────────────────────────────────────────────────
@@ -61,7 +62,8 @@ def encode_voice_prosody(prosody: dict | None) -> dict | None:
         rms = _clamp01(prosody.get("rms", 0.0))
         peak = _clamp01(prosody.get("peak", 0.0))
         try:
-            wps = max(0.0, float(prosody.get("words_per_second", 0.0)))
+            wps = float(prosody.get("words_per_second", 0.0))
+            wps = max(0.0, wps) if math.isfinite(wps) else 0.0
         except Exception:
             wps = 0.0
         pause = _clamp01(prosody.get("pause_density", 0.0))

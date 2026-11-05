@@ -123,7 +123,7 @@ Known architectural limitation (audit item #7, not fixed here):
 """
 from __future__ import annotations
 
-from functools import lru_cache
+from functools import lru_cache, wraps
 from system.config import env_float, env_int
 from system.userspace import current_user_id, user_state_path
 import json
@@ -181,6 +181,7 @@ def _ensure_runtime() -> None:
 
 
 import threading
+import contextvars
 import time
 import warnings
 
@@ -196,8 +197,6 @@ try:
     from livekit.wakeword import WakeWordModel as _WakeWordModel
 except ImportError:
     _WakeWordModel = None  # acoustic wake engine unavailable — falls back to fuzzy ASR-text matching
-
-warnings.filterwarnings("ignore")
 
 # ── boot labels ───────────────────────────────────────────────────────────────
 
@@ -546,6 +545,54 @@ def _prosody_features(audio: np.ndarray, text: str, sample_rate: int = SAMPLE_RA
     }
 
 
+def _serialized_listen(method):
+    @wraps(method)
+    def run(self, *args, **kwargs):
+        # VAD and wake detectors have recurrent state; never share one
+        # utterance buffer between concurrent WebUI/CLI capture requests.
+        with self._listen_lock:
+            return method(self, *args, **kwargs)
+    return run
+
+
+def _pcm_chunk(raw, expected_samples: int) -> np.ndarray:
+    """Copy PortAudio/WebUI float32 little-endian buffers before reuse."""
+    chunk = np.frombuffer(raw, dtype="<f4")
+    if chunk.size != expected_samples or not np.isfinite(chunk).all():
+        raise ValueError("invalid microphone PCM chunk")
+    return chunk.astype(np.float32, copy=True)
+
+
+def _read_input_chunk(stream, samples: int, cancelled=lambda: False):
+    deadline = time.monotonic() + _READ_TIMEOUT_S
+    while stream.read_available < samples:
+        if cancelled():
+            return None
+        if time.monotonic() >= deadline:
+            raise TimeoutError("microphone produced no audio before the read deadline")
+        time.sleep(0.005)
+    if cancelled():
+        return None
+    data, overflowed = stream.read(samples)
+    if overflowed:
+        log.warning("listen: microphone input overflow")
+    return _pcm_chunk(data, samples)
+
+
+def _close_input_stream(stream) -> None:
+    if stream is None:
+        return
+    try:
+        stream.stop()
+    except Exception:
+        log.warning("listen: failed to stop input stream")
+    finally:
+        try:
+            stream.close()
+        except Exception:
+            log.warning("listen: failed to close input stream")
+
+
 class AikoListen:
     """
     Microphone capture + SenseVoice ASR transcription (+ optional speaker
@@ -604,6 +651,8 @@ class AikoListen:
         self._wake_model:      object | None = None  # a livekit.wakeword.WakeWordModel, if loaded
         self._wake_model_name: str | None = None
         self._lock        = threading.Lock()
+        self._listen_lock = threading.Lock()
+        self._mic_lock = threading.Lock()
         # Lazy voice boot (see ensure_ready): models load on first mic arm,
         # not at app startup — keeps boot fast and RAM low in text mode.
         self._ensure_lock = threading.Lock()
@@ -627,6 +676,7 @@ class AikoListen:
         self._speaker_extractor: sherpa_onnx.SpeakerEmbeddingExtractor | None = None
         self._enrolled_embedding: np.ndarray | None = None
         self._speaker_lock = threading.Lock()
+        self._enrollment_signature = None
 
         # wake word / trigger phrase activation session — 0 / expired means
         # "asleep", i.e. the configured phrase(s) must be said again.
@@ -664,6 +714,15 @@ class AikoListen:
                 return
             try:
                 self.load_asr()
+                if self._model is None:
+                    raise RuntimeError("SenseVoice recognizer is unavailable")
+                # Optional model failures must not break ordinary voice chat.
+                # Load before VAD starts warmup so it sees the final models.
+                for loader in (self.load_wakeword, self.load_speaker_id):
+                    try:
+                        loader()
+                    except Exception as exc:
+                        log.warning("listen: optional voice model unavailable: %s", exc)
                 self.load_vad()
             except Exception as e:
                 self._voice_error = str(e)
@@ -674,7 +733,9 @@ class AikoListen:
                 log.warning("listen: voice boot failed, continuing text-only: %s", e)
                 return
             try:
-                self.join_warmup()
+                if not self.join_warmup():
+                    self._voice_error = "Voice warmup timed out; restart Aiko to retry."
+                    return
                 self.start_barge_in_monitor()
             except Exception as e:
                 log.warning("listen: voice post-boot step failed: %s", e)
@@ -751,15 +812,28 @@ class AikoListen:
         raises, so a missing enrollment can't break normal listening.
         """
         if not SPEAKER_VERIFY_ENABLED:
+            self._enrolled_embedding = None
             return
         if not SPEAKER_MODEL_PATH or not os.path.isfile(SPEAKER_MODEL_PATH):
+            self._enrolled_embedding = None
             log.warning(
                 f"[listen] SPEAKER_VERIFY_ENABLED=1 but SPEAKER_MODEL_PATH "
                 f"is missing or invalid ({SPEAKER_MODEL_PATH!r}); verification disabled."
             )
             return
-        _ensure_runtime()
         enroll_path = self.speaker_enroll_path()
+        uid = current_user_id()
+        # A shared listener must use the current user's enrollment, and pick
+        # up re-enrollment without rebuilding the ONNX extractor each turn.
+        try:
+            stat = os.stat(enroll_path)
+            signature = (uid, stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            signature = (uid, None, None)
+        if signature == self._enrollment_signature:
+            return
+        self._enrollment_signature = signature
+        self._enrolled_embedding = None
         if not os.path.isfile(enroll_path):
             log.warning(
                 f"[listen] SPEAKER_VERIFY_ENABLED=1 but no enrollment found at "
@@ -767,17 +841,21 @@ class AikoListen:
             )
             return
 
-        config = sherpa_onnx.SpeakerEmbeddingExtractorConfig(
-            model=SPEAKER_MODEL_PATH,
-            num_threads=SPEAKER_NUM_THREADS,
-            debug=False,
-            provider=ASR_DEVICE,
-        )
-        self._speaker_extractor = sherpa_onnx.SpeakerEmbeddingExtractor(config)
-
         with open(enroll_path) as f:
             data = json.load(f)
-        self._enrolled_embedding = np.asarray(data["embedding"], dtype=np.float32)
+        embedding = np.asarray(data["embedding"], dtype=np.float32)
+        if embedding.ndim != 1 or not embedding.size or embedding.size > 16384 or not np.isfinite(embedding).all() or np.linalg.norm(embedding) <= 0:
+            raise ValueError("speaker enrollment must contain a finite nonzero vector")
+        if self._speaker_extractor is None:
+            _ensure_runtime()
+            config = sherpa_onnx.SpeakerEmbeddingExtractorConfig(
+                model=SPEAKER_MODEL_PATH,
+                num_threads=SPEAKER_NUM_THREADS,
+                debug=False,
+                provider=ASR_DEVICE,
+            )
+            self._speaker_extractor = sherpa_onnx.SpeakerEmbeddingExtractor(config)
+        self._enrolled_embedding = embedding
 
     def join_warmup(self, timeout: float = 120.0) -> bool:
         """Bounded warmup join. Returns False on timeout instead of trapping
@@ -805,8 +883,8 @@ class AikoListen:
     def _verify_speaker(self, audio: np.ndarray) -> tuple[bool, float]:
         """
         Compare audio against the enrolled embedding via cosine similarity.
-        Returns (is_match, score). Thread-safe — extractor sessions aren't
-        guaranteed reentrant, so this is serialized alongside _transcribe().
+        Returns (is_match, score). Extractor sessions are not guaranteed
+        reentrant, so extraction has its own lock, independent of the ASR model.
         """
         with self._speaker_lock:
             embedding = self._compute_embedding(audio)
@@ -914,7 +992,6 @@ class AikoListen:
         this is the master switch. The check happens on every idle tick and
         again on every scoring iteration.
         """
-        bytes_per_chunk = _CHUNK_SAMPLES_VAD * 4
         samples_per_chunk = _CHUNK_SAMPLES_VAD
 
         while self._barge_in_active:
@@ -925,6 +1002,12 @@ class AikoListen:
                 time.sleep(0.5)
                 continue
 
+            if self._recording.is_set() or (not barge_in_always_on() and not self._barge_in_armed.is_set()):
+                time.sleep(0.05)
+                continue
+            if not self._mic_lock.acquire(blocking=False):
+                time.sleep(0.05)
+                continue
             stream = None
             try:
                 sd = self._load_sd()
@@ -941,23 +1024,17 @@ class AikoListen:
                 consecutive = 0
                 while self._barge_in_active and barge_in_enabled():
                     if self._recording.is_set() or (not barge_in_always_on() and not self._barge_in_armed.is_set()):
-                        time.sleep(0.05)
-                        consecutive = 0
-                        continue
+                        break  # release the device before ordinary capture opens it
 
+                    chunk = _read_input_chunk(
+                        stream, samples_per_chunk,
+                        cancelled=lambda: not self._barge_in_active or self._recording.is_set(),
+                    )
+                    if chunk is None:
+                        break
                     if self._barge_in_event.is_set():
-                        # Still consume data to keep the stream buffer from filling
-                        try:
-                            stream.read(samples_per_chunk)
-                        except Exception:
-                            pass
                         consecutive = 0
                         continue
-
-                    data, overflowed = stream.read(samples_per_chunk)
-                    if overflowed:
-                        log.warning("[listen] barge-in input overflow")
-                    chunk = data.flatten().copy()
 
                     is_speech = self._is_speech(self._barge_vad_model, chunk)
 
@@ -973,18 +1050,23 @@ class AikoListen:
                     else:
                         consecutive = 0
             except Exception as exc:
-                log.warning("listen: barge-in monitor died: %s", exc)
+                log.warning("listen: barge-in monitor failed: %s", exc)
+                time.sleep(0.5)  # unavailable devices must not spin/reopen at full CPU
             finally:
-                if stream is not None:
-                    try:
-                        stream.stop()
-                        stream.close()
-                    except Exception:
-                        log.warning("listen: failed to close barge-in input stream")
+                _close_input_stream(stream)
+                self._mic_lock.release()
 
     # ── public api ────────────────────────────────────────────────────────────
 
+    @_serialized_listen
     def listen(self, status_callback=None, speak=None, wait_fn=None, chunk_source=None):
+        """Capture one utterance and always restore the UI's idle state."""
+        try:
+            return self._listen(status_callback, speak, wait_fn, chunk_source)
+        finally:
+            _cb(status_callback, "__IDLE__")
+
+    def _listen(self, status_callback=None, speak=None, wait_fn=None, chunk_source=None):
         """
         Record and transcribe a single utterance (local mic or WebUI chunk stream).
 
@@ -1004,7 +1086,7 @@ class AikoListen:
                 internal wait logic (rarely used).
             chunk_source (callable, optional): For WebUI integration only. Callable(n_bytes)
                 that returns raw audio bytes from browser pcm-worklet. If None, uses local
-                PulseAudio (parec) for microphone input.
+                sounddevice/PortAudio for microphone input.
 
         Returns:
             tuple[str, bool]: (transcript, woke_this_call)
@@ -1046,11 +1128,10 @@ class AikoListen:
         # Lazy voice boot: first call pays the model-load cost here (or it
         # already ran earlier via a mic-arm kick from the WebUI).
         self.ensure_ready()
-        if self._vad_model is None:
+        if self._voice_error is not None or self._vad_model is None:
             # Voice boot failed (see self._voice_error) — _record() needs the
             # VAD, so there is nothing to capture. Return empty like a
             # silence timeout instead of crashing the caller's thread.
-            _cb(status_callback, "__IDLE__")
             return "", {
                 "verified": None,
                 "speaker_score": None,
@@ -1067,7 +1148,6 @@ class AikoListen:
         )
         recording_stopped_at = time.monotonic()
         if audio is None:
-            _cb(status_callback, "__IDLE__")
             return "", {
                 "verified": None,
                 "speaker_score": None,
@@ -1089,16 +1169,28 @@ class AikoListen:
             "listen_started_at": listen_started_at,
             "recording_stopped_at": recording_stopped_at,
         }
+        try:
+            self.load_speaker_id()
+        except Exception as exc:
+            log.warning("listen: speaker enrollment unavailable: %s", exc)
         if self.speaker_verify_active():
             result_box: dict = {}
 
             def _run_verify():
-                result_box["verified"], result_box["speaker_score"] = self._verify_speaker(audio)
+                try:
+                    result_box["verified"], result_box["speaker_score"] = self._verify_speaker(audio)
+                except Exception as exc:
+                    # Verification failure cannot turn an enabled gate into
+                    # a successful match through a missing result-box entry.
+                    result_box["verified"] = False
+                    log.warning("listen: speaker verification failed: %s", exc)
 
             verify_thread = threading.Thread(target=_run_verify, daemon=True)
             verify_thread.start()
-            text = self._transcribe(audio)
-            verify_thread.join()
+            try:
+                text = self._transcribe(audio)
+            finally:
+                verify_thread.join()
             info["verified"]      = result_box.get("verified")
             info["speaker_score"] = result_box.get("speaker_score")
         else:
@@ -1116,7 +1208,6 @@ class AikoListen:
             gated_text, gate_info = self._apply_activation_gate(text, info.get("verified"))
             info["woke"] = gate_info["woke"]
 
-        _cb(status_callback, "__IDLE__")
 
         if (
             speaker_verify_gate()
@@ -1141,7 +1232,8 @@ class AikoListen:
             text, info = self.listen(status_callback=status_callback)
             on_result(text, info)
 
-        t = threading.Thread(target=_run, daemon=True)
+        context = contextvars.copy_context()
+        t = threading.Thread(target=context.run, args=(_run,), daemon=True)
         t.start()
         return t
 
@@ -1248,9 +1340,13 @@ class AikoListen:
 
         use_external = chunk_source is not None
         stream = None
+        mic_acquired = False
 
         try:
             if not use_external:
+                mic_acquired = self._mic_lock.acquire(timeout=_READ_TIMEOUT_S)
+                if not mic_acquired:
+                    raise TimeoutError("microphone is still busy")
                 sd = self._load_sd()
                 device = LISTEN_DEVICE if LISTEN_DEVICE >= 0 else None
                 stream = sd.RawInputStream(
@@ -1269,22 +1365,9 @@ class AikoListen:
                     raw = chunk_source(bytes_per_chunk)
                     if raw is None or len(raw) < bytes_per_chunk:
                         break
-                    chunk = np.frombuffer(raw, dtype=np.float32).copy()
+                    chunk = _pcm_chunk(raw, samples_per_chunk)
                 else:
-                    # Read from sounddevice with a per-read deadline so a
-                    # stalled mic can't wedge the turn loop indefinitely
-                    # (sounddevice.read() blocks until frames are available,
-                    # with no per-read timeout of its own).
-                    read_deadline = time.monotonic() + _READ_TIMEOUT_S
-                    while stream.read_available < samples_per_chunk:
-                        if time.monotonic() >= read_deadline:
-                            _cb(status_callback, "__IDLE__")
-                            return None, False
-                        time.sleep(0.005)
-                    data, overflowed = stream.read(samples_per_chunk)
-                    if overflowed:
-                        log.warning("[listen] input overflow")
-                    chunk = data.flatten().copy()
+                    chunk = _read_input_chunk(stream, samples_per_chunk)
 
                 if wake_needed:
                     # Asleep and using the acoustic engine: score for the
@@ -1321,17 +1404,15 @@ class AikoListen:
                         if silence_count >= SILENCE_CHUNKS:
                             break
 
-        except Exception:
+        except Exception as exc:
+            log.warning("listen: recording failed: %s", exc)
             _cb(status_callback, "__IDLE__")
             return None, False
         finally:
+            _close_input_stream(stream)
+            if mic_acquired:
+                self._mic_lock.release()
             self._recording.clear()
-            if stream is not None:
-                try:
-                    stream.stop()
-                    stream.close()
-                except Exception:
-                    log.warning("listen: failed to close input stream")
 
         if not audio_chunks:
             return None, woke_this_call
@@ -1381,6 +1462,7 @@ class AikoListen:
         except Exception:
             return text
 
+    @_serialized_listen
     def transcribe_pcm(self, audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> str:
         """Public one-shot transcription of mono float32 PCM audio.
 
@@ -1390,25 +1472,27 @@ class AikoListen:
         """
         import numpy as _np
 
-        pcm = _np.asarray(audio, dtype=_np.float32).ravel()
+        if isinstance(sample_rate, bool) or not isinstance(sample_rate, (int, _np.integer)) or not 8000 <= sample_rate <= 192000:
+            raise ValueError("audio sample rate must be an integer between 8000 and 192000 Hz")
+        pcm = _np.asarray(audio, dtype=_np.float32)
+        if pcm.ndim != 1:
+            raise ValueError("audio must be mono PCM")
         if pcm.size == 0:
             return ""
-        if sample_rate != SAMPLE_RATE and sample_rate > 0:
-            try:
-                src = _np.linspace(0.0, 1.0, pcm.size)
-                dst = _np.linspace(0.0, 1.0, int(pcm.size * SAMPLE_RATE / sample_rate))
-                pcm = _np.interp(dst, src, pcm).astype(_np.float32)
-            except Exception:
-                pass
+        if pcm.size > sample_rate * MAX_RECORD_SECONDS:
+            raise ValueError("audio exceeds the maximum recording duration")
+        if not _np.isfinite(pcm).all():
+            raise ValueError("audio must contain finite PCM samples")
+        if sample_rate != SAMPLE_RATE:
+            # Integer sample times avoid stretching the final sample to t=1,
+            # and interpolation failures must never decode at the wrong rate.
+            count = max(1, round(pcm.size * SAMPLE_RATE / sample_rate))
+            pcm = _np.interp(_np.arange(count) * sample_rate / SAMPLE_RATE,
+                             _np.arange(pcm.size), pcm).astype(_np.float32)
         self.ensure_ready()
-        if self._model is None:
-            try:
-                self.load_asr()
-            except Exception:
-                log.warning("listen: transcribe_pcm ASR load failed")
-                return ""
-            if self._model is None:
-                return ""
+        if self._voice_error is not None or self._model is None:
+            return ""
+
         return self._transcribe(pcm)
 
     # ── warmup ────────────────────────────────────────────────────────────────
@@ -1416,6 +1500,7 @@ class AikoListen:
     def _warmup(self) -> None:
         if self._model is None:
             log.debug("listen: _warmup skipped — ASR model not loaded")
+            self._warmup_done.set()
             return
         try:
             silence = np.zeros(int(SAMPLE_RATE * 0.1), dtype=np.float32)

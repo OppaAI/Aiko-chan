@@ -15,7 +15,7 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 | 4 | Agentic tasks, tools, and self-coding | `agentic/`, `Aiko-Playground` integration | Current code pass completed; final validation below; live-model and physical Jetson checks pending |
 | 5 | Memory, retrieval, knowledge, and persistence | `cognition/memory/`, `cognition/knowledge/` | Current code pass completed for SQLite/Harrier; final validation below; live-model retrieval quality and physical Jetson RAM/latency checks pending |
 | 6 | Fly-brain circuits and state wiring | `cognition/fly*`, `cognition/centralcomplex/`, `cognition/neural_state.py` | Current code pass completed; final validation below; full-connectome and physical Jetson/sensor/body measurements pending |
-| 7 | Speech, listening, and sensory pathways | `sensory/`, `cognition/flysense/` | Not started |
+| 7 | Speech, listening, and sensory pathways | `sensory/`, `cognition/flysense/` | In progress: initial capture, lazy boot, enrollment, upload and prosody fixes shipped; TTS/playback and remaining sensory review pending |
 | 8 | Web, desktop, mobile, and external interfaces | `interface/` | Not started |
 | 9 | Configuration, security boundaries, storage, and deployment | `system/`, `config/`, `backend/`, `scripts/` | Focused path/TLS fixes shipped; broad review not started |
 | 10 | Evaluation, observability, and developer tooling | `tests/`, `eval/`, `conscience-lab/`, `util/` | Not started |
@@ -775,3 +775,43 @@ fidelity. The sensory and interface areas retain their own broader audit scopes.
   cognition/conscience/test_conscience_gate.py --tb=short
   -o faulthandler_timeout=60` passed with **2,591 tests, 5 skips, and 34
   subtests**. Physical Jetson/live-model deployment verification remains pending.
+
+
+## Area 7 progress
+
+- Fixed local microphone and barge-in capture: PortAudio RawInputStream returns
+  raw buffers, not arrays. Both paths now decode float32 little-endian PCM,
+  validate chunk size/finiteness, and copy buffers before PortAudio reuses them.
+- Normal capture and the barge monitor share microphone ownership. The monitor
+  closes its input stream when capture starts, rather than merely pausing with
+  the device still open. Reads have deadlines; failing devices back off instead
+  of reopening in a tight CPU loop. Closing is attempted even when stop fails.
+- Lazy voice startup now invokes the configured wake-word and speaker loaders,
+  before warmup. An absent recognizer or warmup timeout no longer advertises a
+  ready voice pipeline. Empty-model warmup also releases waiters.
+- Serialize utterances using recurrent VAD/wake state. Async listen workers
+  inherit the request identity, and speaker enrollment follows the current
+  user and file revision without repeatedly rebuilding the ONNX extractor.
+- Speaker verification exceptions produce a failed match instead of silently
+  bypassing an enabled match gate. Transcription errors still restore idle UI
+  state, and verification workers are joined on decoder errors too.
+- One-shot ASR rejects invalid rates, non-mono/non-finite PCM and excessive
+  duration before model loading; resampling uses actual sample positions.
+  Cached voice boot failures are no longer retried on every phone request.
+- Phone uploads use bounded reads and validate duration against the uploaded
+  sample rate. A 48 kHz recording no longer loses its tail to a 16 kHz cap.
+  Truncated WAV payloads are rejected before decoding.
+- Non-finite voice prosody maps to zero contributions instead of being clamped
+  into false urgency/energy. Removed a process-wide warning suppression from
+  the listener; optional sounddevice imports retain local warning handling.
+- Replaced stale transducer/mirror/precision references in the manual ASR
+  diagnostic with current SenseVoice/Silero stages. Its offline config stage
+  passes without torch, downloading models or requiring a microphone.
+- This first batch does not complete area 7. Remaining review includes TTS
+  cancellation and queue/resource bounds, WebUI/browser audio integration,
+  wake-session edge cases, enrollment utility and physical Jetson measurements.
+- Validation for this batch: 59 focused voice/sensory tests passed; the full
+  unit/integration/conscience run passed with **2,619 tests, 5 skips, and 34
+  subtests**. `python -m tests.unit.test_asr --stage env` also passed offline.
+  Real microphone, speaker, wake-model accuracy, speaker-match quality and
+  physical Jetson RAM/latency checks remain pending.

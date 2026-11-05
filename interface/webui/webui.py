@@ -555,10 +555,15 @@ class AikoWeb:
                     except json.JSONDecodeError:
                         continue
 
+                    if not isinstance(msg, dict):
+                        continue
                     mtype = msg.get("type")
 
                     if mtype == "user_input":
-                        text = (msg.get("text") or "").strip()
+                        text = msg.get("text")
+                        if not isinstance(text, str):
+                            continue
+                        text = text.strip()
                         if text:
                             with self._lock:
                                 busy_with_other = (
@@ -841,9 +846,9 @@ class AikoWeb:
         """Send one message; returns False when the client is dead (evict it)."""
         try:
             if isinstance(raw, bytes):
-                await ws.send_bytes(raw)
+                await asyncio.wait_for(ws.send_bytes(raw), timeout=10)
             else:
-                await ws.send_text(raw)
+                await asyncio.wait_for(ws.send_text(raw), timeout=10)
             return True
         except Exception:
             log.warning("webui: failed to send ws message")

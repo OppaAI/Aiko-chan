@@ -16,7 +16,7 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 | 5 | Memory, retrieval, knowledge, and persistence | `cognition/memory/`, `cognition/knowledge/` | Current code pass completed for SQLite/Harrier; final validation below; live-model retrieval quality and physical Jetson RAM/latency checks pending |
 | 6 | Fly-brain circuits and state wiring | `cognition/fly*`, `cognition/centralcomplex/`, `cognition/neural_state.py` | Current code pass completed; final validation below; full-connectome and physical Jetson/sensor/body measurements pending |
 | 7 | Speech, listening, and sensory pathways | `sensory/`, `cognition/flysense/` | Current code pass completed; final validation below; real-model/audio quality and physical Jetson RAM/latency checks pending |
-| 8 | Web, desktop, mobile, and external interfaces | `interface/` | Not started |
+| 8 | Web, desktop, mobile, and external interfaces | `interface/` | In progress: WebSocket input resilience and Telegram/Discord delivery fixes shipped; broader interface review pending |
 | 9 | Configuration, security boundaries, storage, and deployment | `system/`, `config/`, `backend/`, `scripts/` | Focused path/TLS fixes shipped; broad review not started |
 | 10 | Evaluation, observability, and developer tooling | `tests/`, `eval/`, `conscience-lab/`, `util/` | Not started |
 
@@ -933,3 +933,25 @@ certify model quality or physical-device performance.
   HTTP/body limits, cache eviction, phone event-loop responsiveness, lifecycle
   cleanup, and standalone playback. See [Voice playback](VOICE.md) for limits
   and the remaining physical-device checks.
+
+## Area 8 progress: socket resilience and messenger delivery
+
+- Ignore non-object JSON and non-string chat text in authenticated WebSocket
+  input. A malformed message no longer terminates subsequent chat delivery.
+- Bound individual browser sends to ten seconds so an unresponsive browser
+  cannot leave a broadcast coroutine waiting indefinitely.
+- Telegram now creates and owns its background asyncio loop instead of relying
+  on the nonexistent `Application.loop` attribute. Polling, reply scheduling,
+  and shutdown use that loop; duplicate starts retain the existing worker.
+  Startup failure clears the running flag and the loop closes after shutdown.
+  Register the documented `/help` command alongside `/start`.
+- Discord propagates channel-fetch/send errors to callers instead of reporting
+  a successful delivery. Cached and fetched channels share ordered 2,000-character
+  reply chunks. Both adapters cancel timed-out delivery futures and reject
+  synchronous sends from their own event-loop thread to avoid deadlock.
+- Validation: **47 focused tests passed**, including real background asyncio
+  loops, fake platform services, authenticated malformed WebSocket input,
+  WebUI user context/readiness, and social-lane routing. No messages were sent
+  to external services. Live bot credentials/services and desktop runtime have
+  not been exercised. Area 8's broader mobile, desktop, HTTP, frontend and
+  external-interface review remains open.

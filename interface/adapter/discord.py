@@ -42,6 +42,8 @@ class DiscordAdapter(AdapterBase):
         return mapped
 
     def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
         if discord is None:
             log.error("[discord] discord.py not installed. pip install discord-py")
             return
@@ -109,26 +111,24 @@ class DiscordAdapter(AdapterBase):
         if not self._client or not self._client.is_ready():
             raise RuntimeError(f"discord client not ready; cannot send to {conversation_id}")
         channel_id = int(conversation_id)
-        channel = self._client.get_channel(channel_id)
         try:
-            if channel is None:
-                log.warning("[discord] Channel %s not found in cache, trying fetch", conversation_id)
-                fut = asyncio.run_coroutine_threadsafe(
-                    self._fetch_and_send(channel_id, text),
-                    self._client.loop,
-                )
-            else:
-                fut = asyncio.run_coroutine_threadsafe(channel.send(text), self._client.loop)
-            fut.result(timeout=30)
+            if threading.current_thread() is self._thread:
+                raise RuntimeError("cannot synchronously send from Discord event loop")
+            fut = asyncio.run_coroutine_threadsafe(
+                self._fetch_and_send(channel_id, text), self._client.loop)
+            try:
+                fut.result(timeout=30)
+            except TimeoutError:
+                fut.cancel()
+                raise
         except Exception as exc:
             log.error("[discord] Failed to send to %s: %s", conversation_id, exc)
             raise
 
     async def _fetch_and_send(self, channel_id: int, text: str) -> None:
         """Fetch channel by ID and send message — used for DMs not in cache."""
-        try:
+        channel = self._client.get_channel(channel_id)
+        if channel is None:
             channel = await self._client.fetch_channel(channel_id)
-            await channel.send(text)
-            log.info("[discord] Sent to fetched channel %s", channel_id)
-        except Exception as exc:
-            log.error("[discord] Fetch and send failed for %s: %s", channel_id, exc)
+        for start in range(0, len(text), 2000):
+            await channel.send(text[start:start + 2000])

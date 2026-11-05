@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 
 from system.log import get_logger
@@ -22,6 +23,7 @@ class TelegramAdapter(AdapterBase):
         self._token: str = ""
         self._app: Application | None = None
         self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._user_id_map: dict[str, str] = self._parse_user_map(
             self._get_env("TELEGRAM_USER_ID_MAP")
         )
@@ -40,6 +42,8 @@ class TelegramAdapter(AdapterBase):
         return mapped
 
     def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
         if Application is None:
             log.error("[telegram] python-telegram-bot not installed. pip install python-telegram-bot")
             return
@@ -82,33 +86,40 @@ class TelegramAdapter(AdapterBase):
         if self._app:
             self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
             self._app.add_handler(CommandHandler("start", handle_text))
+            self._app.add_handler(CommandHandler("help", handle_text))
 
-            self._thread = threading.Thread(
-                target=self._app.run_polling,
-                kwargs={
-                    "drop_pending_updates": True,
-                    # run_polling installs SIGINT/SIGTERM handlers by default,
-                    # but add_signal_handler() only works in the main thread.
-                    # We run polling in a background thread, so disable stop
-                    # signals — the adapter's own stop() handles shutdown.
-                    "stop_signals": None,
-                },
-                daemon=True,
-            )
-            self._thread.start()
+            app = self._app
+
+            def poll() -> None:
+                loop = asyncio.new_event_loop()
+                self._loop = loop
+                asyncio.set_event_loop(loop)
+                try:
+                    if not self._running:
+                        return
+                    app.run_polling(drop_pending_updates=True, stop_signals=None,
+                                    close_loop=False)
+                except Exception:
+                    log.exception("[telegram] polling failed")
+                finally:
+                    self._running = False
+                    self._loop = None
+                    loop.close()
+
+            self._thread = threading.Thread(target=poll, daemon=True)
             self._running = True
+            self._thread.start()
             log.info("[telegram] Adapter started")
 
     def stop(self) -> None:
         self._running = False
-        if self._app:
-            try:
-                import asyncio
-                asyncio.run_coroutine_threadsafe(
-                    self._app.stop(), self._app.loop
-                )
-            except Exception:
-                log.warning("telegram: async app stop failed")
+        app, loop = self._app, self._loop
+        if app is not None and loop is not None and loop.is_running():
+            # Let run_polling perform updater/application shutdown in its own loop.
+            loop.call_soon_threadsafe(app.stop_running)
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=10)
 
     def send_message(self, conversation_id: str, text: str) -> None:
         """Send a text message, blocking until Telegram confirms delivery.
@@ -119,7 +130,8 @@ class TelegramAdapter(AdapterBase):
         event loop thread (the blocking wait would deadlock).
         """
         app = self._app
-        if not app:
+        loop = self._loop
+        if not app or loop is None or not loop.is_running() or not self._running:
             raise RuntimeError("telegram adapter not started")
         import asyncio
         try:
@@ -132,7 +144,14 @@ class TelegramAdapter(AdapterBase):
                         text=text[start:start + 4096],
                     )
 
-            asyncio.run_coroutine_threadsafe(send_chunks(), app.loop).result(timeout=30)
+            if threading.current_thread() is self._thread:
+                raise RuntimeError("cannot synchronously send from Telegram event loop")
+            future = asyncio.run_coroutine_threadsafe(send_chunks(), loop)
+            try:
+                future.result(timeout=30)
+            except TimeoutError:
+                future.cancel()
+                raise
         except Exception as exc:
             log.error("[telegram] Failed to send to %s: %s", conversation_id, exc)
             raise

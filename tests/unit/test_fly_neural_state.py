@@ -125,3 +125,84 @@ def test_neural_state_concurrent_publish_and_snapshot_remain_consistent():
         futures.extend(pool.submit(inspect) for _ in range(2))
         for future in futures:
             future.result()
+
+
+def test_invalid_circuit_signals_return_to_neutral_baselines():
+    import math
+    for invalid in (float('nan'), float('inf'), -float('inf'), None, 'invalid'):
+        state = NeuralState(user_id='invalid-signal')
+        state.publish_mb(invalid)
+        state.publish_cx(heading_deg=invalid, sharpness=invalid, decisiveness=invalid, sleep_pressure=invalid)
+        state.publish_dn(arousal=invalid, rate_mult=invalid)
+        state.publish_lh(invalid)
+        state.publish_gf(invalid)
+        state.publish_motion(invalid)
+        state.publish_sensory_gain(invalid)
+        state.publish_circadian(invalid)
+        snapshot = state.snapshot()
+        assert snapshot['urgency'] == 0.0
+        assert snapshot['sleep_pressure'] == 0.0
+        assert snapshot['valence'] == 0.0
+        assert snapshot['decisiveness'] == 0.5
+        assert snapshot['motor_vigor'] == 1.0
+        assert snapshot['sensory_gain'] == 1.0
+        assert snapshot['context_familiarity'] == 0.5
+        assert all(math.isfinite(value) for value in snapshot.values() if isinstance(value, float))
+
+
+def test_neural_trace_owns_nested_input_and_output_values():
+    state = NeuralState(user_id='trace-isolation')
+    event = {'kind': 'signal', 'values': {'sources': ['mb']}}
+    state.record_influence(event)
+    event['values']['sources'].append('external-mutation')
+    snapshot = state.snapshot()
+    assert snapshot['influence'][0]['values']['sources'] == ['mb']
+    snapshot['influence'][0]['values']['sources'].append('consumer-mutation')
+    assert state.snapshot()['influence'][0]['values']['sources'] == ['mb']
+
+
+def test_invalid_priority_cannot_trigger_gf_cancellation(monkeypatch):
+    from cognition.fly_behavior import giant_fiber
+    monkeypatch.setattr(giant_fiber, '_mode', lambda: 'live')
+    for value in (float('nan'), float('inf'), -float('inf'), 'invalid', None):
+        result = giant_fiber.assess_interrupt('Let us see the autumn leaves tomorrow.', priority=value,
+                                             voice_urgency=value, motion_salience=value, subliminal_urgency=value)
+        assert not result['interrupt']
+        assert result['urgency'] == 0.0
+    assert giant_fiber.assess_interrupt('stop')['interrupt']
+    assert giant_fiber.assess_interrupt('system task', priority=1.0)['interrupt']
+
+
+def test_unseen_fingerprint_is_not_reported_as_familiar(monkeypatch):
+    from cognition.memory import preference_store
+    monkeypatch.setattr(lateral_horn, '_mode', lambda: 'live')
+    monkeypatch.setattr(preference_store, '_cached_vec', lambda text: None)
+    _clear_seen()
+    first = lateral_horn.context_prior('Autumn leaves and a coding afternoon', user_id='owner')
+    second = lateral_horn.context_prior('Autumn leaves and a coding afternoon', user_id='owner')
+    assert first['novel'] and first['familiarity'] < .5 and first['bias'] < 0
+    assert not second['novel'] and second['familiarity'] > .5 and second['bias'] > 0
+
+
+def test_invalid_familiarity_vectors_do_not_poison_history(monkeypatch):
+    from cognition.memory import preference_store
+    monkeypatch.setattr(lateral_horn, '_mode', lambda: 'live')
+    monkeypatch.setattr(preference_store, '_cached_vec', lambda text: [float('nan'), 1.0])
+    _clear_seen()
+    prior = lateral_horn.context_prior('A quiet new context', user_id='owner')
+    assert prior['method'] == 'fingerprint'
+    assert lateral_horn._seen_vec == {}
+    assert lateral_horn._cosine([float('nan'), 1.], [1., 1.]) == 0.0
+
+
+def test_working_memory_score_does_not_record_familiarity(monkeypatch):
+    from cognition.memory import grasp, preference_store
+    monkeypatch.setattr(lateral_horn, '_mode', lambda: 'live')
+    monkeypatch.setattr(preference_store, '_cached_vec', lambda text: None)
+    monkeypatch.setattr(grasp, 'MEMORY_FLYMB_MODE', 'off')
+    _clear_seen()
+    turn = grasp.GraspTurn(user='autumn leaves', assistant='a quiet walk', tokens=10)
+    first = grasp.compute_score(turn, 1, user_id='readonly-score')
+    second = grasp.compute_score(turn, 1, user_id='readonly-score')
+    assert first == second
+    assert 'readonly-score' not in _seen_users()

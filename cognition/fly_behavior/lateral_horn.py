@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import threading
 from collections import deque
 
 from system.config import env_str, env_float
@@ -19,6 +20,7 @@ log = logging.getLogger("aiko.fly_behavior.lateral_horn")
 _seen_fp: dict[str, set[str]] = {}
 _seen_vec: dict[str, deque] = {}
 _VEC_MAX = 32
+_history_lock = threading.RLock()
 
 
 def _mode() -> str:
@@ -40,7 +42,8 @@ def _cosine(a: list[float], b: list[float]) -> float:
     dot = sum(x * y for x, y in zip(a, b))
     na = math.sqrt(sum(x * x for x in a)) or 1e-9
     nb = math.sqrt(sum(x * x for x in b)) or 1e-9
-    return max(-1.0, min(1.0, dot / (na * nb)))
+    similarity = dot / (na * nb)
+    return max(-1.0, min(1.0, similarity)) if math.isfinite(similarity) else 0.0
 
 
 def context_prior(text: str, *, user_id: str | None = None, record: bool = True) -> dict:
@@ -61,31 +64,36 @@ def context_prior(text: str, *, user_id: str | None = None, record: bool = True)
 
         vec = _cached_vec(text or "")
         if vec is not None:
+            if not len(vec) or not all(math.isfinite(float(value)) for value in vec):
+                raise ValueError('invalid familiarity embedding')
             method = "embedding"
             # Read-only lookups must not create state (mirrors the fingerprint branch).
-            buf = _seen_vec.setdefault(key, deque(maxlen=_VEC_MAX)) if record else _seen_vec.get(key, ())
+            with _history_lock:
+                previous = list(_seen_vec.get(key, ()))
             best = 0.0
-            for prev in buf:
+            for prev in previous:
                 best = max(best, _cosine(vec, prev))
             familiarity = max(0.1, min(0.95, 0.15 + 0.8 * max(0.0, best)))
             novel = best < 0.75
             if record:
-                buf.append(list(vec))
+                with _history_lock:
+                    _seen_vec.setdefault(key, deque(maxlen=_VEC_MAX)).append(list(vec))
     except Exception as exc:
         log.debug("lh semantic skipped: %s", exc)
         method = "fingerprint"
 
     if method == "fingerprint":
-        bucket = _seen_fp.setdefault(key, set()) if record else _seen_fp.get(key, set())
         fp = _tok_key(text)
-        familiar = fp in bucket
-        if record:
-            bucket.add(fp)
-            if len(bucket) > 256:
-                for i, x in enumerate(list(bucket)):
-                    if i % 2 == 0:
-                        bucket.discard(x)
-        familiarity = 0.85 if familiar else max(0.15, 1.0 - (len(bucket) / 256.0) * 0.5)
+        with _history_lock:
+            bucket = _seen_fp.setdefault(key, set()) if record else _seen_fp.get(key, set())
+            familiar = fp in bucket
+            if record:
+                bucket.add(fp)
+                if len(bucket) > 256:
+                    for i, x in enumerate(list(bucket)):
+                        if i % 2 == 0:
+                            bucket.discard(x)
+        familiarity = 0.85 if familiar else 0.15
         novel = not familiar
 
     w = env_float("MEMORY_FLYLH_W", 0.05)

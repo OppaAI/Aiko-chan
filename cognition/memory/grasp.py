@@ -375,7 +375,7 @@ def compute_score(
     current_turn: int,
     *,
     user_id: str | None = None,
-    record_lh: bool = True,
+    record_lh: bool = False,
 ) -> float:
     emo = (turn.emotion + 1.0) * 0.5
     rec = score_recency(turn.created_turn, current_turn)
@@ -480,7 +480,7 @@ class GraspBuffer:
             created_turn=self._turn_counter, user_ts=u_unix, assistant_ts=a_unix, _token_set=token_set,
         )
         turn.novelty = score_novelty(token_set, [s._token_set for s in self._slots])
-        turn.score = compute_score(turn, self._turn_counter, user_id=self.identity)
+        turn.score = compute_score(turn, self._turn_counter, user_id=self.identity, record_lh=True)
         if MEMORY_FLYMB_MODE == "live":
             # Single DAN-like teaching event per accepted turn (shadow learns nothing).
             # Identity-scoped via fly_registry (multi-user safe).

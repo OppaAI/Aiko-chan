@@ -9,6 +9,8 @@ Stage 1: bounded influence ring buffer for Fly Studio observability.
 """
 from __future__ import annotations
 
+import math
+from copy import deepcopy
 import threading
 import time
 from collections import deque
@@ -35,6 +37,15 @@ def _key(user_id: str | None) -> str:
     except Exception:
         uid = (user_id or "").strip() or "default"
         return uid
+
+
+def _finite(value, default):
+    """Invalid circuit readouts must return to a neutral baseline."""
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else default
+    except (TypeError, ValueError, OverflowError):
+        return default
 
 
 @dataclass
@@ -71,14 +82,14 @@ class NeuralState:
         with self._instance_lock:
             d = asdict(self)
             d["updated_at"] = self.updated_at
-            d["influence"] = list(self._influence)
+            d["influence"] = deepcopy(list(self._influence))
             return d
 
     def record_influence(self, event: dict[str, Any]) -> None:
         """Append a small observability event (Studio / debug). Never raises."""
         try:
             with self._instance_lock:
-                row = dict(event or {})
+                row = deepcopy(dict(event or {}))
                 row.setdefault("ts", time.time())
                 self._influence.append(row)
                 self.updated_at = time.time()
@@ -87,7 +98,7 @@ class NeuralState:
 
     def publish_mb(self, valence: float, *, source: str = "mb") -> None:
         with self._instance_lock:
-            v = max(-1.0, min(1.0, float(valence)))
+            v = max(-1.0, min(1.0, _finite(valence, 0.0)))
             self.valence = v
             self.approach = max(0.0, v)
             self.avoidance = max(0.0, -v)
@@ -104,48 +115,48 @@ class NeuralState:
         source: str = "cx",
     ) -> None:
         with self._instance_lock:
-            self.focus_heading = float(heading_deg) % 360.0
-            self.focus_sharpness = max(0.0, min(1.0, float(sharpness)))
-            self.decisiveness = max(0.0, min(1.0, float(decisiveness)))
-            self.sleep_pressure = max(0.0, min(1.0, float(sleep_pressure)))
+            self.focus_heading = _finite(heading_deg, 0.0) % 360.0
+            self.focus_sharpness = max(0.0, min(1.0, _finite(sharpness, 0.0)))
+            self.decisiveness = max(0.0, min(1.0, _finite(decisiveness, 0.5)))
+            self.sleep_pressure = max(0.0, min(1.0, _finite(sleep_pressure, 0.0)))
             self.sources["cx"] = source
             self.updated_at = time.time()
 
     def publish_dn(self, *, arousal: float = 0.5, rate_mult: float = 1.0, source: str = "dn") -> None:
         with self._instance_lock:
-            self.action_drive = max(0.0, min(1.0, float(arousal)))
-            self.motor_vigor = max(0.5, min(1.5, float(rate_mult)))
+            self.action_drive = max(0.0, min(1.0, _finite(arousal, 0.5)))
+            self.motor_vigor = max(0.5, min(1.5, _finite(rate_mult, 1.0)))
             self.sources["dn"] = source
             self.updated_at = time.time()
 
     def publish_lh(self, familiarity: float, *, source: str = "lh") -> None:
         with self._instance_lock:
-            self.context_familiarity = max(0.0, min(1.0, float(familiarity)))
+            self.context_familiarity = max(0.0, min(1.0, _finite(familiarity, 0.5)))
             self.sources["lh"] = source
             self.updated_at = time.time()
 
     def publish_gf(self, urgency: float, interrupt: bool = False, *, source: str = "gf") -> None:
         with self._instance_lock:
-            self.urgency = max(0.0, min(1.0, float(urgency)))
+            self.urgency = max(0.0, min(1.0, _finite(urgency, 0.0)))
             self.interrupt = bool(interrupt)
             self.sources["gf"] = source
             self.updated_at = time.time()
 
     def publish_motion(self, salience: float, *, source: str = "t4t5") -> None:
         with self._instance_lock:
-            self.motion_salience = max(0.0, min(1.0, float(salience)))
+            self.motion_salience = max(0.0, min(1.0, _finite(salience, 0.0)))
             self.sources["motion"] = source
             self.updated_at = time.time()
 
     def publish_sensory_gain(self, gain: float, *, source: str = "al") -> None:
         with self._instance_lock:
-            self.sensory_gain = max(0.1, min(2.0, float(gain)))
+            self.sensory_gain = max(0.1, min(2.0, _finite(gain, 1.0)))
             self.sources["al"] = source
             self.updated_at = time.time()
 
     def publish_circadian(self, phase: float, *, source: str = "clock") -> None:
         with self._instance_lock:
-            self.circadian_phase = max(0.0, min(1.0, float(phase)))
+            self.circadian_phase = max(0.0, min(1.0, _finite(phase, 0.5)))
             self.sources["clock"] = source
             self.updated_at = time.time()
 

@@ -12,6 +12,7 @@ Modes (MEMORY_FLYGF_MODE): off | shadow | live
 from __future__ import annotations
 
 import re
+from cognition.neural_state import _finite
 from system.config import env_str, env_float
 
 _URGENCY_RE = re.compile(
@@ -37,7 +38,7 @@ _STOP_COMMAND_RE = re.compile(
 
 
 def cancel_threshold() -> float:
-    return max(0.75, min(1.0, env_float("MEMORY_FLYGF_CANCEL_THRESHOLD", 0.85)))
+    return max(0.75, min(1.0, _finite(env_float("MEMORY_FLYGF_CANCEL_THRESHOLD", 0.85), 0.85)))
 
 
 def _mode() -> str:
@@ -89,21 +90,21 @@ def assess_interrupt(
     if _SAFETY_RE.search(t):
         sources["safety"] = 0.55
         u = max(u, 0.55)
-    pr = max(0.0, min(1.0, float(priority or 0.0)))
+    pr = max(0.0, min(1.0, _finite(priority, 0.0)))
     if pr > 0:
         sources["priority"] = pr
         u = max(u, pr)
-    su = max(0.0, min(1.0, float(subliminal_urgency or 0.0)))
+    su = max(0.0, min(1.0, _finite(subliminal_urgency, 0.0)))
     if su > 0:
         su_u = 0.35 + 0.35 * su
         sources["subliminal"] = round(su_u, 4)
         u = max(u, su_u)
-    ms = max(0.0, min(1.0, float(motion_salience or 0.0)))
+    ms = max(0.0, min(1.0, _finite(motion_salience, 0.0)))
     if ms >= 0.55 or motion_sudden:
         ms_u = min(1.0, 0.35 + 0.25 * ms + (0.20 if motion_sudden else 0.0))
         sources["motion"] = round(ms_u, 4)
         u = max(u, ms_u)
-    vu = max(0.0, min(1.0, float(voice_urgency or 0.0)))
+    vu = max(0.0, min(1.0, _finite(voice_urgency, 0.0)))
     if vu > 0:
         # Loud voice is a nudge, never an interrupt by itself (capped at
         # 0.45 upstream — advisory rather than a cancellation command).

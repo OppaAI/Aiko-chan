@@ -14,7 +14,7 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 | 3 | Conscience, refusal gates, and user preferences | `cognition/conscience/`, `cognition/policy.py`, `cognition/attention.py` | Current code pass completed; final validation below; live-model and physical Jetson checks pending |
 | 4 | Agentic tasks, tools, and self-coding | `agentic/`, `Aiko-Playground` integration | Current code pass completed; final validation below; live-model and physical Jetson checks pending |
 | 5 | Memory, retrieval, knowledge, and persistence | `cognition/memory/`, `cognition/knowledge/` | Current code pass completed for SQLite/Harrier; final validation below; live-model retrieval quality and physical Jetson RAM/latency checks pending |
-| 6 | Fly-brain circuits and state wiring | `cognition/fly*`, `cognition/centralcomplex/`, `cognition/neural_state.py` | Focused wiring fixes shipped; broad review not started |
+| 6 | Fly-brain circuits and state wiring | `cognition/fly*`, `cognition/centralcomplex/`, `cognition/neural_state.py` | In progress; signal validation, GF priority, familiarity, and working-memory score wiring fixes below |
 | 7 | Speech, listening, and sensory pathways | `sensory/`, `cognition/flysense/` | Not started |
 | 8 | Web, desktop, mobile, and external interfaces | `interface/` | Not started |
 | 9 | Configuration, security boundaries, storage, and deployment | `system/`, `config/`, `backend/`, `scripts/` | Focused path/TLS fixes shipped; broad review not started |
@@ -674,3 +674,29 @@ standalone conscience harness. The current Area 5 code pass is complete for the
 configured SQLite/Harrier setup. Real-model retrieval quality and physical Jetson
 measurements remain pending; this is not a claim that every live-model scenario
 is bug-free.
+
+
+## Area 6 progress
+
+The first broad-review batch traces the shared NeuralState bus through GF and
+LH into working-memory scoring.
+
+- Nonfinite circuit values previously saturated several Python clamp expressions
+  to their maximum. Neural-state publishers now return invalid values to neutral
+  baselines. GF priority is also validated before its cancellation decision, so
+  NaN/infinite priority cannot manufacture a cancellation. Valid stop commands
+  and finite high-priority cancellation remain supported.
+- Influence records and snapshots own their nested trace values; external
+  producers and consumers cannot mutate stored trace data by reference.
+- LH's fingerprint fallback previously reported new contexts as almost fully
+  familiar. Unseen contexts now receive low familiarity, and invalid embedding
+  readouts fall back without contaminating history. History access is synchronized.
+- Working-memory score evaluation is read-only by default. Accepted turns
+  explicitly record familiarity once; repeated scoring no longer teaches its
+  own familiarity and changes the result being compared.
+
+Validation: **375 tests passed, 2 skipped**, with 13 existing warnings across
+Fly-brain stages, circuits, cancellation, registry, runtime/catalog, persona,
+sensory adapters, central-complex, and Fly-memory tests. Area 6 remains in
+progress; runtime/catalog lifecycle, background step publication, plasticity
+persistence, CX, DN/body, and sensory wiring need the broader review.

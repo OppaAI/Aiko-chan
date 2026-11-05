@@ -646,6 +646,8 @@ class AikoWeb:
                         from sensory.vision import forget
                         if msg.get("active") is True and isinstance(msg.get("watch_id"), str) and 1 <= len(msg["watch_id"]) <= 64:
                             watch_id = msg["watch_id"]
+                            from sensory.perception_events import watching
+                            watching(uid, True)
                         else:
                             watch_id = None
                             forget(uid, camera_only=True)
@@ -687,6 +689,9 @@ class AikoWeb:
                         event = msg.get("event")
                         if self._audio_feedback_blocked():
                             continue
+                        if not hasattr(self, "_human_speech_until"):
+                            self._human_speech_until = {}
+                        self._human_speech_until[uid] = time.monotonic() + (30 if event == "start" else 5)
                         if event == "start":
                             self._broadcast({"type": "voice", "status": "listening"}, user_id=uid)
                         elif event == "end":
@@ -839,6 +844,9 @@ class AikoWeb:
                     "message":"The chat queue is full. Ask me about the image again.", "watch_id":watch_id}, user_id=uid)
                 return
         self._broadcast({"type":"vision", "status":"done", "source":source, "watch_id":watch_id}, user_id=uid)
+
+    def human_is_speaking(self):
+        return getattr(self, "_human_speech_until", {}).get(current_user_id(), 0) > time.monotonic()
 
     def request_camera_action(self, action: str, prompt: str = "") -> bool:
         if action not in {"capture", "watch", "stop"} or self._loop is None:

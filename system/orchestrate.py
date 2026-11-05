@@ -544,6 +544,10 @@ class ProactiveIdleRunner:
         self._next_checkin_after = self._random_first_idle_delay()
         self._resting = False
         self._thread: threading.Thread | None = None
+        from sensory.perception_events import subscribe
+        subscribe(self._wakeup)
+        self._perception_last = 0.0
+        self._perception_times = collections.deque()
         register_idle_runner(self)
 
     def set_speak(self, speak) -> None:
@@ -566,6 +570,8 @@ class ProactiveIdleRunner:
         self._wakeup.set()
         if self._thread and self._thread is not threading.current_thread() and self._thread.is_alive():
             self._thread.join(timeout=2.0)
+        from sensory.perception_events import unsubscribe
+        unsubscribe(self._wakeup)
         _unregister_idle_runner(self)
 
     def touch(self) -> None:
@@ -578,6 +584,8 @@ class ProactiveIdleRunner:
             self._resting = False
         if self._on_rest_change:
             self._on_rest_change(False)
+        from sensory.perception_events import consume
+        consume(self._actor[0])
         self._wakeup.set()
 
     def set_enabled(self, enabled: bool) -> None:
@@ -658,6 +666,24 @@ class ProactiveIdleRunner:
             return None
         if self._speak is not None and self._speak.is_playing():
             return None
+        from sensory.perception_events import peek, consume
+        from system.userspace import current_user_id
+        from system.config import env_bool, env_float, env_int
+        if env_bool("PERCEPTION_CONVERSATION_ENABLED", "1") and PROACTIVE_USE_LLM and self._generate_fn:
+            event = peek(current_user_id())
+            while self._perception_times and now - self._perception_times[0] >= 3600:
+                self._perception_times.popleft()
+            interval = max(15, env_float("PERCEPTION_SPEAK_COOLDOWN_S", 90))
+            gap = max(2, env_float("PERCEPTION_USER_GAP_S", 8))
+            queued = getattr(self._ui, "_input_q", None)
+            human_speaking = getattr(self._ui, "human_is_speaking", lambda: False)()
+            if event and idle_for >= gap and now - self._perception_last >= interval and len(self._perception_times) < max(0, env_int("PERCEPTION_MAX_PER_HOUR", 6)) and not human_speaking and (queued is None or queued.empty()):
+                consume(current_user_id(), event)
+                self._perception_last = now
+                with self._lock:
+                    self._last_prompt = now
+                self._perception_times.append(now)
+                return ("perception_prompt", "[perception-event] A repeated camera cue was observed: " + event[1] + ". Use fresh visual context. Speak only if there is something useful or natural to say; otherwise return [SILENT]. Do not invent what the user is doing or narrate every gesture.")
         if PROACTIVE_REST_AFTER_SECONDS > 0 and idle_for >= PROACTIVE_REST_AFTER_SECONDS:
             if PROACTIVE_USE_LLM and self._generate_fn is not None and PROACTIVE_REST_PROMPT_HINT:
                 return ("rest_prompt", _personalize_proactive_text(PROACTIVE_REST_PROMPT_HINT))
@@ -721,6 +747,10 @@ class ProactiveIdleRunner:
         if PROACTIVE_MAX_PER_HOUR > 0 and len(self._prompt_times) >= PROACTIVE_MAX_PER_HOUR:
             candidates.append(self._prompt_times[0] + 3600)
 
+        from sensory.perception_events import peek
+        from system.userspace import current_user_id
+        if peek(current_user_id()):
+            candidates.append(now + 2)
         future = [target - now for target in candidates if target > now]
         return max(1.0, min(future) if future else 1.0)
 
@@ -738,7 +768,10 @@ class ProactiveIdleRunner:
 
     def _deliver_prompt(self, kind, payload, now):
         rest = kind.startswith("rest")
-        self._mark_prompt(now, rest=rest)
+        with self._lock:
+            activity_before = self._last_activity
+        if kind != "perception_prompt":
+            self._mark_prompt(now, rest=rest)
         log.info("[proactive] idle %s: %s", "rest" if rest else "check-in", payload)
         try:
             if kind.endswith("_prompt") and self._generate_fn is not None:
@@ -746,16 +779,24 @@ class ProactiveIdleRunner:
                 if generated is None:
                     return  # Contended or shutting down: skip this check-in.
                 text = (generated or "").strip()
+                if not text and kind == "perception_prompt":
+                    return
                 if not text:
                     text = PROACTIVE_REST_MESSAGE if rest else self._next_message()
             else:
                 text = payload
-            if self._stop.is_set():
+            with self._lock:
+                interrupted = self._last_activity != activity_before
+            queued = getattr(self._ui, "_input_q", None)
+            if self._stop.is_set() or interrupted or getattr(self._ui, "human_is_speaking", lambda: False)() or (queued is not None and not queued.empty()):
                 return
+            if kind == "perception_prompt":
+                from sensory.perception_events import is_watching
+                if not is_watching(self._actor[0]):
+                    return
             self._ui.add_message("aiko", text)
             if (
-                not kind.endswith("_prompt")
-                and PROACTIVE_SPEAK
+                PROACTIVE_SPEAK
                 and self._speak is not None
                 and self._speak_enabled_fn()
             ):
@@ -1432,9 +1473,8 @@ def run_session(ui, args) -> None:
                 original_speak = None
                 try:
                     original_speak = think._get_speak()
-                    if not tts_enabled or not PROACTIVE_SPEAK:
-                        think.set_speak(None)
-                        muted = True
+                    think.set_speak(None)
+                    muted = True
                     return think.proactive_checkin(prompt_hint)
                 finally:
                     try:

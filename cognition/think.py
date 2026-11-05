@@ -2763,6 +2763,8 @@ class AikoThink:
             response = self._stream_response(messages, system=system, token_callback=None, emit=False)
             if (response or "").startswith("[LLM error]"):
                 return ""
+            if "[perception-event]" in prompt_hint and (not (response or "").strip() or "[SILENT]" in response):
+                return ""
             response = self._finalize_response(prompt_hint, response, None, interactive=False)
             return response
         finally:

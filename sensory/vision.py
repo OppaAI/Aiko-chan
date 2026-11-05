@@ -46,9 +46,14 @@ def remember(uid: str, description: str, source='camera'):
         _observations.move_to_end((uid, source))
         while len(_observations) > 96:
             _observations.popitem(last=False)
+    if source == 'camera':
+        from sensory.perception_events import scene
+        scene(uid, str(description)[:1800])
 
 
 def forget(uid: str, camera_only=False):
+    from sensory.perception_events import watching
+    watching(uid, False)
     with _lock:
         for key in list(_observations):
             if key[0] == uid and (not camera_only or key[1] in {'camera', 'cues'}):
@@ -92,6 +97,11 @@ def note_cues(uid: str, data: object):
         result['face_hint'] = data['face']
     if result:
         remember(uid, json.dumps(result), 'cues')
+        from sensory.perception_events import offer
+        gestures = tuple(sorted(result.get('hand_gestures', [])))
+        posture = result.get('posture_hint')
+        meaningful = bool(gestures) or posture in {'arms_raised', 'leaning_left', 'leaning_right'}
+        offer(uid, (gestures, posture), json.dumps(result) if meaningful else '')
 
 
 def camera_action(action: str) -> str:

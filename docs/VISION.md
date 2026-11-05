@@ -27,3 +27,32 @@ Real camera, browser permissions, model quality, and Jetson RAM/latency have not
 been measured in the cloud environment. The configured VLM endpoint must be
 running and able to process images. Frames are sent to that endpoint, which may
 be remote if configured that way.
+
+## Ongoing conversation
+
+While Watch is active, repeated gesture/posture cues and sustained scene changes
+can wake Aiko's existing proactive conversation system. These are opportunities:
+her normal LLM may respond briefly or select silence. Idle check-ins remain
+available independently of visual changes. `/proactive` controls initiation.
+
+Perception opportunities are coalesced per user, expire after 20 seconds, require
+a quiet gap (default 8 seconds), and are limited to one attempt per 90 seconds
+and six attempts per hour. Quiet windows, resting/wake state, active turns,
+queued chat, and browser speech detection take priority. The four
+`PERCEPTION_*` controls are available in Settings.
+
+Generated proactive speech is held until delivery checks finish. If user
+activity arrives during generation, the stale initiation is discarded before
+TTS. Only one LLM operation owns the shared inference gate at a time, while
+camera capture, cues and ASR can continue waiting for input. This is an ongoing
+event loop; it does not require a new user message for every initiation.
+
+Full-duplex voice still needs confirmed acoustic echo cancellation. Raw
+speaker/microphone setups retain the existing echo-suppression behavior. Real
+camera, conversational timing and ASR/TTS overlap need testing on the Jetson;
+JetPack 7.2 is the stated deployment target, without a ROS2 migration.
+
+Cloud validation: the default suite passed with 2,786 tests, six skips and
+34 subtests. After tightening stop-during-generation cancellation and recurring
+gesture handling, the focused perception/conversation/settings regression suite
+passed all 73 tests. Hardware validation remains pending as described above.

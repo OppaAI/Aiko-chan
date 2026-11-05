@@ -117,3 +117,9 @@ PROACTIVE_MESSAGES:
   - "Checking in. Do you want focus time or should I keep you company?"
   - "Still here. If you're deep in something I can stay quiet."
   - "Tiny ping. Need anything or are we in quiet mode?"
+
+# Ongoing perception: background opportunities, coalesced and user-scoped.
+PERCEPTION_CONVERSATION_ENABLED: "1"
+PERCEPTION_SPEAK_COOLDOWN_S: "90"
+PERCEPTION_USER_GAP_S: "8"
+PERCEPTION_MAX_PER_HOUR: "6"

@@ -6,9 +6,15 @@ Preset-based voice reference: "jp_female", "aiko_flat", or a custom registered p
 
 Server setup (run separately):
     # Using mmnga/mio-tts-cpp (C++ implementation):
+    # Rebuild with: cd /home/oppa-ai/jetson/mio-tts-cpp && bash build.sh mio-tts-server
+    # Then run (Orin Nano tuned):
     ./build/mio-tts-server \
-      -m ~/Aiko-chan/models/miotts/MioTTS-0.4B-Q4_K_M.gguf \
+      -m ~/Aiko-chan/models/miotts/MioTts-0.1B-Q8_0.gguf \
       -mv ~/Aiko-chan/models/miotts/miocodec.gguf \
+      --repeat-penalty 1.15 \
+      --ctx-size 1024 \
+      -np 1 \
+      --llm-shared-context on
       --tts-wavlm-model ~/Aiko-chan/models/miotts/wavlm_base_plus_2l_f32.gguf \
       --reference-file-json '[{"key":"jp_female","path":"~/Aiko-chan/models/miotts/jp_female.emb.gguf"},{"key":"aiko_flat","path":"~/Aiko-chan/models/miotts/aiko_flat.emb.gguf"}]'
     
@@ -549,6 +555,11 @@ class AikoSpeak:
         if not text:
             log.debug("[speak] skipping TTS synthesis for empty text")
             return None
+        # Normalize halfwidth katakana to fullwidth (mirrors C++ normalize_for_tts)
+        text = text.translate({str.maketrans(
+            'ｦｧｨｩｪｫｬｭｮｯｰｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ',
+            'ヲァィゥェォャュョッーアイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワン'
+        )})
         # Increased limit from 300 to 600 for Lingo support
         if len(text) > 600:
             log.warning(f"[speak] truncating oversized TTS chunk: {len(text)} chars")

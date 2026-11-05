@@ -47,12 +47,12 @@ def test_latency_elapsed_and_report():
     assert "input_received→first_llm_token=" in report
 
 
-def test_latency_module_singleton():
+def test_latency_module_current_tracker():
     latency_mod.reset()
     latency_mod.mark("input_received")
-    assert "input_received" in latency_mod._current.marks
+    assert "input_received" in latency_mod.current().marks
     latency_mod.reset()
-    assert latency_mod._current.marks == {}
+    assert latency_mod.current().marks == {}
 
 
 # ── sentence sink ────────────────────────────────────────────────────────

@@ -17,7 +17,7 @@ def test_echo_reference_is_bounded_timed_and_identity_scoped(monkeypatch):
     monkeypatch.setattr(echo.time, 'monotonic', lambda: now[0])
     guard = echo.PlaybackEchoGuard()
     guard.remember(b'voice', 'We can see the autumn leaves tomorrow.', 'alice')
-    guard.started(b'voice', 2.0)
+    guard.started(b'voice', 2.0, user_id='alice')
     assert guard.is_echo('see the autumn leaves tomorrow', 'alice', 100.2, 101.0)
     assert not guard.is_echo('see the autumn leaves tomorrow', 'bob', 100.2, 101.0)
     assert not guard.is_echo('see the autumn leaves tomorrow', 'alice', 104.0, 105.0)
@@ -29,7 +29,7 @@ def test_echo_reference_is_bounded_timed_and_identity_scoped(monkeypatch):
     assert guard.remaining() == 0
     for i in range(30):
         guard.remember(str(i).encode(), 'memory bounded reference', 'alice')
-        guard.started(str(i).encode(), 1.0)
+        guard.started(str(i).encode(), 1.0, user_id='alice')
     assert len(guard._pending) <= 8 and len(guard._played) == 16
 
 

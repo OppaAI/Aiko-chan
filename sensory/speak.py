@@ -31,6 +31,7 @@ Standalone test:
 from __future__ import annotations
 
 import io
+import math
 import os
 import re
 import sys
@@ -44,6 +45,9 @@ from contextlib import nullcontext
 from functools import wraps
 from sensory.echo import PlaybackEchoGuard
 from system.config import env_float, env_int
+if __name__ == "__main__" and not any(arg in ("-h", "--help") for arg in sys.argv[1:]):
+    from system.config import load_config
+    load_config()  # resolve settings before the module's runtime constants
 from system.log import get_logger, silent_stderr
 from sensory import latency as _latency
 
@@ -73,10 +77,9 @@ MIOTTS_TIMEOUT            = env_int("MIOTTS_TIMEOUT", 90)
 MIOTTS_TEMPERATURE        = env_float("MIOTTS_TEMPERATURE", 0.8)
 MIOTTS_TOP_P              = env_float("MIOTTS_TOP_P", 1.0)
 MIOTTS_REPETITION_PENALTY = env_float("MIOTTS_REPETITION_PENALTY", 1.15)
-MIOTTS_PRESENCE_PENALTY   = env_float("MIOTTS_PRESENCE_PENALTY", 0.0)
-MIOTTS_FREQUENCY_PENALTY  = env_float("MIOTTS_FREQUENCY_PENALTY", 0.0)
-MIOTTS_BEST_OF_N_ENABLED  = os.getenv("MIOTTS_BEST_OF_N_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
-MIOTTS_BEST_OF_N          = env_int("MIOTTS_BEST_OF_N", 2)
+
+_MAX_WAV_BYTES = 16 * 1024 * 1024
+_MAX_DEFERRED_CHARS = 65536
 
 # ── text sanitization ─────────────────────────────────────────────────────────
 
@@ -345,10 +348,10 @@ def _bounded_synthesis(method):
         slots = getattr(self, "_synth_slots", None)
         if slots is None:  # lightweight diagnostic/test instances
             return method(self, *args, **kwargs)
-        while not self._cancelled():
+        while not self._synthesis_cancelled():
             if slots.acquire(timeout=0.05):
                 try:
-                    if self._cancelled():
+                    if self._synthesis_cancelled():
                         return None
                     return method(self, *args, **kwargs)
                 finally:
@@ -407,7 +410,6 @@ class AikoSpeak:
         self._sd_lock   = threading.Lock()
         self._playing   = threading.Event()
         self._stop_flag = threading.Event()
-        self._silent    = silent
         # Lazy PortAudio init via _load_sd() (text mode never pays for it).
         # NOTE: an older revision loaded sounddevice eagerly here to dodge a
         # curses fd conflict; current boot has no curses UI, so lazy is safe.
@@ -434,6 +436,10 @@ class AikoSpeak:
         # Persistent HTTP session for MioTTS (keep-alive: one TCP handshake
         # per process instead of per 280-char chunk).
         self._http_session = None
+        self._closed = threading.Event()
+        self._prime_thread = None
+        self._http_init_lock = threading.Lock()
+        self._token_chars = 0
 
         # ── remote audio sink (WebUI) ────────────────────────────────────
         # If set, _play_wav_bytes() also hands each synthesized WAV chunk to
@@ -470,6 +476,11 @@ class AikoSpeak:
     def _cancelled(self):
         return self._cancel_event().is_set()
 
+    def _synthesis_cancelled(self):
+        session = _PLAYBACK_CONTEXT.get()
+        closed = getattr(self, "_closed", None)
+        return bool((closed is not None and closed.is_set()) or (session and session[0] is self and session[1].is_set()))
+
     def _mark_playing(self, playing):
         if self._cancel_event() is self._stop_flag:
             if playing and not self._cancelled():
@@ -505,16 +516,25 @@ class AikoSpeak:
     def set_speech_rate(self, rate: float) -> None:
         """Set a bounded optional synthesis speed for the next utterances."""
         try:
-            self._speech_rate = max(0.85, min(1.15, float(rate)))
+            rate = float(rate)
+            if not math.isfinite(rate):
+                raise ValueError("speech rate must be finite")
+            self._speech_rate = max(0.85, min(1.15, rate))
         except (TypeError, ValueError):
             self._speech_rate = 1.0
 
     def set_expression(self, rate: float = 1.0, volume: float = 1.0, pitch: float = 0.0) -> None:
         """Set bounded optional per-utterance expressive controls."""
         try:
-            self._speech_rate = max(0.85, min(1.15, float(rate)))
-            self._speech_volume = max(0.75, min(1.15, float(volume)))
-            self._speech_pitch = max(-0.15, min(0.15, float(pitch)))
+            rate = float(rate)
+            if not math.isfinite(rate):
+                raise ValueError("speech rate must be finite")
+            self._speech_rate = max(0.85, min(1.15, rate))
+            volume, pitch = float(volume), float(pitch)
+            if not math.isfinite(volume) or not math.isfinite(pitch):
+                raise ValueError("speech controls must be finite")
+            self._speech_volume = max(0.75, min(1.15, volume))
+            self._speech_pitch = max(-0.15, min(0.15, pitch))
         except (TypeError, ValueError):
             self._speech_rate, self._speech_volume, self._speech_pitch = 1.0, 1.0, 0.0
 
@@ -613,7 +633,10 @@ class AikoSpeak:
                 except Exception:
                     pass
 
-            _threading.Thread(target=_prime, name="tts-synth-prime", daemon=True).start()
+            with self._http_init_lock:
+                if not self._closed.is_set() and (self._prime_thread is None or not self._prime_thread.is_alive()):
+                    self._prime_thread = _threading.Thread(target=_prime, name="tts-synth-prime", daemon=True)
+                    self._prime_thread.start()
         return ok
 
     def _health_check(self) -> bool:
@@ -638,14 +661,17 @@ class AikoSpeak:
 
     def _http(self):
         """Lazy persistent session (HTTP keep-alive) for MioTTS calls."""
-        if self._http_session is None:
-            import requests
-            from requests.adapters import HTTPAdapter
-            session = requests.Session()
-            session.mount("http://", HTTPAdapter(pool_connections=2, pool_maxsize=4))
-            session.mount("https://", HTTPAdapter(pool_connections=2, pool_maxsize=4))
-            self._http_session = session
-        return self._http_session
+        with self._http_init_lock:
+            if self._closed.is_set():
+                raise RuntimeError("TTS backend is closed")
+            if self._http_session is None:
+                import requests
+                from requests.adapters import HTTPAdapter
+                session = requests.Session()
+                session.mount("http://", HTTPAdapter(pool_connections=2, pool_maxsize=2))
+                session.mount("https://", HTTPAdapter(pool_connections=2, pool_maxsize=2))
+                self._http_session = session
+            return self._http_session
 
     @_bounded_synthesis
     def _synthesize(self, text: str) -> bytes | None:
@@ -688,17 +714,33 @@ class AikoSpeak:
             if abs(self._speech_pitch) > 0.01:
                 payload_data["pitch"] = round(self._speech_pitch, 3)
 
-        timeout = MIOTTS_TIMEOUT
+        timeout = max(1, MIOTTS_TIMEOUT)
+        response = None
+        deadline = time.monotonic() + timeout
         try:
             # /mio/tts/stream returns the WAV bytes inline (audio/wav,
             # chunked) — no server-side file, no read+unlink round-trip.
-            r = self._http().post(f"{MIOTTS_API_URL}/mio/tts/stream", json=payload_data, timeout=timeout)
-            r.raise_for_status()
-            wav_bytes = r.content
+            response = self._http().post(f"{MIOTTS_API_URL}/mio/tts/stream", json=payload_data, timeout=timeout, stream=True)
+            response.raise_for_status()
+            if int(response.headers.get("Content-Length", 0)) > _MAX_WAV_BYTES:
+                raise ValueError("TTS audio exceeds the response size limit")
+            body = bytearray()
+            for chunk in response.iter_content(chunk_size=65536):
+                if self._synthesis_cancelled():
+                    return None
+                if time.monotonic() > deadline:
+                    raise TimeoutError("TTS synthesis exceeded its deadline")
+                if len(body) + len(chunk) > _MAX_WAV_BYTES:
+                    raise ValueError("TTS audio exceeds the response size limit")
+                body.extend(chunk)
+            wav_bytes = bytes(body)
             if not wav_bytes or len(wav_bytes) < 46:
                 log.error("[speak] TTS stream returned no audio")
                 self._push_notice("TTS", "voice synthesis failed — continuing in text")
                 return None
+            duration = self._wav_duration(wav_bytes)
+            if not math.isfinite(duration) or not 0 < duration <= 120:
+                raise ValueError("TTS returned invalid or excessively long audio")
             from system.userspace import current_user_id
             self._echo_guard().remember(wav_bytes, text, current_user_id())
             _latency.mark("first_tts_synth")
@@ -707,20 +749,42 @@ class AikoSpeak:
             log.error(f"[speak] synthesis error: {e}")
             self._push_notice("TTS", "voice synthesis failed — continuing in text")
             return None
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    log.debug("speak: failed to close synthesis response")
 
     @staticmethod
     def _wav_duration(wav_bytes: bytes) -> float:
         """Return the duration (seconds) of a WAV blob, or 0.0 if unreadable."""
         import wave
         try:
-            with wave.open(io.BytesIO(wav_bytes), "rb") as w:
-                frames = w.getnframes()
-                rate   = w.getframerate()
-                return frames / float(rate) if rate else 0.0
+            with wave.open(io.BytesIO(wav_bytes), "rb") as stream:
+                rate = stream.getframerate()
+                width = stream.getsampwidth() * stream.getnchannels()
+                if rate <= 0 or width <= 0:
+                    return 0.0
+                # Streaming WAV headers may declare an unknown/huge length.
+                # Use the actual PCM body, not that placeholder frame count.
+                pcm = stream.readframes(min(stream.getnframes(), rate * 121))
+                return len(pcm) / float(width * rate)
         except Exception:
-            return 0.0
-
-    # ── playback ──────────────────────────────────────────────────────────────
+            try:
+                import soundfile as sf
+                with sf.SoundFile(io.BytesIO(wav_bytes)) as stream:
+                    if not 0 < stream.channels <= 8 or stream.samplerate <= 0:
+                        return 0.0
+                    frames = 0
+                    while frames <= stream.samplerate * 120:
+                        block = stream.read(4096, dtype="float32")
+                        if not len(block):
+                            break
+                        frames += len(block)
+                    return frames / float(stream.samplerate)
+            except Exception:
+                return 0.0
 
     def _play_wav_bytes(self, wav_bytes: bytes) -> None:
         """
@@ -1059,6 +1123,8 @@ class AikoSpeak:
 
     def _playback_cancelled(self) -> bool:
         """Apply current speech controls and report whether playback is blocked."""
+        if self._closed.is_set():
+            return True
         try:
             from cognition.fly_behavior.dn_tts import apply_dn_prosody
             from system.userspace import current_user_id
@@ -1106,18 +1172,26 @@ class AikoSpeak:
     def feed(self, token: str) -> None:
         """Accumulate a token for deferred synthesis."""
         if token:
-            self._token_buf.append(token)
-            # Drop-oldest cap: a producer outpacing play_async can't grow
-            # this without bound on long sessions.
-            total = sum(len(t) for t in self._token_buf)
-            while total > 4000 and len(self._token_buf) > 1:
-                total -= len(self._token_buf.pop(0))
+            token = token[-4000:]
+            with self._lock:
+                self._token_buf.append(token)
+                self._token_chars += len(token)
+                while self._token_chars > 4000:
+                    excess = self._token_chars - 4000
+                    first = self._token_buf[0]
+                    if len(first) <= excess:
+                        self._token_chars -= len(self._token_buf.pop(0))
+                    else:
+                        self._token_buf[0] = first[excess:]
+                        self._token_chars = 4000
 
     @_serialized_start
     def play_async(self) -> None:
         """Synthesize and play all buffered tokens, then clear the buffer."""
-        text = extract_dialogue_for_tts("".join(self._token_buf))
-        self._token_buf.clear()
+        with self._lock:
+            text = extract_dialogue_for_tts("".join(self._token_buf))
+            self._token_buf.clear()
+            self._token_chars = 0
         if self._playback_cancelled():
             return
         if not text:
@@ -1137,11 +1211,18 @@ class AikoSpeak:
             self._playing.clear()  # consuming text is not audio playback
             cancel = self._stop_flag
         tokens = []
+        chars = 0
+        oversized = False
         try:
             for token in token_iterator:
                 # Always drain: generators may stream the visible text as a
                 # side effect, even when the corresponding voice is cancelled.
-                tokens.append(token)
+                chars += len(token)
+                if chars > _MAX_DEFERRED_CHARS:
+                    oversized = True
+                    tokens.clear()
+                elif not oversized:
+                    tokens.append(token)
         except BaseException:
             if cancel is self._stop_flag:
                 self._playing.clear()
@@ -1150,6 +1231,10 @@ class AikoSpeak:
             if cancel.is_set() or cancel is not self._stop_flag:
                 return
             if self._playback_cancelled():
+                self._playing.clear()
+                return
+            if oversized:
+                self._push_notice("TTS", "reply exceeds deferred speech limit — continuing in text")
                 self._playing.clear()
                 return
             text = extract_dialogue_for_tts("".join(tokens))
@@ -1320,6 +1405,16 @@ class AikoSpeak:
                 daemon=True,
             ).start()
 
+    def close(self):
+        """End this backend's lifetime; normal barge-in uses stop(), not close()."""
+        self._closed.set()
+        self.stop()
+        with self._http_init_lock:
+            session = self._http_session
+            self._http_session = None
+        if session is not None:
+            session.close()
+
     def _halt_audio(self):
         # The control lock is never held across playback, so audible stop
         # doesn't wait for sd.wait() to finish the very audio being cancelled.
@@ -1367,38 +1462,34 @@ def _parse_args() -> argparse.Namespace:
         default="Hello! I'm Aiko. Nice to meet you! I run locally on your machine, so everything stays private.")
     parser.add_argument("--devices", action="store_true")
     parser.add_argument("--preset", default=None)
-    parser.add_argument("--wait",   action="store_true")
+    parser.add_argument("--wait", action="store_true",
+        help="Compatibility flag; the standalone command always waits for its audio worker.")
     parser.add_argument("--synced", action="store_true",
         help="demo karaoke-style synced typing instead of plain speak()")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
-    from system.config import load_config
-    load_config()
     args = _parse_args()
-
     if args.devices:
         list_devices()
         sys.exit(0)
-
     if args.preset:
-        os.environ["MIOTTS_PRESET"] = args.preset
-    MIOTTS_PRESET = os.getenv("MIOTTS_PRESET", "jp_female")
-
+        MIOTTS_PRESET = args.preset
     voice = AikoSpeak()
-
-    if args.synced:
-        def _print_word(w: str) -> None:
-            print(w, end="", flush=True)
-        print("Aiko-chan: ", end="", flush=True)
-        ok = voice.speak_synced(args.text, on_word=_print_word)
-        if args.wait:
-            voice.wait()
-        print()
-    else:
-        ok = voice.speak(args.text)
-        if args.wait:
-            voice.wait()
-
-    sys.exit(0 if ok else 1)
+    try:
+        if args.synced:
+            def _print_word(word: str) -> None:
+                print(word, end="", flush=True)
+            print("Aiko-chan: ", end="", flush=True)
+            ok = voice.speak_synced(args.text, on_word=_print_word)
+        else:
+            ok = voice.speak(args.text)
+        finished = voice.wait() if ok else False
+        if args.synced:
+            print()
+    except KeyboardInterrupt:
+        ok = finished = False
+    finally:
+        voice.close()
+    sys.exit(0 if ok and finished else 1)

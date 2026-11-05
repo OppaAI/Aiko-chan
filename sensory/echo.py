@@ -35,18 +35,22 @@ class PlaybackEchoGuard:
     def remember(self, wav: bytes, text: str, user_id: str):
         digest = hashlib.sha256(wav).digest()
         with self._lock:
-            self._pending[digest] = (_normalize(text), user_id)
-            self._pending.move_to_end(digest)
+            key = (digest, user_id)
+            self._pending[key] = (_normalize(text), user_id)
+            self._pending.move_to_end(key)
             while len(self._pending) > 8:
                 self._pending.popitem(last=False)
 
-    def started(self, wav: bytes, duration: float):
+    def started(self, wav: bytes, duration: float, user_id: str | None = None):
+        if user_id is None:
+            from system.userspace import current_user_id
+            user_id = current_user_id()
         now = time.monotonic()
         duration = duration if math.isfinite(duration) else 0.0
         until = now + max(0.0, min(120.0, duration)) + echo_tail_seconds()
         with self._lock:
             self._until = max(self._until, until)
-            reference = self._pending.pop(hashlib.sha256(wav).digest(), None)
+            reference = self._pending.pop((hashlib.sha256(wav).digest(), user_id), None)
             if reference:
                 text, uid = reference
                 self._played.append((now, until, text, uid))

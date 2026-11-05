@@ -213,7 +213,7 @@ BOOT_LABELS = {
 
 ASR_DEVICE      = os.getenv("ASR_DEVICE", "cpu")       # resolved from config/sensory.yaml via load_config()
 ASR_LANGUAGE    = os.getenv("ASR_LANGUAGE", "auto")    # auto, zh, en, ja, ko, yue, nospeech
-ASR_NUM_THREADS = env_int("ASR_NUM_THREADS", 4)
+ASR_NUM_THREADS = env_int("ASR_NUM_THREADS", 2)
 LISTEN_DEVICE   = env_int("LISTEN_DEVICE", -1)  # sounddevice input index; -1 = default
 
 # HuggingFace repo — model.int8.onnx + tokens.txt downloaded on first use
@@ -237,7 +237,6 @@ ASR_MODEL = os.getenv(
 
 SAMPLE_RATE         = 16000                                          # ASR + Silero target
 
-CHUNK_DURATION_MS   = env_int("LISTEN_CHUNK_MS",         30)  # Silero minimum
 VAD_THRESHOLD       = env_float("LISTEN_VAD_THRESHOLD", 0.5)  # Silero speech prob cutoff
 SILENCE_CHUNKS      = env_int("LISTEN_SILENCE_CHUNKS",   66)  # matches config/sensory.yaml default
 MIN_SPEECH_CHUNKS   = env_int("LISTEN_MIN_CHUNKS",       10)
@@ -283,11 +282,8 @@ _MAX_CHUNKS        = int(MAX_RECORD_SECONDS * 1000 / _CHUNK_MS_ACTUAL)
 # available with no per-read timeout of its own, so a stalled mic can wedge
 # a turn for up to LISTEN_MAX_SECONDS. _READ_TIMEOUT_S bounds each read.
 _READ_TIMEOUT_S    = 5.0
-# NOTE: CHUNK_DURATION_MS (LISTEN_CHUNK_MS in sensory.yaml) is NOT used to
-# compute _MAX_CHUNKS anymore — Silero's chunk size is fixed at 512 samples
-# (32ms @ 16kHz) regardless of that config value, so using it here silently
-# drifted MAX_RECORD_SECONDS off its configured value. CHUNK_DURATION_MS is
-# kept only as a documented constant; see sensory.yaml comment.
+# Silero always consumes 512 samples (32ms); there is no independent
+# configurable chunk duration.
 
 
 # ── native gate flags (formerly sensory/voice_gates.py, then listen_native.py) ─
@@ -541,7 +537,7 @@ def _strip_prefix_phrase(text: str, candidates: list[str], threshold: float) -> 
 
 def _prosody_features(audio: np.ndarray, text: str, sample_rate: int = SAMPLE_RATE) -> dict:
     """Extract transient aggregate speech cues; callers must discard audio."""
-    samples = np.asarray(audio, dtype=np.float32).reshape(-1)
+    samples = np.clip(np.asarray(audio, dtype=np.float64).reshape(-1), -1.0, 1.0)
     if samples.size == 0:
         return {}
     magnitude = np.abs(samples)
@@ -572,7 +568,7 @@ def _pcm_chunk(raw, expected_samples: int) -> np.ndarray:
     chunk = np.frombuffer(raw, dtype="<f4")
     if chunk.size != expected_samples or not np.isfinite(chunk).all():
         raise ValueError("invalid microphone PCM chunk")
-    return chunk.astype(np.float32, copy=True)
+    return np.clip(chunk, -1.0, 1.0).astype(np.float32, copy=True)
 
 
 def _read_input_chunk(stream, samples: int, cancelled=lambda: False):
@@ -679,6 +675,10 @@ class AikoListen:
         self._barge_in_armed:  threading.Event = threading.Event()
         self._barge_in_active: bool             = False
         self._barge_in_thread: threading.Thread | None = None
+        self._barge_control_lock = threading.RLock()
+        self._barge_stop = threading.Event()
+        self._barge_signal_lock = threading.Lock()
+        self._barge_auto_until = 0.0
 
         # set while _record() is running — pauses barge-in to avoid mic conflict
         self._recording = threading.Event()
@@ -986,17 +986,37 @@ class AikoListen:
 
     # ── barge-in monitor ──────────────────────────────────────────────────────
 
-    def start_barge_in_monitor(self) -> None:
-        if self._barge_in_active:
-            return
-        self._barge_in_active = True
-        self._barge_in_thread = threading.Thread(
-            target=self._barge_in_loop, daemon=True,
-        )
+    def _start_monitor_locked(self):
+        stop = threading.Event()
+        self._barge_stop = stop
+        context = contextvars.copy_context()
+        def monitor():
+            try:
+                self._barge_in_loop(stop)
+            finally:
+                with self._barge_control_lock:
+                    self._barge_in_thread = None
+                    # A restart requested while the old native call was still
+                    # exiting starts only after it releases microphone state.
+                    if self._barge_in_active and stop.is_set():
+                        self._start_monitor_locked()
+        self._barge_in_thread = threading.Thread(target=context.run, args=(monitor,), daemon=True)
         self._barge_in_thread.start()
 
+    def start_barge_in_monitor(self) -> None:
+        with self._barge_control_lock:
+            self._barge_in_active = True
+            if self._barge_in_thread is None or not self._barge_in_thread.is_alive():
+                self._start_monitor_locked()
+
     def stop_barge_in_monitor(self) -> None:
-        self._barge_in_active = False
+        with self._barge_control_lock:
+            self._barge_in_active = False
+            self._barge_stop.set()
+            thread = self._barge_in_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=1.0)
+        self._barge_in_armed.clear()
 
     def trigger_barge_in(self) -> None:
         """
@@ -1010,9 +1030,11 @@ class AikoListen:
         """
         if not barge_in_enabled():
             return
-        self._barge_in_event.set()
+        with self._barge_signal_lock:
+            self._barge_auto_until = 0.0  # old automatic cooldown cannot clear this explicit signal
+            self._barge_in_event.set()
 
-    def _barge_in_loop(self) -> None:
+    def _barge_in_loop(self, stop_event=None) -> None:
         """
         Always-on VAD monitor via sounddevice. Pauses while _record() is active.
 
@@ -1021,20 +1043,27 @@ class AikoListen:
         again on every scoring iteration.
         """
         samples_per_chunk = _CHUNK_SAMPLES_VAD
+        def running():
+            return self._barge_in_active and not (stop_event is not None and stop_event.is_set())
+        def pause(seconds):
+            if stop_event is not None:
+                stop_event.wait(seconds)
+            else:
+                time.sleep(seconds)
 
-        while self._barge_in_active:
+        while running():
             if not barge_in_enabled() or not local_barge_in_safe():
-                time.sleep(0.5)
+                pause(0.5)
                 continue
             if not self._ensure_barge_vad():
-                time.sleep(0.5)
+                pause(0.5)
                 continue
 
             if self._recording.is_set() or (not barge_in_always_on() and not self._barge_in_armed.is_set()):
-                time.sleep(0.05)
+                pause(0.05)
                 continue
             if not self._mic_lock.acquire(blocking=False):
-                time.sleep(0.05)
+                pause(0.05)
                 continue
             stream = None
             try:
@@ -1050,17 +1079,23 @@ class AikoListen:
                 stream.start()
 
                 consecutive = 0
-                while self._barge_in_active and barge_in_enabled() and local_barge_in_safe():
+                while running() and barge_in_enabled() and local_barge_in_safe():
                     if self._recording.is_set() or (not barge_in_always_on() and not self._barge_in_armed.is_set()):
                         break  # release the device before ordinary capture opens it
 
                     chunk = _read_input_chunk(
                         stream, samples_per_chunk,
-                        cancelled=lambda: not self._barge_in_active or self._recording.is_set() or not barge_in_enabled() or not local_barge_in_safe(),
+                        cancelled=lambda: not running() or self._recording.is_set() or not barge_in_enabled() or not local_barge_in_safe(),
                     )
                     if chunk is None:
                         break
-                    if self._barge_in_event.is_set():
+                    with self._barge_signal_lock:
+                        now = time.monotonic()
+                        if self._barge_auto_until and now >= self._barge_auto_until:
+                            self._barge_auto_until = 0.0
+                            self._barge_in_event.clear()
+                        cooling = self._barge_auto_until > now
+                    if self._barge_in_event.is_set() or cooling:
                         consecutive = 0
                         continue
 
@@ -1069,17 +1104,15 @@ class AikoListen:
                     if is_speech:
                         consecutive += 1
                         if consecutive >= BARGE_IN_CONFIRM:
-                            self._barge_in_event.set()
+                            with self._barge_signal_lock:
+                                self._barge_in_event.set()
+                                self._barge_auto_until = time.monotonic() + max(0, BARGE_IN_COOLDOWN_MS) / 1000.0
                             consecutive = 0
-                            threading.Timer(
-                                BARGE_IN_COOLDOWN_MS / 1000.0,
-                                self._barge_in_event.clear,
-                            ).start()
                     else:
                         consecutive = 0
             except Exception as exc:
                 log.warning("listen: barge-in monitor failed: %s", exc)
-                time.sleep(0.5)  # unavailable devices must not spin/reopen at full CPU
+                pause(0.5)  # unavailable devices must not spin/reopen at full CPU
             finally:
                 _close_input_stream(stream)
                 self._mic_lock.release()
@@ -1594,6 +1627,7 @@ class AikoListen:
             raise ValueError("audio exceeds the maximum recording duration")
         if not _np.isfinite(pcm).all():
             raise ValueError("audio must contain finite PCM samples")
+        pcm = _np.clip(pcm, -1.0, 1.0)
         if sample_rate != SAMPLE_RATE:
             # Integer sample times avoid stretching the final sample to t=1,
             # and interpolation failures must never decode at the wrong rate.

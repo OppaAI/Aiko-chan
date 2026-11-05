@@ -130,9 +130,9 @@ def test_one_shot_resampling_and_failure_cache(monkeypatch):
     listener = prepared(monkeypatch)
     samples = []
     monkeypatch.setattr(listener, '_transcribe', lambda pcm: samples.append(pcm) or 'spoken')
-    assert listener.transcribe_pcm(np.arange(480, dtype=np.float32), 48000) == 'spoken'
+    assert listener.transcribe_pcm(np.arange(480, dtype=np.float32) / 480, 48000) == 'spoken'
     assert samples[0].shape == (160,)
-    np.testing.assert_array_equal(samples[0], np.arange(160, dtype=np.float32) * 3)
+    np.testing.assert_allclose(samples[0], np.arange(160, dtype=np.float32) * 3 / 480)
     listener._model = None
     listener._voice_error = 'runtime unavailable'
     monkeypatch.setattr(listener, 'load_asr', lambda: pytest.fail('retried a cached boot failure'))

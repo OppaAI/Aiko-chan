@@ -1334,6 +1334,7 @@ class AikoThink:
         _latency.mark("conscience_inbound")
         return "continue", system_note
 
+    @_latency.routed_call
     def route(self, user_input: str, token_callback=None, system_note: str | None = None) -> str:
         """Main entry point. Quaternary routing.
 
@@ -1373,7 +1374,6 @@ class AikoThink:
             # Piece 3 (latency): new typed turn — reset the per-turn tracker and
             # mark input receipt. Scheduler/agentic jobs that bypass route() get
             # their marks from chat() onward; stages before recall stay absent.
-            _latency.reset()
             _latency.mark("input_received")
             # Phase 5: outcome → teach. Praise/correction on this turn teaches the
             # MB about the *last* recorded action (route decision or tool call),
@@ -2798,6 +2798,7 @@ class AikoThink:
             log.warning("[chat] websearch net failed: %s", e)
             return ""
 
+    @_latency.chat_call
     def chat(
         self,
         user_input: str,
@@ -2841,13 +2842,8 @@ class AikoThink:
         if speak and speak.is_playing():
             speak.stop()
 
-        # Piece 3: direct chat() callers (deep-think summary, web-answer)
-        # bypass route(). If the tracker still holds a completed turn
-        # (first_audio already fired), start fresh so the report isn't
-        # polluted by the previous turn's marks. The route()→chat() path
-        # already reset, so this is a no-op there.
-        if _latency.elapsed("input_received", "first_audio") is not None:
-            _latency.reset()
+        # The context-scoped entry decorators distinguish routed chat from
+        # fresh direct calls, including previous turns that produced no audio.
         _latency.mark("input_received")
 
         # Fused soft-gate prompts (see _soft_gate_reply) carry an injected

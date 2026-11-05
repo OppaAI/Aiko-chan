@@ -70,6 +70,7 @@ pre-rendered ANSI); worth a dedicated pass later.
 from __future__ import annotations
 
 import collections
+import contextvars
 from datetime import datetime, timedelta
 import difflib
 import functools
@@ -485,12 +486,21 @@ def _seconds_until_proactive_silence_ends() -> float:
 # so scheduler code can ask without importing UI machinery.
 
 _idle_runner: "ProactiveIdleRunner | None" = None
+_idle_runner_lock = threading.Lock()
 
 
 def register_idle_runner(runner: "ProactiveIdleRunner | None") -> None:
     """Register the active idle tracker (or None to unregister)."""
     global _idle_runner
-    _idle_runner = runner
+    with _idle_runner_lock:
+        _idle_runner = runner
+
+
+def _unregister_idle_runner(runner):
+    global _idle_runner
+    with _idle_runner_lock:
+        if _idle_runner is runner:
+            _idle_runner = None
 
 
 def get_idle_seconds() -> float | None:
@@ -513,13 +523,16 @@ class ProactiveIdleRunner:
     quiet until the user returns.
     """
 
-    def __init__(self, ui, speak, speak_enabled_fn, active_turn: threading.Event, generate_fn=None, on_rest_change=None) -> None:
+    def __init__(self, ui, speak, speak_enabled_fn, active_turn: threading.Event, generate_fn=None, on_rest_change=None, engagement_allowed_fn=None) -> None:
         self._ui = ui
         self._speak = speak
         self._speak_enabled_fn = speak_enabled_fn
         self._active_turn = active_turn
         self._generate_fn = generate_fn
         self._on_rest_change = on_rest_change
+        self._engagement_allowed_fn = engagement_allowed_fn or (lambda: True)
+        from system.userspace import current_user_id, current_display_name
+        self._actor = (current_user_id(), current_display_name())
         self._stop = threading.Event()
         self._wakeup = threading.Event()
         self._lock = threading.Lock()
@@ -541,20 +554,25 @@ class ProactiveIdleRunner:
         """Start the proactive message thread if enabled."""
         if PROACTIVE_FIRST_IDLE_MAX_SECONDS <= 0:
             return
-        self._thread = threading.Thread(target=self._loop, name="aiko-proactive", daemon=True)
-        self._thread.start()
+        with self._lock:
+            if self._stop.is_set() or (self._thread is not None and self._thread.is_alive()):
+                return
+            self._thread = threading.Thread(target=self._loop, name="aiko-proactive", daemon=True)
+            self._thread.start()
 
     def stop(self) -> None:
         """Stop the proactive message thread and wait for it to finish."""
         self._stop.set()
         self._wakeup.set()
-        if self._thread and self._thread.is_alive():
+        if self._thread and self._thread is not threading.current_thread() and self._thread.is_alive():
             self._thread.join(timeout=2.0)
-        register_idle_runner(None)
+        _unregister_idle_runner(self)
 
     def touch(self) -> None:
         """Record user activity and reset the idle timer."""
+        from system.userspace import current_user_id, current_display_name
         with self._lock:
+            self._actor = (current_user_id(), current_display_name())
             self._last_activity = time.monotonic()
             self._next_checkin_after = self._random_first_idle_delay()
             self._resting = False
@@ -617,7 +635,7 @@ class ProactiveIdleRunner:
             next_checkin_after = self._next_checkin_after
             resting = self._resting
 
-        if not enabled:
+        if not enabled or not self._engagement_allowed_fn():
             # No check-ins will ever compete for idle time: report resting
             # once truly idle so the idle learner's gate can open. Without
             # this the learner never fires when proactive is off.
@@ -683,6 +701,8 @@ class ProactiveIdleRunner:
 
         if not enabled or resting:
             return 3600.0
+        if not self._engagement_allowed_fn():
+            return 30.0
 
         quiet_remaining = _seconds_until_proactive_silence_ends()
         if quiet_remaining > 0:
@@ -704,40 +724,57 @@ class ProactiveIdleRunner:
         future = [target - now for target in candidates if target > now]
         return max(1.0, min(future) if future else 1.0)
 
+    def _actor_context(self):
+        from system.userspace import set_current_user_id, set_current_display_name
+        with self._lock:
+            uid, display = self._actor
+        context = contextvars.Context()
+        context.run(set_current_user_id, uid)
+        try:
+            context.run(set_current_display_name, display)
+        except ValueError:
+            pass
+        return context
+
+    def _deliver_prompt(self, kind, payload, now):
+        rest = kind.startswith("rest")
+        self._mark_prompt(now, rest=rest)
+        log.info("[proactive] idle %s: %s", "rest" if rest else "check-in", payload)
+        try:
+            if kind.endswith("_prompt") and self._generate_fn is not None:
+                generated = self._generate_fn(payload)
+                if generated is None:
+                    return  # Contended or shutting down: skip this check-in.
+                text = (generated or "").strip()
+                if not text:
+                    text = PROACTIVE_REST_MESSAGE if rest else self._next_message()
+            else:
+                text = payload
+            if self._stop.is_set():
+                return
+            self._ui.add_message("aiko", text)
+            if (
+                not kind.endswith("_prompt")
+                and PROACTIVE_SPEAK
+                and self._speak is not None
+                and self._speak_enabled_fn()
+            ):
+                self._speak.speak(text)
+            self._ui._draw()
+        except Exception:
+            log.exception("Proactive idle check-in failed")
+
+
     def _loop(self) -> None:
         while not self._stop.is_set():
+            context = self._actor_context()
             now = time.monotonic()
-            due = self._prompt_due(now)
+            due = context.run(self._prompt_due, now)
             if due:
-                kind, payload = due
-                rest = kind.startswith("rest")
-                self._mark_prompt(now, rest=rest)
-                log.info("[proactive] idle %s: %s", "rest" if rest else "check-in", payload)
-                try:
-                    if kind.endswith("_prompt") and self._generate_fn is not None:
-                        generated = self._generate_fn(payload)
-                        if generated is None:
-                            continue  # Contended or shutting down: skip this check-in.
-                        text = (generated or "").strip()
-                        if not text:
-                            text = PROACTIVE_REST_MESSAGE if rest else self._next_message()
-                    else:
-                        text = payload
-                    if self._stop.is_set():
-                        return
-                    self._ui.add_message("aiko", text)
-                    if (
-                        not kind.endswith("_prompt")
-                        and PROACTIVE_SPEAK
-                        and self._speak is not None
-                        and self._speak_enabled_fn()
-                    ):
-                        self._speak.speak(text)
-                    self._ui._draw()
-                except Exception:
-                    log.exception("Proactive idle check-in failed")
-
-            sleep_for = self._seconds_until_next_check(time.monotonic())
+                context.run(self._deliver_prompt, *due, now)
+            if self._stop.is_set():
+                break
+            sleep_for = context.run(self._seconds_until_next_check, time.monotonic())
             self._wakeup.wait(timeout=sleep_for)
             self._wakeup.clear()
 
@@ -1102,7 +1139,7 @@ def run_session(ui, args) -> None:
         if typewriter is not None:
             cleanup("typewriter", lambda: typewriter.stop(flush=True))
         if speak is not None and hasattr(speak, "stop"):
-            cleanup("speech playback", speak.stop)
+            cleanup("speech playback", getattr(speak, "close", speak.stop))
         if listen is not None:
             cleanup("listening monitor", listen.stop_barge_in_monitor)
         if think is not None:
@@ -1388,12 +1425,12 @@ def run_session(ui, args) -> None:
             try:
                 if shutdown_done:
                     return None
+                if listen is not None and hasattr(listen, "is_active") and not listen.is_active():
+                    return None
                 session_active.set()
                 muted = False
                 original_speak = None
                 try:
-                    if listen is not None and hasattr(listen, "extend_activation"):
-                        listen.extend_activation()
                     original_speak = think._get_speak()
                     if not tts_enabled or not PROACTIVE_SPEAK:
                         think.set_speak(None)
@@ -1419,6 +1456,7 @@ def run_session(ui, args) -> None:
             active_turn=session_active,
             generate_fn=_generate_proactive_checkin,
             on_rest_change=think.set_proactive_resting,
+            engagement_allowed_fn=lambda: listen is None or not hasattr(listen, "is_active") or listen.is_active(),
         )
         proactive.start()
 

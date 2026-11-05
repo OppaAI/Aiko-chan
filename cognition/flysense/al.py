@@ -13,6 +13,7 @@ Runtime deps: numpy only. Deterministic per embedding dim.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -31,37 +32,63 @@ class FlyAL:
         self.sigma = float(sigma)
         self.pool_gain = float(pool_gain)
         self.seed = int(seed)
+        if not np.isfinite(self.sigma) or self.sigma <= 0 or not np.isfinite(self.pool_gain) or self.pool_gain < 0:
+            raise ValueError("AL gains need positive finite sigma and nonnegative finite pool gain")
+        if not self.glomeruli or not np.isfinite(self.inh).all() or (self.inh < 0).any():
+            raise ValueError("AL inhibition ratios must be finite and nonnegative")
+        self._lock = threading.RLock()
         self._proj: dict[int, np.ndarray] = {}
 
     def _matrix(self, dim: int) -> np.ndarray:
-        m = self._proj.get(dim)
-        if m is None:
-            rng = np.random.default_rng((self.seed, dim))
-            m = rng.normal(0, 1, (dim, len(self.glomeruli)))
-            m /= max(np.abs(m).sum(), 1e-9)
+        with self._lock:
+            m = self._proj.pop(dim, None)
+            if m is None:
+                rng = np.random.default_rng((self.seed, dim))
+                m = rng.normal(0, 1, (dim, len(self.glomeruli)))
+                m /= max(np.abs(m).sum(), 1e-9)
             self._proj[dim] = m
-        return m
+            while len(self._proj) > 4:
+                self._proj.pop(next(iter(self._proj)))
+            return m
+
+    @staticmethod
+    def _dtype(array):
+        return array.dtype if array.dtype.kind == "f" else np.dtype(np.float32)
 
     def normalize(self, vec: np.ndarray) -> np.ndarray:
-        """Gain-control one embedding, preserving dtype/shape conventions (L2 unit)."""
-        v = np.asarray(vec, dtype=np.float64).reshape(-1)
-        if np.all(v == 0):
-            return np.asarray(vec).copy()
-        P = self._matrix(v.shape[0])
+        """Gain-control one finite vector; return floating, L2-unit output."""
+        original = np.asarray(vec)
+        if original.ndim != 1 or original.size > 16384 or original.dtype.kind not in "biuf":
+            raise ValueError("AL input must be a real vector of at most 16384 values")
+        v = original.astype(np.float64)
+        if not np.isfinite(v).all():
+            raise ValueError("AL input must be finite")
+        dtype = self._dtype(original)
+        if not v.size or np.all(v == 0):
+            return original.astype(dtype, copy=True)
+        peak = float(np.abs(v).max())
+        if peak > 1e100:
+            v /= peak
+        P = self._matrix(v.size)
         drive = np.maximum(P.T @ v, 0.0)
         pool = float(drive.mean())
         out = drive / (self.sigma + self.inh * drive + self.pool_gain * pool)
         back = P @ out
         n = float(np.linalg.norm(back))
-        if n <= 0:
-            return np.asarray(vec).copy()
-        return (back / n).astype(np.asarray(vec).dtype if hasattr(vec, "dtype") else np.float32)
+        if not np.isfinite(n) or n <= 0:
+            baseline = v / np.abs(v).max()
+            return (baseline / np.linalg.norm(baseline)).astype(dtype)
+        return (back / n).astype(dtype)
 
     def normalize_batch(self, mat: np.ndarray) -> np.ndarray:
-        m = np.asarray(mat, dtype=np.float64)
+        m = np.asarray(mat)
         if m.ndim == 1:
             return self.normalize(m)
-        return np.stack([self.normalize(r) for r in m])
+        if m.ndim != 2 or m.shape[1] > 16384 or m.dtype.kind not in "biuf":
+            raise ValueError("AL batch must contain real embedding vectors")
+        if not m.shape[0]:
+            return np.empty(m.shape, dtype=self._dtype(m))
+        return np.stack([self.normalize(row) for row in m])
 
     def summary(self) -> dict:
         return {"glomeruli": len(self.glomeruli),

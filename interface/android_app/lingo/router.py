@@ -168,6 +168,43 @@ init_srs_db()
 _AUDIO_CACHE_MAXSIZE = 512
 _AUDIO_CACHE_TTL_SECONDS = 24 * 60 * 60  # 24h
 
+_AUDIO_DISK_MAX_BYTES = 256 * 1024 * 1024
+_audio_files_lock = threading.Lock()
+_GENERATED_AUDIO_NAME = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}_[0-9]+\.wav$")
+
+
+def _prune_generated_audio(incoming_bytes=0):
+    """Prune app-generated cache files only; caller owns _audio_files_lock."""
+    if incoming_bytes > _AUDIO_DISK_MAX_BYTES:
+        raise ValueError("generated audio is larger than the disk cache budget")
+    now = time.time()
+    for path in AUDIO_DIR.glob("*.tmp"):
+        if path.is_symlink() or not _GENERATED_AUDIO_NAME.fullmatch(path.with_suffix(".wav").name):
+            continue
+        try:
+            if now - path.stat().st_mtime > 600:
+                path.unlink(missing_ok=True)
+        except FileNotFoundError:
+            pass
+    files = []
+    for path in AUDIO_DIR.glob("*.wav"):
+        if path.is_symlink() or not _GENERATED_AUDIO_NAME.fullmatch(path.name):
+            continue
+        try:
+            stat = path.stat()
+            files.append((stat.st_mtime, path, stat.st_size))
+        except FileNotFoundError:
+            continue
+    total = sum(entry[2] for entry in files)
+    remaining = len(files)
+    for modified, path, size in sorted(files, key=lambda entry: entry[0]):
+        if now - modified <= _AUDIO_CACHE_TTL_SECONDS and total + incoming_bytes <= _AUDIO_DISK_MAX_BYTES and remaining < _AUDIO_CACHE_MAXSIZE:
+            break
+        path.unlink(missing_ok=True)
+        total -= size
+        remaining -= 1
+
+
 _audio_cache: Dict[str, str] = {}
 _audio_cache_timestamps: Dict[str, float] = {}
 _audio_lock = threading.Lock()   # race-condition fix
@@ -179,6 +216,12 @@ def _audio_cache_get(key: str) -> Optional[str]:
             return None
         if time.time() - _audio_cache_timestamps.get(key, 0) > _AUDIO_CACHE_TTL_SECONDS:
             # Expired -- evict and treat as a miss.
+            _audio_cache.pop(key, None)
+            _audio_cache_timestamps.pop(key, None)
+            return None
+        from urllib.parse import urlsplit
+        filename = urlsplit(_audio_cache[key]).path.rsplit("/", 1)[-1]
+        if _GENERATED_AUDIO_NAME.fullmatch(filename) and not (AUDIO_DIR / filename).is_file():
             _audio_cache.pop(key, None)
             _audio_cache_timestamps.pop(key, None)
             return None
@@ -707,8 +750,13 @@ def generate_lingo_audio(text: str, base_url: Optional[str] = None) -> Optional[
         filename = f"{audio_id}.wav"
         filepath = AUDIO_DIR / filename
         temp_path = filepath.with_suffix('.tmp')
-        temp_path.write_bytes(wav_bytes)
-        temp_path.replace(filepath)
+        with _audio_files_lock:
+            _prune_generated_audio(len(wav_bytes))
+            try:
+                temp_path.write_bytes(wav_bytes)
+                temp_path.replace(filepath)
+            finally:
+                temp_path.unlink(missing_ok=True)
         base = (base_url or _public_base_url()).rstrip("/")
         return f"{base}/lingo_audio/{filename}"
     except Exception as e:
@@ -1230,7 +1278,12 @@ async def get_tts(text: str, request: Request, session: dict = Depends(get_lingo
     # rate check inside get_cached_lingo_audio() by passing uid=None only
     # after a cache-miss check would be redundant here; a cache hit is
     # still free and correct either way.
-    url = _get_tts_audio_after_rate_check(text, base_url=_public_base_url(request))
+    from starlette.concurrency import run_in_threadpool
+    token = set_current_user_id(uid)
+    try:
+        url = await run_in_threadpool(_get_tts_audio_after_rate_check, text, base_url=_public_base_url(request))
+    finally:
+        reset_current_user_id(token)
     if not url:
         raise HTTPException(status_code=503, detail="TTS generation failed. Please try again.")
     return {"audioUrl": url}
@@ -1319,11 +1372,16 @@ async def speech_to_text(audio: UploadFile = File(...),
     listener = getattr(auth.aiko_web_instance, "_listen", None) if auth.aiko_web_instance else None
     if listener is None:
         raise HTTPException(status_code=503, detail="On-device ASR is not running")
+    token = set_current_user_id(session["user_id"])
     try:
         text = await run_in_threadpool(listener.transcribe_pcm, pcm, framerate)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Audio is outside the configured ASR limits")
     except Exception as e:
         log.error(f"Lingo STT failed: {e}")
         raise HTTPException(status_code=503, detail="Transcription failed")
+    finally:
+        reset_current_user_id(token)
     return {"text": text or ""}
 
 

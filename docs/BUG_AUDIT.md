@@ -15,7 +15,7 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 | 4 | Agentic tasks, tools, and self-coding | `agentic/`, `Aiko-Playground` integration | Current code pass completed; final validation below; live-model and physical Jetson checks pending |
 | 5 | Memory, retrieval, knowledge, and persistence | `cognition/memory/`, `cognition/knowledge/` | Current code pass completed for SQLite/Harrier; final validation below; live-model retrieval quality and physical Jetson RAM/latency checks pending |
 | 6 | Fly-brain circuits and state wiring | `cognition/fly*`, `cognition/centralcomplex/`, `cognition/neural_state.py` | Current code pass completed; final validation below; full-connectome and physical Jetson/sensor/body measurements pending |
-| 7 | Speech, listening, and sensory pathways | `sensory/`, `cognition/flysense/` | In progress: capture, boot, enrollment, echo protection, playback cancellation and queue bounds fixed; remaining wake/sensory review and physical measurements pending |
+| 7 | Speech, listening, and sensory pathways | `sensory/`, `cognition/flysense/` | Current code pass completed; final validation below; real-model/audio quality and physical Jetson RAM/latency checks pending |
 | 8 | Web, desktop, mobile, and external interfaces | `interface/` | Not started |
 | 9 | Configuration, security boundaries, storage, and deployment | `system/`, `config/`, `backend/`, `scripts/` | Focused path/TLS fixes shipped; broad review not started |
 | 10 | Evaluation, observability, and developer tooling | `tests/`, `eval/`, `conscience-lab/`, `util/` | Not started |
@@ -892,3 +892,44 @@ fidelity. The sensory and interface areas retain their own broader audit scopes.
   enrollment help command also works without loading the native voice runtime.
   Runtime API inspection used the hash-verified pinned wheel; real wake ONNX
   artifacts and physical speaker/microphone quality have not been exercised.
+
+### Area 7 completion: runtime wiring and resource lifetime
+
+The current code pass is complete across capture/ASR, wake and enrollment,
+speaker verification, TTS/playback, browser/phone audio handoffs, echo/barge-in,
+proactive speech, latency instrumentation, and visual/AL sensory adapters. This
+closes the remaining software review from the preceding batches; it does not
+certify model quality or physical-device performance.
+
+- Serialize barge-monitor start/stop so a delayed native worker cannot overlap
+  a replacement. Use interruptible waits and monotonic cooldown deadlines;
+  an old automatic cooldown cannot clear a newer explicit interruption.
+- Bind proactive speech to its activity owner's context and current wake state.
+  Repeated starts are idempotent; an old runner cannot unregister its replacement.
+- Isolate latency trackers per conversation turn, including text-only turns and
+  copied playback contexts. Old audio cannot add timestamps to a new reply.
+- Validate finite PCM/expression controls and preserve floating-point AL output
+  for integer input. Reject malformed/oversized embeddings before projection;
+  bound and synchronize the projection cache and normalize fallback vectors.
+- Bound TTS responses to 16 MiB and decoded audio to 120 seconds. Handle PCM
+  streaming headers and float WAVs, close failed HTTP responses, and bound
+  deferred speech text. Oversized replies keep text delivery without synthesis.
+- Limit warmup to one prime worker and release the persistent HTTP session on
+  shutdown. Standalone speech now loads settings before runtime constants and
+  waits for playback even without `--wait`, instead of exiting its daemon worker.
+- Keep independent phone synthesis usable after a previous playback stop and
+  move it off the ASGI event loop with the authenticated identity. Bound generated
+  phone WAV storage to 256 MiB/512 files/24 hours; preserve unrelated references,
+  remove old temporary files, and treat evicted URLs as cache misses.
+- Key pending echo references by both clip digest and user so identical clips
+  cannot overwrite another user's transcript reference.
+- Remove unused chunk, penalty, and best-of-N controls. Mark the external MioTTS
+  model label read-only; model selection belongs to the server startup command.
+- Final combined unit/integration/conscience validation: **2,705 tests passed,
+  5 skipped, and 34 subtests passed**. The final focused speech run passed
+  **89 tests**; standalone speech help and offline ASR environment checks also
+  passed. Tests cover
+  cancellation/restart races, context isolation, invalid inputs, streaming WAVs,
+  HTTP/body limits, cache eviction, phone event-loop responsiveness, lifecycle
+  cleanup, and standalone playback. See [Voice playback](VOICE.md) for limits
+  and the remaining physical-device checks.

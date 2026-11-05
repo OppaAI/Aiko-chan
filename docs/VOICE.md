@@ -109,3 +109,49 @@ It keeps its enrollment snapshot even if another user starts a later request.
 Non-finite, zero or dimension-mismatched vectors never produce a successful or
 NaN match. When the explicit speaker gate is enabled, failed/timed-out matches
 are dropped; otherwise verification remains metadata and text delivery continues.
+
+## Runtime limits and lifecycle
+
+The barge-in monitor keeps one native worker at a time, including during rapid
+stop/restart. Automatic cooldowns use monotonic deadlines and cannot clear a
+newer explicit stop request. Proactive speech retains its user's identity and
+respects that user's wake window; it cannot wake itself by sending a check-in.
+Latency marks belong to each turn, so delayed playback from a previous response
+does not change a new turn's measurements.
+
+TTS responses are limited to 16 MiB and 120 seconds of decoded audio. Streaming
+WAV headers are checked against the actual frames; invalid/non-finite controls
+fall back to neutral values. Deferred token buffering is capped at 4,000
+characters. Generator-driven speech collects at most 65,536 characters; longer
+replies continue through text delivery without generating speech. Warmup starts
+one prime worker, and shutdown closes the persistent HTTP connection pool.
+
+Phone TTS uses the shared synthesizer off the server event loop. A previous
+playback stop does not disable a later independent phone synthesis request.
+Generated phone WAVs are ephemeral: the disk cache is limited to 256 MiB,
+512 files, and 24 hours. Evicted URLs trigger regeneration; pruning does not
+target enrolled profiles or unrelated reference files.
+
+The former presence/frequency penalty, best-of-N, and listening chunk controls
+were unused and have been removed. The Settings model label is read-only;
+select the actual MioTTS model in the external server's startup command.
+
+## Physical Jetson validation still required
+
+The code pass and automated checks are complete. On the 8 GB Orin Nano, run
+these smoke checks with the configured models and audio devices available:
+
+```sh
+python -m tests.unit.test_asr --mic
+python -m sensory.speak --wait "Hello, this is Aiko's speaker check."
+```
+
+The standalone speaker command loads settings before resolving its endpoint
+and always waits for playback; `--wait` remains accepted for compatibility.
+The module API remains asynchronous.
+
+Check wake and speaker-match accuracy with your enrolled identity, then test
+speaker echo, acoustic tail recovery, explicit stop, and AEC barge-in in the
+actual room. Measure cold/warm RAM use, CPU load, and input-to-first-audio latency
+while the main model and voice services run together. Those measurements have
+not been performed on the offline Jetson.

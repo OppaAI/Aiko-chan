@@ -26,7 +26,6 @@ ASR_CORRECTIONS: ""  # e.g. "op ai->OppaAI|hey iko->hey Aiko|my project x->Proje
 # by default) — tune that instead. There is currently no configurable
 # pre/post-speech padding on the local-mic path at all (the WebUI has its
 # own separate, hardcoded ~700ms pre-speech buffer in static/vad.js).
-LISTEN_CHUNK_MS: "30"  # Documentation only — actual VAD chunk size is fixed at 512 samples (32ms @ 16kHz) and is not configurable via this key (audit #5).
 LISTEN_VAD_THRESHOLD: "0.5"  # Silero speech probability threshold; range 0.0-1.0.
 LISTEN_SILENCE_CHUNKS: "66"  # Consecutive silent chunks before utterance ends — this is the authoritative silence-timeout knob (~32ms per chunk).
 LISTEN_MIN_CHUNKS: "10"  # Minimum speech chunks required to accept audio and filter noise.
@@ -58,12 +57,8 @@ BARGE_IN_ALWAYS_ON: "0"  # Also monitor outside TTS wait; options: 1/0, true/fal
 #   1. Acoustic (preferred) — set WAKE_WORD_MODEL_PATH below to a trained
 #      livekit-wakeword ONNX classifier. Runs frame-by-frame on raw audio
 #      before ASR, so SenseVoice never runs just to check the wake word.
-#      No pre-trained "hey Aiko" model exists — you must train one, e.g.:
-#        pip install "livekit-wakeword[train,eval,export]"
-#        # hey_aiko.yaml: model_name: hey_aiko / target_phrases: ["hey aiko"]
-#        livekit-wakeword setup --config hey_aiko.yaml
-#        livekit-wakeword run hey_aiko.yaml
-#      See https://docs.livekit.io/agents/multimodality/audio/wakeword/
+#      Use the livekit-wakeword training tools to export a streaming ONNX
+#      artifact compatible with the installed SDK version. See docs/VOICE.md.
 #   2. Fuzzy ASR-text (fallback) — used automatically if WAKE_WORD_MODEL_PATH
 #      is blank, the file is missing, or livekit-wakeword isn't installed.
 #      Fuzzy-matched (not exact substring) against the leading words of each
@@ -75,7 +70,7 @@ WAKE_WORD: ""  # Phrase that wakes Aiko from idle, e.g. "hey aiko". "" disables 
 # -- Wake word: acoustic engine (livekit-wakeword) --
 WAKE_WORD_MODEL_PATH: ""  # Path to trained hey-aiko.onnx. "" = use the fuzzy engine below instead.
 WAKE_WORD_THRESHOLD: "0.5"  # Wake model score (0.0-1.0) required per-frame; lower = more sensitive, more false positives.
-WAKE_WORD_CONFIRM_FRAMES: "3"  # Consecutive frames above threshold before the wake word fires (~32ms per frame).
+WAKE_WORD_CONFIRM_FRAMES: "3"  # Consecutive frames above threshold before the wake word fires (80ms per streaming-model evaluation).
 
 # -- Wake word: fuzzy ASR-text engine (fallback) --
 # Suggested aliases when WAKE_WORD is set (SenseVoice often mangles "Aiko"):
@@ -93,7 +88,7 @@ ACTIVATION_TIMEOUT_S: "3600"  # Idle seconds before requiring wake word again.
 
 # -- MioTTS --
 MIOTTS_API_URL: "http://localhost:18089"  # MioTTS synthesis API base URL.
-MIOTTS_MODEL: "MioTTS-0.4B-Q4_K_M"  # Display/model label for the TTS model served externally.
+MIOTTS_MODEL: "MioTts-0.1B-Q8_0"  # Display/model label for the TTS model served externally.
 MIOTTS_PRESET: "normaldere"  # Voice reference_key name registered in MioTTS; examples: jp_female, deredere, kuudere, normaldere, tsundere, custom cloned voice.
 MIOTTS_DEVICE: "1"  # sounddevice output index; -1 means system default.
 LISTEN_DEVICE: "-1"  # sounddevice input index; -1 means system default.
@@ -102,10 +97,6 @@ MIOTTS_TIMEOUT: 90  # Client HTTP timeout (s). 30s dropped 15 chunks on 2026-10-
 MIOTTS_TEMPERATURE: 0.8  # Sampling temperature for the TTS LLM; lower = more deterministic/stable delivery.
 MIOTTS_TOP_P: 0.95  # Nucleus sampling threshold; 1.0 = no truncation of the token distribution.
 MIOTTS_REPETITION_PENALTY: 1.15  # Penalizes repeated/held audio tokens; higher discourages drawn-out trailing vowels.
-MIOTTS_PRESENCE_PENALTY: 0.0  # Penalizes tokens already used anywhere in the output, regardless of frequency.
-MIOTTS_FREQUENCY_PENALTY: 0.0  # Penalizes tokens proportional to how often they've already appeared.
-MIOTTS_BEST_OF_N_ENABLED: false  # Generate multiple candidates and pick the best via ASR error-rate scoring.
-MIOTTS_BEST_OF_N: 2  # Number of candidates to generate per call when best-of-N is enabled.
 KARAOKE_TEXT: "1"  # Pace UI text by TTS audio; options: 1/0, true/false, yes/no, on/off.
 
 # Suppress microphone input during TTS and allow speaker/reverb decay afterward.

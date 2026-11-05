@@ -77,6 +77,35 @@ import base64
 import logging
 import modal
 
+
+def _decode_reference_image(value: str):
+    """Validate compressed and decoded size before allocating an RGB image."""
+    from PIL import Image
+    if not value or len(value) > 16_000_000:
+        raise ValueError("reference image exceeds 16 MB base64 limit")
+    try:
+        data = base64.b64decode(value, validate=True)
+        with Image.open(io.BytesIO(data)) as image:
+            if image.width * image.height > 16_000_000:
+                raise ValueError("reference image exceeds 16 megapixels")
+            return image.convert("RGB")
+    except Exception as exc:
+        raise ValueError("invalid or oversized reference image") from exc
+
+
+def _edit_dimensions(src_w: int, src_h: int, max_pixels: int, multiple: int):
+    if min(src_w, src_h, max_pixels, multiple) <= 0 or multiple > 2048 or max_pixels < multiple * multiple:
+        raise ValueError("invalid edit dimensions")
+    scale = min(1.0, (max_pixels / (src_w * src_h)) ** 0.5, 2048 / src_w, 2048 / src_h)
+    width = max(multiple, int(src_w * scale / multiple) * multiple)
+    height = max(multiple, int(src_h * scale / multiple) * multiple)
+    while width * height > max_pixels:
+        if width >= height:
+            width -= multiple
+        else:
+            height -= multiple
+    return width, height
+
 # ---------------------------------------------------------------------------
 # image
 # ---------------------------------------------------------------------------
@@ -594,19 +623,17 @@ class AikoKrea2ImageGen:
             guidance_scale = 3.0 if is_removal else 1.0
         do_cfg = guidance_scale > 1.0
 
-        ref_img = Image.open(io.BytesIO(base64.b64decode(reference_image))).convert("RGB")
+        ref_img = _decode_reference_image(reference_image)
         ref_img_b = None
         if reference_image_b is not None:
-            ref_img_b = Image.open(io.BytesIO(base64.b64decode(reference_image_b))).convert("RGB")
+            ref_img_b = _decode_reference_image(reference_image_b)
 
         # Match output AR to the (first) source image, capped at `max_pixels`.
         # On A10G, if you still see OOMs on the denoise loop, lower max_pixels first —
         # this is the cheapest knob before touching grounding_px or steps.
         src_w, src_h = ref_img.size
         multiple = pipe.vae_scale_factor * pipe.patch_size
-        scale = min(1.0, (max_pixels / (src_w * src_h)) ** 0.5)
-        width = max(multiple, round(src_w * scale / multiple) * multiple)
-        height = max(multiple, round(src_h * scale / multiple) * multiple)
+        width, height = _edit_dimensions(src_w, src_h, max_pixels, multiple)
 
         generator = torch.Generator(device="cuda").manual_seed(seed) if seed >= 0 else None
 
@@ -723,32 +750,49 @@ class AikoKrea2ImageGen:
 # FastAPI wrapper
 # ---------------------------------------------------------------------------
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional
 
 web_app = FastAPI()
 
 
 class GenerateRequest(BaseModel):
-    prompt: str
-    negative_prompt: str = ""
-    width: int = 1024
-    height: int = 1024
-    steps: int = 52
-    guidance_scale: float = 3.5
-    seed: int = -1
+    prompt: str = Field(min_length=1, max_length=8000)
+    negative_prompt: str = Field(default="", max_length=8000)
+    width: int = Field(default=1024, ge=256, le=2048)
+    height: int = Field(default=1024, ge=256, le=2048)
+    steps: int = Field(default=52, ge=1, le=64)
+    guidance_scale: float = Field(default=3.5, ge=0, le=20, allow_inf_nan=False)
+    seed: int = Field(default=-1, ge=-1, le=2**63-1)
+
+    @model_validator(mode="after")
+    def validate_workload(self):
+        if self.width % 64 or self.height % 64 or self.width * self.height > 2_097_152:
+            raise ValueError("dimensions must be multiples of 64 and at most 2 megapixels")
+        if not self.prompt.strip():
+            raise ValueError("prompt cannot be blank")
+        return self
 
 
 class EditRequest(BaseModel):
-    instruction: str
-    reference_image: str
-    reference_image_b: Optional[str] = None
+    instruction: str = Field(min_length=1, max_length=8000)
+    reference_image: str = Field(min_length=1, max_length=16_000_000)
+    reference_image_b: Optional[str] = Field(default=None, max_length=16_000_000)
     is_removal: bool = False
-    steps: Optional[int] = None
-    guidance_scale: Optional[float] = None
-    grounding_px: int = DEFAULT_GROUNDING_PX
-    max_pixels: int = DEFAULT_MAX_PIXELS
-    seed: int = -1
+    steps: Optional[int] = Field(default=None, ge=1, le=64)
+    guidance_scale: Optional[float] = Field(default=None, ge=0, le=20, allow_inf_nan=False)
+    grounding_px: int = Field(default=DEFAULT_GROUNDING_PX, ge=256, le=768)
+    max_pixels: int = Field(default=DEFAULT_MAX_PIXELS, ge=65536, le=2_000_000)
+    seed: int = Field(default=-1, ge=-1, le=2**63-1)
+
+    @model_validator(mode="after")
+    def validate_references(self):
+        if not self.instruction.strip():
+            raise ValueError("instruction cannot be blank")
+        _decode_reference_image(self.reference_image)
+        if self.reference_image_b is not None:
+            _decode_reference_image(self.reference_image_b)
+        return self
 
 
 class ImageResponse(BaseModel):

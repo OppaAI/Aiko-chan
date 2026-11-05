@@ -17,7 +17,7 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 | 6 | Fly-brain circuits and state wiring | `cognition/fly*`, `cognition/centralcomplex/`, `cognition/neural_state.py` | Current code pass completed; final validation below; full-connectome and physical Jetson/sensor/body measurements pending |
 | 7 | Speech, listening, and sensory pathways | `sensory/`, `cognition/flysense/` | Current code pass completed; final validation below; real-model/audio quality and physical Jetson RAM/latency checks pending |
 | 8 | Web, desktop, mobile, and external interfaces | `interface/` | Current code pass completed; final validation below; packaged desktop, live platform accounts and physical client checks pending |
-| 9 | Configuration, security boundaries, storage, and deployment | `system/`, `config/`, `backend/`, `scripts/` | In progress: SQLCipher initialization and backup correctness fixes verified; broader configuration/deployment review pending |
+| 9 | Configuration, security boundaries, storage, and deployment | `system/`, `config/`, `backend/`, `scripts/` | Current code pass completed; final validation below; real SQLCipher, backup media/remotes, Modal deployments and physical Jetson checks pending |
 | 10 | Evaluation, observability, and developer tooling | `tests/`, `eval/`, `conscience-lab/`, `util/` | Not started |
 
 ## Already fixed in the current `dev` history
@@ -1038,3 +1038,54 @@ Ordinary parentheses and bold now stay in the dialogue; explicit italic actions
 retain their separate presentation. Also fix legacy emotion-header removal.
 Browser rendering regressions and **50 interface tests passed**. Persona text
 was not modified; this does not establish the cause of different generated words.
+
+### Area 9 completion: configuration, boundaries and deployment
+
+The current code pass is complete across configuration bootstrap and Settings,
+secret storage/editing, account-to-user mapping, private state paths, backup/reset
+handling, TLS and resource helpers, deployment utilities, and Modal entry points.
+Areas 1–8 retain their recorded orchestration, tool, interface and storage checks;
+Area 10 retains evaluation/developer tooling. This pass does not certify live
+services, external model internals or hardware performance.
+
+- Stage configuration in memory until every YAML file and secret read succeeds.
+  Failed startup/retry cannot turn partially injected defaults into deployment
+  overrides. Keep the existing environment/YAML/secrets precedence, constrain
+  config-index paths, and reject non-finite numeric settings centrally.
+- Treat dotenv values literally, including `${...}`, backslashes, quotes and
+  multiline text; align the Settings serializer and its stand-in parser with
+  the production parser. Encrypted secret verification no longer expands a
+  literal token into another environment variable.
+- Reject symlink user directories before mkdir/chmod and omit them from user
+  enumeration. The configured state root can still be a deployment mount/path.
+- Remove owner-account linking by display name. Only the verified provider ID
+  grants the built-in owner mapping; invalid legacy owner sessions are skipped
+  on restore. Opt-in full prompt dumps now use private atomic files and do not
+  follow a pre-existing target symlink.
+- Complete backup edge handling: malformed manifests cannot break lookup,
+  broken symlinks can be removed without following them during an authorized
+  reset, and explicit backup destinations cannot recurse into staging.
+- Replace predictable secrets-editor files with private tmpfs directories;
+  disable swap, undo, backup and shada files. Signals and failed saves clean up;
+  verify ciphertext decrypts to the intended text before atomic replacement.
+- Resolve Android build URLs through the same config loader instead of a second
+  shell parser with reversed precedence. Do not put decrypted dotenv on disk;
+  write literal property values atomically, preserving URL ampersands.
+- Correct OSRM's MLD build pipeline to extract/partition/customize, matching
+  the serving algorithm. Failed HTTP downloads now fail the build.
+- Bound Modal generation dimensions, steps, guidance, seed, prompt/reference
+  sizes and reference count before GPU dispatch. Validate reference images
+  before RGB conversion and cap their decoded pixel count. Edit output sizing
+  obeys its pixel budget and side limit even for extreme aspect ratios.
+- Focused configuration/storage/settings regressions and mocked deployment
+  checks passed. Final combined unit/integration/conscience validation passed
+  with **2,754 tests, 5 skips, and 34 subtests**. Both deployment shell scripts
+  also passed Bash syntax checks.
+  Deployment tests use dummy secrets, fake tools and a fake Modal SDK; they do
+  not download models, call billable GPUs or send credentials externally.
+
+Remaining deployment validation: enable the optional real SQLCipher driver and
+round-trip an encrypted database; back up/restore on the configured USB/rclone
+remotes; run OSRM's map build and image models against the installed Modal stack;
+measure cold/warm RAM and latency on the 8 GB Jetson. No factory reset, secret
+rotation, remote deployment or live backup destination was executed in this pass.

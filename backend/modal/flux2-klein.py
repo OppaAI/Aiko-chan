@@ -16,6 +16,21 @@ import io
 import base64
 import modal
 
+
+def _decode_reference_image(value: str):
+    """Validate compressed and decoded size before allocating an RGB image."""
+    from PIL import Image
+    if not value or len(value) > 16_000_000:
+        raise ValueError("reference image exceeds 16 MB base64 limit")
+    try:
+        data = base64.b64decode(value, validate=True)
+        with Image.open(io.BytesIO(data)) as image:
+            if image.width * image.height > 16_000_000:
+                raise ValueError("reference image exceeds 16 megapixels")
+            return image.convert("RGB")
+    except Exception as exc:
+        raise ValueError("invalid or oversized reference image") from exc
+
 # ---------------------------------------------------------------------------
 # image
 # ---------------------------------------------------------------------------
@@ -162,8 +177,7 @@ class AikoImageGen:
         ref_pil_images = []
         if reference_images:
             for b64 in reference_images:
-                img_bytes = base64.b64decode(b64)
-                img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                img = _decode_reference_image(b64)
                 ref_pil_images.append(img)
 
         kwargs = dict(
@@ -194,25 +208,36 @@ class AikoImageGen:
 # FastAPI wrapper
 # ---------------------------------------------------------------------------
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional
 
 web_app = FastAPI()
 
 
 class GenerateRequest(BaseModel):
-    prompt: str
-    width: int = 1024
-    height: int = 1024
-    steps: int = 4
-    guidance_scale: float = 1.0
-    seed: int = -1
-    reference_images: Optional[list[str]] = None  # base64 strings
+    prompt: str = Field(min_length=1, max_length=8000)
+    width: int = Field(default=1024, ge=256, le=2048)
+    height: int = Field(default=1024, ge=256, le=2048)
+    steps: int = Field(default=4, ge=1, le=64)
+    guidance_scale: float = Field(default=1.0, ge=0, le=20, allow_inf_nan=False)
+    seed: int = Field(default=-1, ge=-1, le=2**63-1)
+    reference_images: Optional[list[str]] = Field(default=None, max_length=2)  # base64 strings
+
+    @model_validator(mode="after")
+    def validate_workload(self):
+        if self.width % 64 or self.height % 64 or self.width * self.height > 2_097_152:
+            raise ValueError("dimensions must be multiples of 64 and at most 2 megapixels")
+        if not self.prompt.strip():
+            raise ValueError("prompt cannot be blank")
+        for image in getattr(self, "reference_images", None) or []:
+            _decode_reference_image(image)
+        return self
+
 
 
 class GenerateResponse(BaseModel):
     image_b64: str
-    prompt: str
+    prompt: str = Field(min_length=1, max_length=8000)
 
 
 @app.function(image=image)

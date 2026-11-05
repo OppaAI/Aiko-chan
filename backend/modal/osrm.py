@@ -2,8 +2,8 @@
 Aiko navigation backend: OSRM routing server hosted on Modal.
 
 Usage:
-    modal run modal_osrm_app.py::build_graph      # one-time: download + preprocess BC OSM extract
-    modal deploy modal_osrm_app.py                # deploy the always-available (scale-to-zero) endpoint
+    modal run backend/modal/osrm.py::build_graph      # one-time: download + preprocess BC OSM extract
+    modal deploy backend/modal/osrm.py                # deploy the always-available (scale-to-zero) endpoint
 
 Once deployed, hit:
     https://<your-workspace>--aiko-osrm-route.modal.run/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?overview=false&steps=true
@@ -21,7 +21,7 @@ app = modal.App("aiko-osrm")
 osm_volume = modal.Volume.from_name("aiko-osm-data", create_if_missing=True)
 VOLUME_PATH = "/data"
 
-# Official OSRM backend image ships osrm-extract / osrm-partition / osrm-contract / osrm-routed.
+# Official OSRM backend image ships osrm-extract / osrm-partition / osrm-customize / osrm-routed.
 osrm_image = modal.Image.from_registry(
     "ghcr.io/project-osrm/osrm-backend:latest",
     add_python="3.11",
@@ -43,12 +43,12 @@ GRAPH_BASENAME = f"{VOLUME_PATH}/bc"  # osrm files will be bc.osrm, bc.osrm.hsgr
 )
 def build_graph():
     """One-time (or occasional-refresh) job: download OSM extract and build the OSRM graph."""
-    subprocess.run(["curl", "-L", "-o", PBF_PATH, OSM_EXTRACT_URL], check=True)
+    subprocess.run(["curl", "--fail", "--location", "--retry", "3", "--max-time", "1800", "-o", PBF_PATH, OSM_EXTRACT_URL], check=True)
 
-    # Contraction Hierarchies pipeline (fast queries, standard for driving directions).
+    # Multi-Level Dijkstra pipeline, matching --algorithm mld at serving time.
     subprocess.run(["osrm-extract", "-p", "/opt/car.lua", PBF_PATH], check=True, cwd=VOLUME_PATH)
     subprocess.run(["osrm-partition", GRAPH_BASENAME + ".osrm"], check=True)
-    subprocess.run(["osrm-contract", GRAPH_BASENAME + ".osrm"], check=True)
+    subprocess.run(["osrm-customize", GRAPH_BASENAME + ".osrm"], check=True)
 
     osm_volume.commit()  # persist the built graph files
     print("Graph build complete.")

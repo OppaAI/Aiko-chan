@@ -183,6 +183,10 @@ def user_state_dir(user_id: str | None = None) -> Path:
     # raw github_205369547 collapses to the canonical OppaAI directory.
     uid = _resolve_aliased_uid(raw)
 
+    path = root / uid
+    if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
+        raise ValueError("user state directory cannot be a symlink or escape USER_SPACE_ROOT")
+
     if uid == _DEFAULT_USER_ID:
         return root / uid  # no mkdir — nothing on disk for an unauthenticated guest
 
@@ -226,7 +230,7 @@ def all_known_user_ids() -> list[str]:
     try:
         return sorted(
             p.name for p in root.iterdir()
-            if p.is_dir() and p.name and p.name != _DEFAULT_USER_ID
+            if p.is_dir() and not p.is_symlink() and p.name and p.name != _DEFAULT_USER_ID
         )
     except OSError:
         log.warning("userspace: failed to list %s", root)

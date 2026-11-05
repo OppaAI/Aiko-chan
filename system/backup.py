@@ -348,7 +348,13 @@ def write_manifest(staging: Path, manifest: BackupManifest) -> Path:
 
 def read_manifest(path: Path) -> BackupManifest:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("backup manifest must be an object")
     files = data.get("files", [])
+    if not isinstance(files, list) or not all(isinstance(item, dict) for item in files):
+        raise ValueError("backup manifest files must be a list of objects")
+    if not isinstance(data.get("dests", []), list):
+        raise ValueError("backup manifest destinations must be a list")
     return BackupManifest(
         version=int(data.get("version", 1)),
         backup_id=str(data.get("backup_id", "")),
@@ -394,7 +400,7 @@ def latest_verified_manifest(user_id: str, backup_type: str = "") -> BackupManif
     for path in sorted(root.glob("manifest-*.json")):
         try:
             manifest = read_manifest(path)
-        except (OSError, ValueError):
+        except (OSError, ValueError, TypeError):
             continue
         if manifest.user_id != user_id or not manifest.verified:
             continue
@@ -451,6 +457,8 @@ def transport_to_dest(staging: Path, dest: str, backup_id: str, dry_run: bool = 
         target = Path(raw_dest[4:]).expanduser()
         if dry_run:
             return f"dir → {target} (dry-run)"
+        if (target / backup_id).resolve().is_relative_to(staging.resolve()):
+            raise BackupError("backup destination cannot be inside staging")
         target.mkdir(parents=True, exist_ok=True)
         shutil.copytree(staging, target / backup_id, dirs_exist_ok=True)
         return f"dir → {target / backup_id}"
@@ -572,7 +580,7 @@ def perform_factory_reset(user_id: str = "", max_age_seconds: int = MANIFEST_MAX
     for path in sorted(target.rglob("*"), reverse=True):
         if path.is_symlink() or path.is_file():
             with contextlib.suppress(OSError):
-                removed_bytes += path.stat().st_size
+                removed_bytes += path.lstat().st_size
                 path.unlink()
                 removed_files += 1
     for path in sorted(target.rglob("*"), reverse=True):

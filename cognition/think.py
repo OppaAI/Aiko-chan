@@ -736,8 +736,12 @@ def _dump_full_prompt(debug: dict) -> None:
     # (latency + flash wear). Set AIKO_DEBUG_FULL_PROMPT=1 to opt in.
     if os.getenv("AIKO_DEBUG_FULL_PROMPT", "0").lower() not in {"1", "true", "yes", "on"}:
         return
+    import tempfile
+    target = Path(_DEBUG_PROMPT_DUMP_PATH)
+    tmp_name = None
     try:
-        with open(_DEBUG_PROMPT_DUMP_PATH, "w", encoding="utf-8") as f:
+        fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=".aiko-prompt-")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(f"=== mode={debug.get('mode')} @ {datetime.now().isoformat()} ===\n\n")
             f.write("----- SYSTEM PROMPT (full, untruncated) -----\n")
             f.write(debug.get("system_prompt", "") + "\n\n")
@@ -750,8 +754,12 @@ def _dump_full_prompt(debug: dict) -> None:
             f.write("----- PREVIOUS CHAT MESSAGES -----\n")
             for m in debug.get("previous_chat_messages", []):
                 f.write(f"[{m.get('role')}] {m.get('content')}\n")
+        os.replace(tmp_name, target)
     except Exception:
         log.exception("Failed to dump full prompt debug")
+    finally:
+        if tmp_name is not None:
+            Path(tmp_name).unlink(missing_ok=True)
 
 
 def _should_use_local_knowledge(user_input: str) -> bool:

@@ -41,6 +41,7 @@ from __future__ import annotations            # evaluates type annotations later
 
 # Public libraries
 import io                                     # for in-memory age decrypt buffer
+import math
 import json                                   # for list stringify + JSON YAML fallback
 import os                                     # for os.environ precedence
 import subprocess                             # for age decrypt subprocess
@@ -225,7 +226,7 @@ def _decrypt_env(enc_path: Path, identity_path: Path) -> dict[str, str]:
         raise RuntimeError(
             f"failed to decrypt {enc_path}: {exc.stderr.decode(errors='replace')}"
         ) from exc
-    vals = dotenv_values(stream=io.StringIO(result.stdout.decode(errors="replace")))
+    vals = dotenv_values(stream=io.StringIO(result.stdout.decode(errors="replace")), interpolate=False)
     return {k: v for k, v in vals.items() if v is not None}
 
 
@@ -260,16 +261,27 @@ def load_config(*, override: bool = False) -> None:
 
         root = Path(__file__).resolve().parent.parent
         original_env = set(os.environ)
+        pending_env: dict[str, str] = {}
+        resolved_env = dict(os.environ)
 
         config_dir = root / "config"
         if config_dir.exists():
             index_path = config_dir / "index.yaml"
             if index_path.exists():
                 index_data = _load_yaml_mapping(index_path)
+                if not isinstance(index_data, dict):
+                    raise ValueError(f"{index_path} must contain a YAML mapping")
                 config_names = index_data.get("configs", [])
                 if not isinstance(config_names, list):
                     raise ValueError(f"{index_path} configs must be a list")
-                paths = [config_dir / str(name) for name in config_names]
+                paths = []
+                for name in config_names:
+                    if not isinstance(name, str) or not name or Path(name).is_absolute() or ".." in Path(name).parts:
+                        raise ValueError("config index entries must be relative paths inside config/")
+                    path = config_dir / name
+                    if not path.resolve().is_relative_to(config_dir.resolve()):
+                        raise ValueError("config index path escapes config/")
+                    paths.append(path)
             else:
                 paths = sorted(
                     path for path in config_dir.glob("*.y*ml")
@@ -288,37 +300,44 @@ def load_config(*, override: bool = False) -> None:
                     if value is None or (isinstance(value, str) and value == ""):
                         continue
                     if override or key not in original_env:
-                        apply_managed_env(key, _stringify(value))
+                        pending_env[key] = _stringify(value)
+                        resolved_env[key] = pending_env[key]
 
         # --- Secrets: encrypted .env.age (preferred) with plaintext .env fallback ---
         # AGE_KEY / ENV_AGE_PATH may be bare filenames (e.g. from identity.yaml);
         # resolve them under USER_SPACE_ROOT unless they're already absolute,
         # so an explicit absolute override (env var or YAML) still wins outright.
-        state_root = Path(os.environ.get("USER_SPACE_ROOT", str(Path.home() / ".aiko"))).expanduser()
+        state_root = Path(resolved_env.get("USER_SPACE_ROOT", str(Path.home() / ".aiko"))).expanduser()
 
         def _resolve_under(base: Path, value: str) -> Path:
             candidate = Path(value).expanduser()
             return candidate if candidate.is_absolute() else base / candidate
 
-        identity_path = _resolve_under(state_root, os.environ.get("AGE_KEY", "age-key.txt"))
-        enc_path = _resolve_under(state_root, os.environ.get("ENV_AGE_PATH", ".env.age"))
+        identity_path = _resolve_under(state_root, resolved_env.get("AGE_KEY", "age-key.txt"))
+        enc_path = _resolve_under(state_root, resolved_env.get("ENV_AGE_PATH", ".env.age"))
 
         if enc_path.exists():
             for key, value in _decrypt_env(enc_path, identity_path).items():
                 if not key or value is None:
                     continue
-                if override or key not in os.environ:
-                    apply_managed_env(key, value)
+                if override or key not in resolved_env:
+                    pending_env[key] = value
+                    resolved_env[key] = value
         else:
             # Dev-machine fallback only — should not exist on the Jetson deployment.
             env_path = root / ".env"
             if env_path.exists():
-                for key, value in dotenv_values(env_path).items():
+                for key, value in dotenv_values(env_path, interpolate=False).items():
                     if not key or value is None:
                         continue
-                    if override or key not in os.environ:
-                        apply_managed_env(key, value)
+                    if override or key not in resolved_env:
+                        pending_env[key] = value
+                        resolved_env[key] = value
 
+        # Publish only after all files and decryption succeed; retry must not
+        # mistake partially loaded defaults for deployment overrides.
+        for key, value in pending_env.items():
+            apply_managed_env(key, value)
         _LOADED = True
 
 
@@ -352,7 +371,8 @@ def env_int(name: str, default: int) -> int:
 
 def env_float(name: str, default: float) -> float:
     try:
-        return float(os.getenv(name, str(default)))
+        value = float(os.getenv(name, str(default)))
+        return value if math.isfinite(value) else default
     except (TypeError, ValueError):
         return default
 

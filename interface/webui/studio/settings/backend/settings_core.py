@@ -769,47 +769,17 @@ def _resolve_secret_paths(environ: dict) -> tuple[Path, Path]:
 def _dotenv_serialize(values: dict[str, str]) -> str:
     lines = []
     for key, value in values.items():
-        if value and _BARE_SAFE_RE.match(value) and " " not in value:
-            lines.append(f"{key}={value}")
-        elif "'" not in value:
-            lines.append(f"{key}='{value}'")
-        else:
-            escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-            lines.append(f'{key}="{escaped}"')
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+        lines.append(f'{key}="{escaped}"')
     return "\n".join(lines) + "\n"
 
 
 def _dotenv_parse(text: str) -> dict[str, str]:
-    """Minimal dotenv parser for the plaintext stand-in backend.
-
-    Covers the forms _dotenv_serialize emits (bare, single-quoted,
-    double-quoted) plus plain hand-written KEY=value lines. The real
-    .env.age path goes through system.config._decrypt_env instead, which
-    uses python-dotenv (a declared dependency) — this parser exists so
-    the stand-in stays dependency-free.
-    """
-    values: dict[str, str] = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export "):].lstrip()
-        if "=" not in line:
-            continue
-        key, _, raw = line.partition("=")
-        key = key.strip()
-        raw = raw.strip()
-        if len(raw) >= 2 and raw[0] == "'" and raw[-1] == "'":
-            value = raw[1:-1]
-        elif len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
-            value = raw[1:-1].replace("\\\\", "\x00").replace('\\"', '"') \
-                              .replace("\x00", "\\")
-        else:
-            value = raw.split(" #", 1)[0].rstrip()
-        if key:
-            values[key] = value
-    return values
+    """Match the production parser, preserving literal secret values."""
+    import io
+    from dotenv import dotenv_values
+    return {key: value for key, value in dotenv_values(
+        stream=io.StringIO(text), interpolate=False).items() if value is not None}
 
 
 class PlaintextSecretsBackend:

@@ -1,52 +1,41 @@
 #!/usr/bin/env bash
-# Decrypts .env.age to tmpfs, opens it in nvim, re-encrypts on save, and
-# shreds the plaintext copy no matter how the script exits.
-#
-# Usage:
-#   ./edit-dotenv.sh                       # uses $ENV_AGE_PATH, or ~/.aiko/.env.age
-#   ./edit-dotenv.sh /path/to/.env.age     # overrides both of the above
-#
-# Env overrides:
-#   AGE_KEY       path to the age identity (private key)   default: ~/.aiko/age-key.txt
-#   AGE_KEY_PUB   path to the age recipient (public key)   default: ${AGE_KEY}.pub
-#   ENV_AGE_PATH  path to the encrypted secrets file        default: ~/.aiko/.env.age
-
+# Edit encrypted dotenv on tmpfs; keep plaintext and editor state private.
+# AGE_KEY defaults to <USER_SPACE_ROOT>/age-key.txt; AGE_KEY_PUB defaults to
+# ${AGE_KEY}.pub. Pass the encrypted path or set ENV_AGE_PATH.
 set -euo pipefail
-
-ENC="${1:-${ENV_AGE_PATH:-$HOME/.aiko/.env.age}}"
-KEY="${AGE_KEY:-$HOME/.aiko/age-key.txt}"
+umask 077
+STATE_ROOT="${USER_SPACE_ROOT:-$HOME/.aiko}"
+ENC="${1:-${ENV_AGE_PATH:-.env.age}}"
+KEY="${AGE_KEY:-age-key.txt}"
+[[ "$ENC" = /* ]] || ENC="$STATE_ROOT/$ENC"
+[[ "$KEY" = /* ]] || KEY="$STATE_ROOT/$KEY"
 PUB="${AGE_KEY_PUB:-${KEY}.pub}"
-
-if [ ! -f "$KEY" ]; then
-    echo "age identity not found: $KEY" >&2
+[[ "$PUB" = /* ]] || PUB="$STATE_ROOT/$PUB"
+if [[ ! -f "$KEY" || ! -f "$PUB" ]]; then
+    echo "age identity or recipient file not found" >&2
     exit 1
 fi
-if [ ! -f "$PUB" ]; then
-    echo "age recipient not found: $PUB" >&2
-    exit 1
-fi
-
-TMP="/dev/shm/aiko_env.$$"
-SWAPDIR="/dev/shm/aiko_env_swap.$$"
-mkdir -p "$SWAPDIR"
-
+WORKDIR="$(mktemp -d /dev/shm/aiko-env.XXXXXX)"
+TMP="$WORKDIR/env"
+CIPHER_TMP=""
 cleanup() {
-    shred -u "$TMP" 2>/dev/null || rm -f "$TMP"
-    rm -rf "$SWAPDIR"
+    rm -rf -- "$WORKDIR"
+    [[ -z "$CIPHER_TMP" ]] || rm -f -- "$CIPHER_TMP"
 }
-trap cleanup EXIT INT TERM
-
-if [ -f "$ENC" ]; then
-    age -d -i "$KEY" -o "$TMP" "$ENC"
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [[ -f "$ENC" ]]; then
+    age -d -i "$KEY" "$ENC" > "$TMP"
 else
     : > "$TMP"
 fi
-chmod 600 "$TMP"
-
-# -n disables swapfile entirely; directory is set anyway as a second layer
-# in case a plugin forces one on.
-nvim -n -c "set directory=${SWAPDIR}" "$TMP"
-
-age -R "$PUB" -o "${ENC}.new" "$TMP"
-mv "${ENC}.new" "$ENC"
+# Disable swap, backup, persistent undo, and shada (which can retain file text).
+nvim -n -i NONE -c "set nobackup nowritebackup noundofile" "$TMP"
+CIPHER_TMP="$(mktemp "${ENC}.XXXXXX")"
+age -R "$PUB" "$TMP" > "$CIPHER_TMP"
+# Verify decryption without writing another plaintext file.
+age -d -i "$KEY" "$CIPHER_TMP" | cmp -s -- "$TMP" -
+mv -f -- "$CIPHER_TMP" "$ENC"
+CIPHER_TMP=""
 echo "re-encrypted -> $ENC"

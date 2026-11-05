@@ -305,6 +305,12 @@ def _load_sessions() -> None:
         if not isinstance(entry, dict):
             continue
         try:
+            # Old display-name-based owner sessions must not survive the fix.
+            if entry.get("user_id") == "OppaAI" and not (
+                entry.get("provider") == "github"
+                and str(entry.get("provider_user_id")) == "205369547"
+            ):
+                continue
             created = entry.get("created_at")
             created_at = (bioclock.local_now().fromisoformat(created)
                           if isinstance(created, str) else created)
@@ -387,8 +393,6 @@ def _create_session(user_id, username: str, email: str | None, provider: str) ->
     # Owner alias: OppaAI's GitHub id (205369547) should use display name as
     # runtime id so memories/drafts stay under OppaAI, not github_205369547
     if provider == "github" and str(user_id) == "205369547":
-        runtime_user_id = "OppaAI"
-    elif username and username.lower() == "oppaai":
         runtime_user_id = "OppaAI"
     else:
         runtime_user_id = normalize_user_id(provider, user_id)

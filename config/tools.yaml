@@ -191,6 +191,30 @@
       "skill": false
     },
     {
+      "handler": "agentic.toolkit.camera:camera_control",
+      "name": "camera_control",
+      "description": "Control the current user browser camera. capture/watch require an explicit user camera request; stop ends watching. No image is returned until the browser supplies a frame.",
+      "props": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "capture",
+            "watch",
+            "stop"
+          ]
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "domain": "vision",
+      "always_on": true,
+      "react": true,
+      "graph": false,
+      "wiki": false,
+      "skill": false
+    },
+    {
       "handler": "agentic.toolkit.organize:cancel_reminder",
       "name": "cancel_reminder",
       "description": "Cancel reminder by id.",

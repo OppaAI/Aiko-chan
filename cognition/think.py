@@ -1193,6 +1193,10 @@ class AikoThink:
         """
         core = self._persona_core()
         volatile_parts: list[str] = []
+        from sensory.vision import context as visual_context
+        visual = visual_context(current_user_id())
+        if visual:
+            volatile_parts.append(visual)
         global _GIT_STATUS_CACHE
         try:
             from cognition.attention import for_identity

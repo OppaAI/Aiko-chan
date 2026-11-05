@@ -26,6 +26,7 @@ from agentic.toolkit.websearch import (
 from agentic.toolkit.ingest import fetch_from_url
 from agentic.toolkit import plan  # noqa: F401
 from agentic.toolkit import organize  # noqa: F401
+from agentic.toolkit import camera  # noqa: F401
 from agentic.toolkit import photography  # noqa: F401
 from agentic.toolkit import self_improve  # noqa: F401
 from agentic.toolkit import reports  # noqa: F401

@@ -22,6 +22,7 @@ def test_image_motion_runs_in_thread_with_source(monkeypatch):
     web = AikoWeb.__new__(AikoWeb)
     web._broadcast = lambda *_args, **_kwargs: None
     web._infer_image = lambda *_args: "description"
+    web._input_q = queue.Queue()
     monkeypatch.setattr(webui, "observe_fly_runtime", lambda *_args, **_kwargs: None)
     seen = []
     caller_thread = threading.get_ident()

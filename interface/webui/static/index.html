@@ -144,6 +144,8 @@
     <div id="stage-chatbox" aria-label="Message Aiko">
       <input id="user-input" type="text" autocomplete="off" spellcheck="false" placeholder="Type your message...">
       <button id="camera-btn" class="input-btn ghost" title="Take a picture and ask Aiko's vision model" aria-label="Take a picture">📷</button>
+      <button id="watch-btn" class="input-btn ghost" title="Watch with camera" aria-label="Watch with camera">👁</button>
+      <button id="attach-btn" class="input-btn ghost" title="Attach image" aria-label="Attach image">＋</button><input id="image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden>
       <button id="screen-btn" class="input-btn ghost" title="Share one screen frame with Aiko" aria-label="Share screen with Aiko">▣</button>
       <button id="send-btn" class="input-btn send" aria-label="Send message">➤</button>
     </div>
@@ -348,7 +350,15 @@
   <script type="module" src="./vrm.js"></script>
 
   <!-- ── Chat UI + WebSocket ─────────────────────────────────────────────── -->
+  <div id="camera-panel" hidden style="position:fixed;right:1rem;bottom:6rem;z-index:1000;background:#222;color:white;padding:12px;border-radius:12px;max-width:250px">
+    <video id="camera-preview" autoplay muted playsinline style="width:100%;border-radius:8px"></video>
+    <div id="camera-status" aria-live="polite">Camera ready</div>
+    <label><input id="camera-motion" type="checkbox" checked> Gestures and posture</label><br>
+    <label><input id="camera-face" type="checkbox"> Recognize saved face</label><br>
+    <button id="camera-enroll" type="button">Remember my face</button><button id="camera-forget" type="button">Forget face</button><button id="camera-stop" type="button">Stop camera</button>
+  </div>
   <script src="./script.js"></script>
+  <script src="./camera.js"></script>
   <script src="./companion.js"></script>
   <script src="./growth.js"></script>
 

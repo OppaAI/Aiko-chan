@@ -1264,7 +1264,7 @@ function submitInput() {
   input.value = '';
 }
 
-async function captureImage() {
+async function captureImage(promptOverride) {
   if (!wsReady()) {
     addMessage('sys', 'WebSocket bridge is offline. Cannot use the camera.');
     return;
@@ -1280,7 +1280,7 @@ async function captureImage() {
   let submitted = false;
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      video: { facingMode: { ideal: 'user' }, width: { ideal: 1280 }, height: { ideal: 720 } },
       audio: false,
     });
     const video = document.createElement('video');
@@ -1295,7 +1295,7 @@ async function captureImage() {
     canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
     canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
     const image = canvas.toDataURL('image/jpeg', 0.85);
-    const text = input.value.trim();
+    const text = typeof promptOverride === "string" ? promptOverride : input.value.trim();
     if (!wsReady()) {
       addMessage('sys', 'WebSocket bridge is offline. Cannot submit the camera image.');
       return;
@@ -1319,6 +1319,17 @@ input.addEventListener('keydown', e => {
 });
 sendBtn.addEventListener('click', submitInput);
 cameraBtn.addEventListener('click', captureImage);
+window.captureImage = captureImage;
+document.getElementById('attach-btn')?.addEventListener('click', () => document.getElementById('image-file').click());
+document.getElementById('image-file')?.addEventListener('change', async event => {
+  const file = event.target.files?.[0]; event.target.value = '';
+  if (!file || !['image/jpeg','image/png','image/webp'].includes(file.type) || file.size > 12000000) { addMessage('sys','Choose a JPEG, PNG, or WebP image under 12 MB.'); return; }
+  try { const bitmap = await createImageBitmap(file); if (bitmap.width * bitmap.height > 16000000) throw new Error('Image is too large.');
+    const canvas = document.createElement('canvas'); const scale = Math.min(1,1024/bitmap.width,1024/bitmap.height); canvas.width = Math.max(1,Math.round(bitmap.width*scale)); canvas.height = Math.max(1,Math.round(bitmap.height*scale)); canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height); bitmap.close();
+    const text = input.value.trim(); if (!wsReady()) throw new Error('Connection is offline.');
+    ws.send(JSON.stringify({type:'image_input',source:'attachment',image:canvas.toDataURL('image/jpeg',.82),text})); input.value=''; addMessage('user', text || 'Attached an image.');
+  } catch (error) { addMessage('sys', error.message || 'Could not read image.'); }
+});
 function syncTalkButton() {
   const live = !micMuted && !!micContext;
   micBtn.classList.toggle('on', live);
@@ -1437,7 +1448,9 @@ function connectWS() {
       case 'step': handleStep(msg); break;
       case 'phase': if (msg.value === 'chat') switchToChat(); break;
       case 'chat': addMessage(msg.sender, msg.text); break;
+      case 'camera_control': window.AikoCamera?.control(msg); break;
       case 'vision':
+        window.AikoCamera?.visionEvent(msg);
         window.aikoCompanionVision?.(msg);
         if (msg.status === 'working') toolStatus.textContent = `  👁  analyzing ${msg.source === 'screen' ? 'screen' : 'camera'} image…`;
         else if (msg.status === 'done') { toolStatus.textContent = ''; cameraBtn.disabled = false; }
@@ -1499,6 +1512,7 @@ function connectWS() {
     wsLabel.textContent = 'ws offline';
     pendingMicStart = null;
     stopMic();
+    window.AikoCamera?.stop();
     if (wsUrl.startsWith("wss:")) {
       toolStatus.textContent = "  ws offline: open " + wsUrl.replace("wss:", "https:") + " once to accept the WSS certificate";
     } else {
@@ -1523,6 +1537,7 @@ async function checkAuth() {
       let data = {};
       try { data = await res.json(); } catch (_) { /* no body / non-JSON */ }
       window.currentUsername = data.username || 'You';
+      window.currentUserId = data.user_id || '';
       const aiNameEl = document.getElementById('vrm-ai-name');
       if (aiNameEl) aiNameEl.textContent = data.ai_name || 'Aiko';
       const userNameEl = document.getElementById('vrm-user-name');

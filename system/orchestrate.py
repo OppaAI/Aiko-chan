@@ -1793,6 +1793,18 @@ def run_session(ui, args) -> None:
                             continue
                     last_bound_uid = turn_uid
 
+                # Explicit camera requests also work for ASR; await a frame before
+                # asking the language model to describe what it can see.
+                from sensory.vision import camera_intent, grant_camera, VisualInput
+                camera_request = None if isinstance(user_input, VisualInput) else camera_intent(user_input)
+                camera_ui = getattr(ui, "request_camera_action", None)
+                if camera_request and callable(camera_ui):
+                    grant_camera(turn_uid)
+                    if camera_ui(camera_request, user_input):
+                        if camera_request == "stop":
+                            ui.add_message('sys', 'Camera stopped.')
+                        continue
+
                 # Drain per-user runtime notices (TTS/ASR/memory failures) so the
                 # LLM can acknowledge them this turn. Destructive by design — if a
                 # soft gate below answers without the LLM, the notes are dropped
@@ -1871,7 +1883,13 @@ def run_session(ui, args) -> None:
                 if speak is not None and hasattr(speak, "reset_synth_timer"):
                     speak.reset_synth_timer()
 
-                reply_text = think.route(user_input, token_callback=token_cb, system_note=system_note)
+                from sensory.vision import use_snapshot
+                with use_snapshot(turn_uid, user_input):
+                    reply_text = think.route(user_input, token_callback=token_cb, system_note=system_note)
+                from sensory.vision import take_camera_action
+                requested_camera = take_camera_action(turn_uid)
+                if requested_camera and callable(camera_ui):
+                    camera_ui(requested_camera, user_input)
                 last_turn = (user_input, reply_text or "")
                 current_latency["assistant_done_at"] = time.monotonic()
 

@@ -177,7 +177,9 @@
     motionBin = bin; lastPresenceSent = now;
     send({ type: 'presence', level: Math.round(level * 100) / 100 });
   }
+  window.addEventListener('aiko:camera-starting', () => stopWebcam());
   async function toggleWebcam() {
+    window.AikoCamera?.stop();
     if (webcamStream) { stopWebcam(); return; }
     try {
       webcamStream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 320 }, height: { ideal: 240 }, facingMode: 'user' }, audio: false });

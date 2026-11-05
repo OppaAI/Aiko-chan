@@ -18,6 +18,9 @@ via cognition.fly_registry — never share a single process-global DB.
 """
 from __future__ import annotations
 
+import math
+import threading
+from contextlib import nullcontext
 import os
 import sqlite3
 import time
@@ -65,6 +68,7 @@ class PlasticityStore:
         self.identity = (identity or "default").strip() or "default"
         self._mb_events = 0
         self._cx_events = 0
+        self._write_lock = threading.RLock()
 
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -126,9 +130,21 @@ class PlasticityStore:
         return conn
 
     def save_mb(self, pre, post, delta) -> int:
-        pre = np.asarray(pre).reshape(-1)
-        post = np.asarray(post).reshape(-1)
+        with self._write_lock:
+            return self._save_mb(pre, post, delta)
+
+    def _save_mb(self, pre, post, delta) -> int:
+        pre = np.asarray(pre, dtype=np.float64).reshape(-1)
+        post = np.asarray(post, dtype=np.float64).reshape(-1)
         delta = np.asarray(delta, dtype=np.float64).reshape(-1)
+        if not (len(pre) == len(post) == len(delta)):
+            raise ValueError('plasticity arrays must have matching lengths')
+        if not np.isfinite(delta).all():
+            raise ValueError('plasticity deltas must be finite')
+        for indices in (pre, post):
+            if (not np.isfinite(indices).all() or np.any(indices < 0)
+                    or np.any(indices != np.floor(indices)) or np.any(indices >= 2**63)):
+                raise ValueError('plasticity indices must be nonnegative integers')
         mask = np.abs(delta) > 1e-9
         now = _now()
         rows = [
@@ -166,25 +182,41 @@ class PlasticityStore:
             conn.close()
         out = {}
         for a, b, d in rows:
-            if 0 <= a < n_pre and 0 <= b < n_post:
+            if (0 <= a < n_pre and 0 <= b < n_post and d is not None
+                    and math.isfinite(float(d))):
                 out[(int(a), int(b))] = float(d)
             else:
                 return None
         return out
 
     def save_if_due_mb(self, mb) -> int | None:
+        with self._write_lock:
+            return self._save_if_due_mb(mb)
+
+    def _save_if_due_mb(self, mb):
         self._mb_events += 1
         if self._mb_events < _save_every():
             return None
         return self.flush_mb(mb)
 
     def flush_mb(self, mb) -> int:
-        ind, idx, _ = mb._kcm
-        counts = np.diff(ind).astype(np.int64)
-        pre = np.repeat(np.arange(len(ind) - 1, dtype=np.int64), counts)
-        return self.save_mb(pre, idx, mb._plastic)
+        with self._write_lock:
+            ind, idx, _ = mb._kcm
+            counts = np.diff(ind).astype(np.int64)
+            pre = np.repeat(np.arange(len(ind) - 1, dtype=np.int64), counts)
+            with getattr(mb, '_plastic_lock', None) or nullcontext():
+                snapshot = mb._plastic.copy()
+            return self.save_mb(pre, idx, snapshot)
 
     def save_cx(self, sleep_pressure: float) -> None:
+        with self._write_lock:
+            self._save_cx(sleep_pressure)
+
+    def _save_cx(self, sleep_pressure):
+        sleep_pressure = float(sleep_pressure)
+        if not math.isfinite(sleep_pressure):
+            raise ValueError('sleep pressure must be finite')
+        sleep_pressure = max(0.0, min(1.0, sleep_pressure))
         conn = self._connect()
         try:
             conn.execute(
@@ -210,9 +242,15 @@ class PlasticityStore:
             ).fetchone()
         finally:
             conn.close()
-        return float(row[0]) if row else None
+        if row is None or row[0] is None or not math.isfinite(float(row[0])):
+            return None
+        return max(0.0, min(1.0, float(row[0])))
 
     def save_if_due_cx(self, sleep_pressure: float) -> bool:
+        with self._write_lock:
+            return self._save_if_due_cx(sleep_pressure)
+
+    def _save_if_due_cx(self, sleep_pressure):
         self._cx_events += 1
         if self._cx_events < _save_every():
             return False
@@ -232,7 +270,7 @@ def apply_mb(mb, deltas: dict | None) -> int:
         s, e = ind[i], ind[i + 1]
         for p, t in zip(range(s, e), idx[s:e].tolist()):
             d = deltas.get((i, int(t)))
-            if d:
+            if d and math.isfinite(float(d)):
                 mb._plastic[p] = float(d)
                 n += 1
     return n

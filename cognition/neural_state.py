@@ -28,6 +28,7 @@ _lock = threading.RLock()
 _states: dict[str, "NeuralState"] = {}
 
 _INFLUENCE_MAX = 48
+_STATE_LIMIT = 8
 
 
 def _key(user_id: str | None) -> str:
@@ -164,10 +165,12 @@ class NeuralState:
 def get_neural_state(user_id: str | None = None) -> NeuralState:
     key = _key(user_id)
     with _lock:
-        st = _states.get(key)
+        st = _states.pop(key, None)
         if st is None:
             st = NeuralState(user_id=(user_id or "").strip() or None)
-            _states[key] = st
+        _states[key] = st
+        while len(_states) > _STATE_LIMIT:
+            _states.pop(next(iter(_states)))
         return st
 
 

@@ -99,3 +99,43 @@ def test_schema_guard(tmp_path):
     conn.close()
     with pytest.raises(ValueError, match="schema"):
         SqliteCatalog(dest)
+
+
+def test_catalog_failed_load_closes_connection(monkeypatch):
+    from unittest.mock import Mock
+    from cognition.fly_runtime import sqlite_catalog as module
+    connection = Mock()
+    connection.execute.return_value = []
+    monkeypatch.setattr(module.sqlite3, 'connect', lambda *a, **k: connection)
+    with pytest.raises(ValueError, match='schema'):
+        module.SqliteCatalog('bad.db')
+    connection.close.assert_called_once()
+
+
+def test_catalog_releases_connection_when_last_reference_drops(both):
+    import gc
+    import sqlite3
+    _, existing = both
+    temporary = SqliteCatalog(existing._db_path)
+    connection = temporary._conn
+    del temporary
+    gc.collect()
+    with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+        connection.execute('SELECT 1')
+
+
+def test_dense_frontier_has_bounded_edges(tmp_path):
+    nodes = [Node('a'), Node('b')]
+    edges = [Edge('a', 'b', 1.) for _ in range(100)]
+    memory = ConnectomeCatalog(nodes, edges)
+    path = tmp_path / 'dense.db'
+    build_sqlite([{'id': n.id, 'type': n.type, 'region': n.region} for n in nodes],
+                 [{'source': e.source, 'target': e.target, 'weight': e.weight, 'sign': e.sign} for e in edges], _META, path)
+    sql = SqliteCatalog(path)
+    try:
+        for catalog in (memory, sql):
+            graph = catalog.subgraph(['a'], budget=2)
+            assert len(graph['edges']) <= 16
+            assert graph['truncated']
+    finally:
+        sql.close()

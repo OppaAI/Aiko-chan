@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from .catalog import ConnectomeCatalog
 from .dynamics import ActiveDynamics
 from .embodiment import AvatarEmbodiment
+from .anatomy import is_sensory_type
 from cognition.neural_state import peek_neural_state
 def _is_output_type(cell_type: str) -> bool:
     """Return whether a catalog type represents a motor/descending output."""
@@ -43,7 +44,7 @@ class FlyRuntime:
         for _ in range(min(8, max(1, max_hops + 1))):
             rates = dynamics.step(drive)
         outputs = {node_id: value for node_id, value in rates.items() if _is_output_type(self.catalog.nodes[node_id].type)}
-        sensory = max((v for node, v in rates.items() if self.catalog.nodes[node].type in {"sensory", "AL", "T4", "T5"}), default=0.0)
+        sensory = max((v for node, v in rates.items() if is_sensory_type(self.catalog.nodes[node].type)), default=0.0)
         output_drive = max(outputs.values(), default=0.0)
         current_state = peek_neural_state(self.user_id)
         valence = current_state.valence if current_state is not None else 0.0
@@ -75,10 +76,10 @@ class FlyRuntime:
         try:
             from cognition.neural_state import get_neural_state
             state = get_neural_state(self.user_id)
-            sensory = max((v for node, v in rates.items() if self.catalog.nodes[node].type in {"sensory", "AL", "T4", "T5"}), default=0.0)
+            sensory = max((v for node, v in rates.items() if is_sensory_type(self.catalog.nodes[node].type)), default=0.0)
             vigor = max(outputs.values(), default=0.0)
-            state.sensory_gain = max(0.5, min(1.5, 0.5 + sensory))
-            state.motion_salience = max(0.0, min(1.0, sensory))
+            state.publish_sensory_gain(max(0.5, min(1.5, 0.5 + sensory)), source="active_subgraph")
+            state.publish_motion(sensory, source="active_subgraph")
             state.publish_dn(arousal=vigor, rate_mult=0.8 + 0.4 * vigor, source="active_subgraph")
         except Exception:
             # The runtime remains usable for offline evaluation without Aiko's bus.
@@ -87,6 +88,7 @@ class FlyRuntime:
 
 _lock = threading.RLock()
 _runtimes: dict[str, FlyRuntime] = {}
+_MAX_RUNTIMES = 8
 
 
 def _key(user_id: str | None) -> str:
@@ -104,6 +106,11 @@ def get_fly_runtime(user_id: str | None, catalog: ConnectomeCatalog) -> FlyRunti
         if runtime is None or runtime.catalog is not catalog:
             runtime = FlyRuntime(catalog=catalog, user_id=user_id)
             _runtimes[key] = runtime
+        else:
+            _runtimes.pop(key)
+            _runtimes[key] = runtime
+        while len(_runtimes) > _MAX_RUNTIMES:
+            _runtimes.pop(next(iter(_runtimes)))
         return runtime
 
 

@@ -192,3 +192,85 @@ def test_configured_catalog_no_path_no_env_returns_none(monkeypatch):
     monkeypatch.setattr(service, "_catalog", None)
     monkeypatch.setattr(service, "_catalog_path", None)
     assert service._configured_catalog() is None
+
+
+def test_real_anatomical_sensory_types_publish_through_bus():
+    catalog = ConnectomeCatalog([Node('visual', 'VS', 'optic'), Node('output', 'DNp01', 'motor')],
+                                [Edge('visual', 'output', 1.0)])
+    uid = 'real-cell-readout'
+    clear_neural_state(uid)
+    get_fly_runtime(uid, catalog).activate(['visual'], {'visual': 1.0})
+    state = get_neural_state(uid).snapshot()
+    assert state['motion_salience'] > 0
+    assert state['sources']['motion'] == 'active_subgraph'
+    assert state['sources']['al'] == 'active_subgraph'
+
+
+def test_runtime_identity_cache_is_bounded(monkeypatch):
+    from cognition.fly_runtime import runtime as module
+    monkeypatch.setattr(module, '_runtimes', {})
+    monkeypatch.setattr(module, '_MAX_RUNTIMES', 2)
+    catalog = _catalog()
+    a = get_fly_runtime('a', catalog)
+    get_fly_runtime('b', catalog)
+    assert get_fly_runtime('a', catalog) is a
+    get_fly_runtime('c', catalog)
+    assert len(module._runtimes) == 2
+    assert module.peek_fly_runtime('b') is None
+
+
+def test_invalid_active_drive_is_neutral():
+    dynamics = ActiveDynamics([Node('a')], [])
+    assert dynamics.step({'a': float('nan')}) == {'a': 0.0}
+    assert dynamics.step({'a': float('inf')}) == {'a': 0.0}
+
+
+def test_background_evaluations_are_globally_bounded(monkeypatch):
+    monkeypatch.setenv('AIKO_FLY_RUNTIME_MODE', 'live')
+    monkeypatch.setenv('AIKO_FLY_BG_EVERY_N', '1')
+    monkeypatch.setattr(service, '_background_inflight', set())
+    monkeypatch.setattr(service, '_bg_counts', {})
+    begun, release, done = threading.Event(), threading.Event(), threading.Event()
+    calls = []
+    def observe(uid, *a, **k):
+        calls.append(uid)
+        begun.set()
+        release.wait(2)
+        done.set()
+        return None
+    monkeypatch.setattr(service, 'observe', observe)
+    try:
+        service.observe_background('a', SensoryObservation('visual', 1.), seed_types=('visual',))
+        assert begun.wait(2)
+        service.observe_background('b', SensoryObservation('visual', 1.), seed_types=('visual',))
+        assert calls == ['a']
+    finally:
+        release.set()
+        assert done.wait(2)
+        for _ in range(2000):
+            if not service._background_inflight:
+                break
+            threading.Event().wait(.001)
+        assert not service._background_inflight
+
+
+def test_failed_thread_start_does_not_leave_identity_stuck(monkeypatch):
+    monkeypatch.setenv('AIKO_FLY_RUNTIME_MODE', 'live')
+    monkeypatch.setattr(service, '_background_inflight', set())
+    monkeypatch.setattr(service, '_bg_counts', {})
+    class FailedThread:
+        def __init__(self, **kwargs):
+            pass
+        def start(self):
+            raise RuntimeError('cannot start')
+    monkeypatch.setattr(service.threading, 'Thread', FailedThread)
+    service.observe_background('a', SensoryObservation('visual', 1.), seed_types=('visual',))
+    assert service._background_inflight == set()
+
+
+def test_large_json_catalog_requires_indexed_artifact(tmp_path):
+    path = tmp_path / 'too-large.json'
+    with path.open('wb') as stream:
+        stream.truncate(65 * 1024 * 1024)
+    with pytest.raises(ValueError, match='indexed SQLite'):
+        service._load_json_catalog(path)

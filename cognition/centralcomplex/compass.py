@@ -136,6 +136,8 @@ class FlyCompass:
         f = np.asarray(features, dtype=np.float64).reshape(-1)
         if f.shape[0] != self.n_features:
             raise ValueError(f"expected {self.n_features} features, got {f.shape[0]}")
+        if not np.isfinite(f).all() or not np.isfinite(float(pen_drive)) or not np.isfinite(float(fatigue)):
+            raise ValueError('compass inputs must be finite')
         n_epg_total = self.n_epg
         # Real-weight drive into EPG (position order).
         def to_pos(vec_global_epg: np.ndarray) -> np.ndarray:
@@ -184,3 +186,12 @@ class FlyCompass:
             "n_epg": self.n_epg, "n_pfl_l": self.n_pfl_l, "n_pfl_r": self.n_pfl_r,
             "n_er5": len(self._er5), "sleep_pressure": float(self.sleep_pressure),
         }
+
+
+def observe_compass(compass, features, **kwargs):
+    """Evaluate without advancing live state; caller holds the compass lock."""
+    bump, sleep = compass.bump.copy(), compass.sleep_pressure
+    try:
+        return compass.step(features, **kwargs)
+    finally:
+        compass.bump, compass.sleep_pressure = bump, sleep

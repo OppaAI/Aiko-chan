@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import weakref
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
@@ -50,6 +51,14 @@ class SqliteCatalog:
         # background threads for different users.
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True, check_same_thread=False)
+        try:
+            self._load_catalog()
+        except BaseException:
+            self._conn.close()
+            raise
+        self._finalizer = weakref.finalize(self, self._conn.close)
+
+    def _load_catalog(self):
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             meta = {row["key"]: row["value"] for row in self._conn.execute("SELECT key, value FROM meta")}
@@ -73,7 +82,7 @@ class SqliteCatalog:
     def close(self) -> None:
         try:
             with self._lock:
-                self._conn.close()
+                self._finalizer()
         except Exception:
             pass
 
@@ -101,20 +110,25 @@ class SqliteCatalog:
 
     # ── bounded path query (edges fetched per BFS level, indexed) ──────
 
-    def _level_edges(self, node_ids: list[str]) -> dict[str, list[Edge]]:
+    def _level_edges(self, node_ids: list[str], limit: int):
         """One indexed query per chunk (not per node): ~hops queries per eval."""
         out: dict[str, list[Edge]] = defaultdict(list)
+        scanned = 0
         with self._lock:
             for start in range(0, len(node_ids), 500):
                 chunk = node_ids[start:start + 500]
                 marks = ",".join("?" * len(chunk))
                 rows = self._conn.execute(
-                    f"SELECT source, target, weight, sign FROM edges WHERE source IN ({marks})", chunk)
+                    f"SELECT source, target, weight, sign FROM edges WHERE source IN ({marks}) "
+                    "ORDER BY source,target LIMIT ?", [*chunk, max(0, limit - scanned) + 1])
                 for r in rows:
+                    if scanned >= limit:
+                        return out, scanned, True
+                    scanned += 1
                     if r["target"] in self._node_table:
                         out[str(r["source"])].append(
                             Edge(str(r["source"]), str(r["target"]), float(r["weight"]), str(r["sign"])))
-        return out
+        return out, scanned, False
 
     def subgraph(self, seeds: Iterable[str], *, budget: int = 20000, max_hops: int = 4) -> dict:
         """Same return shape as ConnectomeCatalog.subgraph."""
@@ -137,8 +151,12 @@ class SqliteCatalog:
             scheduled.add(seed)
             frontier.append(seed)
         depth = 0
+        edge_limit = min(100000, max(1, budget * 8))
+        scanned = 0
         while frontier and depth <= max_hops:
-            level = self._level_edges(frontier)
+            level, inspected, capped = self._level_edges(frontier, edge_limit - scanned)
+            scanned += inspected
+            truncated = truncated or capped
             adjacency.update(level)
             next_frontier: list[str] = []
             for node_id in frontier:

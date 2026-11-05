@@ -14,7 +14,7 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 | 3 | Conscience, refusal gates, and user preferences | `cognition/conscience/`, `cognition/policy.py`, `cognition/attention.py` | Current code pass completed; final validation below; live-model and physical Jetson checks pending |
 | 4 | Agentic tasks, tools, and self-coding | `agentic/`, `Aiko-Playground` integration | Current code pass completed; final validation below; live-model and physical Jetson checks pending |
 | 5 | Memory, retrieval, knowledge, and persistence | `cognition/memory/`, `cognition/knowledge/` | Current code pass completed for SQLite/Harrier; final validation below; live-model retrieval quality and physical Jetson RAM/latency checks pending |
-| 6 | Fly-brain circuits and state wiring | `cognition/fly*`, `cognition/centralcomplex/`, `cognition/neural_state.py` | In progress; signal validation, GF priority, familiarity, and working-memory score wiring fixes below |
+| 6 | Fly-brain circuits and state wiring | `cognition/fly*`, `cognition/centralcomplex/`, `cognition/neural_state.py` | Current code pass completed; final validation below; full-connectome and physical Jetson/sensor/body measurements pending |
 | 7 | Speech, listening, and sensory pathways | `sensory/`, `cognition/flysense/` | Not started |
 | 8 | Web, desktop, mobile, and external interfaces | `interface/` | Not started |
 | 9 | Configuration, security boundaries, storage, and deployment | `system/`, `config/`, `backend/`, `scripts/` | Focused path/TLS fixes shipped; broad review not started |
@@ -700,3 +700,55 @@ Fly-brain stages, circuits, cancellation, registry, runtime/catalog, persona,
 sensory adapters, central-complex, and Fly-memory tests. Area 6 remains in
 progress; runtime/catalog lifecycle, background step publication, plasticity
 persistence, CX, DN/body, and sensory wiring need the broader review.
+
+### Area 6: runtime, persistence, shadow isolation, and bounded execution
+
+Completed the remaining current-configuration code pass across MB learning,
+plasticity storage, whole-brain/background stepping, the indexed active runtime,
+CX/clock state, and DN output adapters.
+
+- Runtime sensory/descending readouts now use the synchronized NeuralState
+  publisher methods and record their source. Functional seeding and readout
+  share anatomical aliases, so real MaleCNS types such as VS are recognized.
+- Plasticity arrays reject mismatched lengths, invalid indices, and nonfinite
+  deltas before touching saved rows. CX persistence rejects nonfinite pressure.
+  MB features/rewards/patterns are validated before use; learning and readout
+  share a reentrant lock. Persistence snapshots learning under that lock and
+  serializes writes and debounce counters without holding the model lock over
+  SQLite writes.
+- Neural-state/runtime/clock caches retain at most eight identities. Whole-brain
+  result caching normalizes identity, retains at most eight results, and expires
+  results after 60 seconds. Background workers inherit caller context.
+- Runtime background evaluation allows one in-flight task globally and bounds
+  stride counters. Failed thread starts release the reservation, allowing retry.
+- JSON fallback is refused above 64 MiB; full catalogs require the indexed
+  SQLite artifact. Failed indexed loads close their connection, and discarded
+  catalogs release connections when their last reference is gone.
+- Both catalog backends bound inspected/materialized edges to eight times the
+  node budget, capped at 100,000 edges. Dense traversal marks the result
+  truncated. SQLite uses limited queries rather than materializing an entire
+  dense frontier in Python.
+- Whole-brain artifacts validate CSR ordering, edge bounds, node uniqueness,
+  and finite real weights before publication; large-array checks use blocks.
+  Invalid KC seed arrays are rejected before propagation.
+- Circadian drive history is per identity and ticks are synchronized. Shadow
+  familiarity does not publish live state. DN wiring preserves zero arousal,
+  decisiveness, and motor controls rather than replacing them with defaults.
+- Shadow CX attention/planning evaluates a snapshot and restores bump/sleep
+  state. Only live attention updates persist sleep pressure. Routing observation
+  uses the same shared observation helper. Invalid compass inputs are rejected
+  before changing state.
+
+Validation includes synthetic real-type catalogs, dense edge budgets,
+connection cleanup, overlapping and failed workers, invalid persisted learning,
+parallel reinforcement, stale-result expiry, identity separation, shadow state
+preservation, and zero-valued controls. The final combined regression run passed **2,573 tests, with 5 skips, 13
+existing deprecation warnings, and 34 passing subtests**. The current Area 6
+code pass is complete. Final mode-boundary tests also verify that shadow
+GF/MB/LH predictions cannot be fed back into live CX/clock/motor readouts;
+predictions remain available in observability traces.
+
+Physical validation remains: peak RAM/latency with the real connectome and all
+model services on the 8 GB Jetson, real sensor/audio/body feedback, and sustained
+live interaction. Offline tests do not establish these measurements or biological
+fidelity. The sensory and interface areas retain their own broader audit scopes.

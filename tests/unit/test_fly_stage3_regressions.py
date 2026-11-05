@@ -50,10 +50,11 @@ def test_dn_prosody_requires_live_mode_and_preserves_zero_controls(monkeypatch):
     monkeypatch.setenv("AIKO_FLY_PERSONA_MODE", "shadow")
     assert apply_dn_prosody(speaker, user_id="user-1") == {
         "applied": True,
-        "rate": 1.0,
-        "volume": 1.0,
+        "rate": 0.85,
+        "volume": 0.9,
         "cancelled": False,
     }
+    # Explicit zero drive now reaches the bounded low-vigor/low-volume mapping.
     # Five read-only peeks, none of which may create state: the TTS cancel
     # check, body_drive's cancel check, _drive's influence-record read,
     # _drive's cancel check, and dn_body's vigor read.

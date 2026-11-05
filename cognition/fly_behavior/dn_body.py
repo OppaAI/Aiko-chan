@@ -6,6 +6,7 @@ agent action vigor. Never raises.
 """
 from __future__ import annotations
 
+from cognition.neural_state import _finite
 import logging
 import os
 
@@ -82,8 +83,8 @@ def body_drive(*, user_id: str | None = None) -> dict:
         st = peek_neural_state(user_id)
         if st is None:
             return out
-        vigor = float(getattr(st, "motor_vigor", 1.0) or 1.0)
-        drive = float(getattr(st, "action_drive", 0.5) or 0.5)
+        vigor = _finite(getattr(st, "motor_vigor", 1.0), 1.0)
+        drive = _finite(getattr(st, "action_drive", 0.5), 0.5)
         # Phase 11: persona vigor gain — a playful / attached identity
         # moves with more energy. Identity unless AIKO_FLY_PERSONA_MODE=live.
         try:
@@ -139,11 +140,11 @@ def agent_step_budget(*, user_id: str | None = None, base: int = 8) -> int:
                 from cognition.fly_behavior import body as _body_layer
                 cmd = _body_layer.agent_command(user_id=user_id) or {}
                 if cmd.get("applied"):
-                    vig = float(cmd.get("vigor") or 1.0)
+                    vig = _finite(cmd.get("vigor"), 1.0)
                     return max(1, int(round(base * max(0.4, min(1.3, vig)))))
             except Exception:
                 pass
-        vig = float(bd.get("action_vigor") or 1.0)
+        vig = _finite(bd.get("action_vigor"), 1.0)
         return max(1, int(round(base * max(0.4, min(1.3, vig)))))
     except Exception:
         return base

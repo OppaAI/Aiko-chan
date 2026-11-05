@@ -4,6 +4,8 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import contextvars
+from cognition.neural_state import _finite
 from pathlib import Path
 
 from .adapters import SensoryObservation
@@ -24,25 +26,7 @@ _bg_counts: dict[str, int] = {}
 # catalog (verified against male-cns-v1.0-w5.json cell types such as VS,
 # MBON01, AMMC-A1, DNp01, ER5). Callers seed functionally ("visual");
 # the catalog labels anatomically — this table bridges the two.
-_SEED_ALIASES: dict[str, tuple[str, ...]] = {
-    "sensory": ("ORN", "OSN", "DA1", "VA7", "DP1", "DM", "VS", "HS",
-                "Mi", "Tm", "L1", "L2", "L3", "L4", "L5", "R7", "R8",
-                "LoV", "MeV", "AVLP", "PVLP", "PLP", "OCG", "GNG",
-                "VES", "SMP", "AMMC", "DCH", "VCH", "CT1"),
-    "visual": ("VS", "HS", "HSE", "HSN", "HSS", "H2", "Dm", "Mi", "Tm",
-               "L1", "L2", "L3", "L4", "L5", "R7", "R8", "LoV", "MeV",
-               "LPi", "DCH", "VCH", "CT1", "Am", "Li"),
-    "auditory": ("AMMC", "JO", "aSP", "AVLP"),
-    "input": ("ORN", "OSN", "DA1", "VA7", "DP1", "DM", "VS", "HS",
-              "Mi", "Tm", "L1", "L2", "R7", "R8", "LoV", "MeV",
-              "AVLP", "PVLP", "GNG", "AMMC"),
-    "olfactory": ("ORN", "OSN", "DA1", "VA7", "DP1", "lPN", "adPN",
-                  "OA-AL", "OA-V"),
-    "memory": ("MBON", "KC", "PAM", "PPL", "DAN", "APL"),
-    "decide": ("ER", "ExR", "EPG", "PFN", "PEN", "CX", "CB", "PB"),
-    "action": ("DN", "MN"),
-    "arousal": ("OA", "5-HT", "DA", "DH44", "AstA", "sNPF", "VUM", "VPM"),
-}
+from .anatomy import SEED_ALIASES as _SEED_ALIASES
 
 
 def _resolve_seeds(catalog: ConnectomeCatalog, seed_types: tuple[str, ...]) -> list[str]:
@@ -69,6 +53,12 @@ def _resolve_seeds(catalog: ConnectomeCatalog, seed_types: tuple[str, ...]) -> l
         return []
     log.debug("fly runtime: labels=%s -> %d seed cells", sorted(lowered), len(matched))
     return matched[:seed_limit]
+
+
+def _load_json_catalog(path):
+    if Path(path).stat().st_size > 64 * 1024 * 1024:
+        raise ValueError('JSON catalog exceeds 64 MiB; build the indexed SQLite catalog first')
+    return ConnectomeCatalog.from_path(path)
 
 
 def _configured_catalog(path: str | None = None) -> "ConnectomeCatalog | SqliteCatalog | None":
@@ -104,10 +94,10 @@ def _configured_catalog(path: str | None = None) -> "ConnectomeCatalog | SqliteC
                     log.info("fly runtime: using indexed catalog %s", db_path)
                 except Exception as exc:
                     log.warning("fly runtime: indexed catalog unusable, JSON fallback: %s", exc)
-                    _catalog = ConnectomeCatalog.from_path(resolved)
+                    _catalog = _load_json_catalog(resolved)
                     _catalog_path = resolved
             else:
-                _catalog = ConnectomeCatalog.from_path(resolved)
+                _catalog = _load_json_catalog(resolved)
                 _catalog_path = resolved
         return _catalog
 
@@ -127,7 +117,7 @@ def observe(user_id: str | None, observation: SensoryObservation, *, seed_types:
     budget = max(1, min(20000, int(os.getenv("AIKO_FLY_ACTIVE_BUDGET", os.getenv("BUDGET_PER_TURN", "20000")))))
     max_hops = max(1, min(8, int(os.getenv("AIKO_FLY_ACTIVE_HOPS", "4"))))
     return get_fly_runtime(user_id, catalog).activate(
-        seeds, {seed: max(0.0, min(1.0, observation.salience)) for seed in seeds},
+        seeds, {seed: max(0.0, min(1.0, _finite(observation.salience, 0.0))) for seed in seeds},
         budget=budget, max_hops=max_hops,
         mode=mode, observations=[observation.as_trace()],
     )
@@ -150,10 +140,13 @@ def observe_background(user_id: str | None, observation: SensoryObservation, *, 
         stride = 1
     key = (user_id or "").strip() or "default"
     with _background_lock:
-        if key in _background_inflight:
+        if key in _background_inflight or len(_background_inflight) >= 1:
             return
         count = _bg_counts.get(key, 0) + 1
+        _bg_counts.pop(key, None)
         _bg_counts[key] = count
+        while len(_bg_counts) > 32:
+            _bg_counts.pop(next(iter(_bg_counts)))
         if (count - 1) % stride != 0:
             return
         _background_inflight.add(key)
@@ -175,4 +168,10 @@ def observe_background(user_id: str | None, observation: SensoryObservation, *, 
             with _background_lock:
                 _background_inflight.discard(key)
 
-    threading.Thread(target=run, name="aiko-fly-runtime", daemon=True).start()
+    try:
+        threading.Thread(target=contextvars.copy_context().run, args=(run,),
+                         name="aiko-fly-runtime", daemon=True).start()
+    except Exception:
+        with _background_lock:
+            _background_inflight.discard(key)
+        log.exception('fly runtime: background thread could not start')

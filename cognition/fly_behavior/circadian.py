@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 import threading
+from cognition.neural_state import _finite
 from dataclasses import dataclass, field
 
 try:
@@ -33,6 +34,7 @@ NIGHT_CENTER = 2.0 / 24.0
 
 _lock = threading.RLock()
 _circuit: "ClockCircuit | None" = None
+_circuits: dict[str, "ClockCircuit"] = {}
 
 
 @dataclass
@@ -43,11 +45,17 @@ class ClockCircuit:
     amplitude: float = field(init=False, default=0.5)
     clock_drive_ema: float = field(init=False, default=0.0)
 
+    def __post_init__(self):
+        self._tick_lock = threading.RLock()
+
     def tick(self, wall_phase: float, clock_drive: float | None = None) -> dict:
-        """Advance one turn. wall_phase in [0,1); clock_drive >= 0 from FullBrain."""
-        self.phase = max(0.0, min(1.0, float(wall_phase)))
+        with self._tick_lock:
+            return self._tick(wall_phase, clock_drive)
+
+    def _tick(self, wall_phase, clock_drive):
+        self.phase = max(0.0, min(1.0, _finite(wall_phase, 0.5)))
         if clock_drive is not None:
-            d = max(0.0, float(clock_drive))
+            d = max(0.0, _finite(clock_drive, 0.0))
             # Clock drive from the whole-brain step is O(1e-5) (measured
             # 2e-6..3.2e-5 across inputs); normalise against 2e-5 so typical
             # drive maps to ~1. EMA adapts slowly across turns.
@@ -63,9 +71,16 @@ class ClockCircuit:
         }
 
 
-def get_circuit() -> ClockCircuit:
+def get_circuit(user_id=None) -> ClockCircuit:
     global _circuit
     with _lock:
+        key = (user_id or '').strip()
+        if key:
+            circuit = _circuits.pop(key, None) or ClockCircuit()
+            _circuits[key] = circuit
+            while len(_circuits) > 8:
+                _circuits.pop(next(iter(_circuits)))
+            return circuit
         if _circuit is None:
             _circuit = ClockCircuit()
         return _circuit
@@ -76,7 +91,7 @@ def circadian_now(wall_phase: float, *, user_id: str | None = None,
     """Tick the clock circuit and publish to NeuralState. Never raises."""
     out = {"phase": wall_phase, "amplitude": 0.5, "nightness": 0.0, "clock_gain": 0.0}
     try:
-        tick = get_circuit().tick(wall_phase, clock_drive)
+        tick = get_circuit(user_id).tick(wall_phase, clock_drive)
         out.update(tick)
         try:
             from cognition.neural_state import get_neural_state

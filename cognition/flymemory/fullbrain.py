@@ -141,6 +141,27 @@ def load_fullbrain(path: str | Path) -> dict:
         or out["indptr"][-1] != edges
     ):
         raise ValueError("fullbrain artifact has inconsistent array dimensions")
+    if (not np.issubdtype(out['indptr'].dtype, np.integer)
+            or np.any(out['indptr'][1:] < out['indptr'][:-1])
+            or not np.issubdtype(out['node_ids'].dtype, np.integer)
+            or len(np.unique(out['node_ids'])) != n):
+        raise ValueError('fullbrain artifact has invalid node or CSR indices')
+    # Bound temporary validation arrays for the full connectome on the Jetson.
+    for key in ('indices', 'pre_sorted'):
+        array = out[key]
+        if not np.issubdtype(array.dtype, np.integer):
+            raise ValueError('fullbrain edge indices must be integers')
+        for start in range(0, len(array), 65536):
+            block = array[start:start + 65536]
+            if np.any(block < 0) or np.any(block >= n):
+                raise ValueError('fullbrain edge index outside node table')
+    for key in ('data', 'node_sign'):
+        array = out[key]
+        if not np.issubdtype(array.dtype, np.number) or not np.isrealobj(array):
+            raise ValueError('fullbrain weights must be numeric')
+        for start in range(0, len(array), 65536):
+            if not np.isfinite(array[start:start + 65536]).all():
+                raise ValueError('fullbrain weights must be finite')
     # meta_json is a 0-d object array; normalise to str
     m = out.get("meta_json")
     if m is not None:
@@ -209,6 +230,12 @@ class FullBrain:
 
     def step(self, kc_values: np.ndarray, kc_body_ids: np.ndarray) -> dict:
         """Seed KCs, propagate 2 hops, read out DN / clock / arousal."""
+        kc_values = np.asarray(kc_values, dtype=np.float32)
+        kc_body_ids = np.asarray(kc_body_ids)
+        if (kc_values.ndim != 1 or kc_body_ids.ndim != 1 or len(kc_values) != len(kc_body_ids)
+                or not np.isfinite(kc_values).all() or np.any(kc_values < 0)
+                or not np.issubdtype(kc_body_ids.dtype, np.integer)):
+            raise ValueError('invalid fullbrain KC seed arrays')
         x = np.zeros(self.n, dtype=np.float32)
         pos = np.array(
             [self._id2pos.get(int(b), -1) for b in kc_body_ids], dtype=np.int64

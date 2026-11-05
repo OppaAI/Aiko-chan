@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import mmap
+from itertools import islice
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -108,12 +109,18 @@ class ConnectomeCatalog:
                 continue
             scheduled.add(seed)
             queue.append((seed, 0))
+        edge_limit = min(100000, max(1, budget * 8))
+        scanned = 0
         while queue:
             node_id, depth = queue.popleft()
             selected.add(node_id)
             selected_order.append(node_id)
             if depth < max_hops:
                 for edge in self._out.get(node_id, ()):
+                    if scanned >= edge_limit:
+                        truncated = True
+                        break
+                    scanned += 1
                     if edge.target in scheduled:
                         continue
                     if len(scheduled) >= budget:
@@ -121,7 +128,11 @@ class ConnectomeCatalog:
                         continue
                     scheduled.add(edge.target)
                     queue.append((edge.target, depth + 1))
-        edges = [edge for node_id in selected_order for edge in self._out.get(node_id, ()) if edge.target in selected]
+        candidates = (edge for node_id in selected_order for edge in self._out.get(node_id, ()))
+        inspected = list(islice(candidates, edge_limit + 1))
+        if len(inspected) > edge_limit:
+            truncated = True
+        edges = [edge for edge in inspected[:edge_limit] if edge.target in selected]
         return {
             "nodes": [self.nodes[node_id] for node_id in sorted(selected)],
             "edges": edges,

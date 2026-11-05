@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import threading
 import numpy as np
 
 DATA_PATH = Path(__file__).resolve().parent / "data" / "mb_microcircuit.npz"
@@ -167,6 +168,7 @@ class FlyMB:
         # Plastic overlay on KC->MBON (the learned association layer).
         _, kc_mbon_idx, kc_mbon_dat = self._kcm
         self._plastic = np.zeros_like(kc_mbon_dat)
+        self._plastic_lock = threading.RLock()
 
         # Opponent signs from REAL DAN innervation: PAM≈reward, PPL1≈punishment.
         types = circ["node_types"]
@@ -195,6 +197,8 @@ class FlyMB:
         f = np.asarray(features, dtype=np.float64).reshape(-1)
         if f.shape[0] != self.n_features:
             raise ValueError(f"expected {self.n_features} features, got {f.shape[0]}")
+        if not np.isfinite(f).all():
+            raise ValueError('MB features must be finite')
         drive_in = np.maximum(self._sensory.T @ f, 0.0)
         kc = _csrmatvec_vec(*self._ikc, drive_in, self.n_kc)
         # APL/DPM global divisive inhibition keeps activity sparse and bounded.
@@ -207,6 +211,13 @@ class FlyMB:
         return kc
 
     def readout(self, kc: np.ndarray) -> tuple[float, float]:
+        kc = np.asarray(kc, dtype=np.float64)
+        if kc.shape != (self.n_kc,) or not np.isfinite(kc).all() or np.any(kc < 0):
+            raise ValueError('invalid MB KC readout pattern')
+        with self._plastic_lock:
+            return self._readout(kc)
+
+    def _readout(self, kc: np.ndarray) -> tuple[float, float]:
         """Opponent (approach, avoid) MBON sums for an active KC pattern."""
         ind, idx, dat = self._kcm
         w = np.clip(dat + self._plastic, 0.0, None)
@@ -222,6 +233,15 @@ class FlyMB:
         return approach, avoid
 
     def reinforce(self, kc: np.ndarray, reward: float) -> float:
+        kc = np.asarray(kc, dtype=np.float64)
+        reward = float(reward)
+        if (kc.shape != (self.n_kc,) or not np.isfinite(kc).all()
+                or np.any(kc < 0) or not np.isfinite(reward)):
+            raise ValueError('invalid MB reward or KC pattern')
+        with self._plastic_lock:
+            return self._reinforce(kc, reward)
+
+    def _reinforce(self, kc: np.ndarray, reward: float) -> float:
         """DAN-like opponent update. reward in [-1, 1]; returns applied delta mass."""
         r = float(np.clip(reward, -1.0, 1.0))
         if r == 0.0:
@@ -246,12 +266,13 @@ class FlyMB:
 
     def valence_bias(self, features, reward: float | None = None) -> float:
         """One-call helper: encode -> (optionally) reinforce -> opponent bias in [-1, 1]."""
-        kc = self.encode(features)
-        if reward is not None:
-            self.reinforce(kc, reward)
-        approach, avoid = self.readout(kc)
-        denom = approach + avoid + 1e-9
-        return float((approach - avoid) / denom)
+        with self._plastic_lock:
+            kc = self.encode(features)
+            if reward is not None:
+                self.reinforce(kc, reward)
+            approach, avoid = self.readout(kc)
+            denom = approach + avoid + 1e-9
+            return float((approach - avoid) / denom)
 
     def summary(self) -> dict:
         return {

@@ -238,5 +238,32 @@ def test_attention_steps_and_persists_under_identity_lock(monkeypatch) -> None:
     decisiveness = attention.flycx_decisiveness_for_text("is this locked?")
 
     assert decisiveness == 0.6
+    assert np.array_equal(compass.bump, np.array([0.25, 0.75]))
+    assert compass.sleep_pressure == 0.2
+    monkeypatch.setattr(attention, "MEMORY_FLYCX_MODE", "live")
+    attention.flycx_state_for_record(state, "live update")
     assert np.array_equal(compass.bump, np.array([0.9, 0.1]))
     assert compass.sleep_pressure == 0.4
+
+
+
+@pytest.mark.parametrize('bad', [float('nan'), float('inf'), -float('inf')])
+def test_invalid_plasticity_cannot_overwrite_saved_learning(tmp_path, bad):
+    store = PlasticityStore(tmp_path / 'learning.db', identity='owner')
+    store.save_mb([0], [0], [.2])
+    store.save_cx(.4)
+    with pytest.raises(ValueError):
+        store.save_mb([0], [0], [bad])
+    with pytest.raises(ValueError):
+        store.save_cx(bad)
+    assert store.load_mb(1, 1) == {(0, 0): .2}
+    assert store.load_cx() == .4
+
+
+@pytest.mark.parametrize('pre,post,delta', [([0], [0, 1], [.2]), ([-1], [0], [.2]), ([.5], [0], [.2])])
+def test_bad_plasticity_indices_preserve_existing_rows(tmp_path, pre, post, delta):
+    store = PlasticityStore(tmp_path / 'learning.db', identity='owner')
+    store.save_mb([0], [0], [.2])
+    with pytest.raises(ValueError):
+        store.save_mb(pre, post, delta)
+    assert store.load_mb(1, 1) == {(0, 0): .2}

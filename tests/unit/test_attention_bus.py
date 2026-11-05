@@ -26,7 +26,7 @@ def test_cx_only_publishes_live_readouts(mode, monkeypatch):
         calls.append(True)
         return dict(heading_deg=45., sharpness=.9, decisiveness=.7, sleep_pressure=.6)
     monkeypatch.setattr(attention, 'MEMORY_FLYCX_MODE', mode)
-    monkeypatch.setattr(fly_registry, 'get_flycx', lambda user_id: SimpleNamespace(step=step))
+    monkeypatch.setattr(fly_registry, 'get_flycx', lambda user_id: SimpleNamespace(step=step, bump=[.2, .8], sleep_pressure=.4))
     monkeypatch.setattr(fly_registry, 'get_flycx_lock', lambda user_id: threading.RLock())
     monkeypatch.setattr(fly_registry, 'get_fly_store', lambda user_id: None)
     try:

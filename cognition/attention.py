@@ -104,9 +104,11 @@ def flycx_state_for_record(state: "EdgeCognitiveState", user: str) -> dict | Non
             fatigue = feats[7]
             pen = 0.5 * feats[5] + 0.3 * feats[6]
         with cx_lock:
-            out = cx.step(feats, pen_drive=pen, fatigue=fatigue)
+            from cognition.centralcomplex.compass import observe_compass
+            out = (cx.step(feats, pen_drive=pen, fatigue=fatigue) if MEMORY_FLYCX_MODE == 'live'
+                   else observe_compass(cx, feats, pen_drive=pen, fatigue=fatigue))
             try:
-                if store is not None:
+                if store is not None and MEMORY_FLYCX_MODE == 'live':
                     store.save_if_due_cx(out["sleep_pressure"])
             except Exception as exc:
                 log.debug("flycx persist skipped: %s", exc)
@@ -160,11 +162,8 @@ def flycx_decisiveness_for_text(
                  1.0 if _COMMITMENT_RE.search(text or "") else 0.0,
                  0.0]
         with cx_lock:
-            bump, sleep = cx.bump.copy(), cx.sleep_pressure
-            try:
-                out = cx.step(feats, pen_drive=0.5 * feats[5] + 0.3 * feats[6], fatigue=0.0)
-            finally:
-                cx.bump, cx.sleep_pressure = bump, sleep
+            from cognition.centralcomplex.compass import observe_compass
+            out = observe_compass(cx, feats, pen_drive=0.5 * feats[5] + 0.3 * feats[6], fatigue=0.0)
     except Exception as exc:
         log.debug("flycx decisiveness failed: %s", exc)
         return None

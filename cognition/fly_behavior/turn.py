@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
+import contextvars
+from cognition.neural_state import _finite
 from datetime import datetime, timezone
 
 log = logging.getLogger("aiko.fly_behavior.turn")
@@ -23,6 +26,27 @@ _fullbrain_latest: dict = {}
 _fullbrain_latest_lock = threading.Lock()
 
 
+def _cache_fullbrain_result(user_id, result):
+    key = (user_id or '').strip() or None
+    with _fullbrain_latest_lock:
+        _fullbrain_latest.pop(key, None)
+        _fullbrain_latest[key] = {**result, '_at': time.monotonic()}
+        while len(_fullbrain_latest) > 8:
+            _fullbrain_latest.pop(next(iter(_fullbrain_latest)))
+
+
+def _latest_fullbrain_result(user_id):
+    key = (user_id or '').strip() or None
+    with _fullbrain_latest_lock:
+        result = _fullbrain_latest.get(key)
+        if not result:
+            return {}
+        if time.monotonic() - result.get('_at', 0.0) > 60.0:
+            _fullbrain_latest.pop(key, None)
+            return {}
+        return dict(result)
+
+
 def _fullbrain_step_bg(fb, kc, kc_body_ids, user_id) -> None:
     """Run one fullbrain step in the background, then publish its outputs
     for the next turn to consume. Releases the overlap guard on exit."""
@@ -34,17 +58,16 @@ def _fullbrain_step_bg(fb, kc, kc_body_ids, user_id) -> None:
         _t0 = _time.perf_counter()
         step = fb.step(kc, kc_body_ids)
         _ms = (_time.perf_counter() - _t0) * 1000.0
-        dn = float(step.get("dn_drive", 0.0))
+        dn = _finite(step.get("dn_drive"), 50e-6)
         # DN drive is O(5e-5) (measured 4.6e-5..5.4e-5); map gently
         # around the 1.0 baseline - a real neural signal, never a swing.
         latest = {
             "motor_vigor": round(max(0.8, min(1.2, 1.0 + 3000.0 * (dn - 50e-6))), 3),
-            "clock_drive": round(float(step.get("clock_drive", 0.0)), 5),
-            "brain_arousal": round(float(step.get("arousal", 0.0)), 5),
+            "clock_drive": round(_finite(step.get("clock_drive"), 0.0), 5),
+            "brain_arousal": round(_finite(step.get("arousal"), 0.0), 5),
             "whole_brain_ms": round(_ms, 1),
         }
-        with _fullbrain_latest_lock:
-            _fullbrain_latest[user_id] = latest
+        _cache_fullbrain_result(user_id, latest)
         from cognition.flymemory.fullbrain import mark_stepped
         mark_stepped()
         try:
@@ -86,6 +109,7 @@ def apply_turn_priors(
 
     Never raises. Safe to call on every turn.
     """
+    user_id = (user_id or '').strip() or None
     out: dict = {
         "interrupt": False,
         "urgency": 0.0,
@@ -151,7 +175,7 @@ def apply_turn_priors(
                 if mb is not None:
                     kc = mb.encode(text_features(text or ""))
                     bias = float(mb.valence_bias(text_features(text or "")))
-                    out["valence"] = bias
+                    out["valence"] = bias if mb_mode == "live" else 0.0
                     if mb_mode == "live":
                         st.publish_mb(bias, source="turn")
                     st.record_influence(
@@ -168,9 +192,8 @@ def apply_turn_priors(
 
                         fb = get_fullbrain()
                         if fb is not None:
-                            with _fullbrain_latest_lock:
-                                _latest = dict(_fullbrain_latest.get(user_id) or {})
-                            if _latest:
+                            _latest = _latest_fullbrain_result(user_id)
+                            if _latest and mb_mode == 'live':
                                 out["motor_vigor"] = _latest["motor_vigor"]
                                 out["clock_drive"] = _latest["clock_drive"]
                                 out["brain_arousal"] = _latest["brain_arousal"]
@@ -185,8 +208,8 @@ def apply_turn_priors(
                             if _fullbrain_bg_lock.acquire(blocking=False):
                                 try:
                                     _bg = threading.Thread(
-                                        target=_fullbrain_step_bg,
-                                        args=(fb, kc.copy(),
+                                        target=contextvars.copy_context().run,
+                                        args=(_fullbrain_step_bg, fb, kc.copy(),
                                               mb.kc_body_ids.copy(),
                                               user_id),
                                         name="aiko-fullbrain-step",
@@ -247,14 +270,17 @@ def apply_turn_priors(
             text or "",
             system_error=system_error,
             priority=priority,
-            subliminal_urgency=float(subliminal_urgency or 0.0),
+            subliminal_urgency=_finite(subliminal_urgency, 0.0),
             motion_salience=motion,
             motion_sudden=motion_sudden,
             voice_urgency=voice_urgency,
         )
-        st.publish_gf(float(gf.get("urgency") or 0.0), bool(gf.get("interrupt")), source="turn")
-        out["urgency"] = gf.get("urgency", 0.0)
-        out["interrupt"] = bool(gf.get("interrupt"))
+        gf_live = gf.get('mode') == 'live'
+        out['urgency'] = _finite(gf.get('urgency'), 0.0) if gf_live else 0.0
+        out['interrupt'] = bool(gf.get('interrupt')) if gf_live else False
+        st.publish_gf(out['urgency'], out['interrupt'], source='turn')
+        if gf.get('mode') == 'shadow':
+            out['gf_prediction'] = {'urgency': gf.get('urgency'), 'would_interrupt': gf.get('would_interrupt')}
         out["gf_sources"] = gf.get("sources") or {}
         if gf.get("mode") in ("shadow", "live"):
             log.debug(
@@ -272,7 +298,7 @@ def apply_turn_priors(
                     "sources": gf.get("sources"),
                 }
             )
-            if gf.get("interrupt"):
+            if out['interrupt']:
                 try:
                     from cognition.flymemory.online_teach import teach_interrupt_honored
                     online_teach = out.get("online_teach") or {}
@@ -286,9 +312,10 @@ def apply_turn_priors(
 
         lh = context_prior(text or "", user_id=user_id)
         if "familiarity" in lh:
-            st.publish_lh(float(lh["familiarity"]), source="turn")
-            out["familiarity"] = lh.get("familiarity", 0.5)
-            out["novel"] = bool(lh.get("novel"))
+            if lh.get('mode') == 'live':
+                st.publish_lh(_finite(lh['familiarity'], 0.5), source="turn")
+            out['familiarity'] = st.context_familiarity
+            out['novel'] = bool(lh.get('novel')) if lh.get('mode') == 'live' else False
             if lh.get("mode") in ("shadow", "live"):
                 log.debug(
                     "flylh mode=%s familiarity=%.2f novel=%s bias=%s",
@@ -328,14 +355,14 @@ def apply_turn_priors(
                         pass
                 drv = get_flydn().drive(
                     energy=energy,
-                    decisiveness=float(st.decisiveness or 0.5),
+                    decisiveness=_finite(st.decisiveness, 0.5),
                     affect=float(st.valence or 0.0),
                 )
                 if mb_mode == "live" and out.get("whole_brain"):
                     drv = dict(drv)
                     drv["rate_mult"] = max(0.5, min(1.5,
                         float(drv.get("rate_mult", 1.0)) * float(out.get("motor_vigor", 1.0))))
-                out["motor_vigor"] = drv.get("rate_mult", 1.0)
+                out['motor_vigor'] = drv.get('rate_mult', 1.0) if dn_mode == 'live' else st.motor_vigor
                 out["dn_drive"] = {
                     k: drv.get(k)
                     for k in (
@@ -346,7 +373,7 @@ def apply_turn_priors(
                 }
                 if dn_mode == "live":
                     st.publish_dn(
-                        arousal=float(drv.get("arousal") or 0.5),
+                        arousal=_finite(drv.get("arousal"), 0.5),
                         rate_mult=float(drv.get("rate_mult", 1.0)),
                         source="turn",
                     )

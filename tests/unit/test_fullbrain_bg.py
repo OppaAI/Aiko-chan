@@ -188,9 +188,8 @@ def test_fullbrain_vigor_reaches_dn_bus_only_in_live_mode(monkeypatch, mb_mode, 
     fake_mb.encode.return_value = np.zeros(8, dtype=np.float32)
     fake_mb.valence_bias.return_value = 0.0
     fake_mb.kc_body_ids = np.arange(8)
-    with turn_module._fullbrain_latest_lock:
-        turn_module._fullbrain_latest[uid] = dict(motor_vigor=1.2, clock_drive=.1,
-                                                brain_arousal=.5, whole_brain_ms=10)
+    turn_module._cache_fullbrain_result(uid, dict(motor_vigor=1.2, clock_drive=.1,
+                                                brain_arousal=.5, whole_brain_ms=10))
     monkeypatch.setattr(dn.FlyDN, 'drive', lambda *a, **k: {'rate_mult': .9, 'arousal': .5})
     assert turn_module._fullbrain_bg_lock.acquire(blocking=False)
     try:

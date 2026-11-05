@@ -206,3 +206,37 @@ def test_working_memory_score_does_not_record_familiarity(monkeypatch):
     second = grasp.compute_score(turn, 1, user_id='readonly-score')
     assert first == second
     assert 'readonly-score' not in _seen_users()
+
+
+def test_neural_identity_cache_has_bounded_retention(monkeypatch):
+    from cognition import neural_state as module
+    monkeypatch.setattr(module, '_states', {})
+    monkeypatch.setattr(module, '_STATE_LIMIT', 2)
+    a = module.get_neural_state('a')
+    module.get_neural_state('b')
+    assert module.get_neural_state('a') is a
+    module.get_neural_state('c')
+    assert module.peek_neural_state('b') is None
+    assert len(module._states) == 2
+
+
+def test_background_fullbrain_cache_normalizes_identity_and_expires(monkeypatch):
+    from cognition.fly_behavior import turn
+    monkeypatch.setattr(turn, '_fullbrain_latest', {})
+    monkeypatch.setattr(turn.time, 'monotonic', lambda: 100.)
+    turn._cache_fullbrain_result(' owner ', {'motor_vigor': 1.1})
+    assert turn._latest_fullbrain_result('owner')['motor_vigor'] == 1.1
+    assert turn._latest_fullbrain_result('other') == {}
+    monkeypatch.setattr(turn.time, 'monotonic', lambda: 161.)
+    assert turn._latest_fullbrain_result('owner') == {}
+    assert not turn._fullbrain_latest
+
+
+def test_circadian_drive_history_is_identity_scoped(monkeypatch):
+    from cognition.fly_behavior import circadian
+    monkeypatch.setattr(circadian, '_circuits', {})
+    first = circadian.get_circuit('alice')
+    first.tick(.5, 4e-5)
+    assert first.clock_drive_ema > 0
+    assert circadian.get_circuit('bob').clock_drive_ema == 0
+    assert circadian.get_circuit(' alice ') is first

@@ -62,7 +62,9 @@ def _flycx_cadence(task: str, user_id: str | None = None) -> str:
         if cx is None:
             return "parallel"
         with get_flycx_lock(user_id):
-            out = cx.step(text_features(task or ""), fatigue=0.0)
+            from cognition.centralcomplex.compass import observe_compass
+            out = (cx.step(text_features(task or ''), fatigue=0.0) if mode == 'live'
+                   else observe_compass(cx, text_features(task or ''), fatigue=0.0))
     except Exception as exc:
         log.debug("flycx cadence failed: %s", exc)
         return "parallel"

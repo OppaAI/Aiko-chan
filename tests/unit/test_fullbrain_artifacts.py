@@ -116,3 +116,25 @@ def test_extractor_checks_remote_size_with_ranged_get(monkeypatch, tmp_path, rem
     monkeypatch.setattr(urllib.request, "urlretrieve", download)
     extract_full._dl("https://example.invalid/data", str(dest))
     assert bool(downloads) is expected_download
+
+
+@pytest.mark.parametrize('field,value', [('indices', np.array([-1])),
+    ('pre_sorted', np.array([5])), ('data', np.array([float('nan')])),
+    ('indptr', np.array([0, 2, 1])), ('indptr', np.array([0, 2, 1], dtype=np.uint32))])
+def test_corrupted_fullbrain_arrays_are_rejected(tmp_path, field, value):
+    path = tmp_path / 'brain.npz'
+    _artifact(path)
+    with np.load(path) as source:
+        arrays = {key: source[key] for key in source.files}
+    arrays[field] = value
+    np.savez(path, **arrays)
+    with pytest.raises(ValueError):
+        fullbrain.load_fullbrain(path)
+
+
+def test_fullbrain_rejects_nonfinite_seed_before_propagation(tmp_path):
+    path = tmp_path / 'brain.npz'
+    _artifact(path)
+    brain = fullbrain.FullBrain(path)
+    with pytest.raises(ValueError, match='seed'):
+        brain.step(np.array([float('nan')]), np.array([10]))

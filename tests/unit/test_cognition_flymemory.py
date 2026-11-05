@@ -448,3 +448,24 @@ def test_teach_preference_logs_failed_flymb_persistence(monkeypatch, caplog):
     assert result["persisted"] is False
     assert result["reason"] == "ok"
     assert "disk detail" in caplog.text
+
+
+@pytest.mark.parametrize('reward', [float('nan'), float('inf'), -float('inf')])
+def test_invalid_reward_cannot_poison_learning(reward):
+    m = FlyMB()
+    kc = m.encode(FEATS)
+    before = m._plastic.copy()
+    with pytest.raises(ValueError, match='reward'):
+        m.reinforce(kc, reward)
+    assert np.array_equal(m._plastic, before)
+
+
+def test_parallel_reinforcement_matches_serial_updates():
+    from concurrent.futures import ThreadPoolExecutor
+    parallel, serial = FlyMB(), FlyMB()
+    kc = parallel.encode(FEATS)
+    for _ in range(80):
+        serial.reinforce(kc, .01)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(lambda _: parallel.reinforce(kc, .01), range(80)))
+    assert np.allclose(parallel._plastic, serial._plastic)

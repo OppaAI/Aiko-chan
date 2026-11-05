@@ -8,6 +8,7 @@ apply_turn_priors integration run.
 from __future__ import annotations
 
 import os
+import pytest
 
 import cognition.centralcomplex.temporal as temporal
 from cognition.centralcomplex.temporal import TemporalCX
@@ -265,12 +266,13 @@ def test_clear_interrupt_resets_urgency_trace():
 
 # ── wired integration ─────────────────────────────────────────────────────
 
-def test_apply_turn_priors_runs_cx_temporal_clean():
+@pytest.mark.parametrize("gf_mode", ["shadow", "live"])
+def test_apply_turn_priors_runs_cx_temporal_clean(monkeypatch, gf_mode):
     from cognition.fly_behavior.turn import apply_turn_priors
 
     uid = "stage7-turn"
     temporal.clear_temporal_cx(uid)
-    os.environ["MEMORY_FLYGF_MODE"] = "shadow"
+    monkeypatch.setenv("MEMORY_FLYGF_MODE", gf_mode)
     try:
         outs = [
             apply_turn_priors(t, user_id=uid)
@@ -289,8 +291,10 @@ def test_apply_turn_priors_runs_cx_temporal_clean():
             assert all(0.0 <= v <= 1.0 for v in cx["drives"].values())
             assert 0.5 <= cx["teach_gain"] <= 1.25
         traces = [o["cx_temporal"]["urgency"] for o in outs]
-        assert traces[1] > 0.0          # STOP spiked the trace
-        assert traces[2] < traces[1]    # …then it decayed next turn
+        if gf_mode == 'live':
+            assert traces[1] > 0.0
+            assert traces[2] < traces[1]
+        else:
+            assert traces == [0.0, 0.0, 0.0]  # Predictions cannot drive the live urgency trace.
     finally:
-        os.environ.pop("MEMORY_FLYGF_MODE", None)
         temporal.clear_temporal_cx(uid)

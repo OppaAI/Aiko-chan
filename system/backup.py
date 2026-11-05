@@ -47,6 +47,8 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import tempfile
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, UTC
 from pathlib import Path
@@ -139,6 +141,10 @@ def _should_skip_code(rel: Path) -> bool:
     parts = rel.parts
     if any(part in CODE_EXCLUDES_DIRS for part in parts):
         return True
+    if rel.name == ".env" or (rel.name.startswith(".env.") and rel.name not in {".env.example", ".env.sample"}):
+        return True
+    if rel.name == "age-key.txt" or rel.suffix.lower() == ".key":
+        return True
     return rel.suffix.lower() in CODE_EXCLUDES_SUFFIXES
 
 
@@ -161,12 +167,13 @@ def quiesce_sqlite(src: Path, dst: Path, user_id: str) -> None:
             src_conn = (
                 connect_sqlite(src, user_id=user_id)
                 if sqlite_encryption_enabled()
-                else sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=10.0)
+                else sqlite3.connect(src.resolve().as_uri() + "?mode=ro", uri=True, timeout=10.0)
             )
         except Exception as exc:
             raise BackupError(f"cannot open {src} for snapshot: {exc}") from exc
         try:
-            dst_conn = sqlite3.connect(str(tmp), timeout=10.0)
+            dst_conn = (connect_sqlite(tmp, user_id=user_id) if sqlite_encryption_enabled()
+                        else sqlite3.connect(str(tmp), timeout=10.0))
             try:
                 src_conn.backup(dst_conn)
             finally:
@@ -193,7 +200,7 @@ def sqlite_integrity_ok(path: Path, user_id: str) -> bool:
             conn = (
                 connect_sqlite(path, user_id=user_id)
                 if sqlite_encryption_enabled()
-                else sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10.0)
+                else sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10.0)
             )
         except Exception:
             return False
@@ -235,6 +242,8 @@ def snapshot_settings(user_id: str, staging: Path) -> Snapshot:
     src_root = user_state_dir(user_id)
     if not src_root.is_dir():
         raise BackupError(f"no user state dir for {user_id!r} at {src_root}")
+    if staging.resolve().is_relative_to(src_root.resolve()):
+        raise BackupError("settings staging directory must be outside user state")
     dst_root = staging / "settings"
     snap = Snapshot(kind="settings", root=staging)
     for src in sorted(src_root.rglob("*")):
@@ -269,9 +278,17 @@ def snapshot_settings(user_id: str, staging: Path) -> Snapshot:
 def snapshot_code(repo_root: Path, staging: Path) -> Snapshot:
     """Copy of the codebase minus regenerable weight (models/.venv/build/...)."""
     repo_root = repo_root.expanduser().resolve()
+    if staging.resolve().is_relative_to(repo_root):
+        raise BackupError("code staging directory must be outside the repository")
     dst_root = staging / "code"
     snap = Snapshot(kind="code", root=staging)
-    for src in sorted(repo_root.rglob("*")):
+    def code_files():
+        for directory, dirs, names in os.walk(repo_root, followlinks=False):
+            dirs[:] = sorted(name for name in dirs if name not in CODE_EXCLUDES_DIRS
+                             and not (Path(directory) / name).is_symlink())
+            for name in sorted(names):
+                yield Path(directory) / name
+    for src in code_files():
         if not src.is_file() or src.is_symlink():
             continue
         rel = src.relative_to(repo_root)
@@ -342,7 +359,7 @@ def read_manifest(path: Path) -> BackupManifest:
         dests=list(data.get("dests", [])),
         files=files,
         total_bytes=int(data.get("total_bytes", 0)),
-        verified=bool(data.get("verified", False)),
+        verified=data.get("verified") is True,
     )
 
 
@@ -353,6 +370,8 @@ def verify_staging(staging: Path, manifest: BackupManifest) -> None:
         raise BackupError("manifest lists no files — refusing to call that verified")
     for rel, entry in sorted(by_rel.items()):
         path = staging / rel
+        if not path.resolve().is_relative_to(staging.resolve()) or path.is_symlink():
+            raise BackupError(f"staged path escapes snapshot: {rel}")
         if not path.is_file():
             raise BackupError(f"staged file missing: {rel}")
         if sha256_file(path) != entry["sha256"]:
@@ -393,7 +412,7 @@ def manifest_fresh_enough(manifest: BackupManifest, max_age_seconds: int = MANIF
         return False
     if when.tzinfo is None:
         when = when.replace(tzinfo=UTC)
-    return (_utc_now() - when).total_seconds() <= max_age_seconds
+    return 0 <= (_utc_now() - when).total_seconds() <= max_age_seconds
 
 
 # ── transport ─────────────────────────────────────────────────────────────────
@@ -409,7 +428,8 @@ def _rclone(*args: str, timeout: int = 600) -> None:
 
 def transport_to_dest(staging: Path, dest: str, backup_id: str, dry_run: bool = False) -> str:
     """Copy a verified staging tree to one destination. Returns human summary."""
-    name = dest.strip().lower()
+    raw_dest = dest.strip()
+    name = raw_dest.lower()
     if name == "usb":
         target = usb_mount() / "aiko-backups" / backup_id
         if dry_run:
@@ -418,9 +438,9 @@ def transport_to_dest(staging: Path, dest: str, backup_id: str, dry_run: bool = 
             raise BackupError(f"USB mount not present at {usb_mount()} — unlock/mount it first")
         shutil.copytree(staging, target, dirs_exist_ok=True)
         return f"usb → {target}"
-    if name == "microsd" and (staging / "settings").exists():
-        # Unencrypted tier: code snapshot only, never settings/DBs.
-        raise BackupError("microsd is UNENCRYPTED — refusing settings/DB snapshot there (use usb/nas)")
+    if name == "microsd":
+        if (staging / "settings").exists():
+            raise BackupError("microsd is UNENCRYPTED — refusing settings/DB snapshot there (use usb/nas)")
         target = microsd_path() / backup_id
         if dry_run:
             return f"microsd → {target} (dry-run)"
@@ -428,7 +448,7 @@ def transport_to_dest(staging: Path, dest: str, backup_id: str, dry_run: bool = 
         shutil.copytree(staging, target, dirs_exist_ok=True)
         return f"microsd → {target}"
     if name.startswith("dir:"):
-        target = Path(name[4:]).expanduser()
+        target = Path(raw_dest[4:]).expanduser()
         if dry_run:
             return f"dir → {target} (dry-run)"
         target.mkdir(parents=True, exist_ok=True)
@@ -480,42 +500,49 @@ def run_backup(
     """Build snapshots, verify, transport. Returns the verified manifest."""
     if backup_type not in BACKUP_TYPES:
         raise BackupError(f"unknown backup type {backup_type!r} (want settings|full)")
-    dests = [d.strip().lower() for d in dests if d.strip()]
+    dests = [d.strip() for d in dests if d.strip()]
     if not dests:
         raise BackupError("no destinations given (want usb|microsd|nas|cloud|pc|dir:<path>)")
     uid = resolve_user_id(user_id)
     repo = Path(repo_root or Path(__file__).resolve().parent.parent).expanduser()
     parent = Path(staging_parent or (Path(os.getenv("TMPDIR", "/tmp")) / "aiko-backup")).expanduser()
-    staging = parent / f"{backup_type}-{_utc_stamp()}"
-    staging.mkdir(parents=True, exist_ok=True)
+    parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f"{backup_type}-{_utc_stamp()}-", dir=parent))
 
-    manifest = BackupManifest(backup_type=backup_type, user_id=uid, dests=dests)
-    settings_snap = snapshot_settings(uid, staging)
-    manifest.files.extend(
-        {"rel": f.rel, "sha256": f.sha256, "bytes": f.bytes, "integrity": f.integrity}
-        for f in settings_snap.files
-    )
-    if backup_type == "full":
-        code_snap = snapshot_code(repo, staging)
+    try:
+        manifest = BackupManifest(backup_type=backup_type, user_id=uid, dests=dests,
+                                  backup_id=f"{backup_type}-{_utc_stamp()}-{uuid.uuid4().hex[:12]}",
+                                  utc=_utc_now().isoformat())
+        settings_snap = snapshot_settings(uid, staging)
         manifest.files.extend(
             {"rel": f.rel, "sha256": f.sha256, "bytes": f.bytes, "integrity": f.integrity}
-            for f in code_snap.files
+            for f in settings_snap.files
         )
-        manifest.git_commit = git_commit(repo)
-    manifest.total_bytes = sum(f["bytes"] for f in manifest.files)
+        if backup_type == "full":
+            code_snap = snapshot_code(repo, staging)
+            manifest.files.extend(
+                {"rel": f.rel, "sha256": f.sha256, "bytes": f.bytes, "integrity": f.integrity}
+                for f in code_snap.files
+            )
+            manifest.git_commit = git_commit(repo)
+        manifest.total_bytes = sum(f["bytes"] for f in manifest.files)
 
-    verify_staging(staging, manifest)
-    summaries = [transport_to_dest(staging, d, manifest.backup_id or f"{backup_type}-{_utc_stamp()}", dry_run=dry_run)
-                 for d in dests]
-    if dry_run:
-        shutil.rmtree(staging, ignore_errors=True)
-        manifest.dests = [f"{s}" for s in summaries]
+        verify_staging(staging, manifest)
+        # Include the verified file inventory in every destination copy. Register
+        # the local reset-authorizing manifest only after all transports succeed.
+        (staging / f"manifest-{manifest.backup_id}.json").write_text(manifest.to_json() + "\n", encoding="utf-8")
+        summaries = [transport_to_dest(staging, d, manifest.backup_id or f"{backup_type}-{_utc_stamp()}", dry_run=dry_run)
+                     for d in dests]
+        if dry_run:
+            manifest.dests = [f"{s}" for s in summaries]
+            return manifest
+        if all(summary.endswith(" skipped (unconfigured remote)") for summary in summaries):
+            raise BackupError("all backup destinations were skipped; no backup was delivered")
+        manifest.dests = summaries
+        write_manifest(staging, manifest)
         return manifest
-    manifest_path = write_manifest(staging, manifest)
-    manifest.dests = summaries
-    # Re-write with transport summaries + verified flag for the record.
-    manifest_path.write_text(manifest.to_json() + "\n", encoding="utf-8")
-    return manifest
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def perform_factory_reset(user_id: str = "", max_age_seconds: int = MANIFEST_MAX_AGE_SECONDS) -> dict:

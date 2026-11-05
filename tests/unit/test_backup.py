@@ -184,3 +184,86 @@ def test_maintenance_group_stays_exclusive(monkeypatch):
     monkeypatch.setattr(sys, "argv", _argv("--backup", "--factory-reset"))
     with _pytest.raises(SystemExit):
         parse_args()
+
+
+def test_backup_preserves_path_case_and_delivers_manifest(user_root):
+    from system import backup as B
+    dest = user_root / 'MyBackups'
+    staging = user_root / 'stage'
+    first = B.run_backup('settings', [f'dir:{dest}'], 'test_owner', staging_parent=staging)
+    second = B.run_backup('settings', [f'dir:{dest}'], 'test_owner', staging_parent=staging)
+    assert first.backup_id != second.backup_id
+    manifest_path = dest / first.backup_id / f'manifest-{first.backup_id}.json'
+    assert B.read_manifest(manifest_path).verified
+    assert (dest / first.backup_id / 'settings' / 'profile' / 'USER.md').is_file()
+    assert not list(staging.iterdir())
+
+
+def test_skipped_destination_does_not_authorize_reset(user_root, monkeypatch):
+    from system import backup as B
+    monkeypatch.delenv('AIKO_BACKUP_PC_REMOTE', raising=False)
+    with pytest.raises(B.BackupError, match='skipped'):
+        B.run_backup('settings', ['pc'], 'test_owner', staging_parent=user_root / 'stage')
+    assert B.latest_verified_manifest('test_owner') is None
+    assert not list((user_root / 'stage').iterdir())
+
+
+def test_micro_sd_code_only_transport(user_root, monkeypatch):
+    from system import backup as B
+    staging = user_root / 'stage'
+    staging.mkdir()
+    (staging / 'code.txt').write_text('code')
+    monkeypatch.setenv('AIKO_BACKUP_MICROSD_PATH', str(user_root / 'sd'))
+    B.transport_to_dest(staging, 'microsd', 'test')
+    assert (user_root / 'sd' / 'test' / 'code.txt').read_text() == 'code'
+
+
+def test_manifest_rejects_future_timestamp_and_string_verified(tmp_path):
+    from datetime import timedelta
+    from system import backup as B
+    m = B.BackupManifest(utc=(B._utc_now() + timedelta(days=2)).isoformat())
+    assert not B.manifest_fresh_enough(m)
+    path = tmp_path / 'manifest.json'
+    path.write_text('{"verified": "false"}')
+    assert not B.read_manifest(path).verified
+
+
+def test_code_snapshot_skips_secrets_and_prunes_excluded_tree(repo_root, tmp_path, monkeypatch):
+    from system import backup as B
+    (repo_root / '.env').write_text('TOKEN=private')
+    (repo_root / 'age-key.txt').write_text('private')
+    (repo_root / '.env.example').write_text('TOKEN=example')
+    original = B.os.walk
+    visited = []
+    def walk(*args, **kwargs):
+        for item in original(*args, **kwargs):
+            visited.append(Path(item[0]).name)
+            yield item
+    monkeypatch.setattr(B.os, 'walk', walk)
+    snap = B.snapshot_code(repo_root, tmp_path / 'out')
+    rels = {f.rel for f in snap.files}
+    assert 'code/.env' not in rels and 'code/age-key.txt' not in rels
+    assert 'code/.env.example' in rels
+    assert 'models' not in visited and '.venv' not in visited
+
+
+def test_staging_must_stay_outside_source(user_root):
+    from system import backup as B
+    from system.userspace import user_state_dir
+    with pytest.raises(B.BackupError, match='outside'):
+        B.snapshot_settings('test_owner', user_state_dir('test_owner') / 'stage')
+
+
+def test_encrypted_snapshot_uses_same_connection_provider_for_destination(user_root, monkeypatch):
+    from system import backup as B, secure
+    source = user_root / 'test_owner' / 'memory' / 'memory.db'
+    destination = user_root / 'snapshot.db'
+    seen = []
+    def connect(path, *, user_id):
+        seen.append((Path(path), user_id))
+        return sqlite3.connect(path)
+    monkeypatch.setattr(secure, 'sqlite_encryption_enabled', lambda: True)
+    monkeypatch.setattr(secure, 'connect_sqlite', connect)
+    B.quiesce_sqlite(source, destination, 'test_owner')
+    assert seen == [(source, 'test_owner'), (destination.with_name('snapshot.db.part'), 'test_owner')]
+    assert B.sqlite_integrity_ok(destination, 'test_owner')

@@ -177,3 +177,30 @@ class TestConnectSqliteEncrypted:
         monkeypatch.setenv("SQLITE_ENCRYPTION", "1")
         with pytest.raises(ValueError, match="DATA_KEY_SECRET"):
             connect_sqlite(tmp_path / "encrypted.db", user_id="user_a")
+
+
+@pytest.mark.parametrize('fails', [False, True])
+def test_sqlcipher_keys_before_database_access_and_closes_on_failure(monkeypatch, tmp_path, fails):
+    import sys
+    from types import SimpleNamespace
+    seen = []
+    class Conn:
+        def execute(self, sql):
+            seen.append(sql)
+            if fails and sql.startswith('SELECT'):
+                raise RuntimeError('wrong key')
+        def close(self):
+            seen.append('CLOSED')
+    conn = Conn()
+    provider = SimpleNamespace(connect=lambda *args, **kwargs: conn, Row=object())
+    monkeypatch.setitem(sys.modules, 'pysqlcipher3', SimpleNamespace(dbapi2=provider))
+    monkeypatch.setenv('SQLITE_ENCRYPTION', '1')
+    monkeypatch.setenv('DATA_KEY_SECRET', 'test-secret')
+    if fails:
+        with pytest.raises(RuntimeError, match='wrong key'):
+            connect_sqlite(tmp_path / 'cipher.db', user_id='alice')
+        assert seen[-1] == 'CLOSED'
+    else:
+        assert connect_sqlite(tmp_path / 'cipher.db', user_id='alice') is conn
+        assert seen.index('SELECT count(*) FROM sqlite_master') < seen.index('PRAGMA journal_mode=WAL')
+    assert seen[0].startswith('PRAGMA key')

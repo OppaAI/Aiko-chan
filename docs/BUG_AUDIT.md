@@ -17,7 +17,7 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 | 6 | Fly-brain circuits and state wiring | `cognition/fly*`, `cognition/centralcomplex/`, `cognition/neural_state.py` | Current code pass completed; final validation below; full-connectome and physical Jetson/sensor/body measurements pending |
 | 7 | Speech, listening, and sensory pathways | `sensory/`, `cognition/flysense/` | Current code pass completed; final validation below; real-model/audio quality and physical Jetson RAM/latency checks pending |
 | 8 | Web, desktop, mobile, and external interfaces | `interface/` | Current code pass completed; final validation below; packaged desktop, live platform accounts and physical client checks pending |
-| 9 | Configuration, security boundaries, storage, and deployment | `system/`, `config/`, `backend/`, `scripts/` | Focused path/TLS fixes shipped; broad review not started |
+| 9 | Configuration, security boundaries, storage, and deployment | `system/`, `config/`, `backend/`, `scripts/` | In progress: SQLCipher initialization and backup correctness fixes verified; broader configuration/deployment review pending |
 | 10 | Evaluation, observability, and developer tooling | `tests/`, `eval/`, `conscience-lab/`, `util/` | Not started |
 
 ## Already fixed in the current `dev` history
@@ -1002,3 +1002,39 @@ Tailscale URL on the real client, log into the phone/browser, and exercise the
 configured bot platforms with real accounts. No external messages were sent
 while testing. Audio/device checks remain recorded under Area 7. Broader
 security/deployment and evaluation work retain their own Areas 9 and 10 scopes.
+
+## Area 9 progress: encrypted storage and backup correctness
+
+- Key and validate SQLCipher before accessing database state or enabling WAL;
+  close a failed encrypted connection. Snapshot destinations use the same
+  encrypted connection provider as the source instead of mixing SQLite drivers
+  or trying to reopen a plaintext snapshot through SQLCipher.
+- Preserve case-sensitive backup paths. Use private, unique staging directories
+  and unique backup IDs, include a verified inventory in destination copies,
+  and remove staging after success/failure to avoid filling temporary storage.
+- Register the local reset-authorizing manifest only after delivery succeeds;
+  an unconfigured/skipped PC destination cannot count as a delivered backup.
+  Future-dated manifests and string-valued verified flags do not authorize reset.
+- Restore the unreachable microSD code-only transport branch while retaining
+  its refusal to copy settings. Prune model/venv directories before traversal
+  and omit common dotenv/age-identity/private-key files from code snapshots.
+- Reject staging inside its source tree and paths escaping a staged inventory;
+  encode SQLite read-only URI paths so spaces, `?` and `#` do not alter lookup.
+- Validation: **124 tests passed, 1 skipped** across backup, secure storage,
+  userspace and configuration. SQLCipher ordering/provider behavior is covered
+  with isolated drivers; the real optional SQLCipher integration, physical USB
+  mounts, and remote rclone delivery have not been exercised here.
+- The broader configuration, deployment, Modal backends and security review
+  remains in progress. No factory reset or live destination backup was executed.
+
+### CLI/WebUI tone investigation
+
+Both interfaces call the shared conversation engine and core persona. No
+separate WebUI personality instruction was found. Actual generated-tone parity
+still requires a matched live comparison of identity, history, recall and state.
+Fixed a reproducible presentation difference: WebUI extracted every parenthetic
+phrase, including affectionate asides and Markdown link URLs, as nonverbal text.
+Ordinary parentheses and bold now stay in the dialogue; explicit italic actions
+retain their separate presentation. Also fix legacy emotion-header removal.
+Browser rendering regressions and **50 interface tests passed**. Persona text
+was not modified; this does not establish the cause of different generated words.

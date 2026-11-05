@@ -84,10 +84,14 @@ def connect_sqlite(path: str | os.PathLike[str], *, user_id: str) -> Any:
         raise RuntimeError("pysqlcipher3 is required when SQLITE_ENCRYPTION=1") from exc
 
     conn = sqlcipher.connect(str(path), check_same_thread=False, timeout=10.0)
-    _apply_sqlite_pragmas(conn)
-    conn.execute(f"PRAGMA key = \"x'{raw_key}'\"")
-    conn.execute("PRAGMA cipher_page_size = 4096")
-    conn.execute("PRAGMA cipher_compatibility = 4;")  # Lock to SQLCipher 4.x format
-    _validate_sqlcipher_connection(conn)
-    conn.row_factory = sqlcipher.Row
-    return conn
+    try:
+        conn.execute(f"PRAGMA key = \"x'{raw_key}'\"")
+        conn.execute("PRAGMA cipher_compatibility = 4;")
+        conn.execute("PRAGMA cipher_page_size = 4096")
+        _validate_sqlcipher_connection(conn)
+        _apply_sqlite_pragmas(conn)
+        conn.row_factory = sqlcipher.Row
+        return conn
+    except BaseException:
+        conn.close()
+        raise

@@ -658,7 +658,7 @@ function parseAikoMessage(rawText, soft = false) {
   const legacyEmotionMatch = text.match(/^\s*EMOTION:\s*([\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2300}-\u{23FF}\u{2B00}-\u{2BFF}\u{FE00}-\u{FE0F}]|[\uD83C-\uDBFF][\uDC00-\uDFFF]|[a-zA-Z_-]+)\s*/u);
   if (legacyEmotionMatch) {
     emoji = legacyEmotionMatch[1];
-    text = text.replace(/^\s*EMOTION:\s*[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2300}-\u{23FF}\u{2B00}-\u{2BFF}\u{FE00}-\u{FE0F}]|[\uD83C-\uDBFF][\uDC00-\uDFFF]|[a-zA-Z_-]+\s*/u, '');
+    text = text.slice(legacyEmotionMatch[0].length);
   } else {
     const directEmojiRegex = /^\s*([\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2300}-\u{23FF}\u{2B00}-\u{2BFF}\u{FE00}-\u{FE0F}]|[\uD83C-\uDBFF][\uDC00-\uDFFF])\s*:?\s*/u;
     const directEmojiMatch = text.match(directEmojiRegex);
@@ -688,20 +688,14 @@ function parseAikoMessage(rawText, soft = false) {
   const nonVerbalParts = [];
 
   if (!soft) {
-    text = text.replace(/\*([^*]+)\*/g, (m, p1) => {
+    text = text.replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, (m, p1) => {
       nonVerbalParts.push(`*${p1.trim()}*`);
       return '';
     });
 
-    text = text.replace(/\(([^)]+)\)/g, (m, p1) => {
-      nonVerbalParts.push(`(${p1.trim()})`);
-      return '';
-    });
+    // Parentheses are ordinary prose, including affectionate asides and
+    // Markdown link URLs. Only explicit action formats belong off-dialogue.
 
-    text = text.replace(/\[([^\]]+)\]/g, (m, p1) => {
-      // keep markdown links [text](url) — only strip bare [stage directions]
-      return m;
-    });
     // Bare [direction] without following (
     text = text.replace(/\[([^\]\n]+)\](?!\()/g, (m, p1) => {
       nonVerbalParts.push(`[${p1.trim()}]`);

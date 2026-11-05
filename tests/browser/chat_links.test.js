@@ -19,3 +19,16 @@ assert.ok(ctx.parseMarkdown('[site](https://example.com/)').includes('href="http
 assert.ok(!ctx.parseMarkdown('[site](https://example.com/" onclick="evil)').includes(' onclick="evil'));
 assert.equal(ctx.parseMarkdown('<script>evil</script>'), '&lt;script&gt;evil&lt;/script&gt;');
 console.log('chat link checks passed');
+vm.runInContext(source.slice(source.indexOf('function isControlTokenChunk('), source.indexOf('function renderAikoContent(')), ctx);
+{
+  const text = 'I missed you (more than I expected). **Stay a little.** [Read this](https://example.com/).';
+  const result = ctx.parseAikoMessage(text);
+  assert.equal(result.dialogueText, text);
+  assert.equal(result.nonVerbalText, '');
+  const action = ctx.parseAikoMessage('*smiles* Welcome home (I am glad).');
+  assert.equal(action.nonVerbalText, '*smiles*');
+  assert.equal(action.dialogueText, 'Welcome home (I am glad).');
+  const legacy = ctx.parseAikoMessage('EMOTION: happy Welcome home.');
+  assert.equal(legacy.dialogueText, 'Welcome home.');
+}
+console.log('chat prose checks passed');

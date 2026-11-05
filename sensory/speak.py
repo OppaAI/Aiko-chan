@@ -39,6 +39,10 @@ import threading
 import argparse
 import unicodedata
 import queue
+import contextvars
+from contextlib import nullcontext
+from functools import wraps
+from sensory.echo import PlaybackEchoGuard
 from system.config import env_float, env_int
 from system.log import get_logger, silent_stderr
 from sensory import latency as _latency
@@ -324,6 +328,60 @@ def dialogue_for_stream(text: str) -> str:
 
 # ── speak ─────────────────────────────────────────────────────────────────────
 
+_PLAYBACK_CONTEXT = contextvars.ContextVar("aiko_playback_session", default=None)
+
+
+def _serialized_start(method):
+    @wraps(method)
+    def run(self, *args, **kwargs):
+        with getattr(self, "_start_lock", nullcontext()):
+            return method(self, *args, **kwargs)
+    return run
+
+
+def _bounded_synthesis(method):
+    @wraps(method)
+    def run(self, *args, **kwargs):
+        slots = getattr(self, "_synth_slots", None)
+        if slots is None:  # lightweight diagnostic/test instances
+            return method(self, *args, **kwargs)
+        while not self._cancelled():
+            if slots.acquire(timeout=0.05):
+                try:
+                    if self._cancelled():
+                        return None
+                    return method(self, *args, **kwargs)
+                finally:
+                    slots.release()
+        return None
+    return run
+
+
+class _SpeechQueue(queue.Queue):
+    def __init__(self):
+        super().__init__(maxsize=32)
+        self.finished = threading.Event()
+
+
+def _finish_queue(chunks, cancel=False):
+    if chunks is None:
+        return
+    if hasattr(chunks, "finished"):
+        chunks.finished.set()
+    if cancel:
+        while True:
+            try:
+                chunks.get_nowait()
+            except queue.Empty:
+                break
+    try:
+        chunks.put_nowait(None)
+    except queue.Full:
+        # A graceful close drains the bounded queue, then sees finished.
+        # Cancellation is also observed by every playback worker.
+        pass
+
+
 class AikoSpeak:
     """
     MioTTS inference server client.
@@ -340,7 +398,10 @@ class AikoSpeak:
 
     def __init__(self, silent: bool = False) -> None:
         self._lock      = threading.Lock()
-        # Serializes ALL PortAudio/sounddevice calls (play/wait/stop).
+        self._start_lock = threading.RLock()
+        self._echo = PlaybackEchoGuard()
+        self._synth_slots = threading.BoundedSemaphore(2)
+        # Serializes PortAudio control calls, never the playback duration.
         # Concurrent sd.play + sd.stop from overlapping speak threads
         # corrupts the PortAudio heap -> "double free or corruption (out)".
         self._sd_lock   = threading.Lock()
@@ -352,10 +413,8 @@ class AikoSpeak:
         # curses fd conflict; current boot has no curses UI, so lazy is safe.
         self._sd = None
         self._token_buf: list[str] = []        # accumulate feed() tokens
-        self._stream_chunks: list[str] = []
         self._stream_queue = None
         self._stream_thread = None
-        self._stream_on_word = None
         self._streaming_active = False
         self._first_audio_callback = None
         self._first_audio_fired = threading.Event()
@@ -393,6 +452,52 @@ class AikoSpeak:
         if not silent:
             log.info(f"[speak] MioTTS ready | url: {MIOTTS_API_URL} | preset: {MIOTTS_PRESET}")
 
+    def _echo_guard(self):
+        if not hasattr(self, "_echo"):
+            self._echo = PlaybackEchoGuard()
+        return self._echo
+
+    def echo_remaining(self) -> float:
+        return self._echo_guard().remaining()
+
+    def is_self_echo(self, text, user_id, started, stopped) -> bool:
+        return self._echo_guard().is_echo(text, user_id, started, stopped)
+
+    def _cancel_event(self):
+        session = _PLAYBACK_CONTEXT.get()
+        return session[1] if session and session[0] is self else self._stop_flag
+
+    def _cancelled(self):
+        return self._cancel_event().is_set()
+
+    def _mark_playing(self, playing):
+        if self._cancel_event() is self._stop_flag:
+            if playing and not self._cancelled():
+                self._playing.set()
+            else:
+                self._playing.clear()
+
+    def _reset_playback(self):
+        with self._lock:
+            # Never clear a cancelled worker's event: it owns that event
+            # permanently, even while a new response starts.
+            self._stop_flag = threading.Event()
+            from system.userspace import current_user_id
+            self._playback_uid = current_user_id()
+            self._first_audio_fired.clear()
+            self._playing.set()
+
+    def _playback_thread(self, target, args=(), **kwargs):
+        context = contextvars.copy_context()
+        cancel = self._cancel_event()
+        def run():
+            token = _PLAYBACK_CONTEXT.set((self, cancel))
+            try:
+                target(*args)
+            finally:
+                _PLAYBACK_CONTEXT.reset(token)
+        return threading.Thread(target=context.run, args=(run,), daemon=True, **kwargs)
+
     def set_karaoke_enabled(self, enabled: bool) -> None:
         """Runtime toggle for karaoke text pacing (e.g. /karaoke command)."""
         self.karaoke_text = bool(enabled)
@@ -419,7 +524,7 @@ class AikoSpeak:
         self._first_audio_fired.clear()
 
     def _notify_first_audio_start(self) -> None:
-        if self._first_audio_fired.is_set():
+        if self._cancelled() or self._first_audio_fired.is_set():
             return
         self._first_audio_fired.set()
         _latency.mark("first_audio")
@@ -467,6 +572,9 @@ class AikoSpeak:
         self._viseme_sink = callback
 
     def _emit_viseme(self, viseme: str, weight: float = 1.0) -> None:
+        session = _PLAYBACK_CONTEXT.get()
+        if session and session[0] is self and session[1] is not self._stop_flag:
+            return
         if self._viseme_sink is None:
             return
         try:
@@ -539,6 +647,7 @@ class AikoSpeak:
             self._http_session = session
         return self._http_session
 
+    @_bounded_synthesis
     def _synthesize(self, text: str) -> bytes | None:
         """
         POST to MioTTS /mio/tts/stream and return raw WAV bytes.
@@ -590,6 +699,8 @@ class AikoSpeak:
                 log.error("[speak] TTS stream returned no audio")
                 self._push_notice("TTS", "voice synthesis failed — continuing in text")
                 return None
+            from system.userspace import current_user_id
+            self._echo_guard().remember(wav_bytes, text, current_user_id())
             _latency.mark("first_tts_synth")
             return wav_bytes
         except Exception as e:
@@ -621,11 +732,19 @@ class AikoSpeak:
         used to cause is_playing() to flicker false between chunks, and
         could wipe a stop() request that landed between chunks.
         """
-        self._notify_first_audio_start()
-
+        if self._cancelled():
+            return
+        duration = self._wav_duration(wav_bytes)
+        remote_listener_active = self._audio_sink is not None and self._has_remote_listener()
         if self._audio_sink is not None:
             try:
-                self._audio_sink(wav_bytes)
+                with getattr(self, "_start_lock", nullcontext()):
+                    if self._cancelled():
+                        return
+                    if remote_listener_active:
+                        self._echo_guard().started(wav_bytes, duration)
+                        self._notify_first_audio_start()
+                    self._audio_sink(wav_bytes)
             except Exception as e:
                 log.error(f"[speak] audio sink error: {e}")
 
@@ -634,12 +753,11 @@ class AikoSpeak:
         # (or a remotely forwarded local speaker plus browser playback) can sound
         # like stereo/phasing/doubling. Keep the call blocking for the WAV
         # duration so callers preserve normal turn timing.
-        remote_listener_active = self._audio_sink is not None and self._has_remote_listener()
         if not self.local_playback or remote_listener_active:
             duration = self._wav_duration(wav_bytes)
             deadline = time.monotonic() + duration
             while time.monotonic() < deadline:
-                if self._stop_flag.is_set():
+                if self._cancelled():
                     break
                 time.sleep(0.05)
             return
@@ -682,34 +800,41 @@ class AikoSpeak:
             if rate != 48000:
                 data, rate = _resample_fallback(data, rate, 48000)
 
-            # PortAudio is not thread-safe: never overlap play/wait/stop
-            # across speak threads. Hold _sd_lock for the whole sequence so
-            # a concurrent stop() or next chunk can't free the stream mid-play
-            # (glibc "double free or corruption").
+            # Keep control calls serialized, but release the lock while audio
+            # runs so stop() can halt it immediately. Old workers never stop a
+            # newer stream that has already replaced theirs.
             with self._sd_lock:
+                if self._cancelled():
+                    return
                 sd.play(data, rate, device=device)
-                sd.wait()  # Wait until playback finishes
-                if self._stop_flag.is_set():
-                    try:
-                        sd.stop()
-                    except Exception:
-                        pass
+                stream = sd.get_stream()
+                self._echo_guard().started(wav_bytes, len(data) / rate)
+                self._notify_first_audio_start()
+            deadline = time.monotonic() + len(data) / rate + 2.0
+            while not self._cancelled() and time.monotonic() < deadline:
+                with self._sd_lock:
+                    if not stream.active:
+                        break
+                time.sleep(0.01)
+            with self._sd_lock:
+                if (self._cancelled() or time.monotonic() >= deadline) and sd.get_stream() is stream:
+                    sd.stop()
+
         except Exception as e:
             log.error(f"[speak] playback error: {e}")
 
     def _speak_thread(self, text: str) -> None:
         """Split into sentence chunks ≤300 chars, synthesize and play each."""
-        self._playing.set()
-        self._stop_flag.clear()
+        self._mark_playing(True)
         try:
             for chunk in self._chunk_text(text):
-                if self._stop_flag.is_set():
+                if self._cancelled():
                     break
                 wav = self._synthesize(chunk)
                 if wav:
                     self._play_wav_bytes(wav)
         finally:
-            self._playing.clear()
+            self._mark_playing(False)
 
     def _speech_stream_worker(self, chunk_queue, on_word=None) -> None:
         """
@@ -722,10 +847,15 @@ class AikoSpeak:
         thread while the current chunk plays, hiding the HTTP round-trip behind
         audio playback.
         """
-        self._playing.set()
+        self._mark_playing(True)
         try:
-            while not self._stop_flag.is_set():
-                chunk = chunk_queue.get()
+            while not self._cancelled():
+                try:
+                    chunk = chunk_queue.get(timeout=0.1)
+                except queue.Empty:
+                    if hasattr(chunk_queue, "finished") and chunk_queue.finished.is_set():
+                        break
+                    continue
                 if chunk is None:
                     break
                 # Chunk may be a lone emoji line after sentence split —
@@ -736,7 +866,7 @@ class AikoSpeak:
                 pieces = list(self._chunk_text(clean))
                 next_synth = None  # (thread, result_container)
                 for i, piece in enumerate(pieces):
-                    if self._stop_flag.is_set():
+                    if self._cancelled():
                         break
 
                     if next_synth is not None:
@@ -748,7 +878,7 @@ class AikoSpeak:
 
                     # Recheck: the flag may have been set while synthesis
                     # was in flight — never play or emit a cancelled chunk.
-                    if self._stop_flag.is_set():
+                    if self._cancelled():
                         break
 
                     if not wav:
@@ -761,9 +891,8 @@ class AikoSpeak:
                     has_next = i + 1 < len(pieces)
                     if has_next:
                         nr: list = []
-                        nt = threading.Thread(
+                        nt = self._playback_thread(
                             target=lambda p=pieces[i+1], r=nr: r.append(self._synthesize(p)),
-                            daemon=True,
                         )
                         nt.start()
                         next_synth = (nt, nr)
@@ -772,16 +901,14 @@ class AikoSpeak:
 
                     if on_word or self._viseme_sink is not None:
                         duration = self._wav_duration(wav)
-                        play_thread = threading.Thread(
-                            target=self._play_wav_bytes, args=(wav,), daemon=True
-                        )
+                        play_thread = self._playback_thread(target=self._play_wav_bytes, args=(wav,))
                         play_thread.start()
                         self._emit_words_timed(piece, duration, on_word)
                         play_thread.join()
                     else:
                         self._play_wav_bytes(wav)
         finally:
-            self._playing.clear()
+            self._mark_playing(False)
 
     def _emit_words_timed(self, text: str, duration: float, on_word=None) -> None:
         """
@@ -810,13 +937,13 @@ class AikoSpeak:
                         fallback_wps, len(words))
             start = time.monotonic()
             for i, word in enumerate(words):
-                if self._stop_flag.is_set():
+                if self._cancelled():
                     break
                 self._emit_viseme(self._viseme_for_word(word), 0.85)
                 if on_word:
                     on_word(word if i == 0 else " " + word)
                 if i + 1 < len(words):
-                    time.sleep(1.0 / fallback_wps)
+                    self._cancel_event().wait(1.0 / fallback_wps)
             self._emit_viseme("A", 0.0)
             return
 
@@ -837,21 +964,21 @@ class AikoSpeak:
         start = time.monotonic() + 0.02
         elapsed = 0.0
         for i, (word, weight) in enumerate(zip(words, weights, strict=True)):
-            if self._stop_flag.is_set():
+            if self._cancelled():
                 break
             sleep_time = (start + elapsed) - time.monotonic()
             if sleep_time > 0:
-                time.sleep(sleep_time)
+                self._cancel_event().wait(sleep_time)
                 # Recheck: a stop during the pacing sleep must not emit
                 # one trailing word after it.
-                if self._stop_flag.is_set():
+                if self._cancelled():
                     break
             self._emit_viseme(self._viseme_for_word(word), 0.85)
             if on_word:
                 on_word(word if i == 0 else " " + word)
             elapsed += usable_duration * (weight / total)
         remaining = (start + usable_duration) - time.monotonic()
-        while remaining > 0 and not self._stop_flag.is_set():
+        while remaining > 0 and not self._cancelled():
             time.sleep(min(0.05, remaining))
             remaining = (start + usable_duration) - time.monotonic()
         self._emit_viseme("A", 0.0)
@@ -864,20 +991,17 @@ class AikoSpeak:
         karaoke-style — instead of typing the whole response out at a fixed
         pace and only starting audio afterward.
         """
-        self._playing.set()
-        self._stop_flag.clear()
+        self._mark_playing(True)
         try:
             for chunk in self._chunk_text(text):
-                if self._stop_flag.is_set():
+                if self._cancelled():
                     break
                 wav = self._synthesize(chunk)
                 if not wav:
                     continue
                 duration = self._wav_duration(wav)
 
-                play_thread = threading.Thread(
-                    target=self._play_wav_bytes, args=(wav,), daemon=True
-                )
+                play_thread = self._playback_thread(target=self._play_wav_bytes, args=(wav,))
                 play_thread.start()
 
                 if on_word:
@@ -885,7 +1009,7 @@ class AikoSpeak:
 
                 play_thread.join()
         finally:
-            self._playing.clear()
+            self._mark_playing(False)
 
     @staticmethod
     def _chunk_text(text: str, max_chars: int = 280) -> list[str]:
@@ -928,7 +1052,7 @@ class AikoSpeak:
         try:
             from system.notice import get_notice_bus
             from system.userspace import current_user_id
-            uid = self._notice_uid or current_user_id()
+            uid = current_user_id() if _PLAYBACK_CONTEXT.get() else (self._notice_uid or current_user_id())
             get_notice_bus(uid).push(area, brief)
         except Exception:
             pass
@@ -942,6 +1066,7 @@ class AikoSpeak:
         except Exception:
             return False
 
+    @_serialized_start
     def speak(self, text: str) -> bool:
         """Synthesize a complete string, non-blocking. Caller prints to console."""
         if self._playback_cancelled():
@@ -951,12 +1076,12 @@ class AikoSpeak:
             return False
         self._capture_notice_uid()
         self.stop()
-        self._first_audio_fired.clear()
-        self._playing.set()
-        t = threading.Thread(target=self._speak_thread, args=(clean,), daemon=True)
+        self._reset_playback()
+        t = self._playback_thread(target=self._speak_thread, args=(clean,))
         t.start()
         return True
 
+    @_serialized_start
     def speak_synced(self, text: str, on_word=None) -> bool:
         """
         Synthesize and play `text`, calling on_word(word_chunk) timed to
@@ -973,11 +1098,8 @@ class AikoSpeak:
             return False
         self._capture_notice_uid()
         self.stop()
-        self._first_audio_fired.clear()
-        self._playing.set()
-        t = threading.Thread(
-            target=self._speak_thread_synced, args=(clean, on_word), daemon=True
-        )
+        self._reset_playback()
+        t = self._playback_thread(target=self._speak_thread_synced, args=(clean, on_word))
         t.start()
         return True
 
@@ -991,6 +1113,7 @@ class AikoSpeak:
             while total > 4000 and len(self._token_buf) > 1:
                 total -= len(self._token_buf.pop(0))
 
+    @_serialized_start
     def play_async(self) -> None:
         """Synthesize and play all buffered tokens, then clear the buffer."""
         text = extract_dialogue_for_tts("".join(self._token_buf))
@@ -1001,45 +1124,55 @@ class AikoSpeak:
             return
         self._capture_notice_uid()
         self.stop()
-        self._first_audio_fired.clear()
-        self._playing.set()
-        t = threading.Thread(target=self._speak_thread, args=(text,), daemon=True)
+        self._reset_playback()
+        t = self._playback_thread(target=self._speak_thread, args=(text,))
         t.start()
 
     def feed_and_play(self, token_iterator) -> None:
-        """Consume a token iterator, then synthesize and play. Non-blocking."""
+        """Consume an iterator, then play asynchronously; cancellation wins."""
+        with self._start_lock:
+            self._capture_notice_uid()
+            self.stop()
+            self._reset_playback()
+            self._playing.clear()  # consuming text is not audio playback
+            cancel = self._stop_flag
         tokens = []
-        for token in token_iterator:
-            tokens.append(token)
-        text = extract_dialogue_for_tts("".join(tokens))
-        if self._playback_cancelled():
-            return
-        if not text:
-            return
-        self._capture_notice_uid()
-        self.stop()
-        self._first_audio_fired.clear()
-        self._playing.set()
-        t = threading.Thread(target=self._speak_thread, args=(text,), daemon=True)
-        t.start()
+        try:
+            for token in token_iterator:
+                # Always drain: generators may stream the visible text as a
+                # side effect, even when the corresponding voice is cancelled.
+                tokens.append(token)
+        except BaseException:
+            if cancel is self._stop_flag:
+                self._playing.clear()
+            raise
+        with self._start_lock:
+            if cancel.is_set() or cancel is not self._stop_flag:
+                return
+            if self._playback_cancelled():
+                self._playing.clear()
+                return
+            text = extract_dialogue_for_tts("".join(tokens))
+            if not text:
+                self._playing.clear()
+                return
+            self._playing.set()
+            self._playback_thread(target=self._speak_thread, args=(text,)).start()
 
+    @_serialized_start
     def start_speech_stream(self, on_word=None) -> None:
         """Start sentence-level TTS playback for one streamed response."""
         if self._playback_cancelled():
             return
         self._capture_notice_uid()
         self.stop()
-        self._first_audio_fired.clear()
+        self._reset_playback()
         with self._lock:
-            self._stream_chunks = []
-            self._stream_queue = queue.Queue()
-            self._stream_on_word = on_word
+            self._stream_queue = _SpeechQueue()
             self._streaming_active = True
-            self._stop_flag.clear()
-            self._stream_thread = threading.Thread(
+            self._stream_thread = self._playback_thread(
                 target=self._speech_stream_worker,
-                args=(self._stream_queue, self._stream_on_word),
-                daemon=True,
+                args=(self._stream_queue, on_word),
             )
             self._stream_thread.start()
 
@@ -1054,14 +1187,19 @@ class AikoSpeak:
         clean = extract_dialogue_for_tts(text)
         if not clean:
             return
-        with self._lock:
-            if self._streaming_active:
-                self._stream_chunks.append(clean)
-                total = sum(len(c) for c in self._stream_chunks)
-                while total > 4000 and len(self._stream_chunks) > 1:
-                    total -= len(self._stream_chunks.pop(0))
-                if self._stream_queue is not None:
-                    self._stream_queue.put(clean)
+        for piece in self._chunk_text(clean):
+            while True:
+                with self._lock:
+                    chunks = self._stream_queue
+                    active = self._streaming_active
+                    cancel = self._stop_flag
+                if not active or chunks is None or cancel.is_set():
+                    return
+                try:
+                    chunks.put(piece, timeout=0.05)
+                    break
+                except queue.Full:
+                    continue  # bounded backpressure; stop() remains responsive
 
     def stop_speech_stream(self, cancel: bool = False) -> None:
         """Finish the current sentence-level TTS stream.
@@ -1081,26 +1219,25 @@ class AikoSpeak:
         so a later stop() can reap it; the worker exits on its own as soon
         as it unsticks.
         """
-        with self._lock:
-            if not self._streaming_active:
-                return
-            self._streaming_active = False
-            self._stream_chunks = []
-            self._stream_on_word = None
-            stream_queue = self._stream_queue
-            self._stream_queue = None
-            stream_thread = self._stream_thread
-            self._stream_thread = None
+        with getattr(self, "_start_lock", nullcontext()):
+            with self._lock:
+                if not self._streaming_active:
+                    return
+                self._streaming_active = False
+                stream_queue = self._stream_queue
+                self._stream_queue = None
+                stream_thread = self._stream_thread
+                self._stream_thread = None
+                if cancel:
+                    # Cancel this session under the same lock that installs
+                    # a new session, never a newer response's event.
+                    self._stop_flag.set()
+            # The pill releases a worker blocked in queue.get(); on the drain
+            # path it lands behind already-queued sentences so they still play.
+            _finish_queue(stream_queue, cancel=cancel)
             if cancel:
-                # Set under the lock: start_speech_stream() clears the flag
-                # under the same lock, so a new stream cannot slip in between
-                # the state transition and this set and get its fresh flag
-                # clobbered by a stale stop request.
-                self._stop_flag.set()
-        # The pill releases a worker blocked in queue.get(); on the drain
-        # path it lands behind already-queued sentences so they still play.
-        if stream_queue is not None:
-            stream_queue.put(None)
+                self._halt_audio()
+                self._playing.clear()
         if cancel and stream_thread is not None \
                 and stream_thread is not threading.current_thread():
             stream_thread.join(timeout=5.0)
@@ -1152,6 +1289,7 @@ class AikoSpeak:
             _time.sleep(0.02)
         return False
 
+    @_serialized_start
     def stop(self) -> None:
         # Signal synchronously; heavy teardown joins in the background.
         # A barge-in must never block the new turn on audio teardown
@@ -1161,32 +1299,20 @@ class AikoSpeak:
         self._stop_flag.set()
         with self._lock:
             self._streaming_active = False
-            self._stream_chunks = []
-            self._stream_on_word = None
             stream_queue = self._stream_queue
             self._stream_queue = None
             stream_thread = self._stream_thread
             self._stream_thread = None
-        if stream_queue is not None:
-            stream_queue.put(None)
+        _finish_queue(stream_queue, cancel=True)
 
-        # Skip ALSA probe entirely when audio was never initialized
-        # (e.g. text-mode sessions): nothing is playing, so nothing to stop.
-        # Take _sd_lock so stop() can't race a thread inside sd.play/wait.
-        if self._sd is not None:
-            try:
-                sd = self._load_sd()
-                with self._sd_lock:
-                    sd.stop()
-            except Exception:
-                log.warning("speak: sd.stop() failed in stop_stream")
+        self._halt_audio()
+        self._playing.clear()
 
-        # Join the dead stream thread and drain a stale playing flag in the
-        # background. The thread object is captured here so a concurrent
+        # Join the detached stream thread in the background. The thread object is captured here so a concurrent
         # start_speech_stream (which installs a new thread) can't confuse
         # the joiner, and a second stop() finds _stream_thread None —
         # idempotent, no duplicate joiners.
-        if (stream_thread is not None and stream_thread.is_alive()) or self.is_playing():
+        if stream_thread is not None and stream_thread.is_alive():
             threading.Thread(
                 target=self._stop_join_bg,
                 args=(stream_thread,),
@@ -1194,17 +1320,31 @@ class AikoSpeak:
                 daemon=True,
             ).start()
 
+    def _halt_audio(self):
+        # The control lock is never held across playback, so audible stop
+        # doesn't wait for sd.wait() to finish the very audio being cancelled.
+        if self._sd is not None:
+            try:
+                with self._sd_lock:
+                    self._load_sd().stop()
+            except Exception:
+                log.warning("speak: local audio stop failed")
+        if hasattr(self, "_echo"):
+            self._echo.stopped()
+        owner = getattr(getattr(self, "_audio_sink", None), "__self__", None)
+        callback = getattr(owner, "stop_audio_playback", None)
+        if callback is not None:
+            try:
+                callback(user_id=getattr(self, "_playback_uid", None))
+            except Exception:
+                log.warning("speak: remote audio stop failed")
+
     def _stop_join_bg(self, stream_thread) -> None:
-        """Background half of stop(): join the dead stream thread, then
-        drain a stale playing flag. Bounded exactly like the old serial
-        path (2s + 2s); a wedged backend can't trap anything — this thread
-        just exits."""
+        """Reap one detached worker with a bounded wait; never touch a
+        newer response's playback flag."""
         try:
             if stream_thread is not None and stream_thread.is_alive():
                 stream_thread.join(timeout=2.0)
-            deadline = time.monotonic() + 2.0
-            while self.is_playing() and time.monotonic() < deadline:
-                time.sleep(0.02)
         except Exception:
             pass
 

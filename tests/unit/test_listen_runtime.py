@@ -34,6 +34,7 @@ class FakeStream:
 
 
 def prepared(monkeypatch):
+    monkeypatch.setenv("BARGE_IN_LOCAL_AEC", "1")  # fake devices represent echo-cancelled input
     listener = L.AikoListen()
     listener._ready = True
     listener._model = object()

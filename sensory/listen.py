@@ -304,6 +304,15 @@ def barge_in_enabled() -> bool:
     return _env_bool("BARGE_IN_ENABLED", "0")
 
 
+def local_barge_in_safe() -> bool:
+    """Raw local microphone energy cannot distinguish speech from speaker echo.
+
+    Enable only when input is echo-cancelled externally (hardware/PipeWire AEC).
+    Browser barge-in has its own getUserMedia echo-cancellation check.
+    """
+    return _env_bool("BARGE_IN_LOCAL_AEC", "0")
+
+
 def barge_in_always_on() -> bool:
     """Local Silero monitor outside TTS wait — only meaningful if
     barge_in_enabled() is also True."""
@@ -995,7 +1004,7 @@ class AikoListen:
         samples_per_chunk = _CHUNK_SAMPLES_VAD
 
         while self._barge_in_active:
-            if not barge_in_enabled():
+            if not barge_in_enabled() or not local_barge_in_safe():
                 time.sleep(0.5)
                 continue
             if not self._ensure_barge_vad():
@@ -1022,13 +1031,13 @@ class AikoListen:
                 stream.start()
 
                 consecutive = 0
-                while self._barge_in_active and barge_in_enabled():
+                while self._barge_in_active and barge_in_enabled() and local_barge_in_safe():
                     if self._recording.is_set() or (not barge_in_always_on() and not self._barge_in_armed.is_set()):
                         break  # release the device before ordinary capture opens it
 
                     chunk = _read_input_chunk(
                         stream, samples_per_chunk,
-                        cancelled=lambda: not self._barge_in_active or self._recording.is_set(),
+                        cancelled=lambda: not self._barge_in_active or self._recording.is_set() or not barge_in_enabled() or not local_barge_in_safe(),
                     )
                     if chunk is None:
                         break
@@ -1106,24 +1115,36 @@ class AikoListen:
             - If a wake-word gate is configured, utterances are held until wake phrase
               detected (either acoustic model or fuzzy ASR-text match).
         """
+        overlap_allowed = barge_in_enabled() and (chunk_source is not None or local_barge_in_safe())
+        if speak is None or not speak.is_playing():
+            self._barge_in_event.clear()
         if speak is not None and speak.is_playing():
-            if not barge_in_enabled():
+            if not overlap_allowed:
                 _cb(status_callback, "__WAITING__")
+                deadline = time.monotonic() + 120.0
                 while speak.is_playing():
+                    if time.monotonic() >= deadline:
+                        return "", {"tts_busy": True}
                     time.sleep(0.05)
-                speak = None
                 wait_fn = None  # already waited out TTS; avoid double wait_fn
             else:
                 _cb(status_callback, "__WAITING__")
                 self._barge_in_armed.set()
                 try:
-                    interrupted = speak.wait_or_barge_in(self._barge_in_event)
+                    speak.wait_or_barge_in(self._barge_in_event)
                 finally:
                     self._barge_in_armed.clear()
-                if interrupted:
                     self._barge_in_event.clear()
         elif wait_fn is not None:
             wait_fn()
+
+        # Wait for acoustic decay after local playback. The browser also gates
+        # on its actual (possibly delayed) playback, not just server timing.
+        if speak is not None and not overlap_allowed:
+            remaining = getattr(speak, "echo_remaining", lambda: 0.0)
+            deadline = time.monotonic() + 2.1
+            while remaining() > 0 and time.monotonic() < deadline:
+                time.sleep(min(0.05, remaining()))
 
         # Lazy voice boot: first call pays the model-load cost here (or it
         # already ran earlier via a mic-arm kick from the WebUI).
@@ -1145,6 +1166,7 @@ class AikoListen:
         audio, woke_acoustic = self._record(
             status_callback,
             chunk_source=chunk_source,
+            speak=speak,
         )
         recording_stopped_at = time.monotonic()
         if audio is None:
@@ -1195,6 +1217,12 @@ class AikoListen:
             info["speaker_score"] = result_box.get("speaker_score")
         else:
             text = self._transcribe(audio)
+
+        if speak is not None and getattr(speak, "is_self_echo", lambda *args: False)(
+                text, current_user_id(), listen_started_at, recording_stopped_at):
+            info["self_echo"] = True
+            log.debug("listen: suppressed transcript matching overlapping TTS")
+            return "", info
 
         if self._wake_model is not None:
             # Acoustic engine owns wake gating end-to-end: if we got this far
@@ -1292,6 +1320,7 @@ class AikoListen:
         self,
         status_callback=None,
         chunk_source=None,
+        speak=None,
     ) -> tuple[np.ndarray | None, bool]:
         """
         Capture audio until silence after speech detected. Silero VAD scores
@@ -1368,6 +1397,18 @@ class AikoListen:
                     chunk = _pcm_chunk(raw, samples_per_chunk)
                 else:
                     chunk = _read_input_chunk(stream, samples_per_chunk)
+
+                overlap_allowed = barge_in_enabled() and (use_external or local_barge_in_safe())
+                if speak is not None and not overlap_allowed and (
+                    speak.is_playing() or getattr(speak, "echo_remaining", lambda: 0.0)() > 0
+                ):
+                    # Proactive/scheduled TTS can start after capture begins.
+                    # Discard the overlap, including pre-existing speech state.
+                    audio_chunks.clear()
+                    silence_count = speech_count = 0
+                    hearing_speech = False
+                    self._vad_model.reset()
+                    continue
 
                 if wake_needed:
                     # Asleep and using the acoustic engine: score for the
@@ -1513,7 +1554,7 @@ class AikoListen:
             self._vad_model.reset()
             # Warm the barge detector only when barge-in is enabled —
             # otherwise it stays unbuilt (see _ensure_barge_vad).
-            if barge_in_enabled() and self._ensure_barge_vad():
+            if barge_in_enabled() and local_barge_in_safe() and self._ensure_barge_vad():
                 self._is_speech(self._barge_vad_model, warm_chunk)
                 self._barge_vad_model.reset()
 

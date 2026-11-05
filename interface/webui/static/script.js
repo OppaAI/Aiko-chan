@@ -1011,15 +1011,32 @@ function startMouthAnalyserLoop() {
 }
 
 async function enqueueTtsAudio(arrayBuffer) {
+  if (ttsQueue.length >= 32) {
+    ttsQueue.shift();
+    console.warn('[tts] playback backlog full; skipping oldest audio chunk');
+  }
   ttsQueue.push(arrayBuffer);
   if (!ttsPlaying) playNextTts();
 }
 
 let ttsCurrentSource = null;
+let ttsPlaybackEpoch = 0;
+
+async function awaitTtsOperation(operation, timeoutMs) {
+  let timer;
+  try {
+    return await Promise.race([operation, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('audio operation timed out')), timeoutMs);
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 async function playNextTts() {
+  const epoch = ttsPlaybackEpoch;
   const buf = ttsQueue.shift();
-  if (!buf) { ttsPlaying = false; window.aikoIsSpeaking = false; captionSpeaking(false); if (!typingIndicator && currentPresence === 'speaking') setPresence('idle'); return; }
+  if (!buf) { ttsPlaying = false; window.aikoIsSpeaking = false; window.AIKO_TTS_STOPPED_AT = performance.now(); captionSpeaking(false); if (!typingIndicator && currentPresence === 'speaking') setPresence('idle'); return; }
   ttsPlaying = true;
   window.aikoIsSpeaking = true;
   captionSpeaking(true);
@@ -1028,35 +1045,54 @@ async function playNextTts() {
   try {
     const ctx = getTtsContext();
     if (ctx.state === 'suspended') {
-      try { await ctx.resume(); } catch (e) {}
+      await awaitTtsOperation(ctx.resume(), 2000);
+      if (ctx.state !== 'running') throw new Error('audio playback requires a user gesture');
     }
-    const audioBuffer = await ctx.decodeAudioData(buf.slice(0));
+    if (epoch !== ttsPlaybackEpoch) return;
+    const audioBuffer = await awaitTtsOperation(ctx.decodeAudioData(buf.slice(0)), 5000);
+    if (epoch !== ttsPlaybackEpoch) return;
     const analyser = getTtsAnalyser();
     const src = ctx.createBufferSource();
     src.buffer = audioBuffer;
     src.connect(analyser);
-    src.onended = playNextTts;
+    src.onended = () => {
+      src.disconnect();
+      if (ttsCurrentSource === src) ttsCurrentSource = null;
+      if (epoch === ttsPlaybackEpoch) playNextTts();
+    };
     ttsCurrentSource = src;
+    window.AIKO_TTS_STARTED_AT = performance.now();
+    window.AIKO_BARGE_SENT_AT = 0;
     src.start();
     startMouthAnalyserLoop();
   } catch (err) {
     console.error('[tts] decode/play failed:', err);
-    playNextTts();
+    if (epoch === ttsPlaybackEpoch) playNextTts();
   }
 }
 
 function stopTtsPlayback() {
+  ttsPlaybackEpoch++;
   ttsQueue = [];
   if (ttsCurrentSource) {
-    try { ttsCurrentSource.onended = null; ttsCurrentSource.stop(); } catch (e) {}
+    try { ttsCurrentSource.onended = null; ttsCurrentSource.stop(); ttsCurrentSource.disconnect(); } catch (e) {}
     ttsCurrentSource = null;
   }
   ttsPlaying = false;
   window.aikoIsSpeaking = false;
+  window.AIKO_TTS_STOPPED_AT = performance.now();
   captionSpeaking(false);
   if (!typingIndicator && currentPresence === 'speaking') setPresence('idle');
 }
 window.stopTtsPlayback = stopTtsPlayback;
+
+function stopRemoteTtsPlayback() {
+  const bargeAt = window.AIKO_BARGE_SENT_AT || 0;
+  const confirmedBarge = window.AIKO_MIC_ECHO_CANCELLED === true && bargeAt > 0 && performance.now() - bargeAt < 2000;
+  stopTtsPlayback();
+  // The server's stop acknowledgment must not wipe a confirmed human onset.
+  if (confirmedBarge) window.AIKO_TTS_STOPPED_AT = 0;
+}
 
 // ── mic capture ───────────────────────────────────────────────────────────
 let micStream = null;
@@ -1125,6 +1161,7 @@ async function _startMicInner() {
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: false },
     });
+    window.AIKO_MIC_ECHO_CANCELLED = micStream.getAudioTracks()[0]?.getSettings?.().echoCancellation === true;
     micContext = new AudioContext({ sampleRate: 16000 });
     if (micContext.state === 'suspended') {
       await micContext.resume();
@@ -1287,6 +1324,7 @@ function handleMicStart(msg) {
   const seq = ++micCommandSeq;
   browserVadGate = msg.browser_vad_gate !== false;
   window.AIKO_BARGE_IN_ENABLED = !!msg.barge_in_enabled;
+  window.AIKO_ECHO_TAIL_MS = Number.isFinite(msg.echo_tail_ms) ? Math.max(0, Math.min(2000, msg.echo_tail_ms)) : 400;
   window.AIKO_BARGE_ECHO_GUARD_MS = msg.echo_guard_ms ?? 450;
   startMic().then((ok) => {
     if (!ok || seq !== micCommandSeq) return;
@@ -1416,6 +1454,7 @@ function connectWS() {
         break;
       case 'tool': toolStatus.textContent = msg.status ? `  ⚙  ${msg.status}` : ''; break;
       case 'vitals': applyVitals(msg); break;
+      case 'tts_stop': stopRemoteTtsPlayback(); break;
       case 'voice':
         if (msg.status === 'idle') pendingMicStart = null;
         applyVoice(msg.status);

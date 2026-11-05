@@ -29,6 +29,7 @@ let _energyHits = 0;
 let _vadEpoch = 0;
 let _lastBargeSent = 0;
 let _bargeHits = 0;
+let _bargePreBuf = [];
 
 function _bargeInEnabled() {
     return window.AIKO_BARGE_IN_ENABLED === true || window.AIKO_BARGE_IN_ENABLED === 1
@@ -64,6 +65,7 @@ function _resetState() {
     _speaking = false;
     _energyHits = 0;
     _bargeHits = 0;
+    _bargePreBuf = [];
     _lastBargeSent = 0;
     if (_silTimer) { clearTimeout(_silTimer); _silTimer = null; }
 }
@@ -86,21 +88,29 @@ function _calcThresholds() {
 }
 
 function _fireBarge(ws) {
-    if (!_bargeInEnabled()) return;
+    if (!_bargeInEnabled() || window.AIKO_MIC_ECHO_CANCELLED !== true) return;
     if (!window.aikoIsSpeaking) return;
     if (_inEchoGuard()) return;
     const now = performance.now();
     if (now - _lastBargeSent <= 300) return;
     _lastBargeSent = now;
     _bargeHits = 0;
+    const preSpeech = _bargePreBuf;
     if (window.stopTtsPlayback) window.stopTtsPlayback();
+    // Confirmed AEC barge-in retains only the user's onset, never the long
+    // playback/pre-speech buffer. AEC continues removing the stopped tail.
+    window.AIKO_TTS_STOPPED_AT = 0;
+    window.AIKO_BARGE_SENT_AT = now;
+    _resetState();
+    _lastBargeSent = now;
+    _preBuf = preSpeech;
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'barge_in' }));
     }
 }
 
 function _maybeBargeIn(ws, rms, startThresh) {
-    if (!_bargeInEnabled()) return;
+    if (!_bargeInEnabled() || window.AIKO_MIC_ECHO_CANCELLED !== true) return;
     if (!window.aikoIsSpeaking) return;
     if (_inEchoGuard()) {
         _bargeHits = 0;
@@ -118,10 +128,29 @@ function _maybeBargeIn(ws, rms, startThresh) {
 
 function processEnergyVADFrame(frame, ws, epoch = _vadEpoch, gate = true) {
     if (!_canSend(ws, epoch)) return;
-    if (!gate) {
-        ws.send(frame.buffer.slice(0));
-    }
     const rms = _rms(frame);
+    if (!Number.isFinite(rms)) return;
+    const now = performance.now();
+    const tail = Number.isFinite(window.AIKO_ECHO_TAIL_MS) ? Math.max(0, Math.min(2000, window.AIKO_ECHO_TAIL_MS)) : 400;
+    if (window.aikoIsSpeaking) {
+        // No ASR frames, onset events, stale pre-buffer or noise-floor learning
+        // during playback. Energy alone is not evidence of a human interrupt.
+        _preBuf = [];
+        _speaking = false;
+        _energyHits = 0;
+        if (_silTimer) { clearTimeout(_silTimer); _silTimer = null; }
+        _bargePreBuf.push(frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength));
+        if (_bargePreBuf.length > BARGE_IN_CONFIRM_FRAMES) _bargePreBuf.shift();
+        _maybeBargeIn(ws, rms, _calcThresholds().startThresh);
+        return;
+    }
+    if (window.AIKO_TTS_STOPPED_AT > 0 && now - window.AIKO_TTS_STOPPED_AT < tail) {
+        _resetState();
+        return;
+    }
+    if (!gate) {
+        ws.send(frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength));
+    }
 
     const { startThresh } = _calcThresholds();
 
@@ -158,7 +187,7 @@ function processEnergyVADFrame(frame, ws, epoch = _vadEpoch, gate = true) {
                 ws.send(buf);
             }
             if (!_canSend(ws, epoch)) return;
-            ws.send(frame.buffer.slice(0));
+            ws.send(frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength));
         }
         _preBuf = [];
         return;
@@ -167,7 +196,7 @@ function processEnergyVADFrame(frame, ws, epoch = _vadEpoch, gate = true) {
     if (_speaking) {
         if (gate) {
             if (!_canSend(ws, epoch)) return;
-            ws.send(frame.buffer.slice(0));
+            ws.send(frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength));
         }
 
         _maybeBargeIn(ws, rms, startThresh);
@@ -207,6 +236,6 @@ function _rms(frame) {
 }
 
 function _pushPreSpeech(frame) {
-    _preBuf.push(frame.buffer.slice(0));
+    _preBuf.push(frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength));
     if (_preBuf.length > PRE_SPEECH_BUFS) _preBuf.shift();
 }

@@ -15,7 +15,7 @@ test suite is useful evidence, but does not by itself mean an area is bug-free.
 | 4 | Agentic tasks, tools, and self-coding | `agentic/`, `Aiko-Playground` integration | Current code pass completed; final validation below; live-model and physical Jetson checks pending |
 | 5 | Memory, retrieval, knowledge, and persistence | `cognition/memory/`, `cognition/knowledge/` | Current code pass completed for SQLite/Harrier; final validation below; live-model retrieval quality and physical Jetson RAM/latency checks pending |
 | 6 | Fly-brain circuits and state wiring | `cognition/fly*`, `cognition/centralcomplex/`, `cognition/neural_state.py` | Current code pass completed; final validation below; full-connectome and physical Jetson/sensor/body measurements pending |
-| 7 | Speech, listening, and sensory pathways | `sensory/`, `cognition/flysense/` | In progress: initial capture, lazy boot, enrollment, upload and prosody fixes shipped; TTS/playback and remaining sensory review pending |
+| 7 | Speech, listening, and sensory pathways | `sensory/`, `cognition/flysense/` | In progress: capture, boot, enrollment, echo protection, playback cancellation and queue bounds fixed; remaining wake/sensory review and physical measurements pending |
 | 8 | Web, desktop, mobile, and external interfaces | `interface/` | Not started |
 | 9 | Configuration, security boundaries, storage, and deployment | `system/`, `config/`, `backend/`, `scripts/` | Focused path/TLS fixes shipped; broad review not started |
 | 10 | Evaluation, observability, and developer tooling | `tests/`, `eval/`, `conscience-lab/`, `util/` | Not started |
@@ -825,3 +825,38 @@ fidelity. The sensory and interface areas retain their own broader audit scopes.
 - Final validation after integrating concurrent dev changes and the TTS fix:
   **2,623 tests passed, 5 skipped, and 34 subtests passed** in the combined
   unit/integration/conscience suite. Device/model-quality checks remain pending.
+
+### Area 7 continuation: self-echo and playback lifetime
+
+- Added playback/tail suppression in browser VAD, server ingress, local recording
+  and CLI speaker coordination. Browser raw-mic mode observes the same guard;
+  pre-speech/noise-floor state cannot learn or replay TTS audio.
+- Automatic overlap requires confirmed browser AEC or explicitly configured local
+  AEC; a raw local speaker/microphone remains half duplex. Added bounded
+  `ASR_ECHO_TAIL_MS` and `BARGE_IN_LOCAL_AEC` controls to Settings.
+- Added bounded, identity-scoped recent-TTS matching for overlapping transcripts.
+  No microphone audio is retained. Short acknowledgments and commands are exempt.
+- Give each playback worker a permanent cancellation event and copied request
+  context, including prefetch/playback children. Cancelled synthesis/decoding
+  cannot resume old audio; old workers cannot clear a new response's state.
+- Replaced the PortAudio lock held across `sd.wait()` with short control sections
+  and cooperative playback polling. Stops halt audio immediately and signal the
+  original user's browser; a foreign user cannot barge into that session.
+- Bound queued sentence pieces and synthesis concurrency. Full queues close
+  without blocking stop; graceful completion still drains queued speech. Removed
+  unused stream-history/callback bookkeeping and redundant background ASR boot.
+- Restore WebUI input waiters on ASR exceptions, skip foreign-user frames rather
+  than interpreting them as end-of-utterance, validate PCM frame sizes, and avoid
+  blocking the event loop on full audio queues. CLI/WebUI retain one unfinished
+  capture worker instead of spawning one on every retry.
+- Browser checks cover half-duplex/raw-mode echo gates, acoustic tail recovery,
+  stale pre-buffer rejection, confirmed AEC barge-in, cancellation during decode,
+  blocked autoplay, and preserving human onset across stop acknowledgments.
+- Guide and tunable semantics: [Voice playback](VOICE.md). Area 7 remains in
+  progress: remaining wake/enrollment/sensory review and physical Jetson tests
+  have not been declared complete by this batch.
+- Validation: **138 focused tests passed**; the final combined unit/integration/
+  conscience suite passed with **2,642 tests, 5 skips, and 34 subtests**.
+  Browser JavaScript state-machine tests are included through the Node runner.
+  Cancellation preserves generator-driven text delivery, including when audio
+  itself is discarded. Physical feedback/AEC measurements remain pending.

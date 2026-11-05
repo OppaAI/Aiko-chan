@@ -234,13 +234,26 @@ class AikoSimpleCLI:
                 # Run it on a worker and fall back to typing on timeout —
                 # the orphaned worker is daemon-scoped and discarded.
                 import threading as _threading
+                previous = getattr(self, "_voice_input_thread", None)
+                if previous is not None and previous.is_alive():
+                    self.add_message("sys", "[voice] Previous capture is still finishing — type instead.")
+                    return self.get_input()
+                import inspect
+                import contextvars
+                try:
+                    parameters = inspect.signature(method).parameters
+                except (TypeError, ValueError):
+                    parameters = {}
+                voice_kwargs = {key: value for key, value in (("speak", speak), ("wait_fn", wait_fn)) if key in parameters}
                 _voice_box: list = []
                 def _do_listen() -> None:
                     try:
-                        _voice_box.append(method())
+                        _voice_box.append(method(**voice_kwargs))
                     except Exception as e:
                         _voice_box.append(e)
-                _voice_thread = _threading.Thread(target=_do_listen, name="cli-voice-listen", daemon=True)
+                context = contextvars.copy_context()
+                _voice_thread = _threading.Thread(target=context.run, args=(_do_listen,), name="cli-voice-listen", daemon=True)
+                self._voice_input_thread = _voice_thread
                 _voice_thread.start()
                 _voice_thread.join(timeout=self._VOICE_LISTEN_TIMEOUT_S)
                 if _voice_thread.is_alive() or not _voice_box:

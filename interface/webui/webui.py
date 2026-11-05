@@ -35,6 +35,7 @@ import queue
 import ssl
 import subprocess
 import threading
+import contextvars
 import time
 from typing import ClassVar, TYPE_CHECKING
 if TYPE_CHECKING:
@@ -538,6 +539,8 @@ class AikoWeb:
                     break
                 raw_bytes = message.get("bytes")
                 if raw_bytes is not None:
+                    if len(raw_bytes) != 512 * 4 or self._audio_feedback_blocked():
+                        continue
                     if self._mic_active.is_set():
                         try:
                             self._audio_q.put_nowait((raw_bytes, uid, display_name))
@@ -643,25 +646,32 @@ class AikoWeb:
 
                     elif mtype == "vad":
                         event = msg.get("event")
+                        if self._audio_feedback_blocked():
+                            continue
                         if event == "start":
                             self._broadcast({"type": "voice", "status": "listening"}, user_id=uid)
                         elif event == "end":
                             self._broadcast({"type": "voice", "status": "transcribing"}, user_id=uid)
                             if WEBUI_BROWSER_VAD_GATE and self._mic_active.is_set():
-                                self._audio_q.put((b"", uid, display_name))
+                                try:
+                                    self._audio_q.put_nowait((b"", uid, display_name))
+                                except queue.Full:
+                                    log.debug("webui: dropping VAD end marker from a full audio queue")
 
                     elif mtype == "barge_in":
                         # S0: master switch — ignore browser barge when disabled
                         if not _barge_in_enabled():
                             log.debug("[aiko-web] barge_in ignored (BARGE_IN_ENABLED=0)")
                             continue
+                        playback_uid = getattr(self._speak, "_playback_uid", None)
+                        if playback_uid and playback_uid != uid:
+                            continue
                         self._did_barge_in = True
                         if self._listen is not None:
                             self._listen.trigger_barge_in()
                         if self._speak is not None:
-                            # stop() busy-waits for the stream thread to end;
-                            # run it off the event loop so a long TTS playback
-                            # doesn't freeze every other browser/request.
+                            # PortAudio teardown runs off the event loop;
+                            # preserve responsiveness for other requests.
                             await asyncio.to_thread(self._speak.stop)
 
         except Exception:
@@ -776,6 +786,12 @@ class AikoWeb:
             return
         self._broadcast({"type": "vision", "status": "done", "source": source}, user_id=uid)
         self._broadcast({"type": "chat", "sender": "aiko", "text": answer}, user_id=uid)
+
+    def stop_audio_playback(self, user_id=None):
+        """Stop the browser belonging to the cancelled playback session."""
+        uid = user_id or current_user_id()
+        if uid and uid != "guest":
+            self._broadcast({"type": "tts_stop"}, user_id=uid)
 
     def broadcast_audio_bytes(self, wav_bytes: bytes) -> None:
         """Broadcast TTS audio bytes to the current user's connected browsers.
@@ -1098,8 +1114,19 @@ class AikoWeb:
                 if idle_ticks % 10 == 0:
                     self._push_vitals()
 
+    def _audio_feedback_blocked(self):
+        speak = getattr(self, "_speak", None)
+        return bool(speak is not None and not _barge_in_enabled() and (
+            speak.is_playing() or getattr(speak, "echo_remaining", lambda: 0.0)() > 0
+        ))
+
     def get_voice_input(self, listen, speak=None, wait_fn=None):
         """Capture voice input from browser microphone via WebSocket audio streaming."""
+        previous = getattr(self, "_voice_input_thread", None)
+        if previous is not None and previous.is_alive():
+            self._broadcast_to_current_user({"type": "voice", "status": "error",
+                                              "message": "Previous voice request is still finishing; type instead."})
+            return (self.get_input(), {})
         result_holder = [None]
         done_event    = threading.Event()
         # Track the accepted user identity from the first frame
@@ -1130,31 +1157,36 @@ class AikoWeb:
               - Raising exceptions for error conditions vs returning None for EOS
               - Explicitly documenting listen.listen()'s contract in sensory/listen.py
             """
-            try:
-                item = self._audio_q.get(timeout=FRAME_TIMEOUT_S)
-            except queue.Empty:
-                return None
-
-            if isinstance(item, tuple):
-                raw, uid, display_name = item
-                # Reject frames from different users once we've accepted one
-                if accepted_user["uid"] is None:
-                    accepted_user["uid"] = uid
-                    accepted_user["display_name"] = display_name
-                elif accepted_user["uid"] != uid:
-                    # Drop frame from different user
+            deadline = time.monotonic() + FRAME_TIMEOUT_S
+            while self._mic_active.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     return None
-                set_current_user_id(uid)
-                set_current_display_name(display_name)
-            else:
-                raw = item
-
-            if raw == b"":
-                return None
-
-            if len(raw) != n:
-                raw = (raw + b"\x00" * n)[:n]
-            return raw
+                try:
+                    item = self._audio_q.get(timeout=remaining)
+                except queue.Empty:
+                    return None
+                if isinstance(item, tuple):
+                    raw, uid, display_name = item
+                    if accepted_user["uid"] is not None and accepted_user["uid"] != uid:
+                        continue  # another user's frame is not end-of-utterance
+                    if raw and len(raw) != n:
+                        continue
+                    if accepted_user["uid"] is None:
+                        if not raw:
+                            continue
+                        accepted_user["uid"] = uid
+                        accepted_user["display_name"] = display_name
+                    set_current_user_id(uid)
+                    set_current_display_name(display_name)
+                else:
+                    raw = item
+                if raw == b"":
+                    return None
+                if len(raw) != n or self._audio_feedback_blocked():
+                    continue
+                return raw
+            return None
 
         def _status_cb(token: str) -> None:
             mapping = {
@@ -1173,26 +1205,20 @@ class AikoWeb:
             #   - Silero VAD scores ALL chunks regardless of source (local mic or WebUI)
             #   - WEBUI_BROWSER_VAD_GATE only controls pre-gating in browser (static/vad.js),
             #     not server-side Silero scoring (which is authoritative)
-            result_holder[0] = listen.listen(
-                status_callback=_status_cb,
-                speak=speak,
-                wait_fn=wait_fn,
-                chunk_source=_chunk_source,
-            )
-            done_event.set()
+            try:
+                result_holder[0] = listen.listen(
+                    status_callback=_status_cb, speak=speak,
+                    wait_fn=wait_fn, chunk_source=_chunk_source,
+                )
+            except Exception:
+                log.exception("webui: voice capture failed")
+                result_holder[0] = ("", {"voice_error": "Voice capture failed; please type instead."})
+            finally:
+                done_event.set()
 
         self._mic_active.set()
 
-        # Lazy voice boot: overlap server-side ASR/VAD model load with the
-        # browser's mic-permission/arming UX instead of blocking on it.
-        if listen is not None and hasattr(listen, "ensure_ready"):
-            def _ensure_listen_ready() -> None:
-                try:
-                    listen.ensure_ready()
-                except Exception:
-                    log.exception("[webui] background ASR load failed")
-            threading.Thread(target=_ensure_listen_ready, daemon=True).start()
-
+        from sensory.echo import echo_tail_seconds
         self._broadcast({
             "type": "mic",
             "action": "start",
@@ -1200,9 +1226,12 @@ class AikoWeb:
             "browser_vad_gate": WEBUI_BROWSER_VAD_GATE,
             "barge_in_enabled": _barge_in_enabled(),
             "echo_guard_ms": _echo_guard_ms(),
+            "echo_tail_ms": echo_tail_seconds() * 1000,
         })
 
-        threading.Thread(target=_run, daemon=True).start()
+        context = contextvars.copy_context()
+        self._voice_input_thread = threading.Thread(target=context.run, args=(_run,), daemon=True)
+        self._voice_input_thread.start()
 
         text_input = None
         try:
@@ -1210,8 +1239,11 @@ class AikoWeb:
                 self._push_vitals()
                 try:
                     text_input = self._input_q.get_nowait()
-                    self._audio_q.put(b"")
-                    done_event.wait()
+                    try:
+                        self._audio_q.put_nowait(b"")
+                    except queue.Full:
+                        pass
+                    done_event.wait(timeout=5.0)
                     break
                 except queue.Empty:
                     log.debug("webui: voice input queue empty, retrying")

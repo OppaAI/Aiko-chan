@@ -107,3 +107,10 @@ MIOTTS_FREQUENCY_PENALTY: 0.0  # Penalizes tokens proportional to how often they
 MIOTTS_BEST_OF_N_ENABLED: false  # Generate multiple candidates and pick the best via ASR error-rate scoring.
 MIOTTS_BEST_OF_N: 2  # Number of candidates to generate per call when best-of-N is enabled.
 KARAOKE_TEXT: "1"  # Pace UI text by TTS audio; options: 1/0, true/false, yes/no, on/off.
+
+# Suppress microphone input during TTS and allow speaker/reverb decay afterward.
+ASR_ECHO_TAIL_MS: "400"  # 0..2000 ms; does not load an additional model.
+# Local automatic barge-in requires echo-cancelled input supplied by hardware or
+# the OS (e.g. PipeWire AEC). Leave off for a raw Jetson microphone/speaker pair.
+# Browser barge-in instead uses the browser's confirmed echoCancellation setting.
+BARGE_IN_LOCAL_AEC: "0"

@@ -106,6 +106,9 @@ log = get_logger(__name__)
 
 _knowledge_folder_watcher = None  # KnowledgeFolderWatcher instance (lazy)
 
+# Maintenance graphs run outside the interactive turn gate.
+_BACKGROUND_GRAPH_IDS = frozenset({"codebase_refresh"})
+
 
 @contextmanager
 def _scheduler_run_lock(user_id: str, name: str, *, blocking: bool = False,
@@ -2920,12 +2923,15 @@ class ScheduleRunner:
                         continue
                     if gid:
                         self._graphs_in_flight.add(gid)
-                try:
-                    self._run_schedule_graph(g)
-                finally:
-                    if gid:
-                        with self._graphs_lock:
-                            self._graphs_in_flight.discard(gid)
+                if gid in _BACKGROUND_GRAPH_IDS:
+                    self._start_background_graph(g, user_id, gid)
+                else:
+                    try:
+                        self._run_schedule_graph(g)
+                    finally:
+                        if gid:
+                            with self._graphs_lock:
+                                self._graphs_in_flight.discard(gid)
                 # next_due/last_ran_at from COMPLETION time: using the
                 # pre-run `now` leaves next_due in the past after a
                 # minutes-long run → immediate re-fire loop.
@@ -2936,6 +2942,25 @@ class ScheduleRunner:
 
         if changed:
             _write_schedule_graphs(graphs, user_id=user_id)
+
+    def _start_background_graph(self, graph_def: dict, user_id: str, gid: str) -> None:
+        """Run an isolated maintenance graph without the interactive gate."""
+        def worker() -> None:
+            token = set_current_user_id(user_id)
+            try:
+                self._run_schedule_graph(graph_def)
+            except Exception:
+                log.exception("Background schedule graph %s failed for %s", gid, user_id)
+            finally:
+                reset_current_user_id(token)
+                with self._graphs_lock:
+                    self._graphs_in_flight.discard(gid)
+
+        threading.Thread(
+            target=worker,
+            name=f"aiko-schedule-bg-{gid}",
+            daemon=True,
+        ).start()
 
     def _run_schedule_graph(self, graph_def: dict) -> None:
         from agentic.graph_engine import PlanGraph, PlanNode, execute_graph, get_playbook_by_id

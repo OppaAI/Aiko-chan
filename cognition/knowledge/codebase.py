@@ -178,6 +178,10 @@ def _chunk_text(text: str, chunk_chars: int = CODEBASE_CHUNK_CHARS, overlap: int
         start = max(start + 1, end - overlap)
     return [c for c in chunks if len(c.strip()) >= 40]
 
+def _ingest_stats(ok: bool, files_scanned: int, docs_added: int, chunks_added: int, skipped: int, pruned: int, db: str) -> dict:
+    # one shape for both finished and aborted passes
+    return {"ok": ok, "files_scanned": files_scanned, "docs_added": docs_added, "chunks_added": chunks_added, "skipped_unchanged": skipped, "pruned": pruned, "db": db}
+
 def ingest_codebase(user_id: str | None = None, repo_root: Path | None = None, force: bool = False, embedder: HarrierEmbedder | None = None) -> dict:
     """Ingest entire repo into <USER_SPACE_ROOT>/<user_id>/knowledge/codebase.db.
 
@@ -237,7 +241,8 @@ def ingest_codebase(user_id: str | None = None, repo_root: Path | None = None, f
                 pending_chunks.extend(tuple(row) for row in missing)
                 if len(pending_chunks) >= 48:
                     conn.commit()
-                    _embed_and_insert(conn, pending_chunks, embedder)
+                    if not _embed_and_insert(conn, pending_chunks, embedder):
+                        return _ingest_stats(False, len(files), added_docs, added_chunks, skipped, 0, CODEBASE_DB_PATH)
                     conn.commit()
                     pending_chunks.clear()
                 skipped += 1
@@ -267,12 +272,15 @@ def ingest_codebase(user_id: str | None = None, repo_root: Path | None = None, f
             # Flush embeddings in batches to keep RAM low on 8GB
             if len(pending_chunks) >= 48:
                 conn.commit()
-                _embed_and_insert(conn, pending_chunks, embedder)
+                if not _embed_and_insert(conn, pending_chunks, embedder):
+                    return _ingest_stats(False, len(files), added_docs, added_chunks, skipped, 0, CODEBASE_DB_PATH)
                 conn.commit()
                 pending_chunks.clear()
         if pending_chunks:
             conn.commit()
-            _embed_and_insert(conn, pending_chunks, embedder)
+            if not _embed_and_insert(conn, pending_chunks, embedder):
+                conn.commit()
+                return _ingest_stats(False, len(files), added_docs, added_chunks, skipped, 0, CODEBASE_DB_PATH)
             conn.commit()
         # Prune stale docs (files deleted since last ingest)
         pruned = 0
@@ -291,16 +299,20 @@ def ingest_codebase(user_id: str | None = None, repo_root: Path | None = None, f
         try: conn.close()
         except Exception: pass
 
-def _embed_and_insert(conn: sqlite3.Connection, pending: list[tuple[str,str,int,str]], embedder: HarrierEmbedder | None) -> None:
+def _embed_and_insert(conn: sqlite3.Connection, pending: list[tuple[str,str,int,str]], embedder: HarrierEmbedder | None) -> bool:
     if not pending:
-        return
+        return True
     texts = [t[3] for t in pending]
     vecs = None
     if embedder is not None:
         try:
             vecs = []
-            for i in range(0, len(texts), 32):
-                batch = texts[i:i+32]
+            # A batch is one HTTP POST: on CPU-only harrier a whole 48-chunk
+            # block can run minutes per request and always blew the client
+            # timeout, so follow the embedder config instead of hardcoding 32.
+            step = max(1, int(embedder.batch_size))
+            for i in range(0, len(texts), step):
+                batch = texts[i:i+step]
                 vecs.extend(list(embedder.embed(batch)))
         except Exception as e:
             log.warning("codebase embed failed (FTS still works): %s", e)
@@ -308,14 +320,19 @@ def _embed_and_insert(conn: sqlite3.Connection, pending: list[tuple[str,str,int,
     import sqlite_vec
     import numpy as np
     if vecs is None:
-        return  # absent vectors are honest; zero vectors have undefined cosine
+        # absent vectors are honest; zero vectors have undefined cosine.
+        # Tell the caller to stand down: with the embedder unavailable every
+        # remaining batch only repeats this failure and floods the log.
+        log.info("codebase: embeddings unavailable, deferring remaining chunks to the next indexing pass")
+        return False
     vectors = np.asarray(vecs, dtype=np.float32)
     if (vectors.shape != (len(pending), EMBED_DIMS) or not np.isfinite(vectors).all()
             or np.any(np.linalg.norm(vectors, axis=1) <= 1e-12)):
         log.warning("codebase embeddings invalid; retaining lexical index only")
-        return
+        return False
     for (cid, _, _, _), vec in zip(pending, vecs):
         conn.execute("INSERT INTO codebase_chunks_vec(id, embedding) VALUES(?,?)", (cid, sqlite_vec.serialize_float32(vec)))
+    return True
 
 # ── search (hybrid RRF, mirroring cognition/knowledge/search.py) ──────────
 

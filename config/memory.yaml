@@ -78,9 +78,9 @@ EMBED_BASE_URL: "http://127.0.0.1:8080"  # Embedding server base URL used by cog
 EMBED_MODEL: "harrier"  # Embedding model id/alias; must match server/custom embedder.
 EMBED_DIMS: "640"  # Vector dimensions; must match embedding model and sqlite-vec schema.
 EMBED_QUERY_INSTRUCT: "Retrieve relevant memories that answer the query"  # Instruction prefix used for query embeddings; memories/documents stay unprefixed.
-EMBED_BATCH_SIZE: "16"  # Embedding batch size for migration/rebuild scripts; lower if memory pressure is high. Reduced from 64 for Jetson 8GB.
-EMBED_TIMEOUT_S: "30"  # Seconds before embedding HTTP calls time out.
-EMBED_QUERY_MAX_CHARS: "2000"  # Head-truncate queries before embedding (llama-server /embedding 400s oversized input); halve-and-retry covers denser text below this.
+EMBED_BATCH_SIZE: "4"  # Embedding batch size for migration/rebuild scripts; lower if memory pressure is high. 4 = ~1k tokens per POST on CPU-only harrier, safe under the 120s timeout.
+EMBED_TIMEOUT_S: "120"  # Seconds before embedding HTTP calls time out. Rack reloads/queueing on Jetson CPU need minutes, not 30s.
+EMBED_QUERY_MAX_CHARS: "400"  # Head-truncate queries before embedding. 2000 chars = ~500 CPU tokens = ~25s per harrier query: concurrent calls at a tick blew the old 30s timeout for months.
 EMBED_CACHE_PATH: "~/.aiko/embedding_cache"  # Disk cache for embeddings across restarts.
 FASTEMBED_CACHE_PATH: ""  # Legacy FastEmbed cache fallback; blank if unused.
 

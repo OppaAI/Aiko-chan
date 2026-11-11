@@ -8,6 +8,7 @@ Run: pytest tests/unit/test_agentic_research.py -v
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import sys
 import time
@@ -62,7 +63,7 @@ class FakeEmbedder:
         words = text.lower().split()
         vec = np.zeros(384, dtype=np.float32)
         for word in words:
-            idx = hash(word) % 384
+            idx = int.from_bytes(hashlib.sha256(word.encode()).digest()[:4], "big") % 384
             vec[idx] += 1.0
         norm = np.linalg.norm(vec)
         return vec / norm if norm > 0 else vec

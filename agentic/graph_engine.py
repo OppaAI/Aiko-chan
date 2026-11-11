@@ -1420,7 +1420,15 @@ def plan_from_master(user_input: str, cap_ids: list[str] | None = None, embedder
             prompt_vec = reason.normalize_vec(np.asarray(embedder.embed_query(user_input), dtype=np.float32))
         except Exception:
             prompt_vec = None
-    ranked = sorted(((_score_plan(p, user_input, cap_ids, embedder, prompt_vec), p) for p in plans), key=lambda x: x[0], reverse=True)
+    extras = _placeholder_extras(user_input)
+    # A parsed comparison is more specific than a generic question trigger.
+    # Break equal scores by that evidence, rather than playbook file order.
+    ranked = sorted(
+        ((_score_plan(p, user_input, cap_ids, embedder, prompt_vec), p) for p in plans),
+        key=lambda pair: (pair[0], bool(pair[1].get("id") == "compare_and_report"
+                                      and "$compare_subjects" in extras)),
+        reverse=True,
+    )
     if not ranked or ranked[0][0] <= 0:
         return None
     plan = ranked[0][1]

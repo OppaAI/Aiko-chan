@@ -33,21 +33,42 @@ vector status during outages. The embedding context-retry test supplies its
 own character cap and ordinary prose so deployment truncation/redaction cannot
 silently bypass the retry case.
 
-## Verification and remaining work
+## Cloud audit closure and deployment boundary
 
-Final default-suite result: **2,800 passed, 6 skipped, 34 passing subtests**.
-There were 13 warnings, principally the threaded-fork deprecation in the
+Final combined default and standalone evaluation result: **2,851 passed,
+6 skipped, 34 passing subtests**. There were 12 warnings, principally the threaded-fork deprecation in the
 existing Fly process regression tests.
 
-Production Python passes Ruff F821/F823 checks. The default suite is run in an
+All 570 Python files parse. Production and test Python pass Ruff F821/F823 checks. The default suite is run in an
 isolated environment with its declared test/runtime libraries and the sibling
 Aiko-Playground worker contract. Tests using local event-loop sockets require
 an executor that permits loopback; the restricted sandbox can otherwise stall
 TestClient rather than establish an application defect.
 
-The broader audit remains open: real inference/audio/camera services, Jetson
-8 GB measurements, packaging, optional platform accounts and SQLCipher need
-deployment validation. Legacy standalone routing/evaluation helpers also have
-stale undefined references and need their own migration pass. A passing default
-suite does not establish that those standalone commands or every user journey
-has been exercised.
+The cloud static/regression audit and follow-up fixes are complete for this
+checkout. Real inference/audio/camera services, Jetson 8 GB measurements,
+installed packaging, optional platform accounts and SQLCipher still require
+deployment validation. A passing suite does not prove every user journey or
+third-party service works in deployment.
+
+## Final follow-up fixes
+
+- Comparison parsing accepts contrast/differences/pros-and-cons phrases and
+  single-letter subjects. Equal graph scores prefer a structurally parsed
+  comparison over a generic question trigger.
+- The standalone route diagnostic delegates to the actual four-way policy,
+  respects the configured LLM key/timeout, initializes models only on execution,
+  and validates prompt files before initialization. Removed the obsolete
+  ternary decision tree, fake predicted execution steps and undefined helpers.
+- Migrated evaluation fixtures to current per-user chunk storage, embedding
+  dimensions, automatic FTS triggers, graph APIs, report locations and verifier
+  schema. Graph execution tests retain real orchestration with deterministic
+  tools to avoid external side effects.
+- Replaced process-randomized test hashing and the invalid constant-direction
+  evaluation vectors with reproducible word features. This fixes spurious
+  semantic matches without weakening production relevance thresholds.
+
+Validation used an isolated virtual environment with declared lightweight
+runtime/test libraries; no live model, camera, microphone or account was used.
+The known threaded-fork deprecation remains a deployment concern for the Fly
+worker tests and is not counted as proof of safe hardware concurrency.

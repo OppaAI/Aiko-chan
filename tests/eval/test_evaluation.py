@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import sys
 import json
+import tempfile
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -25,7 +26,7 @@ sys.path.insert(0, "/home/oppa-ai/jetson")
 from system.config import load_config
 load_config()
 
-from agentic import schema
+from agentic import graph_engine as schema
 from agentic.toolkit.synthesize import synthesize_report, detect_style, detect_compare, split_subjects
 from agentic.toolkit.research import condense_evidence
 from agentic.toolkit.research import deep_research

@@ -93,12 +93,12 @@ def detect_style(prompt: str) -> str:
 
 _COMPARE_RE = re.compile(
     r"""
-    \b(?:compare|comparison|vs\.?|versus|compared?\s+(?:to|with))\b
+    \b(?:compare|comparison|contrast|differences?\s+between|pros\s+and\s+cons\s+of|vs\.?|versus|compared?\s+(?:to|with))\b
     [\s,:\-\u2013\u2014]*
-    (?P<left>[^,.;:\u2013\u2014?!\n]{2,200}?)
+    (?P<left>[^,.;:\u2013\u2014?!\n]{1,200}?)
     \s+
     (?:vs\.?|versus|and|to|with|or)\s+
-    (?P<right>[^,.;:\u2013\u2014?!\n]{2,200})
+    (?P<right>[^,.;:\u2013\u2014?!\n]{1,200})
     """,
     re.IGNORECASE | re.VERBOSE,
 )
@@ -125,7 +125,7 @@ def split_subjects(prompt: str) -> list[str]:
     text = (prompt or "").strip()
     if not text:
         return []
-    if not re.search(r"\b(?:compare|comparison|versus|vs\.?|differ)\b", text, re.IGNORECASE):
+    if not re.search(r"\b(?:compare|comparison|contrast|differences?|versus|vs\.?|differ)\b", text, re.IGNORECASE):
         return []
     stripped = re.sub(
         r"^\s*(?:please\s+)?(?:can you\s+)?(?:could you\s+)?"
@@ -135,7 +135,7 @@ def split_subjects(prompt: str) -> list[str]:
     )
     parts = re.split(r"\s*(?:,|\||;|\band\b|\n)\s*", stripped)
     parts = [re.sub(r"\s+", " ", p).strip(" \"'`.()[]{}:;,-?!") for p in parts]
-    parts = [p for p in parts if len(p) >= 2]
+    parts = [p for p in parts if p]
     return parts[:6] if len(parts) >= 2 else []
 
 

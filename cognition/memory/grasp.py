@@ -747,7 +747,7 @@ def record_turn(
             layer="write",
             inputs={"identity": ident, "user_chars": len(user),
                     "assistant_chars": len(assistant)},
-            factors=[f"working-memory live buffer (capacity={GRASP_LIVE_CAPACITY})"],
+            factors=[f"working-memory live buffer (capacity={GRASP_MILLER_MAX})"],
         )
     buf = get_live_buffer(identity=ident)
     with _lock:

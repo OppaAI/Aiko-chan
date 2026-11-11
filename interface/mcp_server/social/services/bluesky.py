@@ -29,6 +29,7 @@ except ModuleNotFoundError:
     from ..services import env, err, int_env, get_session
     from ..state import get_db
 
+log = logging.getLogger(__name__)
 _LLM_CLIENT: OpenAI | None = None
 _NAME_LINE_RE = re.compile(
     r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?(?:name|what to call them|display name|call me)(?:\*\*)?\s*[:\-]\s*(.+?)\s*$"

@@ -237,9 +237,6 @@ def web_fetch(
         if cached is not None:
             return cached
  
-    if importlib.util.find_spec("trafilatura") is None and not TAVILY_API_KEY:
-        return "[fetch failed: trafilatura is not installed]"
-
     # Self-healing strategy order: domains with a history of trafilatura
     # failure go straight to the escalation that works (see fetch_heal).
     # Order changes; the contract doesn't — first strategy yielding

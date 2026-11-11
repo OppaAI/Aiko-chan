@@ -2011,6 +2011,7 @@ class EdgeCognitiveState:
         Writes are debounced and batched at run-end or after a short idle
         period to avoid per-tool-call disk I/O on the hot path.
         """
+        global _persist_timer
         if not EDGE_COGNITION_PERSIST or not self._identity or self._identity == "default":
             return
         with _persist_lock:

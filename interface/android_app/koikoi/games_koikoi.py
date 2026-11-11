@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import random
+import threading
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -1051,13 +1052,13 @@ def _self_check() -> None:  # quick stdlib sanity check, see __main__
     you, aiko, field, stock = C.deal(rng)
     assert len(you) == 8 and len(aiko) == 8 and len(field) == 8 and len(stock) == 24
     assert len(set(you + aiko + field + stock)) == 48
-    y = C.detect_yaku([CRANE, CURTAIN, MOON, RAIN_MAN, PHOENIX])
+    y = C.detect_yaku([C.CRANE, C.CURTAIN, C.MOON, C.RAIN_MAN, C.PHOENIX])
     assert any(z["id"] == "goko" and z["points"] == 10 for z in y), y
-    y = C.detect_yaku([CRANE, CURTAIN, MOON])
+    y = C.detect_yaku([C.CRANE, C.CURTAIN, C.MOON])
     assert any(z["id"] == "sanko" for z in y), y
-    y = C.detect_yaku([MOON, SAKE_CUP])
+    y = C.detect_yaku([C.MOON, C.SAKE_CUP])
     assert any(z["id"] == "tsukimi" for z in y), y
-    y = C.detect_yaku([BOAR, BUTTERFLY, DEER])
+    y = C.detect_yaku([C.BOAR, C.BUTTERFLY, C.DEER])
     assert any(z["id"] == "ino-shika-cho" for z in y), y
     poetry = [c for c in range(48) if C.kind_of(c) == "tan-poetry"]
     assert len(poetry) == 3

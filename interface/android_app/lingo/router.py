@@ -107,7 +107,7 @@ from .models import (
     LessonProgress, TestQuestion, TestSubmitRequest, TestItemResult,
     TestSubmitResponse,
 )
-from .srs import LingoSRS, ReviewGrade, init_srs_db
+from .srs import LingoSRS, LingoVocabCard, ReviewGrade, init_srs_db
 from .vocab import VocabExtractor
 
 log = logging.getLogger(__name__)

@@ -310,7 +310,7 @@ def _embed_and_insert(conn: sqlite3.Connection, pending: list[tuple[str,str,int,
             # A batch is one HTTP POST: on CPU-only harrier a whole 48-chunk
             # block can run minutes per request and always blew the client
             # timeout, so follow the embedder config instead of hardcoding 32.
-            step = max(1, int(embedder.batch_size))
+            step = max(1, int(getattr(embedder, 'batch_size', 32)))
             for i in range(0, len(texts), step):
                 batch = texts[i:i+step]
                 vecs.extend(list(embedder.embed(batch)))

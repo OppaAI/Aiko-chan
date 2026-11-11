@@ -34,6 +34,8 @@ except ImportError:
     OpenAI = None  # type: ignore
     _LLM_CLIENT = None
 
+log = logging.getLogger(__name__)
+
 _NAME_LINE_RE = re.compile(
     r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?(?:name|what to call them|display name|call me)(?:\*\*)?\s*[:\-]\s*(.+?)\s*$"
 )

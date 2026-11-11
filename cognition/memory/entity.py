@@ -264,6 +264,16 @@ def spread_activation(
     if not MEMORY_SPREADING_ENABLED or not seed_entities:
         return {}
     max_depth = max_depth if max_depth is not None else MEMORY_SPREADING_MAX_DEPTH
+    decay = decay if decay is not None else MEMORY_SPREADING_DECAY
+    min_strength = min_strength if min_strength is not None else MEMORY_SPREADING_MIN_STRENGTH
+    adj: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    for left, right, weight in edges:
+        if not math.isfinite(weight) or weight <= 0:
+            continue
+        adj[left].append((right, weight))
+        adj[right].append((left, weight))
+    strength = dict.fromkeys(seed_entities, 1.0)
+    frontier = set(seed_entities)
     for _ in range(max_depth):
         nxt: set[str] = set()
         for node in frontier:

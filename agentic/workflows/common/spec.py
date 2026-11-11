@@ -241,7 +241,7 @@ def load_spec_for_workflow(
                 spec = WorkflowSpec(**{**spec.to_dict(), "goal": goal})
             return spec
         except SpecError as exc:
-            log.warning("invalid spec.json in %s (%s); falling back to config.json", workflow_dir, exp)
+            log.warning("invalid spec.json in %s (%s); falling back to config.json", workflow_dir, exc)
 
     cfg = load_workflow_config(workflow_dir)
     return coerce_config_to_spec(

@@ -65,7 +65,9 @@ def test_invalid_responses_never_enter_cache(payload):
     assert not client._cache and not client._disk_cache
 
 
-def test_context_400_retries_do_not_open_backend_circuit():
+def test_context_400_retries_do_not_open_backend_circuit(monkeypatch):
+    # Exercise several shrinking attempts independently of the deployment cap.
+    monkeypatch.setattr(vecstore, '_EMBED_QUERY_MAX_CHARS', 2000)
     client = embedder()
     valid = client._session.post.side_effect
     def respond(*args, **kwargs):
@@ -75,7 +77,9 @@ def test_context_400_retries_do_not_open_backend_circuit():
             raise requests.HTTPError('input too long', response=response)
         return valid(*args, **kwargs)
     client._session.post.side_effect = respond
-    np.testing.assert_allclose(client.embed_query('x' * 2000), [.6, .8])
+    # A token-like 2000-character string is deliberately redacted before HTTP.
+    # Use ordinary prose to exercise context shrinking rather than redaction.
+    np.testing.assert_allclose(client.embed_query('long text ' * 200), [.6, .8])
     assert client._session.post.call_count >= 4
     assert client._cb_open_until == 0
 
@@ -232,7 +236,8 @@ def test_codebase_ingestion_and_recall_work_without_embedding_service(tmp_path, 
     provider = NS(embed=Mock(side_effect=RuntimeError('offline')),
                   embed_query=Mock(side_effect=RuntimeError('offline')))
     result = codebase.ingest_codebase('owner', repo_root=repo, embedder=provider)
-    assert result['ok'], result
+    # Lexical rows are retained while the vector pass is explicitly deferred.
+    assert not result['ok'], result
     assert result['chunks_added'] > 0
     conn = connect()
     try:

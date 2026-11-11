@@ -5,12 +5,16 @@ import logging
 import os
 import threading
 import contextvars
+from typing import TYPE_CHECKING
 from cognition.neural_state import _finite
 from pathlib import Path
 
 from .adapters import SensoryObservation
 from .catalog import ConnectomeCatalog
 from .runtime import get_fly_runtime
+
+if TYPE_CHECKING:
+    from .sqlite_catalog import SqliteCatalog
 
 log = logging.getLogger("aiko.fly_runtime")
 

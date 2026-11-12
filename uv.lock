@@ -744,7 +744,7 @@ wheels = [
 
 [[package]]
 name = "cyclopts"
-version = "5.4.0"
+version = "5.4.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
@@ -752,9 +752,9 @@ dependencies = [
     { name = "rich" },
     { name = "rich-rst" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/47/ea/b4237c7955b11d529ac29fa5b55ce744c6e09514753725337c270aa4ae43/cyclopts-5.4.0.tar.gz", hash = "sha256:a853c9394fde3e3ec0a1b50c7e20b64bb49dfd71baef5f24eceb7bb397171a41", size = 257584, upload-time = "2026-11-08T14:37:40.844Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4d/b2/b6d6f3a5fc8b16e274eefc5c89d8e555d5bf8d3c0e4c0a770236d9d54722/cyclopts-5.4.1.tar.gz", hash = "sha256:5872925e9a6ff3ed2344b91abe0c3593b853a647c0c17adebb0939cf6a5a8385", size = 257832, upload-time = "2026-11-11T16:27:47.943Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/16/7b/0e423f10ac1d19c7405301874caf7c2b76a977dc9901dd8da70707b0187f/cyclopts-5.4.0-py3-none-any.whl", hash = "sha256:29a4639849e9161f64bce7904c787b85f6a8accfb08cd675ad70b7753af57e81", size = 300383, upload-time = "2026-11-08T14:37:39.152Z" },
+    { url = "https://files.pythonhosted.org/packages/3b/a2/f06e43bc6e032affbdd54bcd78132713a06e1d5774b29a04c0df94e57fd5/cyclopts-5.4.1-py3-none-any.whl", hash = "sha256:48a80e4e49a10f7aa0bb99211f6eeb7e4f35b0c79a797c526670522daa35d7f2", size = 300667, upload-time = "2026-11-11T16:27:46.131Z" },
 ]
 
 [[package]]
@@ -894,7 +894,7 @@ wheels = [
 
 [[package]]
 name = "fastapi"
-version = "0.162.4"
+version = "0.162.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "annotated-doc" },
@@ -905,9 +905,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "typing-inspection" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/60/39/7435269dcabb3c1b4ce1b9b03b40dae919415c258e1caa27160c22f55b9a/fastapi-0.162.4.tar.gz", hash = "sha256:4abdb1ef367090678d8bc664631df432ae7a1bfe7709c37547d3606e667650e3", size = 529374, upload-time = "2026-11-10T17:51:17.96Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4e/7b/ae546e10f153fcf9a6afd8b9fe4730bdfeb8fdcb93178d54122973ef3f4c/fastapi-0.162.5.tar.gz", hash = "sha256:1ca37f64f61c99cebd38636e67525fb721c5e8c1169f07f2a35d73b0a63265d4", size = 531785, upload-time = "2026-11-11T22:29:53.177Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3f/6b/0537ac682ac728dbe91f75c16683a985d11812f9930f21a35b756d6df629/fastapi-0.162.4-py3-none-any.whl", hash = "sha256:f093bc306d3958278d30ffd14f3834ca3d9b144fbb898ab5c9b652cf6e75f869", size = 151685, upload-time = "2026-11-10T17:51:16.562Z" },
+    { url = "https://files.pythonhosted.org/packages/10/19/5b9abfa67a29b862e509911eef40f4901f78aa48de32ad1f939b5c2b165e/fastapi-0.162.5-py3-none-any.whl", hash = "sha256:5303c67415fde762889ca337db79d27b755b8bd09cef314fa7a4340bb30bfd2b", size = 151782, upload-time = "2026-11-11T22:29:51.47Z" },
 ]
 
 [package.optional-dependencies]
@@ -928,16 +928,16 @@ standard = [
 
 [[package]]
 name = "fastapi-cli"
-version = "0.0.32"
+version = "0.0.33"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "rich-toolkit" },
     { name = "typer" },
     { name = "uvicorn", extra = ["standard"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/33/eb/3b534c6f8e157f9ddbf2a153512307c886cad0b258739c200dd8ff8c4452/fastapi_cli-0.0.32.tar.gz", hash = "sha256:38024d2345275e1b37ce8848727a580d84901b570e96b3256d9d36a9a5039424", size = 26636, upload-time = "2026-07-16T12:16:58.678Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/41/8c/d2fe2da44fe68a442bbfea5e6436e2de7829c0c2d419a7c314e2e91ae95f/fastapi_cli-0.0.33.tar.gz", hash = "sha256:94f19bcde4bd6ae26328292ac864082543262b7ee9f5d11bd7224614c22fb958", size = 26627, upload-time = "2026-11-11T09:18:05.981Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d5/53/56ae5ae17bb0a5d89d1d31e5320eb1865553ebbfbde91cdc4c221245f2a8/fastapi_cli-0.0.32-py3-none-any.whl", hash = "sha256:8dcc286fa32f01bbd3f65dd09cfd5a2540ed5f2230b77db7fd30978d6165f3c4", size = 14670, upload-time = "2026-07-16T12:16:57.297Z" },
+    { url = "https://files.pythonhosted.org/packages/68/07/7b9b4bccb46032067de7a4584aef096ee720dcc26ef56c4b09beb970d45c/fastapi_cli-0.0.33-py3-none-any.whl", hash = "sha256:699b95a4b0fc6d54152c9c0e3550f79ac66641717cfb0333c2fbb53ad291767e", size = 14646, upload-time = "2026-11-11T09:18:04.93Z" },
 ]
 
 [package.optional-dependencies]
@@ -948,7 +948,7 @@ standard = [
 
 [[package]]
 name = "fastapi-cloud-cli"
-version = "0.27.1"
+version = "0.28.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-detector" },
@@ -962,9 +962,9 @@ dependencies = [
     { name = "typer" },
     { name = "uvicorn", extra = ["standard"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/08/05/ee5db04afed32e6957ffec49514ba247268a48ff3016bae103defd41c8cf/fastapi_cloud_cli-0.27.1.tar.gz", hash = "sha256:ce8ebc45236ec64b50ee4b676566b4442a0e61566a805676b9da3a2831f8eace", size = 129197, upload-time = "2026-11-08T14:41:39.024Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/97/c7/3b7c8eb16c5777c40c3b5ef675804796b92a9cde96fd0aa9c85cde3b0449/fastapi_cloud_cli-0.28.0.tar.gz", hash = "sha256:7e70611d3f3f1f3bbd48cf5def95db927566f9668929cec96bc34dd632f09963", size = 130012, upload-time = "2026-11-11T12:36:57.738Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/cf/ab/dd4a9d104391fcebe3dec74b526642082c24642655a4f7c338775d0e641d/fastapi_cloud_cli-0.27.1-py3-none-any.whl", hash = "sha256:2ea97b1105e1de6060a002b3a4b801181a0018357cb3fc1cc4da045cef1d0ab5", size = 109665, upload-time = "2026-11-08T14:41:38.017Z" },
+    { url = "https://files.pythonhosted.org/packages/17/0c/d1f01df6de9c3b6647aaf0042d3ab5d02a577858adaff775c6e26add15e4/fastapi_cloud_cli-0.28.0-py3-none-any.whl", hash = "sha256:e1409bc42017a86f8092fdf1dd64ead129698936cfeb151a6c3e023f611fd620", size = 109934, upload-time = "2026-11-11T12:36:56.616Z" },
 ]
 
 [[package]]
@@ -1596,15 +1596,15 @@ wheels = [
 
 [[package]]
 name = "livekit-wakeword"
-version = "2.1.1"
+version = "2.1.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
     { name = "onnxruntime", marker = "sys_platform == 'ignore_this_marker'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/00/84/dfb7b6722310657e2bf88b27aedc39e813ded4743818eff1a83d79052af0/livekit_wakeword-2.1.1.tar.gz", hash = "sha256:0bfb0e65f384d1f42fa43778ee12f33254d563bcbf802885317facbccdf57e9c", size = 55127, upload-time = "2026-11-06T06:48:48.049Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/63/8b/d160961b3e2beec11d1fa85428940e42a8b6a4a8fce0c5838dff52a33dfa/livekit_wakeword-2.1.2.tar.gz", hash = "sha256:8c6022e1d585285dd13ba8a473a3d7ded48aba511caeb5a0ecb3960578413020", size = 56997, upload-time = "2026-11-11T17:10:23.594Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/00/e0/0b9652ac5fde15d9796457b5f623d17e1146e708eceefe58009b51e90a30/livekit_wakeword-2.1.1-py3-none-any.whl", hash = "sha256:d084d51a0c4bc8fb7cdd6c80463b1e9f3490c79eb423ec698de1714a99d37cd1", size = 64872, upload-time = "2026-11-06T06:48:46.679Z" },
+    { url = "https://files.pythonhosted.org/packages/c5/34/31704323309b31e322305a4c620ffd100e236f302d92c56154aa756e8b6b/livekit_wakeword-2.1.2-py3-none-any.whl", hash = "sha256:4af701c032dd439f9b5c847c534f7d67fe61bc18cda8daab2efa7586709d82e5", size = 66841, upload-time = "2026-11-11T17:10:22.067Z" },
 ]
 
 [[package]]
@@ -2178,21 +2178,21 @@ wheels = [
 
 [[package]]
 name = "playwright"
-version = "1.65.0"
+version = "1.65.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "greenlet" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ab/26/bfd17cb22beaab2c41ae68b245338ca25b83bffd809fa8d4117d648002d6/playwright-1.65.0.tar.gz", hash = "sha256:81f6a4c56e25d2e0f66232c3548649b17697ee3211e222aae78d4ecafad51918", size = 10224005, upload-time = "2026-11-09T21:10:01.425Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bb/08/18637433ce895625586a1fcb277921568007c631edefcb5c86773d4f8acd/playwright-1.65.1.tar.gz", hash = "sha256:a6c0db1447bcbe0493dcd23c84faf8e993fa7f8c1573b146a5c786df262f90b5", size = 10224475, upload-time = "2026-11-11T23:48:57.962Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a9/8c/e98c8ac52e9187bff759893a4009bf468dbd56255dc34ad8f53c8e77f10c/playwright-1.65.0-py3-none-macosx_10_13_x86_64.whl", hash = "sha256:78d2bd6127463552ddd890516e5eb4cc805559af474aa5ccf5b62e907972ce16", size = 50319011, upload-time = "2026-11-09T21:09:30.436Z" },
-    { url = "https://files.pythonhosted.org/packages/c4/5d/213c3f278d4f3b110d61b4082222c52b9f7187d3f4ca3dde2d217e0d752f/playwright-1.65.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:229d6b184de3da7bf292cc38a63ee82aefb5c9f0a4233b1142f3ffb1cbd410ec", size = 48808710, upload-time = "2026-11-09T21:09:34.587Z" },
-    { url = "https://files.pythonhosted.org/packages/73/76/ed4f88c6cc56a31b21c9820df74b65d1fef8f0500b8bc85c5f994a3b9d36/playwright-1.65.0-py3-none-macosx_11_0_universal2.whl", hash = "sha256:17e8e46065aa1a2e2aa3c3efde37788fecd0e5e645c7020780ebe684305118ca", size = 50319014, upload-time = "2026-11-09T21:09:38.488Z" },
-    { url = "https://files.pythonhosted.org/packages/a9/5c/fddffe92237452d23b19c4703ca8a2ddffc3da9eaf4424b0f019dd5608f3/playwright-1.65.0-py3-none-manylinux1_x86_64.whl", hash = "sha256:e8e4d4a177bef2c2f2a17019febadded1c84cd1499b80f7100bb30ff20df7bad", size = 53470748, upload-time = "2026-11-09T21:09:42.382Z" },
-    { url = "https://files.pythonhosted.org/packages/c0/ff/952586cd6d9ec43739d66fa6bfebfd92656ab03e97bc54659b23c23ad069/playwright-1.65.0-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:9072e6394fec07e56e17fec0ca271a7847dda4716db9d716291d1f7344f199bb", size = 53142506, upload-time = "2026-11-09T21:09:46.401Z" },
-    { url = "https://files.pythonhosted.org/packages/fe/21/af53bd727a8dfb7289c9f5c9477f84aa3dd8d9e7786ed68b65c9e2625ec3/playwright-1.65.0-py3-none-win32.whl", hash = "sha256:d9efef7b809020325d3d1bb34eb05c93865199274319249c9f6a77cd17fd8573", size = 42664070, upload-time = "2026-11-09T21:09:50.532Z" },
-    { url = "https://files.pythonhosted.org/packages/8c/0d/32e96514b48fabd16ece31bae11afba5e18cf425123fb7c36c6b8bd8db8f/playwright-1.65.0-py3-none-win_amd64.whl", hash = "sha256:ab22611318e8747477c949c81b055ee6e224ecedf66c2a794209c7fd0210a743", size = 42664080, upload-time = "2026-11-09T21:09:54.425Z" },
-    { url = "https://files.pythonhosted.org/packages/ac/d6/2a75d6eeda7b23e1b241ef898ed53bc3ea134ff52d2c959c770dce843e3c/playwright-1.65.0-py3-none-win_arm64.whl", hash = "sha256:67f0b1a80d0d2d4349f67c1ccfeceaa067f1d85aaac32d4d81dd3e971a96ddbb", size = 38367903, upload-time = "2026-11-09T21:09:58.28Z" },
+    { url = "https://files.pythonhosted.org/packages/7f/6a/f9209357831450dea440bc6f71cceb28e485c4f0ee4ffb48267a3d4c832e/playwright-1.65.1-py3-none-macosx_10_13_x86_64.whl", hash = "sha256:cd0eabebdadd45bd897a5465b358c26546cf0d7298492d66f609eec012a68de1", size = 50333789, upload-time = "2026-11-11T23:48:18.278Z" },
+    { url = "https://files.pythonhosted.org/packages/a6/cb/098c441446b7d468149837b7f490934072fa29bce302c5f1347fc7ebc305/playwright-1.65.1-py3-none-macosx_11_0_arm64.whl", hash = "sha256:5f9542db4d3bff9943510297c1de4252bf8ee62c47fd5f5af3213645035ba6d7", size = 48815926, upload-time = "2026-11-11T23:48:23.663Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/8d/c795dcdd6e68f82835e87600c18cec132fa6f07fb4c6395fc2b1df4e39f3/playwright-1.65.1-py3-none-macosx_11_0_universal2.whl", hash = "sha256:4ffb9e62ee226130ec9333a062a3a30d6a12ee5e4d164a9076c2b54cd15cc14e", size = 50333790, upload-time = "2026-11-11T23:48:29.139Z" },
+    { url = "https://files.pythonhosted.org/packages/f7/6c/11b3900a7fe1a70baf539a90a4ea217762c149a37ab70b61e7177fa981ed/playwright-1.65.1-py3-none-manylinux1_x86_64.whl", hash = "sha256:5660e0b050a5bd5672bf8e366ed2580288a3d3640ff9444436ed2d890d3dc442", size = 53474168, upload-time = "2026-11-11T23:48:34.296Z" },
+    { url = "https://files.pythonhosted.org/packages/14/fc/c1c491e57e36a6eb6f6705450ecc813e2a12bc1ac44f13853cd05a2d8067/playwright-1.65.1-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:0178cec62bfcc9c202f7d2c2c79c14ebac620c672f36ba31f0d7f0ee5ce87032", size = 53145932, upload-time = "2026-11-11T23:48:39.472Z" },
+    { url = "https://files.pythonhosted.org/packages/d4/a8/e5213ea8d8fe308b00412a1c21f51229e295faace74423375830c7b200a8/playwright-1.65.1-py3-none-win32.whl", hash = "sha256:43541b89fa293819eb98383feea837368ee681e67cc105b19f3dd58f1409f1d6", size = 42673459, upload-time = "2026-11-11T23:48:44.428Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/cc/f09f7a7f3ae3c4cd3cd2e6dc11b70f269e7fa018351e30339fb0d7c33ca4/playwright-1.65.1-py3-none-win_amd64.whl", hash = "sha256:f9ea4f4b4f70ecc27ef0bd46a1b929798f1a8bf68b3e771261fc098bc98e1a0b", size = 42673468, upload-time = "2026-11-11T23:48:49.783Z" },
+    { url = "https://files.pythonhosted.org/packages/b9/c4/317b9e97cbacabd85704c6970a2c09c221bc84a93bae8ab616ef483175fe/playwright-1.65.1-py3-none-win_arm64.whl", hash = "sha256:d50ad4dd217d4ee9e4672efd7ec4ab0523b5e73f64f6e0c5eae258961fa73a49", size = 38404959, upload-time = "2026-11-11T23:48:54.745Z" },
 ]
 
 [[package]]
@@ -3196,7 +3196,7 @@ wheels = [
 
 [[package]]
 name = "typer"
-version = "0.29.0"
+version = "0.29.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "annotated-doc" },
@@ -3205,9 +3205,9 @@ dependencies = [
     { name = "rich" },
     { name = "shellingham" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ed/db/401793a0d5345409a28de2c571d4ef8bea9a08700c20ea7f7b6af3b050d2/typer-0.29.0.tar.gz", hash = "sha256:6871960a1603fba66af2ff751be48a6735af6480a67660afaf2fab2f7e008ed4", size = 206371, upload-time = "2026-11-09T18:48:12.751Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6c/aa/0de7986aa1fa856adb961c67345189b97d13f6e250b34ba68884df865f07/typer-0.29.1.tar.gz", hash = "sha256:ab6eb3880bf67ce96147734717f9ec333c06f66e361f3ea947d0be43da39f242", size = 205843, upload-time = "2026-11-11T09:18:39.782Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c1/3d/cc08d3cb257764101c71c47f18e2f547782d013928edc877f155cb99229d/typer-0.29.0-py3-none-any.whl", hash = "sha256:b3c3de6e06a848274dc7bd56a433499e9cf25fa1d40aa3ba4eccfec4e1624c7b", size = 121058, upload-time = "2026-11-09T18:48:11.665Z" },
+    { url = "https://files.pythonhosted.org/packages/05/ff/51969745f31cea6bcd12151e668febcf979656316e67a7755942267c1273/typer-0.29.1-py3-none-any.whl", hash = "sha256:00dbc549c13428bec1be55fe1f4d0fb8c6637a310e4f178ef14abe9534ee7b58", size = 121064, upload-time = "2026-11-11T09:18:38.671Z" },
 ]
 
 [[package]]

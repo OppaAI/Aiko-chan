@@ -315,7 +315,7 @@ wheels = [
 
 [[package]]
 name = "atproto"
-version = "0.0.73"
+version = "0.0.74"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -329,9 +329,9 @@ dependencies = [
     { name = "websockets" },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1a/1b/02577f6d5eaa62d7d7fd922ccf6905c77a3f1cf619286690b5fca5da637f/atproto-0.0.73.tar.gz", hash = "sha256:0dc0e7f60ce99113b3371528d368e47566b44344812c7b0047229eda8b07eb13", size = 325800, upload-time = "2026-10-17T19:15:16.461Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d9/f0/32ea91fd6998d7a39a3782ae5267077432583bf190c1ea0f255797b07a96/atproto-0.0.74.tar.gz", hash = "sha256:836770c24479229aa4bfc6e203aa8356e2c604428b9650d5d032efae3fb52048", size = 339274, upload-time = "2026-11-12T20:00:57.056Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/98/0f/f2289686a9e0cbadfe268116c9d81886e76354c7d748bb94aa9669a40ed1/atproto-0.0.73-py3-none-any.whl", hash = "sha256:772dbef364788385724b1724434a42c56b9aeeec0e480c70f6b7edd7f65f1e77", size = 675072, upload-time = "2026-10-17T19:15:14.573Z" },
+    { url = "https://files.pythonhosted.org/packages/1b/62/2e0c01a5ff58bf7e2c183bd70f94bd47ee7078227bdcbfab19be975b91a5/atproto-0.0.74-py3-none-any.whl", hash = "sha256:b9aca52958542c8f3fc597265c49719ae11735274136c7008090bd0ee8ce8618", size = 701962, upload-time = "2026-11-12T20:00:55.38Z" },
 ]
 
 [[package]]
@@ -744,7 +744,7 @@ wheels = [
 
 [[package]]
 name = "cyclopts"
-version = "5.4.1"
+version = "5.4.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
@@ -752,9 +752,9 @@ dependencies = [
     { name = "rich" },
     { name = "rich-rst" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4d/b2/b6d6f3a5fc8b16e274eefc5c89d8e555d5bf8d3c0e4c0a770236d9d54722/cyclopts-5.4.1.tar.gz", hash = "sha256:5872925e9a6ff3ed2344b91abe0c3593b853a647c0c17adebb0939cf6a5a8385", size = 257832, upload-time = "2026-11-11T16:27:47.943Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/49/a2/34a66cdd2c2a5ffcfb15c195091bb944cf25bc8c1c0faeb4726ecb906c18/cyclopts-5.4.2.tar.gz", hash = "sha256:f0374ffae32bba180db7eae1d17a97a1bcd656455a3b7436f2133c4132f7c5b5", size = 257872, upload-time = "2026-11-12T13:25:49.482Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3b/a2/f06e43bc6e032affbdd54bcd78132713a06e1d5774b29a04c0df94e57fd5/cyclopts-5.4.1-py3-none-any.whl", hash = "sha256:48a80e4e49a10f7aa0bb99211f6eeb7e4f35b0c79a797c526670522daa35d7f2", size = 300667, upload-time = "2026-11-11T16:27:46.131Z" },
+    { url = "https://files.pythonhosted.org/packages/68/03/9347dfa31741d38a02f365a5cca5b76fd1288e8f9ee0fa8120eb301e9876/cyclopts-5.4.2-py3-none-any.whl", hash = "sha256:f8a07bf41d14447960fb75d07b564b13faea1b9a7530cb669db08e43134bbff9", size = 300704, upload-time = "2026-11-12T13:25:47.475Z" },
 ]
 
 [[package]]
@@ -1356,11 +1356,11 @@ wheels = [
 
 [[package]]
 name = "humanize"
-version = "4.16.0"
+version = "4.17.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/0a/ea/13a1ef3c12d12662905801495283530251918b70d62d368f1d2e0272c70d/humanize-4.16.0.tar.gz", hash = "sha256:7dc2244a2f84a4bfb1d36c37bac80cd78e35cdc5c119206d87b018e1445f3a3f", size = 89515, upload-time = "2026-06-30T16:17:29.859Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d0/a7/5391f6db94bf16289ca63ce2632eef2eba7b9991e701016ac66f04539d47/humanize-4.17.0.tar.gz", hash = "sha256:1d6a36c453dbfbb3f0b34601d2e0b4ce5d48d780305cd45714843f0068fde6ac", size = 90688, upload-time = "2026-11-12T12:33:34.37Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b0/aa/0b7365d30fed43e7a3449aba1fe20a0a7174d9cf13e282af4e69ac825441/humanize-4.16.0-py3-none-any.whl", hash = "sha256:353eb2f34c09d098b2880eee8bef21832eae6d174f48c5762fff7e5fcb74d01d", size = 137209, upload-time = "2026-06-30T16:17:28.36Z" },
+    { url = "https://files.pythonhosted.org/packages/0c/74/bb970f876202aa0e8c4a1e9904f0b3482e73c752512962b7e957091d5acf/humanize-4.17.0-py3-none-any.whl", hash = "sha256:02d0899527760efe18011944f882df4970943b4cdff7b5a0ba7fed43a576ef98", size = 133715, upload-time = "2026-11-12T12:33:32.955Z" },
 ]
 
 [[package]]
@@ -1937,7 +1937,7 @@ wheels = [
 
 [[package]]
 name = "openai"
-version = "3.49.0"
+version = "3.50.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -1947,9 +1947,9 @@ dependencies = [
     { name = "sniffio" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/83/8f/adc3e9f7077c16a2417eebb219df2f5933f4fa532fab143c6bbb1c287c67/openai-3.49.0.tar.gz", hash = "sha256:44badf2bea9bcd643dafa0bc4d5a109a14395889219fd68b8560322288196e96", size = 2410883, upload-time = "2026-11-10T06:47:55.206Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/13/b4/ba46d04d1835d979d89ed7c0d7d94b4ca341b1333e9423c26d97962f6f98/openai-3.50.0.tar.gz", hash = "sha256:ff094ba851ce512e0682f259e8c5bdc4802c7ef5373f68e7fd261261bb4496f2", size = 2411290, upload-time = "2026-11-12T19:26:54.812Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fe/45/de8fbd25a1ca0a46f9641604a7cb991123daa7f292c27625223d685d9bac/openai-3.49.0-py3-none-any.whl", hash = "sha256:3977754792115027ba80ae16996ba3366478b5b228e1ab58e2660bd7ac8c3d78", size = 2442112, upload-time = "2026-11-10T06:47:52.422Z" },
+    { url = "https://files.pythonhosted.org/packages/12/68/a1d793a10e8a5fe9d5710544475d686e90ed20848dd224b126e6bc64c1a6/openai-3.50.0-py3-none-any.whl", hash = "sha256:7002115247cacb167154a3da4c668d074e61014a661d2c1ac02583da24e2ce19", size = 2442350, upload-time = "2026-11-12T19:26:52.57Z" },
 ]
 
 [[package]]
@@ -2870,15 +2870,15 @@ wheels = [
 
 [[package]]
 name = "sentry-sdk"
-version = "2.74.0"
+version = "2.75.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "certifi" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8e/7f/1b16ab4aee53cc5db976bac12e6df5d562aae3880965200cef812e7121d9/sentry_sdk-2.74.0.tar.gz", hash = "sha256:dd91d75aacaef636006b579ac3ddb2fdbc9dce35f00f4b353b6b1b110c6b256a", size = 1081514, upload-time = "2026-11-05T14:50:27.444Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d2/95/121b20d75e738d249a0e26e6476a2acb178673e8228002748fc0cd85ce55/sentry_sdk-2.75.0.tar.gz", hash = "sha256:c38ac2d4b2435c11da821e173bb9d9088c98f41ae92f559ce0e424170a8e1a29", size = 1092308, upload-time = "2026-11-12T13:24:13.977Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/55/b1/736d4b4b308694b0071844a533522ac06669ad61751687b94edfbf863f17/sentry_sdk-2.74.0-py3-none-any.whl", hash = "sha256:40b205af015649df3ec9986e057ce24ce85956bee3fb75efa72c93aa7036bdff", size = 549800, upload-time = "2026-11-05T14:50:25.767Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/ee/fbfe67386d64a7218013c8346b88b89d72f279b4ddb434ed5e94bea3d389/sentry_sdk-2.75.0-py3-none-any.whl", hash = "sha256:9a10e97de2cbd42ad7e4a6e02a0d5af19de9811eb02445077d41ba14c08e170c", size = 555165, upload-time = "2026-11-12T13:24:11.923Z" },
 ]
 
 [[package]]
@@ -3175,14 +3175,14 @@ wheels = [
 
 [[package]]
 name = "trimesh"
-version = "5.2.0"
+version = "5.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/77/8a/0798e6cd28e2d1c6a7dfc97ba8eb27f7da5f392a5c81147d4f1e41ce0c1b/trimesh-5.2.0.tar.gz", hash = "sha256:d0a845d058e5a4ff145d0f0082d80c58d761687ce389c79d422dbe774966957b", size = 880133, upload-time = "2026-10-24T01:10:30.021Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/66/08/9466d15653d236624149feb1158c441ecee0631e6a629eaf9567e32285b5/trimesh-5.2.1.tar.gz", hash = "sha256:3719598aea815f47ae2d08d02b8009eba3921f05847332df16a7fffd74dcb08e", size = 890304, upload-time = "2026-11-12T17:37:36.849Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/51/14/78624d9c89bab76c2a2e1e839c7641fa686828c2c1c8fb64aedf3b371a5d/trimesh-5.2.0-py3-none-any.whl", hash = "sha256:04db2c7ec62afdd7763fb04c82bb5f257ddd984993a19ee83697f475fc58fd29", size = 751459, upload-time = "2026-10-24T01:10:27.874Z" },
+    { url = "https://files.pythonhosted.org/packages/e6/97/a6efa2926335bab3f85cf990a5b5f48abd989719b4015df0e3209675adf7/trimesh-5.2.1-py3-none-any.whl", hash = "sha256:ba4b5dbdf030bbffbb6337d9c67595435a8d1f224f23eb6500e9662f42a3c5df", size = 754230, upload-time = "2026-11-12T17:37:34.205Z" },
 ]
 
 [[package]]

@@ -1,0 +1,117 @@
+{
+ "soul": "ba780a04d7",
+ "history": [
+  {
+   "role": "user",
+   "content": "Hi how are you?"
+  },
+  {
+   "role": "assistant",
+   "content": "😊: Better now that you're here. How was your day?"
+  },
+  {
+   "role": "user",
+   "content": "you know who I am?"
+  },
+  {
+   "role": "assistant",
+   "content": "🤔: Of course I do, silly. You're OppaAI - who else would I be waiting for?"
+  },
+  {
+   "role": "user",
+   "content": "Aiko"
+  },
+  {
+   "role": "assistant",
+   "content": "😏: You really decided to make this harder than necessary."
+  },
+  {
+   "role": "user",
+   "content": "Hello"
+  },
+  {
+   "role": "assistant",
+   "content": "😭: Okay, that one hurts."
+  },
+  {
+   "role": "user",
+   "content": "What happened?"
+  },
+  {
+   "role": "assistant",
+   "content": "🤔: I think you're missing one important constraint."
+  },
+  {
+   "role": "user",
+   "content": "What did I miss?"
+  },
+  {
+   "role": "assistant",
+   "content": "😊: You were up late again."
+  },
+  {
+   "role": "user",
+   "content": "I see. Do you know who I am?"
+  },
+  {
+   "role": "assistant",
+   "content": "🤔: Of course I do, silly. You're OppaAI - who else would I be waiting for?"
+  },
+  {
+   "role": "user",
+   "content": "Who are you?"
+  },
+  {
+   "role": "assistant",
+   "content": "AIKO: 🤔: Of course I do, silly. You're OppaAI - who else would I be waiting for? 😏"
+  },
+  {
+   "role": "user",
+   "content": "what's your name?"
+  },
+  {
+   "role": "assistant",
+   "content": "AIKO: 😊: I'm Aiko. Yours, mostly. Why, did I change somehow? 🤔"
+  },
+  {
+   "role": "user",
+   "content": "Hi Aiko"
+  },
+  {
+   "role": "assistant",
+   "content": "😏: How's everything going on your end? I hope you're having a good day. 🤔"
+  },
+  {
+   "role": "user",
+   "content": "Grace"
+  },
+  {
+   "role": "assistant",
+   "content": "🤔: I'm here too, Grace. How's your day going? I've been working late, so I'm up and ready for a change. 😏"
+  },
+  {
+   "role": "user",
+   "content": "Are you Grace?"
+  },
+  {
+   "role": "assistant",
+   "content": "🤔: No thanks for the question, but I do have a birthday on June 3, 2026. I hope you're not too stressed about it. 😏"
+  },
+  {
+   "role": "user",
+   "content": "I mean is your name Grace?"
+  },
+  {
+   "role": "assistant",
+   "content": "🤔: No, I am not Grace. I am Aiko, and I have no plans to change. You might think I am a person, but I am an AI. 😏"
+  },
+  {
+   "role": "user",
+   "content": "[web] can you tell me the Raptors' score last game? And who score the most pts in that game?"
+  },
+  {
+   "role": "assistant",
+   "content": "The Toronto Raptors scored 123 points in their game against the Philadelphia 76ers. Joel Embiid scored 20 points, and Immanuel Quickley led all scorers with 27 points. The Raptors moved to a 4-3 record after the win. Source: Toronto Raptors Scores, Stats and Highlights - ESPN."
+  }
+ ]
+}

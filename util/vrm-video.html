@@ -152,6 +152,8 @@
       <input class="field" id="videoUrl" type="url" placeholder="direct video URL (CORS-enabled .mp4/.webm)" aria-label="source video URL" style="margin-top:8px">
       <button class="action-btn" style="margin:8px 0 0; width:100%" id="btnLoadUrl">load URL</button>
       <label class="mini-note">Capture rate <select id="captureFps"><option value="15">15 fps</option><option value="30" selected>30 fps</option><option value="60">60 fps</option></select></label>
+      <label class="mini-note">Motion response <select id="motionResponse"><option value="0.8" selected>Dance (low lag)</option><option value="1">Direct (more jitter)</option><option value="0.35">Smooth</option></select></label>
+      <label class="mini-note"><input id="rootTravel" type="checkbox"> Follow sideways movement and jumps (fixed camera)</label>
       <div class="mini-note">Frame-by-frame capture may run slower than playback. Use a fixed camera with the whole body visible; hidden joints hold their previous pose. This is estimated motion capture, not training or a guarantee of an exact match.</div>
       <div class="toggle-row" style="margin-top:8px">
         <button class="toggle-btn" id="btnProcessVideo" disabled>track video</button>
@@ -161,7 +163,7 @@
         <button class="toggle-btn" id="btnPlayback" disabled>play take</button>
         <button class="toggle-btn" id="btnMirror">mirror L/R</button>
       </div>
-      <div class="mini-note">Runs MediaPipe Tasks Vision (pose + face landmarker) frame-by-frame on the video, feeds the landmarks into Kalidokit, and drives Aiko's actual VRM skeleton and face blendshapes directly. URL loading needs a direct CORS-enabled media file; YouTube/Vimeo/watch pages can't be read by browser mocap code.</div>
+      <div class="mini-note">Runs MediaPipe Tasks Vision (pose, face, and hand landmarkers) frame-by-frame on the video, feeds the landmarks into Kalidokit, and drives Aiko's actual VRM skeleton and face blendshapes directly. URL loading needs a direct CORS-enabled media file; YouTube/Vimeo/watch pages can't be read by browser mocap code.</div>
     </div>
 
     <!-- Trim / export -->
@@ -178,7 +180,7 @@
       <input class="field" id="gestureFileName" value="myVideoMocap" aria-label="export filename">
       <button class="action-btn primary" style="margin:10px 0 0; width:100%" id="btnSaveMotion" disabled>save WebUI motion .json</button>
       <button class="action-btn" style="margin:10px 0 0; width:100%" id="btnSaveGesture" disabled>save legacy .js clip</button>
-      <div class="mini-note">Import the JSON under Recorded motions in Aiko's WebUI. Body and head rotations replay; speech still controls her mouth. Finger articulation and accurate walking/root travel are not captured in this version.</div>
+      <div class="mini-note">Import the JSON under Recorded motions in Aiko's WebUI. Body, tracked fingers, blinking, mouth shapes and basic smiles replay. Recorded facial tracks take priority during the clip. Hidden or blurred hands cannot be recovered; root movement is an estimate.</div>
     </div>
 
     <!-- Live debug readout -->
@@ -190,6 +192,7 @@
           <div class="bone-vals">
             <div class="bone-val">pose <span id="dbgPose">—</span></div>
             <div class="bone-val">face <span id="dbgFace">—</span></div>
+            <div class="bone-val">hands <span id="dbgHands">—</span></div>
             <div class="bone-val">fps <span id="dbgFps">—</span></div>
           </div>
         </div>
@@ -245,6 +248,7 @@
       FilesetResolver,
       PoseLandmarker,
       FaceLandmarker,
+      HandLandmarker,
     } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
 
     // ── Banner / status helpers ────────────────────────────────────
@@ -374,6 +378,7 @@
     // ── MediaPipe Tasks Vision setup ─────────────────────────────────
     let poseLandmarker = null;
     let faceLandmarker = null;
+    let handLandmarker = null;
     let visionReady = false;
 
     async function ensureVision() {
@@ -397,9 +402,58 @@
         },
         runningMode: 'VIDEO',
         numFaces: 1,
-        outputFaceBlendshapes: false, // Kalidokit solves blendshapes itself from raw landmarks
+        outputFaceBlendshapes: true,
+      });
+      handLandmarker = await HandLandmarker.createFromOptions(fileset, {
+        baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task' },
+        // Each crop is a different image region; independent detection avoids
+        // carrying one hand's temporal state into the other hand's crop.
+        runningMode: 'IMAGE', numHands: 2,
+        minHandDetectionConfidence: 0.5, minHandPresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5,
       });
       visionReady = true;
+    }
+
+    // Pose-guided crops give small faces/hands more of the landmark model's input
+    // resolution. Coordinates return to the original image before retargeting.
+    const detailCanvas = document.createElement('canvas');
+    detailCanvas.width = detailCanvas.height = 384;
+    const detailContext = detailCanvas.getContext('2d');
+    function detailCrop(poseLm, indices, padding) {
+      if (!poseLm || !indices.every(i => (poseLm[i]?.visibility ?? 0) >= 0.5)) return null;
+      const width = cameraPreview.videoWidth, height = cameraPreview.videoHeight;
+      const xs = indices.map(i => poseLm[i].x * width), ys = indices.map(i => poseLm[i].y * height);
+      const side = Math.min(width, height, Math.max(48, Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)) * padding));
+      const x = Math.max(0, Math.min(width - side, (Math.min(...xs) + Math.max(...xs) - side) / 2));
+      const y = Math.max(0, Math.min(height - side, (Math.min(...ys) + Math.max(...ys) - side) / 2));
+      detailContext.drawImage(cameraPreview, x, y, side, side, 0, 0, 384, 384);
+      return { x, y, side, width, height };
+    }
+    function uncrop(lm, crop) {
+      return lm.map(p => ({ ...p, x: (crop.x + p.x * crop.side) / crop.width,
+        y: (crop.y + p.y * crop.side) / crop.height, z: p.z * crop.side / crop.width }));
+    }
+    function detectFace(poseLm, timestamp) {
+      const crop = detailCrop(poseLm, [0, 2, 5, 7, 8, 9, 10], 2.3);
+      if (crop) {
+        const result = faceLandmarker.detectForVideo(detailCanvas, timestamp);
+        if (result.faceLandmarks?.length) {
+          result.faceLandmarks = result.faceLandmarks.map(lm => uncrop(lm, crop));
+          return result;
+        }
+      }
+      return faceLandmarker.detectForVideo(cameraPreview, timestamp + 1);
+    }
+    function detectHands(poseLm) {
+      const landmarks = [];
+      for (const indices of [[15, 17, 19, 21], [16, 18, 20, 22]]) {
+        const crop = detailCrop(poseLm, indices, 3.2);
+        if (!crop) continue;
+        const result = handLandmarker.detect(detailCanvas);
+        for (const lm of result.landmarks || []) landmarks.push(uncrop(lm, crop));
+      }
+      return { landmarks };
     }
 
     // ── Kalidokit → VRM rigging ────────────────────────────────────
@@ -418,6 +472,16 @@
       return kName.charAt(0).toLowerCase() + kName.slice(1);
     }
 
+    const FACE_TRACKS = ['blinkLeft', 'blinkRight', 'aa', 'ih', 'ou', 'ee', 'oh', 'happy', 'lookUp', 'lookDown', 'lookLeft', 'lookRight'];
+    let captureFirstFrame = true;
+    let rootReference = null;
+    let trackingStats = null;
+    let framesWithoutFace = 0;
+    const missingHands = { Left: 0, Right: 0 };
+    function response() {
+      if (captureFirstFrame) return 1;
+      return 1 - Math.pow(1 - Number(document.getElementById('motionResponse').value), 30 / Number(document.getElementById('captureFps').value));
+    }
     const tmpEuler = new THREE.Euler();
     const tmpQuat = new THREE.Quaternion();
     const tmpVec = new THREE.Vector3();
@@ -436,18 +500,18 @@
       const hips = vrm.humanoid.getNormalizedBoneNode('hips');
       if (hips) hips.position.copy(restHipPosition);
       if (vrm.expressionManager) {
-        for (const name of ['blinkLeft', 'blinkRight', 'aa', 'ih', 'ou', 'ee', 'oh']) {
+        for (const name of FACE_TRACKS) {
           vrm.expressionManager.setValue(name, 0);
         }
       }
       vrm.update(0);
     }
 
-    function rigRotation(vrm, kName, rotation, dampener = 1, lerpAmount = 0.3) {
+    function rigRotation(vrm, kName, rotation, dampener = 1, lerpAmount = response()) {
       if (!rotation) return;
       const bone = vrm.humanoid?.getNormalizedBoneNode(vrmBoneName(kName));
       if (!bone) return;
-      tmpEuler.set((rotation.x || 0) * dampener, (rotation.y || 0) * dampener, (rotation.z || 0) * dampener);
+      tmpEuler.set((rotation.x || 0) * dampener, (rotation.y || 0) * dampener, (rotation.z || 0) * dampener, rotation.rotationOrder || 'XYZ');
       tmpQuat.setFromEuler(tmpEuler);
       bone.quaternion.slerp(tmpQuat, lerpAmount);
     }
@@ -478,9 +542,23 @@
 
     function rigPose(vrm, riggedPose, poseLm) {
       if (!riggedPose || !poseLm) return;
-      rigRotation(vrm, 'Hips', riggedPose.Hips.rotation, 0.7, 0.3);
+      rigRotation(vrm, 'Hips', riggedPose.Hips.rotation);
       const hips = vrm.humanoid?.getNormalizedBoneNode('hips');
-      if (hips && riggedPose.Hips?.position) {
+      if (hips && document.getElementById('rootTravel').checked && landmarksVisible(poseLm, [23, 24])) {
+        const x = (poseLm[23].x + poseLm[24].x) / 2;
+        const y = (poseLm[23].y + poseLm[24].y) / 2;
+        // Calibrate image-plane travel once from hips-to-floor height. Do not infer
+        // forward travel from monocular depth; a moving camera invalidates this estimate.
+        if (!rootReference && landmarksVisible(poseLm, [27, 28])) {
+          const floor = Math.max(poseLm[27].y, poseLm[28].y);
+          if (floor - y > 0.08) rootReference = { x, y, scale: restHipPosition.y / (floor - y) };
+        }
+        if (rootReference) {
+          tmpVec.set(restHipPosition.x - (x - rootReference.x) * rootReference.scale * cameraPreview.videoWidth / cameraPreview.videoHeight,
+            restHipPosition.y - (y - rootReference.y) * rootReference.scale, restHipPosition.z);
+          hips.position.lerp(tmpVec, response());
+        }
+      } else if (hips && riggedPose.Hips?.position) {
         tmpVec.set(
           restHipPosition.x + clamp(deadzone(-riggedPose.Hips.position.x) * 0.25, HIP_DRIFT_CLAMP),
           restHipPosition.y + clamp(deadzone(riggedPose.Hips.position.y) * 0.12, HIP_DRIFT_CLAMP),
@@ -489,8 +567,8 @@
         hips.position.lerp(tmpVec, 0.16);
       }
 
-      rigRotation(vrm, 'Chest', riggedPose.Spine, 0.5, 0.3);
-      rigRotation(vrm, 'Spine', riggedPose.Spine, 0.65, 0.3);
+      rigRotation(vrm, 'Chest', riggedPose.Spine, 0.4);
+      rigRotation(vrm, 'Spine', riggedPose.Spine, 0.6);
 
       // MediaPipe pose landmark indices: 11/12 shoulders, 13/14 elbows, 15/16 wrists,
       // 23/24 hips, 25/26 knees, 27/28 ankles.
@@ -500,20 +578,20 @@
       // Kalidokit actually consumed for each side, not the same-side indices.
       // (Verified 2026-10-13 with synthetic landmarks through Kalidokit 1.1.4.)
       if (landmarksVisible(poseLm, [12, 14, 16])) {
-        rigRotation(vrm, 'LeftUpperArm', riggedPose.LeftUpperArm, 1, 0.3);
-        rigRotation(vrm, 'LeftLowerArm', riggedPose.LeftLowerArm, 1, 0.3);
+        rigRotation(vrm, 'LeftUpperArm', riggedPose.LeftUpperArm);
+        rigRotation(vrm, 'LeftLowerArm', riggedPose.LeftLowerArm);
       }
       if (landmarksVisible(poseLm, [11, 13, 15])) {
-        rigRotation(vrm, 'RightUpperArm', riggedPose.RightUpperArm, 1, 0.3);
-        rigRotation(vrm, 'RightLowerArm', riggedPose.RightLowerArm, 1, 0.3);
+        rigRotation(vrm, 'RightUpperArm', riggedPose.RightUpperArm);
+        rigRotation(vrm, 'RightLowerArm', riggedPose.RightLowerArm);
       }
       if (landmarksVisible(poseLm, [24, 26, 28])) {
-        rigRotation(vrm, 'LeftUpperLeg', riggedPose.LeftUpperLeg, 1, 0.3);
-        rigRotation(vrm, 'LeftLowerLeg', riggedPose.LeftLowerLeg, 1, 0.3);
+        rigRotation(vrm, 'LeftUpperLeg', riggedPose.LeftUpperLeg);
+        rigRotation(vrm, 'LeftLowerLeg', riggedPose.LeftLowerLeg);
       }
       if (landmarksVisible(poseLm, [23, 25, 27])) {
-        rigRotation(vrm, 'RightUpperLeg', riggedPose.RightUpperLeg, 1, 0.3);
-        rigRotation(vrm, 'RightLowerLeg', riggedPose.RightLowerLeg, 1, 0.3);
+        rigRotation(vrm, 'RightUpperLeg', riggedPose.RightUpperLeg);
+        rigRotation(vrm, 'RightLowerLeg', riggedPose.RightLowerLeg);
       }
     }
 
@@ -531,12 +609,12 @@
 
       // Head/neck follow the face solve's head pose (this is what actually reads as
       // "looking at the camera" / nodding / tilting in sync with the source footage).
-      rigRotation(vrm, 'Neck', riggedFace.head, 0.55, 0.3);
-      rigRotation(vrm, 'Head', riggedFace.head, 0.7, 0.3);
+      rigRotation(vrm, 'Neck', riggedFace.head, 0.35);
+      rigRotation(vrm, 'Head', riggedFace.head, 0.65);
 
       const blend = (name, value) => {
         const prev = em.getValue(name) ?? 0;
-        em.setValue(name, prev + (value - prev) * 0.5);
+        em.setValue(name, prev + (value - prev) * response());
       };
 
       blend('blinkLeft', 1 - riggedFace.eye.l);
@@ -554,6 +632,72 @@
       document.getElementById('dbgU').textContent = mouth.U.toFixed(2);
     }
 
+    function rigFaceDetails(vrm, categories) {
+      const em = vrm.expressionManager;
+      if (!em || !categories) return;
+      const values = Object.fromEntries(categories.map(c => [c.categoryName, c.score]));
+      const average = (a, b) => ((values[a] || 0) + (values[b] || 0)) / 2;
+      const weights = {
+        blinkLeft: values.eyeBlinkLeft || 0, blinkRight: values.eyeBlinkRight || 0,
+        happy: average('mouthSmileLeft', 'mouthSmileRight'),
+        lookUp: average('eyeLookUpLeft', 'eyeLookUpRight'),
+        lookDown: average('eyeLookDownLeft', 'eyeLookDownRight'),
+        lookLeft: average('eyeLookOutLeft', 'eyeLookInRight'),
+        lookRight: average('eyeLookInLeft', 'eyeLookOutRight'),
+      };
+      if (mirrorLR) {
+        [weights.blinkLeft, weights.blinkRight] = [weights.blinkRight, weights.blinkLeft];
+        [weights.lookLeft, weights.lookRight] = [weights.lookRight, weights.lookLeft];
+      }
+      for (const [name, weight] of Object.entries(weights)) {
+        const prev = em.getValue(name) || 0;
+        em.setValue(name, prev + (Math.max(0, Math.min(1, weight)) - prev) * response());
+      }
+    }
+
+    function rigHands(vrm, result, poseLm, solvedPose) {
+      const assigned = new Map();
+      const aspect = cameraPreview.videoWidth / cameraPreview.videoHeight;
+      const distance = (a, b) => Math.hypot((a.x - b.x) * aspect, a.y - b.y);
+      // Associate hands with the pose wrist, rather than relying on handedness
+      // labels that can flip in turns. Kalidokit's Left corresponds to pose wrist 16.
+      const candidates = [];
+      for (let i = 0; i < (result.landmarks?.length || 0); i++) {
+        const lm = mirrorLR ? mirrorNormalized(result.landmarks[i]) : result.landmarks[i];
+        for (const [side, wrist] of [['Left', 16], ['Right', 15]]) {
+          if (landmarksVisible(poseLm, [wrist])) candidates.push({ side, i, lm, d: distance(lm[0], poseLm[wrist]) });
+        }
+      }
+      const used = new Set();
+      for (const c of candidates.sort((a, b) => a.d - b.d)) {
+        if (c.d > 0.2 || assigned.has(c.side) || used.has(c.i)) continue;
+        assigned.set(c.side, c.lm); used.add(c.i);
+      }
+      for (const side of ['Left', 'Right']) {
+        const lm = assigned.get(side);
+        if (lm) {
+          missingHands[side] = 0;
+          const solved = Kalidokit.Hand.solve(lm, side);
+          const wrist = solved?.[`${side}Wrist`];
+          if (wrist) rigRotation(vrm, `${side}Hand`, { x: wrist.x, y: wrist.y, z: solvedPose?.[`${side}Hand`]?.z ?? wrist.z });
+          for (const finger of ['Thumb', 'Index', 'Middle', 'Ring', 'Little']) {
+            for (const segment of ['Proximal', 'Intermediate', 'Distal']) {
+              const name = `${side}${finger}${segment}`;
+              rigRotation(vrm, name, solved?.[name]);
+            }
+          }
+        } else {
+          missingHands[side]++;
+          if (missingHands[side] / Number(document.getElementById('captureFps').value) > 0.25) {
+            for (const name of THREE_VRM_HUMAN_BONE_NAMES.filter(n => n.startsWith(side.toLowerCase()) && /Thumb|Index|Middle|Ring|Little/.test(n))) {
+              vrm.humanoid?.getNormalizedBoneNode(name)?.quaternion.slerp(new THREE.Quaternion(), 0.15);
+            }
+          }
+        }
+      }
+      return assigned;
+    }
+
     function captureFrame(vrm, time) {
       const bones = {};
       if (vrm.humanoid) {
@@ -569,7 +713,7 @@
       const hips = vrm.humanoid?.getNormalizedBoneNode('hips');
       const expressions = {};
       if (vrm.expressionManager) {
-        for (const name of ['blinkLeft', 'blinkRight', 'aa', 'ih', 'ou', 'ee', 'oh']) {
+        for (const name of FACE_TRACKS) {
           expressions[name] = +(vrm.expressionManager.getValue(name) ?? 0).toFixed(4);
         }
       }
@@ -581,15 +725,15 @@
       };
     }
 
-    // Minimal humanoid bone list we actually rig/record (body + a few face-relevant ones).
-    // Hands/fingers are intentionally left out of this pass — Kalidokit + a HandLandmarker
-    // pass can be added later if you want fingers too.
+    // Include all 30 finger joints so exported clips retain hand articulation.
     const THREE_VRM_HUMAN_BONE_NAMES = [
       'hips', 'spine', 'chest', 'neck', 'head',
       'leftUpperArm', 'leftLowerArm', 'leftHand',
       'rightUpperArm', 'rightLowerArm', 'rightHand',
       'leftUpperLeg', 'leftLowerLeg', 'leftFoot',
       'rightUpperLeg', 'rightLowerLeg', 'rightFoot',
+      ...['left', 'right'].flatMap(side => ['Thumb', 'Index', 'Middle', 'Ring', 'Little'].flatMap(finger =>
+        (finger === 'Thumb' ? ['Metacarpal', 'Proximal', 'Distal'] : ['Proximal', 'Intermediate', 'Distal']).map(segment => `${side}${finger}${segment}`))),
     ];
 
     // ── Video element / state ────────────────────────────────────────
@@ -679,7 +823,7 @@
       processingVideo = true;
       mocapPlayback = false;
       document.getElementById('btnPlayback').classList.remove('active');
-      const locked = ['vrmFile', 'videoFile', 'videoUrl', 'btnLoadUrl', 'btnProcessVideo', 'btnMirror', 'captureFps', 'btnResetPose'];
+      const locked = ['vrmFile', 'videoFile', 'videoUrl', 'btnLoadUrl', 'btnProcessVideo', 'btnMirror', 'captureFps', 'motionResponse', 'rootTravel', 'btnResetPose'];
       locked.forEach(id => { document.getElementById(id).disabled = true; });
       document.getElementById('btnCancelVideo').disabled = false;
       const processBtn = document.getElementById('btnProcessVideo');
@@ -691,6 +835,11 @@
         await ensureVision();
         if (!processingVideo) return;
         resetRigState(currentVRM);
+        captureFirstFrame = true;
+        rootReference = null;
+        framesWithoutFace = 0;
+        missingHands.Left = missingHands.Right = 0;
+        trackingStats = { frames: 0, body: 0, face: 0, leftHand: 0, rightHand: 0 };
         cameraPreview.pause();
         await seekFrame(0);
         const duration = cameraPreview.duration;
@@ -705,29 +854,45 @@
           visionTimestamp += 1000 / fps;
           const started = performance.now();
           const poseResult = poseLandmarker.detectForVideo(cameraPreview, visionTimestamp);
-          const faceResult = faceLandmarker.detectForVideo(cameraPreview, visionTimestamp);
           const rawPoseLm = poseResult.landmarks?.[0];
+          const faceResult = detectFace(rawPoseLm, visionTimestamp);
+          const handResult = detectHands(rawPoseLm);
           const rawWorld = poseResult.worldLandmarks?.[0];
           const rawFace = faceResult.faceLandmarks?.[0];
           const poseLm = rawPoseLm && mirrorLR ? mirrorNormalized(rawPoseLm) : rawPoseLm;
           const world = rawWorld && mirrorLR ? mirrorWorld(rawWorld) : rawWorld;
           const face = rawFace && mirrorLR ? mirrorNormalized(rawFace) : rawFace;
+          let solved = null;
           if (poseLm && world) {
-            const solved = Kalidokit.Pose.solve(world, poseLm, { runtime: 'mediapipe', video: cameraPreview, enableLegs: true });
+            solved = Kalidokit.Pose.solve(world, poseLm, { runtime: 'mediapipe', video: cameraPreview, enableLegs: true });
             rigPose(currentVRM, solved, poseLm);
             tracked++;
           } else lost++;
-          if (face) rigFace(currentVRM, Kalidokit.Face.solve(face, { runtime: 'mediapipe', video: cameraPreview, imageSize: { width: cameraPreview.videoWidth, height: cameraPreview.videoHeight } }));
+          if (face) {
+            framesWithoutFace = 0;
+            rigFace(currentVRM, Kalidokit.Face.solve(face, { runtime: 'mediapipe', video: cameraPreview, imageSize: { width: cameraPreview.videoWidth, height: cameraPreview.videoHeight } }));
+            rigFaceDetails(currentVRM, faceResult.faceBlendshapes?.[0]?.categories);
+          } else if (++framesWithoutFace / fps > 0.25) {
+            for (const name of FACE_TRACKS) currentVRM.expressionManager?.setValue(name, (currentVRM.expressionManager.getValue(name) || 0) * 0.8);
+          }
+          const hands = rigHands(currentVRM, handResult, poseLm, solved);
+          trackingStats.frames++;
+          trackingStats.body += Boolean(poseLm && world);
+          trackingStats.face += Boolean(face);
+          trackingStats.leftHand += hands.has('Left');
+          trackingStats.rightHand += hands.has('Right');
+          document.getElementById('dbgHands').textContent = `${hands.size}/2`;
+          if (poseLm && world) captureFirstFrame = false;
           document.getElementById('dbgPose').textContent = poseLm ? 'tracked' : 'lost';
           document.getElementById('dbgFace').textContent = face ? 'tracked' : 'lost';
           document.getElementById('dbgFps').textContent = (1000 / Math.max(1, performance.now() - started)).toFixed(0);
           currentVRM.update(1 / fps);
           recordedFrames.push(captureFrame(currentVRM, index / fps));
-          setMocapStatus(`frame ${index + 1}/${count} · pose found ${tracked}, lost ${lost}`, 'rec');
+          setMocapStatus(`frame ${index + 1}/${count} · body ${tracked} · face ${trackingStats.face} · hands L ${trackingStats.leftHand} / R ${trackingStats.rightHand}`, 'rec');
           await new Promise(resolve => requestAnimationFrame(resolve));
         }
         if (!tracked) { recordedFrames = []; throw new Error('No body pose detected. Use a clear video with one person visible.'); }
-        setMocapStatus(`${processingVideo ? 'Tracked' : 'Stopped'}: ${recordedFrames.length} frames; ${lost} lost body detections`, 'live');
+        setMocapStatus(`${processingVideo ? 'Tracked' : 'Stopped'}: ${recordedFrames.length} frames; body lost ${lost}; face found ${trackingStats.face}; hands L ${trackingStats.leftHand} / R ${trackingStats.rightHand}. Counts show detections, not accuracy.`, 'live');
       } catch (err) {
         showBanner(`Tracking failed: ${err.message}`);
       } finally {
@@ -831,7 +996,7 @@
       if (frames.length < 2) return showBanner('Track and select at least two frames first.', 'info');
       const name = (document.getElementById('gestureFileName').value || 'myVideoMocap').replace(/\.(?:js|json)$/i, '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
       const clip = { format: 'aiko-vrm-motion', version: 1, rig: 'normalized', name,
-        restHips: restHipPosition.toArray(), fps: Number(document.getElementById('captureFps').value), frames };
+        restHips: restHipPosition.toArray(), fps: Number(document.getElementById('captureFps').value), tracking: trackingStats, frames };
       const url = URL.createObjectURL(new Blob([JSON.stringify(clip)], { type: 'application/json' }));
       const link = document.createElement('a');
       link.href = url;
@@ -933,7 +1098,7 @@ export function ${exportName}(vrm, t) {
         const hips = currentVRM.humanoid.getNormalizedBoneNode('hips');
         if (hips) hips.position.copy(restHipPosition);
         if (currentVRM.expressionManager) {
-          for (const name of ['blinkLeft', 'blinkRight', 'aa', 'ih', 'ou', 'ee', 'oh']) {
+          for (const name of FACE_TRACKS) {
             currentVRM.expressionManager.setValue(name, 0);
           }
         }

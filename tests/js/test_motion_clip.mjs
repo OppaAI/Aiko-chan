@@ -37,3 +37,26 @@ player.stop();
 assert.throws(() => player.play(null, clip));
 assert.throws(() => player.play({humanoid:rig}, clip, {speed:NaN}));
 console.log('Motion validation, timeline sampling, quaternion interpolation, avatar scaling, looping and cleanup passed.');
+
+// Face playback must override conversational weights, interpolate and restore on stop.
+const faceClip = makeClip();
+faceClip.frames[0].expressions = {happy:0, blinkLeft:0};
+faceClip.frames[1].expressions = {happy:1, blinkLeft:1};
+const weights = {happy:0.2, blinkLeft:0.1, angry:0.7};
+const em = {expressions:Object.keys(weights).map(expressionName=>({expressionName})),
+ getValue:name=>weights[name], setValue:(name,value)=>{weights[name]=value;}};
+const lookAt = {autoUpdate:true};
+player.play({humanoid:rig, expressionManager:em, lookAt}, faceClip);
+assert.equal(lookAt.autoUpdate,false);
+player.update(player.active.started+500);
+assert.equal(weights.happy,0.5);
+assert.equal(weights.blinkLeft,0.5);
+assert.equal(weights.angry,0);
+player.stop();
+assert.deepEqual(weights,{happy:0.2, blinkLeft:0.1, angry:0.7});
+assert.equal(lookAt.autoUpdate,true);
+for (const bad of [NaN,-0.1,1.1,'1']) {
+ const corrupt=makeClip(); corrupt.frames[0].expressions={happy:bad};
+ assert.throws(()=>validateMotionClip(corrupt));
+}
+console.log('Captured face interpolation, conversational override, gaze suspension and restoration passed.');

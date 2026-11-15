@@ -19,6 +19,12 @@ export function validateMotionClip(value) {
       const q = frame.bones[name];
       if (!/^[a-zA-Z][a-zA-Z0-9]{0,63}$/.test(name) || !vector(q, 4) || Math.hypot(...q) < 0.00001) throw new Error('Invalid bone rotation.');
     }
+    if (frame.expressions !== undefined) {
+      if (!frame.expressions || typeof frame.expressions !== 'object' || Array.isArray(frame.expressions) || Object.keys(frame.expressions).length > 64) throw new Error('Invalid expression tracks.');
+      for (const [name, weight] of Object.entries(frame.expressions)) {
+        if (!/^[a-zA-Z][a-zA-Z0-9]{0,63}$/.test(name) || !Number.isFinite(weight) || weight < 0 || weight > 1) throw new Error('Invalid expression weight.');
+      }
+    }
     previous = frame.time;
   }
   if (frames[0].time !== 0) throw new Error('The first frame must start at zero.');
@@ -51,7 +57,11 @@ export class MotionClipPlayer {
     if (!hips) throw new Error('This avatar has no humanoid hips.');
     this.active = { vrm, data, loop, speed, started: performance.now(),
       rawPose: h.getRawPose(), normalizedPose: h.getNormalizedPose(),
-      restHips: hips.position.clone(), autoUpdate: h.autoUpdateHumanBones };
+      restHips: hips.position.clone(), autoUpdate: h.autoUpdateHumanBones,
+      expressions: Object.fromEntries((vrm.expressionManager?.expressions || []).map(e => [e.expressionName, vrm.expressionManager.getValue(e.expressionName) || 0])),
+      hasFace: data.frames.some(f => Object.keys(f.expressions || {}).length > 0),
+      lookAtAutoUpdate: vrm.lookAt?.autoUpdate };
+    if (vrm.lookAt && this.active.hasFace) vrm.lookAt.autoUpdate = false;
     // Playback owns the humanoid until stop; the normal WebUI poses use raw bones.
     h.autoUpdateHumanBones = true;
   }
@@ -61,6 +71,10 @@ export class MotionClipPlayer {
     a.vrm.humanoid.setNormalizedPose(a.normalizedPose);
     a.vrm.humanoid.setRawPose(a.rawPose);
     a.vrm.humanoid.autoUpdateHumanBones = a.autoUpdate;
+    if (a.vrm.expressionManager && a.hasFace) {
+      for (const [name, value] of Object.entries(a.expressions)) a.vrm.expressionManager.setValue(name, value);
+    }
+    if (a.vrm.lookAt && a.hasFace) a.vrm.lookAt.autoUpdate = a.lookAtAutoUpdate;
     this.active = null;
   }
   update(now = performance.now()) {
@@ -82,7 +96,14 @@ export class MotionClipPlayer {
       hips.position.setComponent(i, a.restHips.getComponent(i) +
         (THREE.MathUtils.lerp(f0.hipsPos[i], f1.hipsPos[i], mix) - a.data.restHips[i]) * scale);
     }
-    // Mouth/face remain driven by WebUI speech and expressions.
+    // Captured facial tracks own expressions during the clip, including blinks.
+    // Clear conversational expressions so a prior smile cannot distort the take.
+    if (a.hasFace && a.vrm.expressionManager) {
+      const em = a.vrm.expressionManager;
+      for (const expr of em.expressions || []) em.setValue(expr.expressionName, 0);
+      const names = new Set([...Object.keys(f0.expressions || {}), ...Object.keys(f1.expressions || {})]);
+      for (const name of names) em.setValue(name, THREE.MathUtils.lerp(f0.expressions?.[name] || 0, f1.expressions?.[name] || 0, mix));
+    }
     return true;
   }
 }

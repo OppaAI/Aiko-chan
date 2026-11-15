@@ -1608,7 +1608,7 @@ function animate() {
       applyGestures(dt);     // (c) event gestures → offset layer
       composePose();         // REST + vitality + state + gesture → bones
     }
-    applyBlink(dt);        // expressionManager blink (gestures never touch it)
+    if (!motionPlayer.active?.hasFace) applyBlink(dt); // Recorded blinks own the eyes during a facial clip.
     vrm.update(dt);        // humanoid + spring bones LAST, on this frame's pose
   }
   renderer.render(scene, camera);

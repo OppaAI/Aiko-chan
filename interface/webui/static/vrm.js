@@ -17,6 +17,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+import { MotionClipPlayer } from './motion-clip.js';
+import { setupMotionPanel } from './motion-panel.js';
 
 // ── renderer ────────────────────────────────────────────────────────────────
 const canvas = document.getElementById('canvas');
@@ -1565,6 +1567,34 @@ function applyBlink(dt) {
   }
 }
 
+const motionPlayer = new MotionClipPlayer();
+let motionCamera = null;
+function restoreMotionCamera() {
+  if (!motionCamera) return;
+  camera.fov = motionCamera.fov;
+  camera.position.copy(motionCamera.position);
+  controls.target.copy(motionCamera.target);
+  controls.minDistance = motionCamera.min;
+  controls.maxDistance = motionCamera.max;
+  camera.updateProjectionMatrix();
+  motionCamera = null;
+}
+setupMotionPanel({
+  play: (clip, options) => {
+    motionPlayer.play(vrm, clip, options);
+    if (!motionCamera) motionCamera = { fov: camera.fov, position: camera.position.clone(),
+      target: controls.target.clone(), min: controls.minDistance, max: controls.maxDistance };
+    const height = Math.max(1, new THREE.Box3().setFromObject(vrm.scene).getSize(new THREE.Vector3()).y);
+    camera.fov = 35;
+    controls.minDistance = 1;
+    controls.maxDistance = 10;
+    controls.target.set(0, height * 0.5, 0);
+    camera.position.set(0, height * 0.5, height * 2.1);
+    camera.updateProjectionMatrix();
+  },
+  stop: () => { motionPlayer.stop(); restoreMotionCamera(); },
+});
+
 function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.05);
@@ -1572,9 +1602,12 @@ function animate() {
   controls.update();
   if (vrm) {
     updateExpressions(dt); // expression weights (cubic crossfades, 0.8 cap)
-    applyIdle(dt);         // (a) vitality + (b) state pose → offset layers
-    applyGestures(dt);     // (c) event gestures → offset layer
-    composePose();         // REST + vitality + state + gesture → bones
+    if (!motionPlayer.update()) {
+      restoreMotionCamera();
+      applyIdle(dt);         // (a) vitality + (b) state pose → offset layers
+      applyGestures(dt);     // (c) event gestures → offset layer
+      composePose();         // REST + vitality + state + gesture → bones
+    }
     applyBlink(dt);        // expressionManager blink (gestures never touch it)
     vrm.update(dt);        // humanoid + spring bones LAST, on this frame's pose
   }

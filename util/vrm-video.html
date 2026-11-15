@@ -151,6 +151,8 @@
       <input class="field" id="videoFile" type="file" accept="video/*" aria-label="source video">
       <input class="field" id="videoUrl" type="url" placeholder="direct video URL (CORS-enabled .mp4/.webm)" aria-label="source video URL" style="margin-top:8px">
       <button class="action-btn" style="margin:8px 0 0; width:100%" id="btnLoadUrl">load URL</button>
+      <label class="mini-note">Capture rate <select id="captureFps"><option value="15">15 fps</option><option value="30" selected>30 fps</option><option value="60">60 fps</option></select></label>
+      <div class="mini-note">Frame-by-frame capture may run slower than playback. Use a fixed camera with the whole body visible; hidden joints hold their previous pose. This is estimated motion capture, not training or a guarantee of an exact match.</div>
       <div class="toggle-row" style="margin-top:8px">
         <button class="toggle-btn" id="btnProcessVideo" disabled>track video</button>
         <button class="toggle-btn" id="btnCancelVideo" disabled>cancel</button>
@@ -174,7 +176,9 @@
         <input type="range" id="slTrimEnd" min="0" max="0" step="0.01" value="0">
       </div>
       <input class="field" id="gestureFileName" value="myVideoMocap" aria-label="export filename">
-      <button class="action-btn primary" style="margin:10px 0 0; width:100%" id="btnSaveGesture" disabled>save .js mocap clip</button>
+      <button class="action-btn primary" style="margin:10px 0 0; width:100%" id="btnSaveMotion" disabled>save WebUI motion .json</button>
+      <button class="action-btn" style="margin:10px 0 0; width:100%" id="btnSaveGesture" disabled>save legacy .js clip</button>
+      <div class="mini-note">Import the JSON under Recorded motions in Aiko's WebUI. Body and head rotations replay; speech still controls her mouth. Finger articulation and accurate walking/root travel are not captured in this version.</div>
     </div>
 
     <!-- Live debug readout -->
@@ -642,107 +646,97 @@
       e.target.classList.toggle('active', mirrorLR);
     });
 
+    // Wait for a decoded video frame rather than tracking whichever frame a
+    // real-time render loop happens to reach on a slow CPU.
+    let visionTimestamp = 0; // MediaPipe requires increasing timestamps across takes.
+    function waitForVideo(event, action) {
+      return new Promise((resolve, reject) => {
+        const finish = (err) => {
+          clearTimeout(timer);
+          cameraPreview.removeEventListener(event, ready);
+          cameraPreview.removeEventListener('error', failed);
+          err ? reject(err) : resolve();
+        };
+        const ready = () => finish();
+        const failed = () => finish(new Error('The video could not be decoded.'));
+        const timer = setTimeout(() => finish(new Error('Timed out decoding video.')), 15000);
+        cameraPreview.addEventListener(event, ready, { once: true });
+        cameraPreview.addEventListener('error', failed, { once: true });
+        action();
+      });
+    }
+    async function seekFrame(seconds) {
+      if (cameraPreview.readyState < 2) await waitForVideo('loadeddata', () => cameraPreview.load());
+      if (Math.abs(cameraPreview.currentTime - seconds) < 0.00001) return;
+      await waitForVideo('seeked', () => { cameraPreview.currentTime = seconds; });
+    }
     document.getElementById('btnCancelVideo').addEventListener('click', () => {
       processingVideo = false;
-      cameraPreview.pause();
-      const btn = document.getElementById('btnProcessVideo');
-      btn.classList.remove('recording');
-      btn.textContent = 'track video';
-      document.getElementById('btnCancelVideo').disabled = true;
-      btn.disabled = !selectedVideoUrl || !currentVRM;
-      setMocapStatus(recordedFrames.length > 1 ? `tracked ${recordedFrames.length} frames` : 'tracking canceled', recordedFrames.length > 1 ? 'live' : '');
+      setMocapStatus('Stopping after the current frame…');
     });
-
     document.getElementById('btnProcessVideo').addEventListener('click', async () => {
       if (!selectedVideoUrl || !currentVRM || processingVideo) return;
+      processingVideo = true;
+      mocapPlayback = false;
+      document.getElementById('btnPlayback').classList.remove('active');
+      const locked = ['vrmFile', 'videoFile', 'videoUrl', 'btnLoadUrl', 'btnProcessVideo', 'btnMirror', 'captureFps', 'btnResetPose'];
+      locked.forEach(id => { document.getElementById(id).disabled = true; });
+      document.getElementById('btnCancelVideo').disabled = false;
+      const processBtn = document.getElementById('btnProcessVideo');
+      processBtn.textContent = 'tracking…';
+      let tracked = 0, lost = 0;
       try {
-        await ensureVision();
-        processingVideo = true;
         recordedFrames = [];
+        updateTakeUi();
+        await ensureVision();
+        if (!processingVideo) return;
         resetRigState(currentVRM);
-
-        const processBtn = document.getElementById('btnProcessVideo');
-        processBtn.disabled = true;
-        processBtn.classList.add('recording');
-        processBtn.textContent = 'tracking…';
-        document.getElementById('btnCancelVideo').disabled = false;
+        cameraPreview.pause();
+        await seekFrame(0);
+        const duration = cameraPreview.duration;
+        if (!Number.isFinite(duration) || duration <= 0 || duration > 1200) throw new Error('Choose a video shorter than 20 minutes.');
+        const fps = Number(document.getElementById('captureFps').value);
+        const count = Math.min(36000, Math.ceil(duration * fps));
         document.getElementById('hudMode').textContent = 'tracking video';
-
-        cameraPreview.currentTime = 0;
-        cameraPreview.playbackRate = 1;
-        await cameraPreview.play();
-        setMocapStatus('tracking 0.0s', 'rec');
         hideBanner();
-
-        let frameCount = 0;
-        let lastFpsCheck = performance.now();
-
-        const step = async () => {
-          if (!processingVideo) return;
-          if (cameraPreview.ended || cameraPreview.paused) {
-            processingVideo = false;
-            processBtn.classList.remove('recording');
-            processBtn.textContent = 'track video';
-            processBtn.disabled = false;
-            document.getElementById('btnCancelVideo').disabled = true;
-            document.getElementById('hudMode').textContent = 'idle';
-            setMocapStatus(`tracked ${recordedFrames.length} frames`, 'live');
-            updateTakeUi();
-            return;
-          }
-          try {
-            const t = cameraPreview.currentTime * 1000;
-            const poseResult = poseLandmarker.detectForVideo(cameraPreview, t);
-            const faceResult = faceLandmarker.detectForVideo(cameraPreview, t);
-
-            const rawPoseLm = poseResult.landmarks?.[0];
-            const rawPoseWorldLm = poseResult.worldLandmarks?.[0];
-            const rawFaceLm = faceResult.faceLandmarks?.[0];
-            const poseLm = rawPoseLm && mirrorLR ? mirrorNormalized(rawPoseLm) : rawPoseLm;
-            const poseWorldLm = rawPoseWorldLm && mirrorLR ? mirrorWorld(rawPoseWorldLm) : rawPoseWorldLm;
-            const faceLm = rawFaceLm && mirrorLR ? mirrorNormalized(rawFaceLm) : rawFaceLm;
-
-            document.getElementById('dbgPose').textContent = poseLm ? 'tracked' : 'lost';
-            document.getElementById('dbgFace').textContent = faceLm ? 'tracked' : 'lost';
-
-            if (poseLm && poseWorldLm) {
-              const riggedPose = Kalidokit.Pose.solve(poseWorldLm, poseLm, { runtime: 'mediapipe', video: cameraPreview, enableLegs: true });
-              rigPose(currentVRM, riggedPose, poseLm);
-            }
-            if (faceLm) {
-              const riggedFace = Kalidokit.Face.solve(faceLm, { runtime: 'mediapipe', video: cameraPreview, imageSize: { width: cameraPreview.videoWidth, height: cameraPreview.videoHeight } });
-              rigFace(currentVRM, riggedFace);
-            }
-
-            currentVRM.update(1 / 60);
-            recordedFrames.push(captureFrame(currentVRM, cameraPreview.currentTime));
-
-            frameCount++;
-            const now = performance.now();
-            if (now - lastFpsCheck > 500) {
-              document.getElementById('dbgFps').textContent = (frameCount / ((now - lastFpsCheck) / 1000)).toFixed(0);
-              frameCount = 0;
-              lastFpsCheck = now;
-            }
-
-            setMocapStatus(`tracking ${cameraPreview.currentTime.toFixed(1)}s / ${(cameraPreview.duration || 0).toFixed(1)}s`, 'rec');
-            requestAnimationFrame(step);
-          } catch (err) {
-            processingVideo = false;
-            processBtn.classList.remove('recording');
-            processBtn.textContent = 'track video';
-            processBtn.disabled = !selectedVideoUrl || !currentVRM;
-            document.getElementById('btnCancelVideo').disabled = true;
-            document.getElementById('hudMode').textContent = 'idle';
-            showBanner(`Tracking step failed: ${err.message}\n${err.stack ?? ''}`);
-          }
-        };
-        requestAnimationFrame(step);
+        for (let index = 0; index < count && processingVideo; index++) {
+          await seekFrame(index / fps);
+          if (!processingVideo) break;
+          visionTimestamp += 1000 / fps;
+          const started = performance.now();
+          const poseResult = poseLandmarker.detectForVideo(cameraPreview, visionTimestamp);
+          const faceResult = faceLandmarker.detectForVideo(cameraPreview, visionTimestamp);
+          const rawPoseLm = poseResult.landmarks?.[0];
+          const rawWorld = poseResult.worldLandmarks?.[0];
+          const rawFace = faceResult.faceLandmarks?.[0];
+          const poseLm = rawPoseLm && mirrorLR ? mirrorNormalized(rawPoseLm) : rawPoseLm;
+          const world = rawWorld && mirrorLR ? mirrorWorld(rawWorld) : rawWorld;
+          const face = rawFace && mirrorLR ? mirrorNormalized(rawFace) : rawFace;
+          if (poseLm && world) {
+            const solved = Kalidokit.Pose.solve(world, poseLm, { runtime: 'mediapipe', video: cameraPreview, enableLegs: true });
+            rigPose(currentVRM, solved, poseLm);
+            tracked++;
+          } else lost++;
+          if (face) rigFace(currentVRM, Kalidokit.Face.solve(face, { runtime: 'mediapipe', video: cameraPreview, imageSize: { width: cameraPreview.videoWidth, height: cameraPreview.videoHeight } }));
+          document.getElementById('dbgPose').textContent = poseLm ? 'tracked' : 'lost';
+          document.getElementById('dbgFace').textContent = face ? 'tracked' : 'lost';
+          document.getElementById('dbgFps').textContent = (1000 / Math.max(1, performance.now() - started)).toFixed(0);
+          currentVRM.update(1 / fps);
+          recordedFrames.push(captureFrame(currentVRM, index / fps));
+          setMocapStatus(`frame ${index + 1}/${count} · pose found ${tracked}, lost ${lost}`, 'rec');
+          await new Promise(resolve => requestAnimationFrame(resolve));
+        }
+        if (!tracked) { recordedFrames = []; throw new Error('No body pose detected. Use a clear video with one person visible.'); }
+        setMocapStatus(`${processingVideo ? 'Tracked' : 'Stopped'}: ${recordedFrames.length} frames; ${lost} lost body detections`, 'live');
       } catch (err) {
+        showBanner(`Tracking failed: ${err.message}`);
+      } finally {
         processingVideo = false;
-        document.getElementById('btnProcessVideo').disabled = !selectedVideoUrl || !currentVRM;
+        locked.forEach(id => { document.getElementById(id).disabled = false; });
+        processBtn.textContent = 'track video';
         document.getElementById('btnCancelVideo').disabled = true;
-        showBanner(`Couldn't start tracking: ${err.message}`);
+        document.getElementById('hudMode').textContent = 'idle';
+        updateTakeUi();
       }
     });
 
@@ -758,7 +752,8 @@
       document.getElementById('slTrimEnd').value = duration.toFixed(2);
       document.getElementById('takeDurationLabel').textContent = `${recordedFrames.length} frames`;
       updateTrim();
-      const hasTake = recordedFrames.length > 1;
+      const hasTake = recordedFrames.length > 1 && !processingVideo;
+      document.getElementById('btnSaveMotion').disabled = !hasTake;
       document.getElementById('btnPlayback').disabled = !hasTake;
       document.getElementById('btnSaveGesture').disabled = !hasTake;
     }
@@ -776,8 +771,9 @@
     function trimmedFrames() {
       const start = +document.getElementById('slTrimStart').value;
       const end = +document.getElementById('slTrimEnd').value;
-      return recordedFrames.filter(f => f.time >= start && f.time <= end)
-        .map(f => ({ time: +(f.time - start).toFixed(4), hipsPos: f.hipsPos, bones: f.bones, expressions: f.expressions }));
+      const selected = recordedFrames.filter(f => f.time >= start && f.time <= end);
+      const origin = selected[0]?.time ?? 0;
+      return selected.map(f => ({ ...f, time: +(f.time - origin).toFixed(4) }));
     }
 
     // ── Playback preview ────────────────────────────────────────────
@@ -796,6 +792,7 @@
 
     function lerp(a, b, t) { return a + (b - a) * t; }
     const playbackQuat = new THREE.Quaternion();
+    const playbackTarget = new THREE.Quaternion();
 
     function sampleAndApply(frames, t) {
       if (!currentVRM || frames.length < 2) return;
@@ -810,10 +807,7 @@
         const bone = currentVRM.humanoid?.getNormalizedBoneNode(name);
         const qa = a.bones[name], qb = b.bones[name];
         if (!bone || !qa || !qb) continue;
-        playbackQuat.set(
-          lerp(qa[0], qb[0], f), lerp(qa[1], qb[1], f),
-          lerp(qa[2], qb[2], f), lerp(qa[3], qb[3], f),
-        ).normalize();
+        playbackQuat.fromArray(qa).normalize().slerp(playbackTarget.fromArray(qb).normalize(), f);
         bone.quaternion.copy(playbackQuat);
       }
       const hips = currentVRM.humanoid?.getNormalizedBoneNode('hips');
@@ -831,6 +825,21 @@
       }
       currentVRM.update(1 / 60);
     }
+
+    document.getElementById('btnSaveMotion').addEventListener('click', () => {
+      const frames = trimmedFrames();
+      if (frames.length < 2) return showBanner('Track and select at least two frames first.', 'info');
+      const name = (document.getElementById('gestureFileName').value || 'myVideoMocap').replace(/\.(?:js|json)$/i, '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
+      const clip = { format: 'aiko-vrm-motion', version: 1, rig: 'normalized', name,
+        restHips: restHipPosition.toArray(), fps: Number(document.getElementById('captureFps').value), frames };
+      const url = URL.createObjectURL(new Blob([JSON.stringify(clip)], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${name}.motion.json`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setMocapStatus(`Downloaded ${name}.motion.json — import under Recorded motions in WebUI.`, 'live');
+    });
 
     // ── Export ────────────────────────────────────────────────────
     function buildExportModule(frames, exportName) {

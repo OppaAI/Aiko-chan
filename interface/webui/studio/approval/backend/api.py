@@ -7,6 +7,7 @@ import logging
 import mimetypes
 import os
 import requests
+import threading
 from pathlib import Path
 from datetime import datetime
 
@@ -20,6 +21,8 @@ load_config()
 
 app = FastAPI(title="Aiko Approval Studio")
 logger = logging.getLogger(__name__)
+_publish_locks: dict[str, asyncio.Lock] = {}
+_publish_locks_guard = threading.Lock()
 
 from interface.webui.studio.session_binding import bind_login_session
 bind_login_session(app)
@@ -58,6 +61,17 @@ def _resolve_draft_path(draft_dir: str) -> Path:
     except ValueError:
         raise HTTPException(status_code=403, detail="Invalid draft path")
     return draft_path
+
+
+def _publish_lock_for(draft_path: Path) -> asyncio.Lock:
+    """Return a process-local lock shared by all publish requests for a draft."""
+    key = str(draft_path)
+    with _publish_locks_guard:
+        lock = _publish_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _publish_locks[key] = lock
+        return lock
 
 
 def _scan_all_drafts() -> list[dict]:
@@ -243,33 +257,32 @@ async def update_content(draft_dir: str, request: Request):
 
 @app.post("/api/drafts/{draft_dir:path}/publish")
 async def publish_draft(draft_dir: str):
-    """Publish an approved draft to Meta Threads — posts immediately, no
-    further confirmation step past this call. Refuses unless human_approved
-    is true and the draft hasn't already been posted."""
+    """Serialize this draft's publishes and re-check approval before posting."""
     draft_path = _resolve_draft_path(draft_dir)
+    async with _publish_lock_for(draft_path):
+        meta_path = draft_path / "draft.json"
+        if not meta_path.exists():
+            raise HTTPException(status_code=404, detail="Draft not found")
 
-    meta_path = draft_path / "draft.json"
-    if not meta_path.exists():
-        raise HTTPException(status_code=404, detail="Draft not found")
+        # Re-read metadata after acquiring the lock. A concurrent request may
+        # have completed publishing while this request waited.
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if meta.get("posted"):
+            raise HTTPException(status_code=409, detail="Draft has already been posted")
+        if not meta.get("human_approved"):
+            raise HTTPException(status_code=409, detail="Draft must be approved before publishing")
 
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    if meta.get("posted"):
-        raise HTTPException(status_code=409, detail="Draft has already been posted")
-    if not meta.get("human_approved"):
-        raise HTTPException(status_code=409, detail="Draft must be approved before publishing")
+        try:
+            from agentic.toolkit.social import post_job_post_draft
+        except ImportError as e:
+            raise HTTPException(status_code=500, detail=f"Could not import posting module: {e}")
 
-    try:
-        from agentic.toolkit.social import post_job_post_draft
-    except ImportError as e:
-        raise HTTPException(status_code=500, detail=f"Could not import posting module: {e}")
+        result = await asyncio.to_thread(post_job_post_draft, draft_path)
+        if not result.get("posted"):
+            raise HTTPException(status_code=502, detail=result.get("error") or "Failed to post to Threads")
 
-    result = await asyncio.to_thread(post_job_post_draft, draft_path)
-    if not result.get("posted"):
-        raise HTTPException(status_code=502, detail=result.get("error") or "Failed to post to Threads")
-
-    updated_meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else meta
-    return {"success": True, "message": "Published to Threads", "result": result, "meta": updated_meta}
-
+        updated_meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else meta
+        return {"success": True, "message": "Published to Threads", "result": result, "meta": updated_meta}
 
 @app.post("/api/drafts/{draft_dir:path}/reject")
 async def reject_draft(draft_dir: str):

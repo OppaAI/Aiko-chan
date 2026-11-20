@@ -169,9 +169,12 @@ function updateBulkToolbar() {
     document.getElementById('bulk-remove-btn').disabled = bulkBusy || removable.length === 0;
     selectVisible.disabled = bulkBusy || visible.length === 0;
     document.getElementById('clear-selection-btn').disabled = bulkBusy || selected.length === 0;
+    document.querySelectorAll('#action-buttons button').forEach(button => {
+        button.disabled = bulkBusy || button.dataset.requiresApproval === 'true';
+    });
 }
 
-function selectDraft(draft, skipDirtyCheck = false) {
+function selectDraft(draft, skipDirtyCheck = false, reloadContent = true) {
     if (!skipDirtyCheck && currentDraft && currentDraft.draft_dir !== draft.draft_dir && isContentDirty()) {
         const proceed = confirm('You have unsaved changes to this draft. Discard them and switch?');
         if (!proceed) return;
@@ -234,13 +237,14 @@ function selectDraft(draft, skipDirtyCheck = false) {
     } else {
         actions.innerHTML = `
             <button class="btn btn-success" onclick="toggleApprove('${escapeHTML(draft.draft_dir)}', true)">Approve</button>
-            <button class="btn btn-primary" style="opacity: 0.5; cursor: not-allowed;" title="Approve before publishing" disabled>Publish</button>
+            <button class="btn btn-primary" data-requires-approval="true" style="opacity: 0.5; cursor: not-allowed;" title="Approve before publishing" disabled>Publish</button>
             <button class="btn btn-danger" onclick="rejectDraft('${escapeHTML(draft.draft_dir)}')">Reject</button>
         `;
     }
 
-    // Load full draft content
-    loadDraftContent(draft.draft_dir);
+    // Load full draft content unless this is a metadata-only status refresh.
+    if (reloadContent) loadDraftContent(draft.draft_dir);
+    updateBulkToolbar();
 }
 
 function autoGrowTextarea(el) {
@@ -476,6 +480,40 @@ async function toggleApprove(draftDir, approve) {
     }
 }
 
+function captureOpenDraftState() {
+    const content = document.getElementById('content-text');
+    return {
+        draftDir: currentDraft?.draft_dir || null,
+        content: content.value,
+        original: originalDraftText,
+        contentDisplay: content.style.display,
+        sourceUrl: currentSourceUrl,
+    };
+}
+
+function openDraftStateUnchanged(before, after) {
+    return before.draftDir === after.draftDir
+        && before.content === after.content
+        && before.original === after.original
+        && before.contentDisplay === after.contentDisplay
+        && before.sourceUrl === after.sourceUrl;
+}
+
+function clearOpenDraft() {
+    currentDraft = null;
+    document.getElementById('info-empty').style.display = 'flex';
+    document.getElementById('info-content').style.display = 'none';
+    document.getElementById('content-empty').style.display = 'flex';
+    document.getElementById('content-empty').querySelector('p').textContent = 'Draft content will appear here';
+    document.getElementById('content-text').style.display = 'none';
+    document.getElementById('content-edit-actions').style.display = 'none';
+    document.getElementById('url-content').style.display = 'none';
+    document.getElementById('url-empty').style.display = 'flex';
+    currentSourceUrl = null;
+    originalDraftText = '';
+    updateBulkToolbar();
+}
+
 async function runBulkAction(action) {
     const selected = allDrafts.filter(draft => selectedDraftDirs.has(draft.draft_dir));
     const eligible = selected.filter(draft => {
@@ -496,41 +534,73 @@ async function runBulkAction(action) {
         if (!confirm('The selected draft has unsaved changes. Continue without saving them?')) return;
     }
 
+    const openDraftAtStart = captureOpenDraftState();
     bulkBusy = true;
     const status = document.getElementById('bulk-status');
-    status.textContent = `${progressLabels[action]} ${eligible.length} post${eligible.length === 1 ? '' : 's'}…`;
+    status.textContent = `${progressLabels[action]} 0/${eligible.length} posts…`;
     updateBulkToolbar();
     try {
-        const response = await fetch(`${API_BASE}/drafts/bulk-action`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action, draft_dirs: eligible.map(draft => draft.draft_dir) }),
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || 'Bulk action failed');
+        const results = [];
+        let stoppedAfterFailure = false;
+        for (let offset = 0; offset < eligible.length; offset += 100) {
+            const chunk = eligible.slice(offset, offset + 100);
+            const batchNumber = Math.floor(offset / 100) + 1;
+            const batchCount = Math.ceil(eligible.length / 100);
+            status.textContent = `${progressLabels[action]} batch ${batchNumber}/${batchCount} (${chunk.length} posts)…`;
+            try {
+                const response = await fetch(`${API_BASE}/drafts/bulk-action`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action, draft_dirs: chunk.map(draft => draft.draft_dir) }),
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    chunk.forEach(draft => results.push({ draft_dir: draft.draft_dir, success: false, detail: data.detail || 'Bulk action failed' }));
+                    stoppedAfterFailure = true;
+                    break;
+                }
+                const chunkResults = new Map((data.results || []).map(result => [result.draft_dir, result]));
+                chunk.forEach(draft => results.push(chunkResults.get(draft.draft_dir) || {
+                    draft_dir: draft.draft_dir,
+                    success: false,
+                    detail: 'The server did not return a result for this draft',
+                }));
+            } catch (err) {
+                chunk.forEach(draft => results.push({
+                    draft_dir: draft.draft_dir,
+                    success: false,
+                    detail: `No response received; verify status before retrying (${err.message})`,
+                }));
+                stoppedAfterFailure = true;
+                break;
+            }
+        }
+        if (stoppedAfterFailure) {
+            const sentCount = results.length;
+            eligible.slice(sentCount).forEach(draft => results.push({
+                draft_dir: draft.draft_dir,
+                success: false,
+                detail: 'Not sent because the previous batch did not complete reliably',
+            }));
+        }
 
-        const results = data.results || [];
         const succeeded = results.filter(result => result.success);
         const failed = results.filter(result => !result.success);
         succeeded.forEach(result => selectedDraftDirs.delete(result.draft_dir));
-        const currentWasRemoved = action === 'reject' && currentDraft
-            && succeeded.some(result => result.draft_dir === currentDraft.draft_dir);
-        if (currentWasRemoved) {
-            currentDraft = null;
-            document.getElementById('info-empty').style.display = 'flex';
-            document.getElementById('info-content').style.display = 'none';
-            document.getElementById('content-empty').style.display = 'flex';
-            document.getElementById('content-empty').querySelector('p').textContent = 'Draft content will appear here';
-            document.getElementById('content-text').style.display = 'none';
-            document.getElementById('content-edit-actions').style.display = 'none';
-            document.getElementById('url-content').style.display = 'none';
-            document.getElementById('url-empty').style.display = 'flex';
-        }
-        const currentWasUpdated = currentDraft && succeeded.some(result => result.draft_dir === currentDraft.draft_dir);
         await loadDrafts();
-        if (currentWasUpdated && !currentWasRemoved) {
-            const refreshedDraft = allDrafts.find(draft => draft.draft_dir === currentDraft.draft_dir);
-            if (refreshedDraft) selectDraft(refreshedDraft, true);
+
+        // Only refresh metadata if the reviewer is still looking at the same
+        // draft and its editor has not changed while the bulk request ran.
+        const openDraftAfterRequest = captureOpenDraftState();
+        if (openDraftAtStart.draftDir && openDraftStateUnchanged(openDraftAtStart, openDraftAfterRequest)) {
+            const openDraftWasRemoved = action === 'reject'
+                && succeeded.some(result => result.draft_dir === openDraftAtStart.draftDir);
+            if (openDraftWasRemoved) {
+                clearOpenDraft();
+            } else if (succeeded.some(result => result.draft_dir === openDraftAtStart.draftDir)) {
+                const refreshedDraft = allDrafts.find(draft => draft.draft_dir === openDraftAtStart.draftDir);
+                if (refreshedDraft) selectDraft(refreshedDraft, true, false);
+            }
         }
         const past = succeeded.length === 1 ? 'post' : 'posts';
         status.textContent = `${succeeded.length}/${eligible.length} ${past} ${action === 'reject' ? 'removed' : action === 'publish' ? 'published' : 'approved'}${failed.length ? ` · ${failed.length} failed` : ''}`;

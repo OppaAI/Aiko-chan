@@ -15,6 +15,8 @@ let allDrafts = [];
 let originalDraftText = '';
 let currentSourceUrl = null;
 let currentFilter = 'pending';
+let selectedDraftDirs = new Set();
+let bulkBusy = false;
 
 function escapeHTML(str) {
     const d = document.createElement('div');
@@ -37,6 +39,8 @@ async function loadDrafts() {
         const resp = await fetch(`${API_BASE}/drafts?status=all`);
         const data = await resp.json();
         allDrafts = data.drafts || [];
+        const existingDirs = new Set(allDrafts.map(draft => draft.draft_dir));
+        selectedDraftDirs = new Set([...selectedDraftDirs].filter(dir => existingDirs.has(dir)));
         renderDraftList(currentFilter);
         document.getElementById('header-status').textContent = `${allDrafts.length} drafts`;
         document.getElementById('draft-count').textContent = allDrafts.length;
@@ -71,13 +75,22 @@ function renderDraftList(filter) {
 
     if (!drafts.length) {
         container.innerHTML = '<div style="color:var(--dim);font-size:12px;padding:20px;text-align:center">No drafts found</div>';
+        updateBulkToolbar();
         return;
     }
 
     container.innerHTML = '';
     drafts.forEach(draft => {
+        const row = document.createElement('div');
+        row.className = 'draft-row';
         const div = document.createElement('div');
-        div.className = 'draft-item' + (currentDraft && currentDraft.draft_dir === draft.draft_dir ? ' active' : '');
+        const selected = selectedDraftDirs.has(draft.draft_dir);
+        div.className = 'draft-item'
+            + (currentDraft && currentDraft.draft_dir === draft.draft_dir ? ' active' : '')
+            + (selected ? ' selected' : '');
+        div.setAttribute('role', 'checkbox');
+        div.setAttribute('tabindex', '0');
+        div.setAttribute('aria-checked', String(selected));
 
         const statusBadges = [];
         if (draft.posted) {
@@ -94,7 +107,10 @@ function renderDraftList(filter) {
         }
 
         div.innerHTML = `
-            <div class="draft-name">${escapeHTML(draft.relative_path)}</div>
+            <div class="draft-item-heading">
+                <span class="draft-selection-mark" aria-hidden="true">${selected ? '✓' : ''}</span>
+                <span class="draft-name">${escapeHTML(draft.relative_path)}</span>
+            </div>
             <div class="draft-meta">
                 <span>${formatDate(draft.created_at)}</span>
                 <span>${escapeHTML(draft.category || 'general')}</span>
@@ -103,13 +119,60 @@ function renderDraftList(filter) {
             <div class="draft-status">${statusBadges.join('')}</div>
         `;
         div.setAttribute('data-draft-dir', draft.draft_dir);
-        div.onclick = () => selectDraft(draft);
-        container.appendChild(div);
+        const toggleSelection = () => {
+            if (selectedDraftDirs.has(draft.draft_dir)) selectedDraftDirs.delete(draft.draft_dir);
+            else selectedDraftDirs.add(draft.draft_dir);
+            renderDraftList(currentFilter);
+            const focusedItem = [...container.querySelectorAll('.draft-item')]
+                .find(item => item.getAttribute('data-draft-dir') === draft.draft_dir);
+            focusedItem?.focus();
+        };
+        div.onclick = toggleSelection;
+        div.onkeydown = event => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                toggleSelection();
+            }
+        };
+        const reviewButton = document.createElement('button');
+        reviewButton.type = 'button';
+        reviewButton.className = 'draft-review-btn btn';
+        reviewButton.textContent = 'Review';
+        reviewButton.title = 'Open this draft without changing its selection';
+        reviewButton.onclick = event => {
+            event.stopPropagation();
+            selectDraft(draft);
+        };
+        row.append(div, reviewButton);
+        container.appendChild(row);
     });
+    updateBulkToolbar();
 }
 
-function selectDraft(draft) {
-    if (currentDraft && currentDraft.draft_dir !== draft.draft_dir && isContentDirty()) {
+function updateBulkToolbar() {
+    const selected = allDrafts.filter(draft => selectedDraftDirs.has(draft.draft_dir));
+    const pending = selected.filter(draft => !draft.human_approved && !draft.posted && !draft.rejected);
+    const approved = selected.filter(draft => draft.human_approved && !draft.posted && !draft.rejected);
+    const removable = selected.filter(draft => !draft.posted && !draft.rejected);
+    const visible = filterDrafts(currentFilter);
+    const visibleSelected = visible.filter(draft => selectedDraftDirs.has(draft.draft_dir)).length;
+    const selectVisible = document.getElementById('select-visible-btn');
+    if (!selectVisible) return;
+
+    document.getElementById('selection-count').textContent = `${selected.length} selected${visibleSelected < selected.length ? ` · ${visibleSelected} visible` : ''}`;
+    selectVisible.textContent = visible.length && visibleSelected === visible.length ? 'Deselect visible' : 'Select visible';
+    document.getElementById('bulk-approve-btn').textContent = `Approve${pending.length ? ` (${pending.length})` : ''}`;
+    document.getElementById('bulk-publish-btn').textContent = `Publish${approved.length ? ` (${approved.length})` : ''}`;
+    document.getElementById('bulk-remove-btn').textContent = `Remove${removable.length ? ` (${removable.length})` : ''}`;
+    document.getElementById('bulk-approve-btn').disabled = bulkBusy || pending.length === 0;
+    document.getElementById('bulk-publish-btn').disabled = bulkBusy || approved.length === 0;
+    document.getElementById('bulk-remove-btn').disabled = bulkBusy || removable.length === 0;
+    selectVisible.disabled = bulkBusy || visible.length === 0;
+    document.getElementById('clear-selection-btn').disabled = bulkBusy || selected.length === 0;
+}
+
+function selectDraft(draft, skipDirtyCheck = false) {
+    if (!skipDirtyCheck && currentDraft && currentDraft.draft_dir !== draft.draft_dir && isContentDirty()) {
         const proceed = confirm('You have unsaved changes to this draft. Discard them and switch?');
         if (!proceed) return;
     }
@@ -412,6 +475,98 @@ async function toggleApprove(draftDir, approve) {
         alert('Failed to update draft approval status');
     }
 }
+
+async function runBulkAction(action) {
+    const selected = allDrafts.filter(draft => selectedDraftDirs.has(draft.draft_dir));
+    const eligible = selected.filter(draft => {
+        if (draft.posted || draft.rejected) return false;
+        if (action === 'approve') return !draft.human_approved;
+        if (action === 'publish') return draft.human_approved;
+        return action === 'reject';
+    });
+    if (!eligible.length || bulkBusy) return;
+
+    const labels = { approve: 'approve', publish: 'publish to Threads', reject: 'move to the rejected archive' };
+    const progressLabels = { approve: 'Approving', publish: 'Publishing', reject: 'Removing' };
+    const verb = labels[action];
+    if (action === 'publish' && !confirm(`Publish ${eligible.length} approved post${eligible.length === 1 ? '' : 's'} to Threads now?`)) return;
+    if (action === 'reject' && !confirm(`Remove ${eligible.length} post${eligible.length === 1 ? '' : 's'} from the active list and move them to the rejected archive?`)) return;
+    if (action === 'approve' && !confirm(`Approve ${eligible.length} selected post${eligible.length === 1 ? '' : 's'}?`)) return;
+    if (currentDraft && eligible.some(draft => draft.draft_dir === currentDraft.draft_dir) && isContentDirty()) {
+        if (!confirm('The selected draft has unsaved changes. Continue without saving them?')) return;
+    }
+
+    bulkBusy = true;
+    const status = document.getElementById('bulk-status');
+    status.textContent = `${progressLabels[action]} ${eligible.length} post${eligible.length === 1 ? '' : 's'}…`;
+    updateBulkToolbar();
+    try {
+        const response = await fetch(`${API_BASE}/drafts/bulk-action`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action, draft_dirs: eligible.map(draft => draft.draft_dir) }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || 'Bulk action failed');
+
+        const results = data.results || [];
+        const succeeded = results.filter(result => result.success);
+        const failed = results.filter(result => !result.success);
+        succeeded.forEach(result => selectedDraftDirs.delete(result.draft_dir));
+        const currentWasRemoved = action === 'reject' && currentDraft
+            && succeeded.some(result => result.draft_dir === currentDraft.draft_dir);
+        if (currentWasRemoved) {
+            currentDraft = null;
+            document.getElementById('info-empty').style.display = 'flex';
+            document.getElementById('info-content').style.display = 'none';
+            document.getElementById('content-empty').style.display = 'flex';
+            document.getElementById('content-empty').querySelector('p').textContent = 'Draft content will appear here';
+            document.getElementById('content-text').style.display = 'none';
+            document.getElementById('content-edit-actions').style.display = 'none';
+            document.getElementById('url-content').style.display = 'none';
+            document.getElementById('url-empty').style.display = 'flex';
+        }
+        const currentWasUpdated = currentDraft && succeeded.some(result => result.draft_dir === currentDraft.draft_dir);
+        await loadDrafts();
+        if (currentWasUpdated && !currentWasRemoved) {
+            const refreshedDraft = allDrafts.find(draft => draft.draft_dir === currentDraft.draft_dir);
+            if (refreshedDraft) selectDraft(refreshedDraft, true);
+        }
+        const past = succeeded.length === 1 ? 'post' : 'posts';
+        status.textContent = `${succeeded.length}/${eligible.length} ${past} ${action === 'reject' ? 'removed' : action === 'publish' ? 'published' : 'approved'}${failed.length ? ` · ${failed.length} failed` : ''}`;
+        if (failed.length) {
+            status.title = failed.map(result => {
+                const draft = eligible.find(item => item.draft_dir === result.draft_dir);
+                return `${draft?.relative_path || 'Draft'}: ${result.detail || result.message || 'Failed'}`;
+            }).join('\n');
+        } else {
+            status.removeAttribute('title');
+        }
+    } catch (err) {
+        console.error('Bulk approval action failed:', err);
+        status.textContent = `Failed to ${verb}: ${err.message}`;
+    } finally {
+        bulkBusy = false;
+        updateBulkToolbar();
+    }
+}
+
+document.getElementById('select-visible-btn').addEventListener('click', () => {
+    const visible = filterDrafts(currentFilter);
+    const allVisibleSelected = visible.length > 0 && visible.every(draft => selectedDraftDirs.has(draft.draft_dir));
+    visible.forEach(draft => {
+        if (allVisibleSelected) selectedDraftDirs.delete(draft.draft_dir);
+        else selectedDraftDirs.add(draft.draft_dir);
+    });
+    renderDraftList(currentFilter);
+});
+document.getElementById('clear-selection-btn').addEventListener('click', () => {
+    selectedDraftDirs.clear();
+    renderDraftList(currentFilter);
+});
+document.getElementById('bulk-approve-btn').addEventListener('click', () => runBulkAction('approve'));
+document.getElementById('bulk-publish-btn').addEventListener('click', () => runBulkAction('publish'));
+document.getElementById('bulk-remove-btn').addEventListener('click', () => runBulkAction('reject'));
 
 document.getElementById('refresh-btn').addEventListener('click', loadDrafts);
 

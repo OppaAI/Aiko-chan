@@ -32,6 +32,22 @@
                 <button class="filter-tab" data-filter="posted">Posted</button>
                 <button class="filter-tab" data-filter="rejected">Rejected</button>
             </div>
+            <section class="bulk-toolbar" aria-label="Bulk post actions">
+                <div class="bulk-toolbar-heading">
+                    <span id="selection-count" aria-live="polite">0 selected</span>
+                    <div class="bulk-selection-controls">
+                        <button id="select-visible-btn" class="btn">Select visible</button>
+                        <button id="clear-selection-btn" class="btn">Clear</button>
+                    </div>
+                </div>
+                <div class="selection-hint">Click a post to toggle selection</div>
+                <div class="bulk-toolbar-actions">
+                    <button id="bulk-approve-btn" class="btn btn-success" disabled>Approve</button>
+                    <button id="bulk-publish-btn" class="btn btn-primary" disabled>Publish</button>
+                    <button id="bulk-remove-btn" class="btn btn-danger" title="Move selected drafts to the rejected archive" disabled>Remove</button>
+                </div>
+                <div id="bulk-status" class="bulk-status" role="status" aria-live="polite"></div>
+            </section>
             <div id="drafts-list"></div>
         </aside>
 

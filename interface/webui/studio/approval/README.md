@@ -21,7 +21,9 @@ This directory contains the frontend and backend for the job post approval inter
 - View all daily job post drafts
 - Filter by status: pending, approved, posted
 - Review draft content with full text display
-- Approve/reject drafts with one click
+- Select drafts by clicking anywhere on a list item; click again to deselect
+- Approve, publish, or archive multiple selected drafts in one batch
+- Publish prompts for confirmation and reports per-draft failures
 - View draft metadata (date, category, LLM enrichment, etc.)
 
 # Files

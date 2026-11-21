@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import mimetypes
 import os
 import requests
+import threading
 from pathlib import Path
 from datetime import datetime
 
@@ -18,6 +20,9 @@ from system.config import load_config
 load_config()
 
 app = FastAPI(title="Aiko Approval Studio")
+logger = logging.getLogger(__name__)
+_publish_locks: dict[str, asyncio.Lock] = {}
+_publish_locks_guard = threading.Lock()
 
 from interface.webui.studio.session_binding import bind_login_session
 bind_login_session(app)
@@ -56,6 +61,17 @@ def _resolve_draft_path(draft_dir: str) -> Path:
     except ValueError:
         raise HTTPException(status_code=403, detail="Invalid draft path")
     return draft_path
+
+
+def _publish_lock_for(draft_path: Path) -> asyncio.Lock:
+    """Return a process-local lock shared by all publish requests for a draft."""
+    key = str(draft_path)
+    with _publish_locks_guard:
+        lock = _publish_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _publish_locks[key] = lock
+        return lock
 
 
 def _scan_all_drafts() -> list[dict]:
@@ -241,33 +257,32 @@ async def update_content(draft_dir: str, request: Request):
 
 @app.post("/api/drafts/{draft_dir:path}/publish")
 async def publish_draft(draft_dir: str):
-    """Publish an approved draft to Meta Threads — posts immediately, no
-    further confirmation step past this call. Refuses unless human_approved
-    is true and the draft hasn't already been posted."""
+    """Serialize this draft's publishes and re-check approval before posting."""
     draft_path = _resolve_draft_path(draft_dir)
+    async with _publish_lock_for(draft_path):
+        meta_path = draft_path / "draft.json"
+        if not meta_path.exists():
+            raise HTTPException(status_code=404, detail="Draft not found")
 
-    meta_path = draft_path / "draft.json"
-    if not meta_path.exists():
-        raise HTTPException(status_code=404, detail="Draft not found")
+        # Re-read metadata after acquiring the lock. A concurrent request may
+        # have completed publishing while this request waited.
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if meta.get("posted"):
+            raise HTTPException(status_code=409, detail="Draft has already been posted")
+        if not meta.get("human_approved"):
+            raise HTTPException(status_code=409, detail="Draft must be approved before publishing")
 
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    if meta.get("posted"):
-        raise HTTPException(status_code=409, detail="Draft has already been posted")
-    if not meta.get("human_approved"):
-        raise HTTPException(status_code=409, detail="Draft must be approved before publishing")
+        try:
+            from agentic.toolkit.social import post_job_post_draft
+        except ImportError as e:
+            raise HTTPException(status_code=500, detail=f"Could not import posting module: {e}")
 
-    try:
-        from agentic.toolkit.social import post_job_post_draft
-    except ImportError as e:
-        raise HTTPException(status_code=500, detail=f"Could not import posting module: {e}")
+        result = await asyncio.to_thread(post_job_post_draft, draft_path)
+        if not result.get("posted"):
+            raise HTTPException(status_code=502, detail=result.get("error") or "Failed to post to Threads")
 
-    result = await asyncio.to_thread(post_job_post_draft, draft_path)
-    if not result.get("posted"):
-        raise HTTPException(status_code=502, detail=result.get("error") or "Failed to post to Threads")
-
-    updated_meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else meta
-    return {"success": True, "message": "Published to Threads", "result": result, "meta": updated_meta}
-
+        updated_meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else meta
+        return {"success": True, "message": "Published to Threads", "result": result, "meta": updated_meta}
 
 @app.post("/api/drafts/{draft_dir:path}/reject")
 async def reject_draft(draft_dir: str):
@@ -282,6 +297,14 @@ async def reject_draft(draft_dir: str):
         raise HTTPException(status_code=404, detail="Draft not found")
 
     root = _job_post_social_root()
+    rejected_root = root / "rejected"
+    try:
+        draft_path.relative_to(rejected_root)
+    except ValueError:
+        pass
+    else:
+        raise HTTPException(status_code=409, detail="Draft is already in the rejected archive")
+
     meta_path = draft_path / "draft.json"
     if meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -290,7 +313,6 @@ async def reject_draft(draft_dir: str):
         meta["rejected_at"] = datetime.now().isoformat()
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    rejected_root = root / "rejected"
     relative = draft_path.relative_to(root)
     target = (rejected_root / relative).resolve()
     try:
@@ -334,6 +356,68 @@ def _download_page(url: str, headers: dict) -> tuple[bytes, str]:
                 body.extend(chunk)
             return bytes(body), response.headers.get("content-type", "")
     raise ValueError("Too many redirects")
+
+
+@app.post("/api/drafts/bulk-action")
+async def bulk_draft_action(request: Request):
+    """Apply an approval-studio action to multiple drafts in one request.
+
+    Publishing is processed one post at a time to avoid overwhelming the
+    provider; each result is returned independently so one failure does not
+    prevent the remaining selected drafts from being handled.
+    """
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        raise HTTPException(status_code=400, detail="Request body must be valid JSON")
+
+    action = body.get("action") if isinstance(body, dict) else None
+    draft_dirs = body.get("draft_dirs") if isinstance(body, dict) else None
+    if not isinstance(action, str) or action not in {"approve", "publish", "reject"}:
+        raise HTTPException(status_code=400, detail="Action must be approve, publish, or reject")
+    if (not isinstance(draft_dirs, list) or not draft_dirs
+            or any(not isinstance(path, str) or not path.strip() for path in draft_dirs)):
+        raise HTTPException(status_code=400, detail="draft_dirs must be a non-empty list of paths")
+    if len(draft_dirs) > 100:
+        raise HTTPException(status_code=400, detail="A bulk action can include at most 100 drafts")
+
+    results = []
+    for draft_dir in dict.fromkeys(draft_dirs):
+        try:
+            if action == "approve":
+                draft_path = _resolve_draft_path(draft_dir)
+                root = _job_post_social_root()
+                try:
+                    draft_path.relative_to(root / "rejected")
+                except ValueError:
+                    pass
+                else:
+                    raise HTTPException(status_code=409, detail="Rejected drafts cannot be approved")
+                meta_path = draft_path / "draft.json"
+                if not meta_path.is_file():
+                    raise HTTPException(status_code=404, detail="Draft not found")
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                if meta.get("posted"):
+                    raise HTTPException(status_code=409, detail="Posted drafts cannot be approved")
+                if not meta.get("human_approved"):
+                    meta["human_approved"] = True
+                    meta["approved_at"] = datetime.now().isoformat()
+                    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                result = {"success": True, "message": "Draft approved"}
+            elif action == "reject":
+                result = await reject_draft(draft_dir)
+            else:
+                result = await publish_draft(draft_dir)
+            results.append({"draft_dir": draft_dir, **result})
+        except HTTPException as exc:
+            results.append({"draft_dir": draft_dir, "success": False, "detail": exc.detail})
+        except Exception:
+            logger.exception("Bulk approval action failed for draft %s", draft_dir)
+            results.append({"draft_dir": draft_dir, "success": False, "detail": "Unexpected error"})
+
+    succeeded = sum(bool(result.get("success")) for result in results)
+    return {"success": succeeded == len(results), "results": results,
+            "succeeded": succeeded, "failed": len(results) - succeeded}
 
 
 @app.get("/api/fetch-url")
